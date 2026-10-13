@@ -1,0 +1,63 @@
+# Build output
+bin/
+obj/
+out/
+.vs/
+__pycache__/
+*.log
+
+# Personal settings: the user's own folders and mod choices
+TamrielMerge.settings.json
+TamrielMerge.mods.json
+
+# An old copy; the tool's is tools/model3d/sprite2mesh.py
+/sprite2mesh.py
+
+# Tools: only the converter's own scripts and sources, and the small assets it ships. Not kept: what setup downloads
+# (ffmpeg, FFDec, RAD Video Tools, uv, Blender, Java, the AI models), Python environments, and everything made from
+# the user's games (upscaled textures, voices, renders). The release zip carries the app with its models.
+/tools/*
+!/tools/creatures/
+!/tools/ingame/
+!/tools/menu/
+!/tools/model3d/
+!/tools/obse/
+!/tools/scene3d/
+!/tools/ship/
+!/tools/skse/
+!/tools/textures/
+!/tools/upscale/
+!/tools/video/
+!/tools/voice/
+
+# Creatures: their configuration, scripts and credits (the downloaded source models and work files are in the release)
+/tools/creatures/*/source/
+/tools/creatures/*/work/
+
+# The 3D model maker: its scripts, and TripoSR's own code (MIT) without its examples
+/tools/model3d/*
+!/tools/model3d/*.py
+!/tools/model3d/TripoSR/
+/tools/model3d/TripoSR/*
+!/tools/model3d/TripoSR/tsr/
+!/tools/model3d/TripoSR/LICENSE
+!/tools/model3d/TripoSR/README.md
+
+# The ship: its scripts and layout (the CGTrader model's own files aren't redistributed here)
+/tools/ship/*
+!/tools/ship/*.py
+!/tools/ship/*.json
+
+# SKSE plugins: sources, build scripts and the built plugins (no build leftovers, no NVIDIA runtime)
+/tools/skse/third_party/
+/tools/skse/**/*.obj
+/tools/skse/**/*.exp
+/tools/skse/**/*.lib
+/tools/skse/**/*.pdb
+/tools/skse/**/nvngx_dlss.dll
+
+# Upscaling and voices: their scripts only
+/tools/upscale/*
+!/tools/upscale/upscale.py
+/tools/voice/*
+!/tools/voice/generate.py
