@@ -1,0 +1,90 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="DotRecast.Recast" Version="2026.3.1" />
+    <PackageReference Include="Mutagen.Bethesda.Oblivion" Version="0.54.4" />
+    <PackageReference Include="Mutagen.Bethesda.Skyrim" Version="0.54.4" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="niflysharp" Version="2.0.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Skyrim SE Havok files (skeletons, animations, behaviours) for creatures with their own skeleton: HKX2Library by
+         kreny (ret2end), MIT, vendored under src\ThirdParty (user, 2026-10-10: "just make a new skeleton", "we use skyrim se"). -->
+    <ProjectReference Include="..\ThirdParty\HKX2Library\HKX2\HKX2.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Papyrus\*.psc" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Interface\*.as" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Papyrus\Compiled\*.pex" CopyToOutputDirectory="PreserveNewest" />
+    <!-- OBSE's script commands (tools\obse\gen_commands.py from xOBSE's source). -->
+    <None Include="Oblivion\Data\obse_commands.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The Python helpers the converter runs (video remaster, voice generation), shipped next to it. -->
+    <None Include="..\..\tools\video\remaster.py" Link="tools\video\remaster.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The intros' ray-traced look and Daggerfall's tape clean-up. -->
+    <None Include="..\..\tools\video\rt_look.py" Link="tools\video\rt_look.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\video\deflare.py" Link="tools\video\deflare.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The main menu: its ray-traced intro, its music, red emblem and measured camera (docs/menu.md). -->
+    <None Include="..\..\tools\menu\intro.py" Link="tools\menu\intro.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\menu\menu_theme.py" Link="tools\menu\menu_theme.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Music (the menu's theme, Daggerfall's songs): FluidSynth, the GeneralUser GS soundfont and WildMIDI shipped with
+         the tool, found next to it by Program.MusicTools (they were only in the repository's tools folder). -->
+    <None Include="..\..\tools\fluidsynth\fluidsynth-v2.6.1-win10-x64-cpp11\bin\**\*" Link="tools\fluidsynth\fluidsynth-v2.6.1-win10-x64-cpp11\bin\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\soundfonts\GeneralUser-GS.sf2;..\..\tools\soundfonts\GeneralUser-GS-README.md" LinkBase="tools\soundfonts" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\wildmidi\**\*" Link="tools\wildmidi\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\menu\red_logo.py" Link="tools\menu\red_logo.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\menu\calibration.py" Link="tools\menu\calibration.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\menu\menu_camera.json" Link="tools\menu\menu_camera.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\menu\logo_source.png" Link="tools\menu\logo_source.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The red emblem for the menu's banner layer (cut from the menu with the red textures). -->
+    <None Include="..\..\tools\menu\emblem.png" Link="tools\menu\emblem.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The ship for Redguard's and Daggerfall's ships (user-supplied CGTrader model, Skyrim/Meshes/ShipModel): the FBX,
+         its textures, the material links read from it, and the parts and collision Blender exported (export.py). -->
+    <None Include="..\..\tools\ship\ship.fbx;..\..\tools\ship\links.json;..\..\tools\ship\ship.json;..\..\tools\ship\collision.obj;..\..\tools\ship\export.py;..\..\tools\ship\fbx_links.py;..\..\tools\ship\inspect.py" LinkBase="tools\ship" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\ship\parts\*.obj" LinkBase="tools\ship\parts" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\ship\tex\*.png" LinkBase="tools\ship\tex" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\scene3d\render_scene.py" Link="tools\scene3d\render_scene.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\scene3d\blend_prep.py" Link="tools\scene3d\blend_prep.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\scene3d\blend_scene.py" Link="tools\scene3d\blend_scene.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The model viewer's texture pictures and PBR tool. -->
+    <None Include="..\..\tools\textures\pbr.py" Link="tools\textures\pbr.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The SKSE plugins the conversion installs (AltStartBuilder.CopyEraPlugin); NVIDIA's DLSS runtime comes from setup. -->
+    <None Include="..\..\tools\skse\TamrielMergeEra\TamrielMergeEra.dll" Link="tools\skse\TamrielMergeEra\TamrielMergeEra.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\skse\TamrielMergeGraphics\TamrielMergeGraphics.dll" Link="tools\skse\TamrielMergeGraphics\TamrielMergeGraphics.dll" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The games' textures upscaled (upscale-textures, run by convert). -->
+    <None Include="..\..\tools\upscale\upscale.py" Link="tools\upscale\upscale.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The model viewer's turntable previews. -->
+    <None Include="..\..\tools\scene3d\preview_model.py" Link="tools\scene3d\preview_model.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\voice\generate.py" Link="tools\voice\generate.py" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The model maker for sprites Skyrim has no model of: sprite2mesh.py and TripoSR (MIT, patched: PyMCubes,
+         optional rembg, baking on the model's device). -->
+    <None Include="..\..\tools\model3d\sprite2mesh.py" Link="tools\model3d\sprite2mesh.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\model3d\reproject.py" Link="tools\model3d\reproject.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\model3d\smooth.py" Link="tools\model3d\smooth.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\model3d\carve.py" Link="tools\model3d\carve.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\model3d\check.py" Link="tools\model3d\check.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\model3d\render.py" Link="tools\model3d\render.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\model3d\TripoSR\LICENSE" Link="tools\model3d\TripoSR\LICENSE" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\model3d\TripoSR\tsr\**\*.py" Link="tools\model3d\TripoSR\tsr\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The finished sprite models (user, 2026-10-10: "update tool with meshes that we have ... so they get installed if a
+         users game is detected and converted"): what SpriteModelImporter reads from each (mesh, baked texture, collision,
+         the sprite it was made from for its colour, its fidelity score), so a user's conversion has them without running
+         the model maker. -->
+    <None Include="..\..\tools\model3d\work\models\**\mesh.obj;..\..\tools\model3d\work\models\**\texture.png;..\..\tools\model3d\work\models\**\collision.obj;..\..\tools\model3d\work\models\**\input.png;..\..\tools\model3d\work\models\**\score.txt" Link="tools\model3d\work\models\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The creature models (docs/creatures.md): each creature's config, its Blender export (work\creature.json) and the
+         textures that export uses (work\tex), so a conversion builds them without Blender or the downloads; the scripts
+         and the credits (CC0 / CC-BY / CC-BY-SA, shipped with the models). Morrowind's come from the user's own game. -->
+    <None Include="..\..\tools\creatures\*.py;..\..\tools\creatures\CREDITS.md" LinkBase="tools\creatures" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\creatures\**\creature.json" Exclude="..\..\tools\creatures\**\source\**" Link="tools\creatures\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\creatures\**\work\tex\*" Link="tools\creatures\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
