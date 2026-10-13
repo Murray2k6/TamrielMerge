@@ -1,0 +1,40 @@
+{
+  "source": "source/Dark_Priest.blend",
+  "armature": "varsoi_male.002",
+  "meshes": [
+    "Cultist"
+  ],
+  "height": 195,
+  "template": "hagraven",
+  "name": "Lich",
+  "actions": {
+    "idle": "VM_idle",
+    "walk": "VM_walk",
+    "run": "VM_run",
+    "attack": "VM_attack_melee_1h.R"
+  },
+  "actors": [
+    "DFCreatureLich",
+    "DFCreatureAncientLich"
+  ],
+  "materials": {
+    "lambert6": {
+      "diffuse": "source/dcipher/unpacked/source/model/model/textures/lambert6_albedo.jpg",
+      "normal": "source/dcipher/unpacked/source/model/model/textures/lambert6_normal.png"
+    }
+  },
+  "body": {
+    "source": "source/dcipher/unpacked/source/model/model/lich_low.fbx",
+    "fit": "Cultist",
+    "arms": [
+      [
+        "upper_arm.L",
+        "forearm.L"
+      ],
+      [
+        "upper_arm.R",
+        "forearm.R"
+      ]
+    ]
+  }
+}

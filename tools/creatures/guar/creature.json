@@ -1,0 +1,14 @@
+{
+  "game": "morrowind",
+  "model": "r\\guar.nif",
+  "head": "Bip01 Head",
+  "remaster": 1,
+  "template": "atronachfrost",
+  "name": "Guar",
+  "actors": [
+    "MWguar",
+    "MWguarferal",
+    "MWguarrollieunique",
+    "MWguarllovynunique"
+  ]
+}

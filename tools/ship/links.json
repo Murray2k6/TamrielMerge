@@ -1,0 +1,100 @@
+{
+ "cable": {
+  "Bump": "ship_lambert14_Height.png",
+  "DiffuseColor": "ship_lambert14_Diffuse.png",
+  "NormalMap": "ship_lambert14_Normal.png",
+  "ReflectionColor": "ship_lambert14_Specular.png",
+  "SpecularColor": "ship_lambert14_Specular.png"
+ },
+ "korpus": {
+  "Bump": "ship_lambert2_Height.png",
+  "DiffuseColor": "ship_lambert2_Diffuse.png",
+  "NormalMap": "ship_lambert2_Normal.png",
+  "ReflectionColor": "ship_lambert2_Specular.png",
+  "SpecularColor": "ship_lambert2_Specular.png"
+ },
+ "korpus.1": {
+  "Bump": "ship_lambert6_Height.png",
+  "DiffuseColor": "ship_lambert6_Diffuse.png",
+  "NormalMap": "ship_lambert6_Normal.png",
+  "ReflectionColor": "ship_lambert6_Specular.png",
+  "SpecularColor": "ship_lambert6_Specular.png"
+ },
+ "korpus.2": {
+  "Bump": "ship_lambert4_Height.png",
+  "DiffuseColor": "ship_lambert4_Diffuse.png",
+  "NormalMap": "ship_lambert4_Normal.png",
+  "ReflectionColor": "ship_lambert4_Specular.png",
+  "SpecularColor": "ship_lambert4_Specular.png"
+ },
+ "korpus.3": {
+  "Bump": "ship_lambert12_Height.png",
+  "DiffuseColor": "ship_lambert12_Diffuse.png",
+  "NormalMap": "ship_lambert12_Normal.png",
+  "ReflectionColor": "ship_lambert12_Specular.png",
+  "SpecularColor": "ship_lambert12_Specular.png"
+ },
+ "korpus.4": {
+  "Bump": "ship_lambert13_Height.png",
+  "DiffuseColor": "ship_lambert13_Diffuse.png",
+  "NormalMap": "ship_lambert13_Normal.png",
+  "ReflectionColor": "ship_lambert13_Specular.png",
+  "SpecularColor": "ship_lambert13_Specular.png"
+ },
+ "korpus.5": {
+  "Bump": "ship_lambert15_Height.png",
+  "DiffuseColor": "ship_lambert15_Diffuse.png",
+  "NormalMap": "ship_lambert15_Normal.png",
+  "ReflectionColor": "ship_lambert15_Specular.png",
+  "SpecularColor": "ship_lambert15_Specular.png"
+ },
+ "korpus.6": {
+  "Bump": "ship_lambert7_Height.png",
+  "DiffuseColor": "ship_lambert7_Diffuse.png",
+  "NormalMap": "ship_lambert7_Normal.png",
+  "ReflectionColor": "ship_lambert7_Specular.png",
+  "SpecularColor": "ship_lambert7_Specular.png"
+ },
+ "korpus.7": {
+  "Bump": "ship_lambert3_Height.png",
+  "DiffuseColor": "ship_lambert3_Diffuse.png",
+  "NormalMap": "ship_lambert3_Normal.png",
+  "ReflectionColor": "ship_lambert3_Specular.png",
+  "SpecularColor": "ship_lambert3_Specular.png"
+ },
+ "korpus.8": {
+  "Bump": "ship_lambert16_Height.png",
+  "DiffuseColor": "ship_lambert16_Diffuse.png",
+  "NormalMap": "ship_lambert16_Normal.png",
+  "ReflectionColor": "ship_lambert16_Specular.png",
+  "SpecularColor": "ship_lambert16_Specular.png"
+ },
+ "sails": {
+  "Bump": "ship_lambert11_Height.png",
+  "DiffuseColor": "ship_lambert11_Diffuse.png",
+  "NormalMap": "ship_lambert11_Normal.png",
+  "ReflectionColor": "ship_lambert11_Specular.png",
+  "SpecularColor": "ship_lambert11_Specular.png"
+ },
+ "wheel": {
+  "Bump": "ship_lambert8_Height.png",
+  "DiffuseColor": "ship_lambert8_Diffuse.png",
+  "NormalMap": "ship_lambert8_Normal.png",
+  "ReflectionColor": "ship_lambert8_Specular.png",
+  "SpecularColor": "ship_lambert8_Specular.png"
+ },
+ "window": {
+  "Bump": "ship_lambert10_Height.png",
+  "DiffuseColor": "ship_lambert10_Diffuse.png",
+  "NormalMap": "ship_lambert10_Normal.png",
+  "ReflectionColor": "ship_lambert10_Specular.png",
+  "SpecularColor": "ship_lambert10_Specular.png"
+ },
+ "window2": {
+  "Bump": "ship_lambert9_Height.png",
+  "DiffuseColor": "ship_lambert9_Diffuse.png",
+  "NormalMap": "ship_lambert9_Normal.png",
+  "ReflectionColor": "ship_lambert9_Specular.png",
+  "SpecularColor": "ship_lambert9_Specular.png"
+ }
+}

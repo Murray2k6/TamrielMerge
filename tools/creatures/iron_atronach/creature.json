@@ -1,0 +1,31 @@
+{
+  "source": "source/unpacked/source/skeletonLord.fbx",
+  "armature": "Armature",
+  "meshes": [
+    "body",
+    "helm"
+  ],
+  "height": 235,
+  "template": "atronachfrost",
+  "name": "Iron Atronach",
+  "actions": {
+    "idle": "Armature|CINEMA_4D_Main|Layer0"
+  },
+  "actors": [
+    "DFCreatureIronAtronach"
+  ],
+  "materials": {
+    "body": {
+      "diffuse": "source/unpacked/textures/bodyColor.png",
+      "normal": "source/unpacked/textures/bodyNormal.png"
+    },
+    "cloth": {
+      "diffuse": "source/unpacked/textures/clothColor.png",
+      "normal": "source/unpacked/textures/clothNormal.png"
+    },
+    "helmet": {
+      "diffuse": "source/unpacked/textures/helmetcolor.png",
+      "normal": "source/unpacked/textures/helmetNormal.png"
+    }
+  }
+}

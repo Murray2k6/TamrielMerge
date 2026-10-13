@@ -1,0 +1,28 @@
+{
+  "source": "source/animated_vampire_bat/bat_v5.blend",
+  "armature": "Armature_Bat",
+  "meshes": [
+    "Bat_LP_Anim"
+  ],
+  "height": 45,
+  "template": "chaurushunter",
+  "name": "Giant Bat",
+  "actions": {
+    "idle": "Bat_Idle",
+    "walk": "Bat_Flying",
+    "attack": "Bat_Attack",
+    "death": "Bat_Die"
+  },
+  "actors": [
+    "DFCreatureGiantBat"
+  ],
+  "materials": {
+    "bat": {
+      "diffuse": "source/animated_vampire_bat/bat_tex.jpg",
+      "normal": "source/animated_vampire_bat/bat_tex_n.jpg"
+    },
+    "bat_parts": {
+      "diffuse": "source/animated_vampire_bat/bat_parts.jpg"
+    }
+  }
+}

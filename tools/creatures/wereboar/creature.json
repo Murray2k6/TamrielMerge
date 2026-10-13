@@ -1,0 +1,50 @@
+{
+  "source": "source/unpacked/source/PigMan_SketchFab.fbx",
+  "armature": "PW_armature",
+  "meshes": [
+    "Axe_UW.001",
+    "Hairs6_c2",
+    "Hairs6_c3.007",
+    "PW_arm_Straps",
+    "PW_ass_side",
+    "PW_body",
+    "PW_eyes",
+    "PW_legs",
+    "PW_Stummer",
+    "PW_Stummer.001",
+    "PW_teeth"
+  ],
+  "height": 215,
+  "template": "atronachfrost",
+  "name": "Wereboar",
+  "actions": {
+    "idle": "PW_armature|PW_armature|pig_idle",
+    "walk": "PW_armature|PW_armature|pig_walk_one_hand",
+    "run": "PW_armature|PW_armature|run_pig_one_hand"
+  },
+  "actors": [
+    "DFCreatureWereboar"
+  ],
+  "materials": {
+    "PigMan_Body": {
+      "diffuse": "source/unpacked/textures/Body_and_head_Base_Color.png",
+      "normal": "source/unpacked/textures/Body_and_head_Normal_OpenGL.png"
+    },
+    "PigMan_ArmsLegs": {
+      "diffuse": "source/unpacked/textures/Arms_and_Legs_Base_Color.png",
+      "normal": "source/unpacked/textures/Arms_and_Legs_Normal_OpenGL.png"
+    },
+    "PigMan_Armor": {
+      "diffuse": "source/unpacked/textures/Armor_Base_Color.png",
+      "normal": "source/unpacked/textures/Armor_Normal_OpenGL.png"
+    },
+    "Pig_fur": {
+      "diffuse": "source/unpacked/textures/H6_dif_alpha.png",
+      "normal": "source/unpacked/textures/H6_dif_nrml.png"
+    },
+    "PigMan_Axe": {
+      "diffuse": "source/unpacked/textures/axe.png",
+      "normal": "source/unpacked/textures/axe_Normal_OpenGL.png"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "source": "source/Imp/Imp/Imp.blend",
+  "armature": "Skeleton",
+  "meshes": [
+    "Imp"
+  ],
+  "height": 95,
+  "template": "chaurushunter",
+  "name": "Imp",
+  "actions": {
+    "idle": "Idle",
+    "walk": "Walk"
+  },
+  "actors": [
+    "DFCreatureImp"
+  ],
+  "textures": {
+    "diffuse": "source/imp_pbr/imp_pbr/Imp_edit_Imp_AlbedoTransparency.png",
+    "normal": "source/imp_pbr/imp_pbr/Imp_edit_Imp_Normal.png"
+  }
+}

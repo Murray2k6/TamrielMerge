@@ -1,0 +1,29 @@
+{
+  "source": "source/troll.blend",
+  "armature": "Armature",
+  "meshes": [
+    "med",
+    "eye med",
+    "cloth",
+    "cloth.001"
+  ],
+  "height": 270,
+  "template": "atronachfrost",
+  "name": "Flesh Atronach",
+  "actions": {
+    "walk": "ArmatureAction"
+  },
+  "actors": [
+    "DFCreatureFleshAtronach"
+  ],
+  "materials": {
+    "med": {
+      "diffuse": "packed:troll_baseTexBaked.png",
+      "normal": "packed:troll_normals.png"
+    },
+    "cloth": {
+      "diffuse": "packed:cloth uv.png",
+      "normal": "packed:cloth uv_NRM.png"
+    }
+  }
+}

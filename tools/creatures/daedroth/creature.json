@@ -1,0 +1,22 @@
+{
+  "source": "source/raptile/raptile_rig_fin.blend",
+  "armature": "Armature.000",
+  "meshes": [
+    "lizardman"
+  ],
+  "height": 250,
+  "template": "atronachfrost",
+  "name": "Daedroth",
+  "actions": {
+    "idle": "Armature.000Action"
+  },
+  "actors": [
+    "DFCreatureDaedroth"
+  ],
+  "materials": {
+    "mat": {
+      "diffuse": "packed:diff2k+color.tga.jpg",
+      "normal": "packed:normal.jpg"
+    }
+  }
+}

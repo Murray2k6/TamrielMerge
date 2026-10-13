@@ -1,0 +1,19 @@
+{
+  "source": "source/unpacked/source/Dragon.glb",
+  "armature": "skeletal.3",
+  "meshes": [
+    "dragon_wings2.2"
+  ],
+  "height": 140,
+  "template": "chaurushunter",
+  "name": "Dragonling",
+  "actions": {
+    "idle": "idle",
+    "walk": "flying",
+    "run": "running"
+  },
+  "actors": [
+    "DFCreatureDragonling",
+    "DFCreatureDragonlingB"
+  ]
+}

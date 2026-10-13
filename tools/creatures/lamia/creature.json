@@ -1,0 +1,33 @@
+{
+  "source": "source/unpacked/source/rig export fix1.fbx",
+  "armature": "rig",
+  "meshes": [
+    "body mesh"
+  ],
+  "height": 200,
+  "template": "slaughterfish",
+  "name": "Lamia",
+  "actions": {
+    "idle": "rig|idol",
+    "walk": "rig|swim"
+  },
+  "actors": [
+    "DFCreatureLamia"
+  ],
+  "materials": {
+    "body": {
+      "diffuse": "source/unpacked/textures/Material_BaseColor2.png",
+      "normal": "source/unpacked/textures/Material_Normal.png"
+    },
+    "HAIR .001": {
+      "diffuse": "source/unpacked/textures/hair_13.png",
+      "normal": "source/unpacked/textures/hair_noirmal.png"
+    },
+    "eye glass": {
+      "diffuse": "source/unpacked/textures/eyeball_Base_Color222222.png"
+    },
+    "iris": {
+      "diffuse": "source/unpacked/textures/eyeball_Base_Color222222.png"
+    }
+  }
+}

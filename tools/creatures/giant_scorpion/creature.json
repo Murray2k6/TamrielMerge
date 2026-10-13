@@ -1,0 +1,26 @@
+{
+  "source": "source/unpacked/source/scorpion/scorpion.fbx",
+  "armature": "Armature",
+  "height": 110,
+  "facing": "-Y",
+  "actions": {
+    "idle": "Armature|Armature|idle",
+    "walk": "Armature|Armature|walk",
+    "attack": "Armature|Armature|areaAttack",
+    "block": "Armature|Armature|Defend",
+    "death": "Armature|Armature|death"
+  },
+  "textures": {
+    "diffuse": "source/unpacked/source/scorpion/scorpion_low_scorpion_AlbedoTransparency.png",
+    "normal": "source/unpacked/source/scorpion/scorpion_low_scorpion_Normal.png",
+    "glow": "source/unpacked/source/scorpion/scorpion_low_scorpion_Emission.png",
+    "specular": "source/unpacked/source/scorpion/scorpion_low_scorpion_MetallicSmoothness.png"
+  },
+  "template": "scrib",
+  "head": "body",
+  "name": "Giant Scorpion",
+  "actors": [
+    "DFCreatureGiantScorpion",
+    "DFCreatureGiantScorpionPassive"
+  ]
+}
