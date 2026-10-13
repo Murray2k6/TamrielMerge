@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>TamrielMerge</AssemblyName>
+    <RootNamespace>TamrielMerge.Gui</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The converter itself: run as TamrielMerge.Cli.exe next to this program; its game and tool detection is used directly. -->
+    <ProjectReference Include="..\TamrielMerge.Cli\TamrielMerge.Cli.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The tool's logo, shown at the top of its left column and as its window icon. -->
+    <EmbeddedResource Include="..\..\tools\menu\logo_source.png" LogicalName="TamrielMerge.logo.png" />
+  </ItemGroup>
+
+</Project>
