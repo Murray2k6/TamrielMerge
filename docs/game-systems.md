@@ -37,9 +37,9 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | Vampirism (9 bloodlines), lycanthropy (wolf/boar, moon) | missing | |
 | Diseases | missing | |
 | Banks, letters of credit, loans, buying houses and ships | banks, letters of credit and loans done (docs/progression.md); houses and ships missing | |
-| Holidays (half-price shops, free cures) | partial | TMDfHolidays: morning notice, Merchants' Festival half price (SKSE), free temple healing days, free ale days, Heart's Day rooms, Sun's Rest closed; Warriors Festival, Tales and Tallows, Witches Festival, summoning days missing |
+| Holidays (half-price shops, free cures) | partial | TMDfHolidays: morning notice, Merchants' Festival half price (a hidden perk, DFMerchantsFestivalPerk: Mod Buy Prices x 0.5 by the date and the Iliac Bay in its conditions; selling prices untouched, nothing to re-apply after a load), free temple healing days, free ale days, Heart's Day rooms, Sun's Rest closed; Warriors Festival, Tales and Tallows, Witches Festival, summoning days missing |
 | Travel map: cautious/reckless, inns/camp, horse, cart, ship fares | partial | Tamriel menu Travel tab: region, town, time on the road (on foot / horse); cautious/reckless, inns/camp, cart and ship fares missing |
-| Taverns: rooms, food/drink | done | TMDfTavern: rooms 7 gold a night (beds owned by the tavern until rented), ale 2 gold |
+| Taverns: rooms, food/drink | done | TMDfTavern: rooms 7 gold a night (beds the player's for the stay, then back to their owners: the tavern's faction or a person), ale 2 gold |
 | Climbing skill, swimming breath, levitation | missing | |
 | Weather and seasons, day/night | partial | AtmosphereBuilder |
 | Books | done | |
@@ -59,7 +59,7 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | Logbook | done | log quest |
 | Game scripts (story flags, puzzles, mechanisms) | partial | Redguard scripts are next in the plan |
 | Keys and keyed doors (Rusty, Gold, Silver, Palace Silver, Bone, …) | partial | no lockpicking in the game; rune doors are puzzle scripts |
-| Puzzles: levers, pads, timed doors, traps, rope swings, elevators, lighthouse signal, star chart | missing | come with the scripts |
+| Puzzles: levers, pads, timed doors, traps, rope swings, elevators, lighthouse signal, star chart | partial | Dungeon actions as Daggerfall Unity's DaggerfallAction (MIT; ActionObjectBuilder, TMDfAction): moving models (levers, lifts, platforms, secret walls, trapdoors, wheels) and sliding doors (portcullises: their own model, moving) toggle between poses the converter gives (StartPose/EndPose; triggers wait while anything down the chain moves); action doors keep their lock (TMDfLock) beside the action; flats with actions (spell traps, teleport pads, hurt and drain, riddles, texts, switches) are invisible activators at the flat, clickable ones a click primitive (L_NONCOLLIDABLE, as vanilla's) and walk-on/walk-into ones a trigger box, and chains reach them; hurt 21 rolls magnitude-index x level on every 20th trigger; lock door 16 (Adept); close door relocks; set global 31 sets DFQuestGlobal<n> (Daggerfall.esm, 0xDF0000 + n); 29 talks through its person; 26, 27, 30, 50 and 100 only pass the trigger on (as Daggerfall Unity). Town-specific puzzles (rope swings, lighthouse, star chart) missing |
 | Using items on objects (torch on troll, bucket on fire, shovel on dig spot) | missing | |
 | Mixing ingredients (ectoplasm, Hist sap, orc's blood, spider's milk) | missing | three recipes open Clavicus Vile's portal |
 | Healing items: potion 15, well water 20 × 5, water + aloe 20 × 15, bandage 30; Arkay priest/statue | missing | |

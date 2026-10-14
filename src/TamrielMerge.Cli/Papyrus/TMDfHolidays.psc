@@ -1,21 +1,31 @@
 ScriptName TMDfHolidays extends Quest
 {Daggerfall's holidays (UESP Daggerfall:Holidays) while the player is in the Iliac Bay: each morning of a holiday says
-so, and Merchants' Festival (10 Sun's Height) halves every shop's prices (Skyrim's barter settings, through SKSE).
+so, and Merchants' Festival (10 Sun's Height) halves every shop's prices: a hidden perk (FestivalPrices) halves what the
+player pays on that day in the Iliac Bay, by its own conditions, so it needs no re-applying after a load and leaves
+selling prices alone.
 The other holidays' effects live where they apply: free temple healing (TMDfGuilds), free drinks and Heart's Day
 rooms (TMDfTavern), shops shut on Sun's Rest (the barter line's conditions).}
 
 Location Property IliacBay Auto
 GlobalVariable Property GameMonth Auto
 GlobalVariable Property GameDay Auto
+Perk Property FestivalPrices Auto
+{Mod Buy Prices x 0.5 on 10 Sun's Height in the Iliac Bay (its conditions).}
 
 Int lastDay = -1
-Float barterMax
-Float barterMin
-Bool halved = False
 
 Event OnInit()
+  GivePerk()
   RegisterForSingleUpdateGameTime(1.0)
 EndEvent
+
+; The player keeps the perk for good; given again each hour so games saved before it existed get it too.
+Function GivePerk()
+  Actor player = Game.GetPlayer()
+  If FestivalPrices && !player.HasPerk(FestivalPrices)
+    player.AddPerk(FestivalPrices)
+  EndIf
+EndFunction
 
 String Function Holiday(Int month, Int day)
   If month == 0 && day == 1
@@ -58,20 +68,7 @@ Event OnUpdateGameTime()
   Int month = GameMonth.GetValueInt()
   Int day = GameDay.GetValueInt()
   Bool here = Game.GetPlayer().IsInLocation(IliacBay)
-  Bool merchants = here && month == 6 && day == 10
-  If SKSE.GetVersion() > 0
-    If merchants && !halved
-      barterMax = Game.GetGameSettingFloat("fBarterMax")
-      barterMin = Game.GetGameSettingFloat("fBarterMin")
-      Game.SetGameSettingFloat("fBarterMax", barterMax * 0.5)
-      Game.SetGameSettingFloat("fBarterMin", barterMin * 0.5)
-      halved = True
-    ElseIf !merchants && halved
-      Game.SetGameSettingFloat("fBarterMax", barterMax)
-      Game.SetGameSettingFloat("fBarterMin", barterMin)
-      halved = False
-    EndIf
-  EndIf
+  GivePerk()
   If here && day != lastDay
     String name = Holiday(month, day)
     If name != ""
