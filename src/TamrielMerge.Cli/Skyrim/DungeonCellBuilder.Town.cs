@@ -197,6 +197,13 @@ public sealed partial class DungeonCellBuilder
         {
             var pos = ToSkyrim(o.Position);
             if (o.Type == DfRdbObjectType.Flat && o.RecordOffset < 0) { people.Add(o); Count("person"); continue; }
+            if (o.Type == DfRdbObjectType.Flat && o.TextureArchive == EditorFlatArchive && o.TextureRecord is QuestSpawnRecord or QuestItemRecord)
+            {
+                float floor = SurfaceY(floorPolys, o.Position.X, o.Position.Z, o.Position.Y + 16, above: false) ?? o.Position.Y;
+                AddQuestMarker(cell, new P3Float(pos.X, pos.Y, floor * BlockMeshBuilder.Scale + 8), o.TextureRecord == QuestItemRecord);
+                Count("quest marker");
+                continue;
+            }
             if (LightFixturePlacer.IsLight(o))
             {
                 foreach (var f in fixtures.Fixtures(o, o.Position))
