@@ -4,7 +4,8 @@ namespace TamrielMerge.Daggerfall;
 
 public enum DfRdbObjectType : byte { Model = 1, Light = 2, Flat = 3 }
 
-/// <summary>A model's action (Daggerfall Unity RdbActionResource): movement along/around an axis, chained to another object.</summary>
+/// <summary>A model's or flat's action (Daggerfall Unity RdbActionResource / RdbFlatResource): movement along/around an
+/// axis, damage, a spell, a text..., chained to another object.</summary>
 public sealed record DfAction(byte Axis, ushort Duration, ushort Magnitude, byte Flags, int NextObjectIndex);
 
 /// <summary>An object in an RDB dungeon block. Position is block-relative in Daggerfall units with Y up.</summary>
@@ -13,7 +14,8 @@ public sealed record DfRdbObject(DfRdbObjectType Type, Vector3 Position, Vector3
 {
     /// <summary>Three-letter tag from the block's model reference list (DOR door, DDR double door, ...).</summary>
     public string Tag { get; init; } = "";
-    /// <summary>Raw trigger/lock field: low nibble trigger flags, high nibble starting lock index.</summary>
+    /// <summary>Raw trigger/lock field: low nibble trigger flags, high nibble starting lock index. For a flat with an
+    /// action, its flags (the trigger).</summary>
     public uint TriggerAndLock { get; init; }
     /// <summary>Sound/index byte: the sound a model plays, or for spell actions the SPELLS.STD record index.</summary>
     public byte SoundIndex { get; init; }
@@ -92,7 +94,20 @@ public sealed class DfDungeonBlock
                         ushort faction = BitConverter.ToUInt16(d, res + 4);
                         // The faction/mobile field's bytes are also the flat's magnitude and sound index (Daggerfall Unity
                         // BlocksFile); a start marker's sound index is its block's water level (DungeonWaterLevel).
-                        objects.Add(new DfRdbObject(type, p, Vector3.Zero, 0, tex >> 7, tex & 0x7f, flags, faction, 0, false) { RecordOffset = pos, FlatAction = d[res + 10], SoundIndex = d[res + 5] });
+                        // A flat's action (Daggerfall Unity AddActionFlatHelper): the action byte, the flags as its trigger,
+                        // the magnitude byte as both magnitude and raw axis value, no duration, and its own chain link.
+                        // Enemy markers keep theirs as enemy data (99 = passive).
+                        byte flatAction = d[res + 10], flatMagnitude = d[res + 4];
+                        bool enemy = tex >> 7 == 199 && (tex & 0x7f) is 15 or 16;
+                        DfAction? flatAct = null;
+                        if (flatAction != 0 && !enemy)
+                        {
+                            flatAct = new DfAction(flatMagnitude, 0, flatMagnitude, flatAction, -1);
+                            int nextFlat = BitConverter.ToInt32(d, res + 6);
+                            if (nextFlat > 0) actionTargets.Add((objects.Count, nextFlat));
+                        }
+                        objects.Add(new DfRdbObject(type, p, Vector3.Zero, 0, tex >> 7, tex & 0x7f, flags, faction, 0, false)
+                        { RecordOffset = pos, FlatAction = flatAction, SoundIndex = d[res + 5], Action = flatAct, TriggerAndLock = flatAct is null ? 0u : flags });
                         break;
                     }
                     case DfRdbObjectType.Light:
