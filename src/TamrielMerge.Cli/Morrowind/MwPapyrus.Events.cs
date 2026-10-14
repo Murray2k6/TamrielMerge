@@ -32,19 +32,17 @@ public sealed partial class MwPapyrus
             sb.AppendLine("  If !IsRunning()");
             sb.AppendLine("    Return");
             sb.AppendLine("  EndIf");
-            if (ctx.Start)
-            {
-                // Morrowind's story begins when the player first comes to its lands; its start scripts wait for that.
-                sb.AppendLine("  If !TMMwScript.InMorrowind()");
-                sb.AppendLine("    RegisterForSingleUpdate(5.0)");
-                sb.AppendLine("    Return");
-                sb.AppendLine("  EndIf");
-            }
+            // Morrowind's story begins when the player first comes to its lands (its start scripts wait for that), and
+            // its global scripts pause while the player is in another story's (no Dark Brotherhood ambush in Daggerfall).
+            sb.AppendLine("  If !TMMwScript.InMorrowind()");
+            sb.AppendLine("    RegisterForSingleUpdate(5.0)");
+            sb.AppendLine("    Return");
+            sb.AppendLine("  EndIf");
             sb.AppendLine($"  RegisterForSingleUpdate({iv})");
             sb.AppendLine("  MwTick()");
             sb.AppendLine("EndEvent");
             sb.AppendLine();
-            if (sleep) WriteSleepEvents(sb);
+            if (sleep) WriteSleepEvents(sb, global: true);
             return;
         }
         if (kind != Kind.Object) return;
@@ -222,13 +220,19 @@ public sealed partial class MwPapyrus
         if (sleep) WriteSleepEvents(sb);
     }
 
-    static void WriteSleepEvents(StringBuilder sb)
+    static void WriteSleepEvents(StringBuilder sb, bool global = false)
     {
         // GetPCSleep: Morrowind's scripts act while the player rests (an ambush wakes them); Skyrim's run when the
         // sleep starts, and whatever they place is there on waking.
         sb.AppendLine("Event OnSleepStart(Float afSleepStartTime, Float afDesiredSleepEndTime)");
         sb.AppendLine("  __pcSleep = True");
-        sb.AppendLine("  MwTick()");
+        if (global)
+        {
+            sb.AppendLine("  If TMMwScript.InMorrowind() && IsRunning()");
+            sb.AppendLine("    MwTick()");
+            sb.AppendLine("  EndIf");
+        }
+        else sb.AppendLine("  MwTick()");
         sb.AppendLine("EndEvent");
         sb.AppendLine();
         sb.AppendLine("Event OnSleepStop(Bool abInterrupted)");

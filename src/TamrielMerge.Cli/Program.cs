@@ -2925,6 +2925,8 @@ static class Program
                     foreach (var s in vm.Scripts.Where(s => s.Name.StartsWith("MW")))
                         Console.WriteLine($"  {rec.EditorID ?? rec.FormKey.ToString()}: {s.Name} ({s.Properties.Count} properties: {string.Join(", ", s.Properties.Take(6).Select(p => p.Name))})");
                 }
+                foreach (var npc in m.Npcs)
+                    Console.WriteLine($"  npc {npc.EditorID}: {string.Join(", ", npc.VirtualMachineAdapter?.Scripts.Select(s => $"{s.Name} ({s.Properties.Count})") ?? [])} template flags {npc.Configuration.TemplateFlags}");
                 foreach (var p in builder.Problems.Where(p => p.StartsWith("script")).Distinct().Take(30)) Console.WriteLine($"  problem: {p}");
                 return 0;
             }
