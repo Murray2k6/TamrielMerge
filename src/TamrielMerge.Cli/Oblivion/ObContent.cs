@@ -24,7 +24,8 @@ public sealed partial class ObPluginBuilder
     static readonly FormKey SkyrimGold = new(ModKey.FromFileName("Skyrim.esm"), 0x00000F);
 
     static bool IsItem(Ob.IOblivionMajorRecordGetter r) => r is Ob.IWeaponGetter or Ob.IArmorGetter or Ob.IClothingGetter or Ob.IBookGetter or Ob.IPotionGetter
-        or Ob.IIngredientGetter or Ob.IMiscellaneousGetter or Ob.IKeyGetter or Ob.IAmmunitionGetter or Ob.ISoulGemGetter or Ob.ISigilStoneGetter or Ob.ILeveledItemGetter;
+        or Ob.IIngredientGetter or Ob.IMiscellaneousGetter or Ob.IKeyGetter or Ob.IAmmunitionGetter or Ob.ISoulGemGetter or Ob.ISigilStoneGetter or Ob.ILeveledItemGetter
+        or Ob.IAlchemicalApparatusGetter;
 
     ObMeshConverter.Result? ItemMesh(string? model, float weight)
     {
@@ -54,6 +55,12 @@ public sealed partial class ObPluginBuilder
                 Ob.IMiscellaneousGetter m => Misc(edid, m.Name, m.Model?.File, m.Data?.Weight ?? 0, (uint)Math.Max(0, m.Data?.Value ?? 0)),
                 Ob.ISigilStoneGetter s => Misc(edid, s.Name, s.Model?.File, 0, s.Data?.Value ?? 0),
                 Ob.IKeyGetter k => KeyItem(edid, k),
+                // Skyrim's potions and soul gems carry no scripts: one with an object script (a quest's wine, a
+                // collector's soul gem) is a misc item, which can.
+                Ob.ISoulGemGetter g when ObScriptWorld.ScriptLink(g) is not null => Misc(edid, g.Name, g.Model?.File, g.Data?.Weight ?? 0, g.Data?.Value ?? 0),
+                Ob.IPotionGetter p when ObScriptWorld.ScriptLink(p) is not null => Misc(edid, p.Name, p.Model?.File, p.Weight ?? 0, p.Data?.Value ?? 0),
+                // Oblivion's apparatus (mortars, alembics...) are Skyrim's clutter.
+                Ob.IAlchemicalApparatusGetter a => Misc(edid, a.Name, a.Model?.File, a.Data?.Weight ?? 0, a.Data?.Value ?? 0),
                 Ob.ISoulGemGetter g => SoulGemItem(edid, g),
                 Ob.IBookGetter b => ScrollItem(edid, b) ?? BookItem(edid, b),
                 Ob.IPotionGetter p => PotionItem(edid, p),
@@ -142,6 +149,12 @@ public sealed partial class ObPluginBuilder
         {
             if (e.Data is not { } d) continue;
             string code = d.MagicEffect.EDID.Type;
+            // A scripted effect: the converted script runs when it's drunk or eaten.
+            if (ScriptEffectOf(e) is { } scripted && Magic.EffectOf(scripted, TesCast.CastOnce) is { } scriptMgef)
+            {
+                target.Add(new Effect { BaseEffect = scriptMgef.ToNullableLink<IMagicEffectGetter>(), Data = new EffectData { Duration = (int)d.Duration } });
+                continue;
+            }
             if (!AlchemyEffects.TryGetValue(code, out var edid) || Vanilla.Get<IMagicEffectGetter>(edid) is not { } mgef) continue;
             target.Add(new Effect { BaseEffect = mgef.ToNullableLink(), Data = new EffectData { Magnitude = Math.Max(1, d.Magnitude), Duration = (int)d.Duration, Area = (int)d.Area } });
         }

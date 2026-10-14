@@ -47,12 +47,23 @@ public sealed partial class ObPluginBuilder
         {
             if (e.Data is not { } d) continue;
             string code = d.MagicEffect.EDID.Type;
+            if (ScriptEffectOf(e) is { } scripted) { yield return scripted; continue; }
             if (TesMagic.OblivionName(code) is not { } name) { yield return new TesEffect(code, null, TesRange.Self, 0, 0, 0); continue; }
             var range = d.Type.ToString() switch { "Touch" => TesRange.Touch, "Target" => TesRange.Target, _ => TesRange.Self };
             string sub = d.ActorValue.ToString();
             yield return new TesEffect(name, sub, range, (int)d.Area, (int)d.Duration, d.Magnitude,
                 name is "Summon" or "BoundWeapon" ? Associated(code) : null);
         }
+    }
+
+    /// <summary>A scripted effect (SEFF) whose script was translated: the effect running it.</summary>
+    TesEffect? ScriptEffectOf(Ob.IEffectGetter e)
+    {
+        if (e.Data is not { } d || d.MagicEffect.EDID.Type != "SEFF" || e.ScriptEffect?.Data?.Script.FormKeyNullable is not { } script
+            || !translations.TryGetValue(script, out var o) || o.Kind != "MagicEffect") return null;
+        var range = d.Type.ToString() switch { "Touch" => TesRange.Touch, "Target" => TesRange.Target, _ => TesRange.Self };
+        bool hostile = e.ScriptEffect.Data.Flags.ToString().Contains("Hostile");
+        return new TesEffect("ScriptEffect", o.ScriptName, range, (int)d.Area, (int)d.Duration, d.Magnitude, Label: e.ScriptEffect.Name, Hostile: hostile);
     }
 
     /// <summary>An Oblivion spell, ability, disease or (lesser) power.</summary>

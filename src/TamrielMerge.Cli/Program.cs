@@ -2361,6 +2361,7 @@ static class Program
                 {
                     var world = new Oblivion.ObScriptWorld(mods);
                     var table = Oblivion.ObFunctions.Load(dir);
+                    world.Functions = table;
                     var missing = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     var perPlugin = new Dictionary<string, (int Scripts, int Statements, int Translated)>(StringComparer.OrdinalIgnoreCase);
                     var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("id", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -2387,6 +2388,16 @@ static class Program
                     report.Add("Missing most:");
                     report.AddRange(missing.OrderByDescending(kv => kv.Value).Select(kv => $"  {kv.Value,6} {kv.Key}"));
                     File.WriteAllLines(Path.Combine(outDir, "coverage.txt"), report);
+                    // What carries each script (carriers.txt): the record types naming it, and scripts nothing carries.
+                    var carriers = new List<string>();
+                    foreach (var (key, sc) in world.Scripts.OrderBy(kv => kv.Value.EditorID))
+                    {
+                        if (sc.Fields.SourceCode is null || sc.EditorID is not { } cid || !rx.IsMatch(cid)) continue;
+                        string ckind = world.QuestScripts.Contains(key) ? "Quest" : sc.Fields.MetadataSummary.Type.ToString();
+                        var list = world.Carriers.GetValueOrDefault(key) ?? [];
+                        carriers.Add($"{cid} ({ckind}): {(list.Count == 0 ? "NOTHING" : string.Join(", ", list.GroupBy(c => c.Type).Select(g => $"{g.Key} x{g.Count()} [{string.Join(" ", g.Take(3).Select(c => c.EditorID))}]")))}");
+                    }
+                    File.WriteAllLines(Path.Combine(outDir, "carriers.txt"), carriers);
                     foreach (var line in report.Take(int.Parse(opts.GetValueOrDefault("top", "40")) + perPlugin.Count + 2)) Console.WriteLine(line);
                 }
                 finally { foreach (var m in mods) m.Dispose(); }
@@ -2397,6 +2408,29 @@ static class Program
                     foreach (var l in output.Split('\n').Select(l => l.TrimEnd()).Where(l => l.Contains("): ")).Take(int.Parse(opts.GetValueOrDefault("errors", "40")))) Console.WriteLine(l);
                     Console.WriteLine(compiled is null ? output : $"{compiled.Count} of {Directory.GetFiles(srcDir, "*.psc").Length} scripts compiled");
                 }
+                return 0;
+            }
+            case "ob-script-attach-test":
+            {
+                // Dev aid: Oblivion's scripts attached without the world (minutes, not hours): translated, compiled and
+                // attached to the quests, magic, actors and items they need, plus a few interiors (--cells a,b), into a
+                // plugin in --out; reports what carries scripts and what the attaching couldn't do.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed through Steam or GOG");
+                string outDir = Path.GetFullPath(opts["out"]);
+                using var builder = new Oblivion.ObPluginBuilder(new Oblivion.ObData(dataDir, Mods.ModCatalog.Selected(Game.Oblivion, dataDir, [])), outDir) { SkyrimData = skyrimData };
+                builder.PrepareScripts();
+                foreach (var id in opts.GetValueOrDefault("cells", "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+                    if (builder.FindInterior(id) is { } cell) builder.BuildInterior(cell);
+                builder.ConvertAllMagic();
+                builder.BuildDialogue();
+                int compiled = builder.AttachScripts();
+                builder.Write();
+                var m = builder.Mod;
+                Console.WriteLine($"{compiled} scripts compiled, {builder.ScriptsAttached} attached, {builder.PropertiesFilled} properties filled; {builder.PackagesMade} packages, {builder.SoundsMade} sounds");
+                var carriers = m.EnumerateMajorRecords().Select(r => (r, vm: r.GetType().GetProperty("VirtualMachineAdapter")?.GetValue(r) as Mutagen.Bethesda.Skyrim.IAVirtualMachineAdapterGetter))
+                    .Where(x => x.vm is not null && x.vm.Scripts.Any(sc => sc.Name.StartsWith("OB_") || sc.Name.StartsWith("TMOb"))).ToList();
+                foreach (var g in carriers.GroupBy(x => x.r.GetType().Name).OrderByDescending(g => g.Count())) Console.WriteLine($"  {g.Count(),6} {g.Key}");
+                foreach (var p in builder.Problems.Where(p => p.StartsWith("script")).Distinct().Take(int.Parse(opts.GetValueOrDefault("problems", "40")))) Console.WriteLine($"  problem: {p}");
                 return 0;
             }
             case "obse-opcode-check":

@@ -39,6 +39,7 @@ public sealed partial class ObPluginBuilder
     {
         scriptWorld = new ObScriptWorld(plugins);
         var functions = ObFunctions.Load(data.DataDir);
+        scriptWorld.Functions = functions;
         foreach (var (key, sc) in scriptWorld.Scripts)
         {
             if (sc.Fields.SourceCode is not { } src || sc.EditorID is not { } id) continue;
@@ -51,8 +52,15 @@ public sealed partial class ObPluginBuilder
                 ScriptStatementsTranslated += output.Translated;
                 foreach (var (m, n) in output.Missing) ScriptMissing[m] = ScriptMissing.GetValueOrDefault(m) + n;
                 foreach (var p in output.Properties)
+                {
                     if (p.PapyrusTypeIsReference() && !p.Generated && p.QuestVariable is null && scriptWorld.KeyOf(p.EditorID) is { } refKey)
                         scriptRefs.Add(refKey);
+                    // The references a package the scripts use names (where it goes, whom it follows) are persistent too.
+                    if (p.Type == "Package" && scriptWorld.KeyOf(p.EditorID) is { } pk && records.GetValueOrDefault(pk) is Ob.IAIPackageGetter package)
+                        foreach (var r in PackageRefs(package)) scriptRefs.Add(r);
+                }
+                foreach (var (pkg, uses) in output.ScriptPackages)
+                    if (scriptWorld.KeyOf(pkg) is { } pk2) scriptPackageUses[pk2] = scriptPackageUses.GetValueOrDefault(pk2) + uses;
             }
             catch (Exception e) { Problems.Add($"script {id}: {e.Message}"); }
         }
@@ -108,6 +116,18 @@ public sealed partial class ObPluginBuilder
                 Attach(functionsQuest, o);
             }
         if (functionsQuest is not null) generated["TMObFunctions"] = functionsQuest.FormKey;
+        // What Oblivion's engine kept for its scripts (crimes, animations, script packages...), and every Oblivion
+        // person and creature telling it of assaults and murders.
+        generated["TMObState"] = StateQuest(Fill).FormKey;
+        foreach (var npc in actors.Values.OfType<Npc>().Distinct())
+        {
+            npc.VirtualMachineAdapter ??= new VirtualMachineAdapter();
+            npc.VirtualMachineAdapter.Scripts.Add(new ScriptEntry
+            {
+                Name = "TMObActor",
+                Properties = [new ScriptObjectProperty { Name = "ObState", Object = new FormLink<ISkyrimMajorRecordGetter>(generated["TMObState"]) }],
+            });
+        }
 
         // Carriers: quests, then base objects (containers, activators, doors, lights, items, actors).
         foreach (var q in plugins.SelectMany(p => p.Quests).GroupBy(q => q.FormKey).Select(g => g.Last()))
@@ -118,6 +138,18 @@ public sealed partial class ObPluginBuilder
             if (rec is Ob.IQuestGetter || ObScriptWorld.ScriptLink(rec) is not { } s || !translations.TryGetValue(s, out var o)) continue;
             foreach (var carrier in new[] { bases.GetValueOrDefault(key), items.GetValueOrDefault(key), actors.GetValueOrDefault(key), swingDoors.GetValueOrDefault(key) }.Distinct())
                 if (carrier is not null) Attach(carrier, o);
+        }
+        // Scripted magic effects (SEFF): the magic effects made for them carry their scripts (TesMagic names the
+        // script; its properties are filled here).
+        var byName = translations.Values.GroupBy(o => o.ScriptName, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        foreach (var m in mod.MagicEffects)
+        {
+            if (m.VirtualMachineAdapter is not { } vm) continue;
+            foreach (var se in vm.Scripts.Where(x => x.Properties.Count == 0 && byName.ContainsKey(x.Name)).ToList())
+            {
+                vm.Scripts.Remove(se);
+                Attach(m, byName[se.Name]);
+            }
         }
         return compiled.Count;
 
@@ -151,6 +183,7 @@ public sealed partial class ObPluginBuilder
             if (p.Generated)
                 return p.EditorID.StartsWith("TMOB_PC", StringComparison.Ordinal) ? GeneratedGlobal(p.EditorID) : generated.TryGetValue(p.EditorID, out var gk) ? gk : null;
             if (p.EditorID == "player") return PlayerRefKey;
+            if (p.EditorID.StartsWith('@') && p.EditorID.Contains(':') && !p.EditorID.StartsWith("@ref:", StringComparison.Ordinal)) return Special(p);
             if (p.QuestVariable is { } variable)
                 return QuestByEditorId(p.EditorID) is { } qk ? QuestVariable(qk, variable).FormKey : null;
             if (scriptWorld.KeyOf(p.EditorID) is not { } key) return null;
@@ -165,10 +198,24 @@ public sealed partial class ObPluginBuilder
                 Ob.IClassGetter => ObClass(key),
                 Ob.IDialogTopicGetter => obTopics.GetValueOrDefault(key),
                 Ob.INpcGetter or Ob.ICreatureGetter or Ob.ILeveledCreatureGetter => Actor(key),
+                Ob.ISpellGetter => ObSpell(key),
+                Ob.IEnchantmentGetter => ObEnchantment(key),
+                Ob.IAIPackageGetter => ObPackage(key),
+                Ob.ISoundGetter => ObSound(key),
+                Ob.IWorldspaceGetter => worldspaces.GetValueOrDefault(key),
                 _ when IsItem(rec) => Item(key),
-                _ => bases.GetValueOrDefault(key),
+                _ => bases.GetValueOrDefault(key) ?? (rec is Ob.IOblivionMajorRecordGetter && p.Type is "Form" or "Activator" or "Static" or "Furniture" ? Base(key) : null),
             };
-            return converted?.FormKey;
+            if (converted is not null) return converted.FormKey;
+            // Look-alikes from Skyrim for what isn't converted: races, effect shaders, weathers, combat styles.
+            return rec switch
+            {
+                Ob.IRaceGetter r => Vanilla.Get<IRaceGetter>(RaceStandIns.GetValueOrDefault(r.EditorID ?? "", r.EditorID ?? "") + "Race")?.FormKey,
+                Ob.IEffectShaderGetter e => ShaderStandIn(e.EditorID ?? ""),
+                Ob.IWeatherGetter w => WeatherStandIn(w.EditorID ?? ""),
+                Ob.ICombatStyleGetter cs => CombatStyleStandIn(cs.EditorID ?? ""),
+                _ => null,
+            };
         }
     }
 
