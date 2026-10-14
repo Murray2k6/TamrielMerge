@@ -312,8 +312,10 @@ public sealed partial class ObPluginBuilder
             EditorID = edid, Name = c.Name, Model = new Model { File = SkyrimModelPath(mesh.Path) }, ObjectBounds = Bounds(mesh),
             Weight = c.Data?.Weight ?? 0,
             Flags = c.Data?.Flags.HasFlag(Ob.Container.ContainerFlag.Respawns) == true ? Container.Flag.Respawns : 0,
-            OpenSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x0E3496)),
-            CloseSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x0E3497)),
+            // Skyrim's chest sounds, DRScTreasureOpenSD / DRScTreasureCloseSD (2026-10-14: 0E3496/0E3497 were placed
+            // objects, not sounds; 3,694 containers named a reference as their sound, which crashes the game).
+            OpenSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x03C8E7)),
+            CloseSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x03C8EA)),
             Items = [],
         };
         foreach (var i in c.Items)

@@ -61,3 +61,6 @@ TamrielMerge.mods.json
 !/tools/upscale/upscale.py
 /tools/voice/*
 !/tools/voice/generate.py
+
+# The app's logs and game-check reports
+logs/

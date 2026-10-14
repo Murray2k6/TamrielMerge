@@ -157,6 +157,10 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     /// </summary>
     public bool BackgroundNavmesh { get; init; }
 
+    /// <summary>The overland's ground height at a world position, for where the player is set down outside (in front of
+    /// the door, 160 units on: on a slope the ground there is higher than the door's, and the player arrived under it).</summary>
+    public Func<float, float, float>? GroundAt { get; init; }
+
     /// <summary>Static for an RDB block, building its NIF on first use.</summary>
     /// <summary>Block statics an already built plugin has (by EditorID), used instead of new copies (dungeon batches).</summary>
     public IReadOnlyDictionary<string, FormKey>? MasterStatics { get; init; }
@@ -450,7 +454,8 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         interiorDoor.TeleportDestination = new TeleportDestination
         {
             Door = exteriorDoor.ToLink<IPlacedObjectGetter>(),
-            Position = new P3Float(exteriorPosition.X, exteriorPosition.Y - 160, exteriorPosition.Z + 8),
+            Position = new P3Float(exteriorPosition.X, exteriorPosition.Y - 160,
+                MathF.Max(exteriorPosition.Z, GroundAt?.Invoke(exteriorPosition.X, exteriorPosition.Y - 160) ?? exteriorPosition.Z) + 16),
             Rotation = new P3Float(0, 0, MathF.PI),
         };
         exteriorDoor.TeleportDestination = new TeleportDestination

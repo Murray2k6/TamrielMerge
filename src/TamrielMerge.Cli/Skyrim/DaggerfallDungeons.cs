@@ -66,6 +66,7 @@ public static class DaggerfallDungeons
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(System.IO.Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), props)
         {
             Spells = spells, Creatures = creatures, MasterStatics = statics, BackgroundNavmesh = true,
+            GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y),
             Clutter = new ClutterPlacer(skyrim, props, master.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey)),
         };
         dungeons.Clutter!.UseDaggerfallItems(DfItems.Lookup(master));   // Daggerfall's weapons and armor on its floors

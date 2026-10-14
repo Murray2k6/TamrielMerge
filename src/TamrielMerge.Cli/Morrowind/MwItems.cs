@@ -479,8 +479,10 @@ public sealed partial class MwPluginBuilder
             ObjectBounds = Bounds(mesh),
             Weight = rec.Get("CNDT")?.Float() ?? 0,
             Flags = ((rec.Get("FLAG")?.Int() ?? 0) & 2) != 0 ? Container.Flag.Respawns : 0,
-            OpenSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x0E3496)),    // TRNChestOpen
-            CloseSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x0E3497)),   // TRNChestClose
+            // Skyrim's chest sounds, DRScTreasureOpenSD / DRScTreasureCloseSD (2026-10-14: 0E3496/0E3497 were placed
+            // objects, not sounds; 3,694 containers named a reference as their sound, which crashes the game).
+            OpenSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x03C8E7)),
+            CloseSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x03C8EA)),
             Items = [],
         };
         foreach (var f in rec.All("NPCO"))

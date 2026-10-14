@@ -347,7 +347,10 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         {
             NavmeshVersion = NavmeshVersion,
             CrcHash = Stamp,
-            Parent = new WorldspaceNavmeshParent { Parent = ws.ToLink<IWorldspaceGetter>(), Coordinates = new P2Int16((short)cx, (short)cy) },
+            // Skyrim stores the cell's grid Y first, then X (2,914 of Skyrim.esm's exterior navmeshes, 2026-10-14); Mutagen's
+            // P2Int16 writes X first, so Y goes in X. Swapped, a navmesh named a cell that doesn't exist in the long Iliac
+            // Bay (Privateer's Hold at (-391, 91) became (91, -391)) and the game crashed stepping outside.
+            Parent = new WorldspaceNavmeshParent { Parent = ws.ToLink<IWorldspaceGetter>(), Coordinates = new P2Int16((short)cy, (short)cx) },
         };
         data.Vertices.AddRange(verts);
         var neighbours = Adjacency(tris);
@@ -379,7 +382,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         WriteGrid(data, verts, tris);
         var navm = new NavigationMesh(mod) { Data = data };
         cell.NavigationMeshes.Add(navm);
-        AddInfo(navm, new NavigationMapInfoWorldParent { ParentWorldspace = ws.ToLink<IWorldspaceGetter>(), ParentWorldspaceCoord = new P2Int16((short)cx, (short)cy) }, verts, linked);
+        // The navmesh map's entry stores the grid the same way: Y first.
+        AddInfo(navm, new NavigationMapInfoWorldParent { ParentWorldspace = ws.ToLink<IWorldspaceGetter>(), ParentWorldspaceCoord = new P2Int16((short)cy, (short)cx) }, verts, linked);
         var mesh = new ExteriorMesh(ws, cx, cy, navm, verts, tris);
         exteriors.Add(mesh);
         return mesh;

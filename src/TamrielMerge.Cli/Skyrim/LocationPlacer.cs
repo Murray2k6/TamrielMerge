@@ -55,6 +55,17 @@ public static class LocationPlacer
         return new P3Float(x, y, (float)Math.Max(h, 0));
     }
 
+    /// <summary>The terrain's height (units) at a Skyrim world position: <see cref="WorldPosition"/> the other way round.</summary>
+    public static float GroundAt(HeightField f, float x, float y)
+    {
+        double vx = x / HeightField.UnitsPerQuad - f.MinCellX * HeightField.QuadsPerCell;
+        double vy = y / HeightField.UnitsPerQuad - f.MinCellY * HeightField.QuadsPerCell;
+        int x0 = (int)Math.Floor(vx), y0 = (int)Math.Floor(vy);
+        double fx = vx - x0, fy = vy - y0;
+        double h = (f.At(x0, y0) * (1 - fx) + f.At(x0 + 1, y0) * fx) * (1 - fy) + (f.At(x0, y0 + 1) * (1 - fx) + f.At(x0 + 1, y0 + 1) * fx) * fy;
+        return (float)Math.Max(h, 0);
+    }
+
     static MapMarker.MarkerType MarkerType(DfLocation loc) => loc.Type switch
     {
         DfLocationType.TownCity => MapMarker.MarkerType.City,
