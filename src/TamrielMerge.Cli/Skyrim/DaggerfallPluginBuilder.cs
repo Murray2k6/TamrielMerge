@@ -172,6 +172,7 @@ public static class DaggerfallPluginBuilder
         };
         questBuilder.Build();
         var markerOf = markers.GroupBy(m => (m.Location.Region, m.Location.Index)).ToDictionary(g => g.Key, g => g.First().Marker.FormKey);
+        questTowns.AddRange(questBuilder.ExteriorOnly.Select(l => new QuestSites.Town(l, null)));
         var questSites = QuestSites.Build(mod, "Main", questBuilder.Machine!.FormKey, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,
             QuestSites.Individuals(mod, everyone), l => markerOf.TryGetValue((l.Region, l.Index), out var mk) ? mk : null);
         Console.WriteLine($"Quest sites: {questTowns.Count} towns, {dungeons.BuiltDungeons.Count} dungeons, {dungeons.QuestMarkers.Values.Sum(m => m.Count)} quest markers in {questSites.Count} site quests");

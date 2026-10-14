@@ -17,7 +17,9 @@ namespace TamrielMerge.Skyrim;
 /// </summary>
 public static class QuestSites
 {
-    public sealed record Town(DfLocation Location, TownBuilder.Built Built);
+    /// <summary>A town (Built null: a place only seen from outside, such as a witches' coven, which a quest names by its
+    /// location but no plugin builds: on the map, nothing to enter).</summary>
+    public sealed record Town(DfLocation Location, TownBuilder.Built? Built);
 
     const int MaxBuildingsPerQuest = 900, MaxDungeonsPerQuest = 500, PerType = 3, PerHouseType = 2;
 
@@ -82,7 +84,7 @@ public static class QuestSites
         foreach (var town in towns)
         {
             var list = new List<(int, FormKey, FormKey, FormKey, FormKey)>();
-            foreach (var (type, doors) in town.Built.DoorsByType.OrderBy(d => d.Key))
+            foreach (var (type, doors) in (town.Built?.DoorsByType ?? []).OrderBy(d => d.Key))
             {
                 bool house = (int)type is >= 17 and <= 22;
                 foreach (var door in doors.Take(house ? PerHouseType : PerType))
@@ -139,7 +141,7 @@ public static class QuestSites
                             Ints("TownRegion", ts.Select(x => x.Town.Location.Region)), Ints("TownLocId", ts.Select(x => x.Town.Location.LocationId)),
                             Ints("TownX", ts.Select(x => x.Town.Location.PixelX)), Ints("TownY", ts.Select(x => x.Town.Location.PixelY)),
                             Ints("TownFirst", first), Ints("TownCount", ts.Select(x => x.Buildings.Count)),
-                            Objs("TownLocation", ts.Select(x => x.Town.Built.Location.FormKey)),
+                            Objs("TownLocation", ts.Select(x => x.Town.Built?.Location.FormKey ?? FormKey.Null)),
                             Objs("TownMap", ts.Select(x => mapMarker(x.Town.Location) ?? FormKey.Null)),
                             Ints("BType", bs.Select(b => b.B.Type)), Ints("BTown", bs.Select(b => b.Town)),
                             Objs("BDoor", bs.Select(b => b.B.Door)), Objs("BArrival", bs.Select(b => b.B.Arrival)),

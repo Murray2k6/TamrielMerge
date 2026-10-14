@@ -37,6 +37,9 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
     public IReadOnlyList<FormKey> Books { get; init; } = [];
 
     public Quest? Machine { get; private set; }
+    /// <summary>Places the quests name that are neither towns nor dungeons (the witches' covens): Daggerfall.esm registers
+    /// them as sites with only a map marker.</summary>
+    public List<DfLocation> ExteriorOnly { get; } = [];
     public int Messages { get; private set; }
     public int Objectives { get; private set; }
     public int Topics { get; private set; }
@@ -669,13 +672,26 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
     {
         if (p.Scope != 0) return (p.Scope, p.P1, p.P2, p.P3);
         locations ??= DfLocations.LoadAll(arena2);
-        int id = p.P1;
-        if (locations.FirstOrDefault(l => l.LocationId == id) is { } exact)
-            return (0, id, exact.ExteriorBlocks.Length > 0 && (ushort)p.P2 >> 8 != 0xFA ? 0 : exact.DungeonBlocks.Count > 0 ? 1 : 0, 0);
-        if (locations.FirstOrDefault(l => l.LocationId == id - 1 && l.DungeonBlocks.Count > 0) is { } dungeon)
-            return (0, dungeon.LocationId, 1, 0);
-        Problems.Add($"{q.Name}: fixed place 0x{id:X4} not found");
-        return (0, id, 1, 0);
+        var (id, dungeon, loc) = ResolveFixed(locations, p.P1, p.P2);
+        if (loc is null) Problems.Add($"{q.Name}: fixed place 0x{p.P1:X4} not found");
+        else if (!dungeon && loc.Type is not (DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage) && !ExteriorOnly.Contains(loc))
+            ExteriorOnly.Add(loc);
+        return (0, id, dungeon ? 1 : 0, 0);
+    }
+
+    /// <summary>A fixed place's Daggerfall location (Daggerfall Unity Place.SetupFixedLocation): the location with that id,
+    /// its dungeon when it is not a town (or the second half names a marker inside, 0xFAnn), else the town's streets; or the
+    /// location one id lower, its dungeon.</summary>
+    public static (int LocationId, bool Dungeon, DfLocation? Location) ResolveFixed(IReadOnlyList<DfLocation> locations, int p1, int p2)
+    {
+        if (locations.FirstOrDefault(l => l.LocationId == p1) is { } exact)
+        {
+            bool town = exact.Type is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage;
+            return (p1, exact.DungeonBlocks.Count > 0 && (!town || (ushort)p2 >> 8 == 0xFA), exact);
+        }
+        if (locations.FirstOrDefault(l => l.LocationId == p1 - 1 && l.DungeonBlocks.Count > 0) is { } below)
+            return (below.LocationId, true, below);
+        return (p1, true, null);
     }
 
     /// <summary>Every TMDf* script property the plugin sets that its script doesn't declare (they would be dropped in game),

@@ -812,7 +812,8 @@ Bool Function RunAction(Int i)
       Questor = personRef[Arg(i, 1)] as Actor
     EndIf
   EndIf
-  If m >= 0 && (code == 0x13 || code == 0x1E || code == 0x00 || code == 0x16 || code == 0x0C || code == 0x22 || code == 0x2E || code == 0x3D || code == 0x08 || code == 0x36 || code == 0x37 || code == 0x38)
+  ; Any other action's message is shown once it has run ("... saying N").
+  If m >= 0 && code != 0x33 && code != 0x06 && code != 0x04 && code != 0x4C && code != 0x1A && code != 0x24 && code != 0x1D
     Say(m)
   EndIf
   Return True

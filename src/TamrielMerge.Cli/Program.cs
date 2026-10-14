@@ -1275,7 +1275,19 @@ static class Program
             {
                 // Coverage of Daggerfall's quests: per quest, how many of its operations the quest machine supports, and why
                 // the rest aren't (like ob-script-inventory).
-                Console.Write(DfQuestDump.Check(DfQuest.LoadAll(arena2)));
+                var allQuests = DfQuest.LoadAll(arena2);
+                Console.Write(DfQuestDump.Check(allQuests));
+                if (opts.ContainsKey("places"))
+                {
+                    // --places: every fixed place and the Daggerfall location it resolves to.
+                    var locs = DfLocations.LoadAll(arena2);
+                    foreach (var q in allQuests)
+                        foreach (var p in q.Places.Where(p => p.Scope == 0))
+                        {
+                            var (id, dungeon, loc) = DfQuestBuilder.ResolveFixed(locs, p.P1, p.P2);
+                            Console.WriteLine($"{q.Name} place {p.Index}: 0x{p.P1:X4} 0x{(ushort)p.P2:X4} -> {(loc is null ? "NOT FOUND" : $"{loc.Name} ({loc.RegionName}, {loc.Type}) {(dungeon ? "dungeon" : "streets")}")}");
+                        }
+                }
                 return 0;
             }
             case "df-text":
