@@ -2851,6 +2851,40 @@ static class Program
                 Console.WriteLine($"Wrote {Path.GetFullPath(Path.Combine(outDir, Oblivion.ObPluginBuilder.PluginName))} in {sw.Elapsed.TotalSeconds:F0}s");
                 return 0;
             }
+            case "mw-script-translate":
+            {
+                // Morrowind's scripts (the converter's plugins: --plugins a,b,... or the mod selection) translated into
+                // Papyrus in --out (default out/mwscripts): object scripts (MW_), global scripts (MWG_) and dialogue result
+                // scripts (MWR_) in Source, and coverage.txt — per plugin the share of statements translated and what's
+                // missing most. --compile compiles them against Skyrim's, SKSE's and TamrielMerge's sources (compile.txt);
+                // --id <regex> limits it to matching script IDs ("results" for the dialogue's).
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind) ?? throw new DirectoryNotFoundException("Morrowind isn't installed through Steam or GOG");
+                var mwPlugins = opts.TryGetValue("plugins", out var mwList) ? mwList.Split(',').Select(x => x.Trim()).ToList() : Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []);
+                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/mwscripts"));
+                string srcDir = Path.Combine(outDir, "Source");
+                if (Directory.Exists(srcDir)) Directory.Delete(srcDir, true);
+                Directory.CreateDirectory(srcDir);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var world = Morrowind.MwWorld.Load(dataFiles, mwPlugins);
+                var scriptWorld = new Morrowind.MwScriptWorld(world, Morrowind.MwDialogue.Load(world.Plugins), Morrowind.Tes3Data.Open(dataFiles, mwPlugins));
+                var only = opts.TryGetValue("id", out var idRx) ? new System.Text.RegularExpressions.Regex(idRx, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+                var set = Morrowind.MwScriptSet.Translate(scriptWorld, only);
+                foreach (var o in set.All) File.WriteAllText(Path.Combine(srcDir, o.ScriptName + ".psc"), o.Source);
+                var report = set.Report();
+                report.Insert(0, $"Plugins: {string.Join(", ", world.Plugins.Select(p => p.FileName))}; {scriptWorld.Scripts.Count} scripts, {scriptWorld.StartScripts.Count} start scripts ({string.Join(", ", scriptWorld.StartScripts)}), {scriptWorld.GlobalScripts.Count} run as global scripts");
+                File.WriteAllLines(Path.Combine(outDir, "coverage.txt"), report);
+                foreach (var line in set.Report(int.Parse(opts.GetValueOrDefault("top", "30"))).Take(80)) Console.WriteLine(line);
+                Console.WriteLine($"Translated in {sw.Elapsed.TotalSeconds:F0}s into {srcDir}");
+                if (opts.ContainsKey("compile"))
+                {
+                    var (compiled, output) = Morrowind.MwPluginBuilder.CompilePapyrus(skyrimData, srcDir, Path.Combine(outDir, "Scripts"));
+                    File.WriteAllText(Path.Combine(outDir, "compile.txt"), output);
+                    var errors = output.Split('\n').Select(l => l.TrimEnd()).Where(l => l.Contains("): ")).ToList();
+                    foreach (var l in errors.Take(int.Parse(opts.GetValueOrDefault("errors", "40")))) Console.WriteLine(l);
+                    Console.WriteLine(compiled is null ? output : $"{compiled.Count} of {Directory.GetFiles(srcDir, "*.psc").Length} scripts compiled, {errors.Count} error lines ({sw.Elapsed.TotalSeconds:F0}s)");
+                }
+                return 0;
+            }
             case "mw-script-grep":
             {
                 // Dev aid: Morrowind scripts (SCPT source text, SCTX) containing --text (regex), with the matching lines;

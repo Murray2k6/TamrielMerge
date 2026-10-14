@@ -1,0 +1,257 @@
+using System.Text;
+
+namespace TamrielMerge.Morrowind;
+
+/// <summary>The events a translated script runs on, and the per-script helper functions it uses.</summary>
+public sealed partial class MwPapyrus
+{
+    void WriteEvents(StringBuilder sb, bool polls, float interval)
+    {
+        string iv = F(interval);
+        bool sleep = uses.Contains("pcsleep");
+        if (kind == Kind.Global)
+        {
+            sb.AppendLine("Event OnInit()");
+            if (sleep) sb.AppendLine("  RegisterForSleep()");
+            sb.AppendLine("  RegisterForSingleUpdate(0.5)");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+            sb.AppendLine("; StartScript: runs the script (on akSelf, when the call names a reference).");
+            sb.AppendLine("Function MwStartScript(ObjectReference akSelf)");
+            sb.AppendLine("  If akSelf");
+            sb.AppendLine("    MwSelf = akSelf");
+            sb.AppendLine("  EndIf");
+            sb.AppendLine("  If !IsRunning()");
+            sb.AppendLine("    Start()");
+            sb.AppendLine("  EndIf");
+            if (sleep) sb.AppendLine("  RegisterForSleep()");
+            sb.AppendLine("  RegisterForSingleUpdate(0.05)");
+            sb.AppendLine("EndFunction");
+            sb.AppendLine();
+            sb.AppendLine("Event OnUpdate()");
+            sb.AppendLine("  If !IsRunning()");
+            sb.AppendLine("    Return");
+            sb.AppendLine("  EndIf");
+            if (ctx.Start)
+            {
+                // Morrowind's story begins when the player first comes to its lands; its start scripts wait for that.
+                sb.AppendLine("  If !TMMwScript.InMorrowind()");
+                sb.AppendLine("    RegisterForSingleUpdate(5.0)");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+            }
+            sb.AppendLine($"  RegisterForSingleUpdate({iv})");
+            sb.AppendLine("  MwTick()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+            if (sleep) WriteSleepEvents(sb);
+            return;
+        }
+        if (kind != Kind.Object) return;
+        bool activate = uses.Contains("onactivate");
+        var mirrored = locals.Keys.Where(v => world.IsDialogueLocal(v) && ctx.OnActor).ToList();
+        bool startPos = uses.Contains("startpos");
+        bool items = ctx.IsItem;
+        if (activate || polls || mirrored.Count > 0 || startPos || sleep)
+        {
+            sb.AppendLine("Event OnInit()");
+            sb.AppendLine("  MwInit()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+            sb.AppendLine("Event OnLoad()");
+            sb.AppendLine("  MwInit()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+            sb.AppendLine("Function MwInit()");
+            if (activate) sb.AppendLine("  BlockActivation()   ; Morrowind's OnActivate replaces the default activation (Activate performs it)");
+            foreach (var v in mirrored)
+            {
+                string f = properties.Values.First(p => p.Fill.Equals("local:" + v, StringComparison.OrdinalIgnoreCase)).Name;
+                sb.AppendLine($"  TMMwScript.MirrorLocal(Self, {f}, {Var(v)}{(locals[v] == T.Float ? " as Int" : "")})");
+            }
+            if (startPos)
+            {
+                sb.AppendLine("  If !__startSet");
+                sb.AppendLine("    __startSet = True");
+                sb.AppendLine("    __sx = GetPositionX()");
+                sb.AppendLine("    __sy = GetPositionY()");
+                sb.AppendLine("    __sz = GetPositionZ()");
+                sb.AppendLine("    __sax = GetAngleX()");
+                sb.AppendLine("    __say = GetAngleY()");
+                sb.AppendLine("    __saz = GetAngleZ()");
+                sb.AppendLine("  EndIf");
+            }
+            if (sleep) sb.AppendLine("  RegisterForSleep()");
+            if (polls) sb.AppendLine("  RegisterForSingleUpdate(0.1)");
+            sb.AppendLine("EndFunction");
+            sb.AppendLine();
+        }
+        if (polls)
+        {
+            sb.AppendLine("Event OnUnload()");
+            if (items)
+            {
+                sb.AppendLine("  If !__carried");
+                sb.AppendLine("    UnregisterForUpdate()");
+                sb.AppendLine("  EndIf");
+            }
+            else sb.AppendLine("  UnregisterForUpdate()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+            sb.AppendLine("Event OnUpdate()");
+            sb.AppendLine(items ? "  If Is3DLoaded() || __carried" : "  If Is3DLoaded()");
+            sb.AppendLine($"    RegisterForSingleUpdate({iv})");
+            sb.AppendLine("    MwTick()");
+            sb.AppendLine("  EndIf");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
+        if (activate)
+        {
+            sb.AppendLine("Event OnActivate(ObjectReference akActionRef)");
+            sb.AppendLine("  __activated = True");
+            sb.AppendLine("  __actionRef = akActionRef");
+            sb.AppendLine("  MwTick()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
+        if (ctx.OnActor && (uses.Contains("ondeath") || uses.Contains("onmurder")))
+        {
+            sb.AppendLine("Event OnDeath(Actor akKiller)");
+            if (uses.Contains("ondeath")) sb.AppendLine("  __died = True");
+            if (uses.Contains("onmurder")) sb.AppendLine("  __murdered = akKiller == PlayerRef");
+            sb.AppendLine("  MwTick()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
+        if (ctx.OnActor && uses.Contains("onknockout"))
+        {
+            sb.AppendLine("Event OnEnterBleedout()");
+            sb.AppendLine("  __knockedOut = True");
+            sb.AppendLine("  MwTick()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
+        bool equipLocal = locals.ContainsKey("OnPCEquip"), skipLocal = locals.ContainsKey("PCSkipEquip");
+        if (items || uses.Contains("onpcadd") || uses.Contains("onpcdrop"))
+        {
+            sb.AppendLine("Event OnContainerChanged(ObjectReference akNewContainer, ObjectReference akOldContainer)");
+            sb.AppendLine("  __carried = akNewContainer == PlayerRef");
+            if (uses.Contains("onpcadd"))
+            {
+                sb.AppendLine("  If __carried");
+                sb.AppendLine("    __pcAdded = True");
+                sb.AppendLine("  EndIf");
+            }
+            if (uses.Contains("onpcdrop"))
+            {
+                sb.AppendLine("  If akOldContainer == PlayerRef && !akNewContainer");
+                sb.AppendLine("    __pcDropped = True");
+                sb.AppendLine("  EndIf");
+            }
+            if (polls)
+            {
+                sb.AppendLine("  If __carried");
+                sb.AppendLine("    RegisterForSingleUpdate(0.1)");
+                sb.AppendLine("  EndIf");
+            }
+            if (uses.Contains("onpcadd") || uses.Contains("onpcdrop")) sb.AppendLine("  MwTick()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
+        if (uses.Contains("onpcequip") || equipLocal || skipLocal)
+        {
+            sb.AppendLine("Event OnEquipped(Actor akActor)");
+            sb.AppendLine("  If akActor != PlayerRef");
+            sb.AppendLine("    Return");
+            sb.AppendLine("  EndIf");
+            if (skipLocal)
+            {
+                // PCSkipEquip: the item does its thing instead of being worn (books that open a menu…).
+                sb.AppendLine($"  If {Var("PCSkipEquip")} != 0");
+                sb.AppendLine("    akActor.UnequipItem(GetBaseObject(), False, True)");
+                sb.AppendLine("  EndIf");
+            }
+            if (equipLocal) sb.AppendLine($"  {Var("OnPCEquip")} = 1");
+            if (uses.Contains("onpcequip")) sb.AppendLine("  __pcEquipped = True");
+            sb.AppendLine("  MwTick()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
+        if (uses.Contains("onpchitme"))
+        {
+            sb.AppendLine("Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile, Bool abPowerAttack, Bool abSneakAttack, Bool abBashAttack, Bool abHitBlocked)");
+            sb.AppendLine("  If akAggressor == PlayerRef");
+            sb.AppendLine("    __pcHit = True");
+            sb.AppendLine("    MwTick()");
+            sb.AppendLine("  EndIf");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
+        if (sleep) WriteSleepEvents(sb);
+    }
+
+    static void WriteSleepEvents(StringBuilder sb)
+    {
+        // GetPCSleep: Morrowind's scripts act while the player rests (an ambush wakes them); Skyrim's run when the
+        // sleep starts, and whatever they place is there on waking.
+        sb.AppendLine("Event OnSleepStart(Float afSleepStartTime, Float afDesiredSleepEndTime)");
+        sb.AppendLine("  __pcSleep = True");
+        sb.AppendLine("  MwTick()");
+        sb.AppendLine("EndEvent");
+        sb.AppendLine();
+        sb.AppendLine("Event OnSleepStop(Bool abInterrupted)");
+        sb.AppendLine("  __pcSleep = False");
+        sb.AppendLine("EndEvent");
+        sb.AppendLine();
+    }
+
+    void WriteHelpers(StringBuilder sb)
+    {
+        void Lines(params string[] lines) { foreach (var l in lines) sb.AppendLine(l); }
+        if (uses.Contains("dt")) Lines("Float __dt", "Float __last = -1.0");
+        if (uses.Contains("cellchanged")) Lines("Cell __lastCell", "Bool __cellSeen", "Bool __cellChanged");
+        if (uses.Contains("onactivate")) Lines("Bool __activated");
+        if (uses.Contains("onactivate") || uses.Contains("actionref")) Lines("ObjectReference __actionRef");
+        if (uses.Contains("ondeath")) Lines("Bool __died");
+        if (uses.Contains("onmurder")) Lines("Bool __murdered");
+        if (uses.Contains("onknockout")) Lines("Bool __knockedOut");
+        if (uses.Contains("onpcadd")) Lines("Bool __pcAdded");
+        if (uses.Contains("onpcdrop")) Lines("Bool __pcDropped");
+        if (uses.Contains("onpcequip")) Lines("Bool __pcEquipped");
+        if (uses.Contains("onpchitme")) Lines("Bool __pcHit");
+        if (uses.Contains("pcsleep")) Lines("Bool __pcSleep");
+        if (kind == Kind.Object && (ctx.IsItem || uses.Contains("onpcadd") || uses.Contains("onpcdrop"))) Lines("Bool __carried");
+        if (uses.Contains("startpos")) Lines("Bool __startSet", "Float __sx", "Float __sy", "Float __sz", "Float __sax", "Float __say", "Float __saz");
+        foreach (var s in loopSounds.Order(StringComparer.Ordinal)) Lines($"Int __loop_{s}");
+        if (uses.Contains("say")) Lines("Float __sayUntil");
+        if (uses.Contains("sound")) Lines("Float[] __soundUntil", "Form[] __soundOf");
+        if (uses.Contains("button"))
+        {
+            Lines("Int __button = -1", "",
+                "; GetButtonPressed: the button chosen in the last message box, once (-1 until then).",
+                "Int Function MwTakeButton()", "  Int b = __button", "  __button = -1", "  Return b", "EndFunction");
+        }
+        // Events' flags: true once after the event, as Morrowind's functions are.
+        foreach (var (use, flag, fn) in new[] { ("onactivate", "__activated", "MwOnActivate"), ("ondeath", "__died", "MwOnDeath"), ("onmurder", "__murdered", "MwOnMurder"),
+                     ("onknockout", "__knockedOut", "MwOnKnockout"), ("onpcadd", "__pcAdded", "MwOnPCAdd"), ("onpcdrop", "__pcDropped", "MwOnPCDrop"),
+                     ("onpcequip", "__pcEquipped", "MwOnPCEquip"), ("onpchitme", "__pcHit", "MwOnPCHitMe") })
+        {
+            if (!uses.Contains(use)) continue;
+            Lines("", $"Bool Function {fn}()", $"  Bool was = {flag}", $"  {flag} = False", "  Return was", "EndFunction");
+        }
+        if (uses.Contains("say"))
+            Lines("", "; Say: Skyrim doesn't report when a line ends, so its length is reckoned from its text.",
+                "Function MwSaid(Float afSeconds)", "  __sayUntil = Utility.GetCurrentRealTime() + afSeconds", "EndFunction");
+        if (uses.Contains("sound"))
+            Lines("", "; GetSoundPlaying: a sound plays for its file's length after PlaySound.",
+                "Function MwPlayed(Form akSound, Float afSeconds)",
+                "  If !__soundOf", "    __soundOf = new Form[8]", "    __soundUntil = new Float[8]", "  EndIf",
+                "  Int i = __soundOf.Find(akSound)", "  If i < 0", "    i = __soundOf.Find(None)", "  EndIf", "  If i < 0", "    i = 0", "  EndIf",
+                "  __soundOf[i] = akSound", "  __soundUntil[i] = Utility.GetCurrentRealTime() + afSeconds", "EndFunction", "",
+                "Bool Function MwSoundPlaying(Form akSound)",
+                "  If !__soundOf", "    Return False", "  EndIf",
+                "  Int i = __soundOf.Find(akSound)", "  Return i >= 0 && Utility.GetCurrentRealTime() < __soundUntil[i]", "EndFunction");
+        sb.AppendLine();
+    }
+}

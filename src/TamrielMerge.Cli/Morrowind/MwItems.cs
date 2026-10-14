@@ -44,12 +44,12 @@ public sealed partial class MwPluginBuilder
         catch (Exception e) { Problems.Add($"item model {model}: {e.Message}"); return null; }
     }
 
-    static bool IsItemType(string type) => type is "MISC" or "WEAP" or "ARMO" or "CLOT" or "BOOK" or "ALCH" or "INGR" or "APPA" or "LOCK" or "PROB" or "REPA" or "LEVI";
+    internal static bool IsItemType(string type) => type is "MISC" or "WEAP" or "ARMO" or "CLOT" or "BOOK" or "ALCH" or "INGR" or "APPA" or "LOCK" or "PROB" or "REPA" or "LEVI";
 
     /// <summary>Morrowind's coins: Gold_001, and the piles Gold_005 to Gold_100 that are worth that many. They become
     /// Skyrim's gold, the money barter, dialogue and scripts count (drakes while the player is in Morrowind's time,
     /// TMStoryOrder); 0 for anything else.</summary>
-    static int CoinsIn(string id) => id.ToLowerInvariant() switch
+    internal static int CoinsIn(string id) => id.ToLowerInvariant() switch
     {
         "gold_001" => 1, "gold_005" => 5, "gold_010" => 10, "gold_025" => 25, "gold_100" => 100, _ => 0,
     };
