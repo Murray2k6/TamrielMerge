@@ -1271,6 +1271,17 @@ static class Program
                     AltStartBuilder.CompileScripts(skyrimData, Path.Combine(AppContext.BaseDirectory, "Papyrus"), Path.GetDirectoryName(outPath)!);
                 return 0;
             }
+            case "df-quest-markers":
+            {
+                // How many locations' map markers the town and dungeon parts find in a built Daggerfall.esm (--master PATH),
+                // for their quest sites (QuestSites.MasterMarkers).
+                using var master = SkyrimMod.CreateFromBinaryOverlay(opts["master"], SkyrimRelease.SkyrimSE);
+                var lookup = QuestSites.MasterMarkers(master, arena2);
+                var all = DfLocations.LoadAll(arena2);
+                int found = all.Count(l => lookup(l) is not null);
+                Console.WriteLine($"map markers found for {found} of {all.Count} locations; missing e.g. {string.Join(", ", all.Where(l => lookup(l) is null).Take(5).Select(l => l.Name))}");
+                return 0;
+            }
             case "df-quest-check":
             {
                 // Coverage of Daggerfall's quests: per quest, how many of its operations the quest machine supports, and why

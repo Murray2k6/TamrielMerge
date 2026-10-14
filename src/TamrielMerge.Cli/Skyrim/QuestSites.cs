@@ -45,8 +45,10 @@ public static class QuestSites
     {
         var ids = MarkerIds(DfLocations.LoadAll(arena2));
         var byEdid = new Dictionary<string, FormKey>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in master.EnumerateMajorRecords<IPlacedObjectGetter>())
-            if (r.EditorID is { } e && e.StartsWith("DFMap", StringComparison.Ordinal)) byEdid.TryAdd(e, r.FormKey);
+        // Map markers are persistent: in the overland tiles' persistent cells.
+        foreach (var ws in master.Worldspaces)
+            foreach (var r in ws.TopCell?.Persistent ?? [])
+                if (r.EditorID is { } e && e.StartsWith("DFMap", StringComparison.Ordinal)) byEdid.TryAdd(e, r.FormKey);
         return l => ids.TryGetValue((l.Region, l.Index), out var e) && byEdid.TryGetValue(e, out var k) ? k : null;
     }
 
