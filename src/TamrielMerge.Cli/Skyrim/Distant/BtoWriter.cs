@@ -33,7 +33,8 @@ public static class BtoWriter
 
     static readonly object NifLock = new();
 
-    public static void Write(string path, string world, int level, IReadOnlyList<Shape> shapes)
+    /// <summary>Writes the chunk at <paramref name="path"/>; its shapes use the texture sheet named <paramref name="sheet"/>.</summary>
+    public static void Write(string path, string sheet, int level, IReadOnlyList<Shape> shapes)
     {
         int segments = level == 4 ? 16 : 1;
         var pieces = new List<(Shape Shape, List<(int Start, int Count)> Runs)>();
@@ -65,8 +66,8 @@ public static class BtoWriter
                     for (int t = 0; t < piece.T.Count; t += 3) tris.Add(new Triangle((ushort)piece.T[t], (ushort)piece.T[t + 1], (ushort)piece.T[t + 2]));
                     var shape = nif.CreateShapeFromData("Obj", verts, tris, uvs, normals);
                     nif.SetParentNode(shape, boundNode);
-                    nif.SetTextureSlot(shape, DistantAtlas.PagePath(world, piece.Page), 0);
-                    nif.SetTextureSlot(shape, DistantAtlas.NormalPath(world), 1);
+                    nif.SetTextureSlot(shape, DistantAtlas.PagePath(sheet, piece.Page), 0);
+                    nif.SetTextureSlot(shape, DistantAtlas.NormalPath(sheet), 1);
                     nif.CalcTangentsForShape(shape);
                     if (piece.Cutout) nif.AssignAlphaProperty(shape, BlockMeshBuilder.Owned(new NiAlphaProperty { flags = 0x12EC, threshold = 128 }));
                     BlockMeshBuilder.EditBlock<BSLightingShaderProperty>(nif, hdr.GetBlockID(nif.GetShader(shape)), sh =>
@@ -92,7 +93,7 @@ public static class BtoWriter
 
     sealed class Piece : Shape { public readonly List<(int Start, int Count)> Runs = []; }
 
-    /// <summary>A shape cut to fit 16-bit indices, each piece's triangles in segment order, with its runs.</summary>
+    /// <summary>A shape cut to fit 16-bit vertex and triangle counts, each piece's triangles in segment order, with its runs.</summary>
     static IEnumerable<Piece> Split(Shape s, int segments)
     {
         var order = Enumerable.Range(0, s.T.Count / 3).OrderBy(t => s.Segment[t]).ToList();
@@ -109,7 +110,9 @@ public static class BtoWriter
         }
         foreach (int t in order)
         {
-            if (cur is null || cur.P.Count > 65000)
+            // A shape holds at most 65,535 vertices and 65,535 triangles (Skyrim SE stores both counts in 16 bits;
+            // 2026-10-14: dense level-16 chunks of Vvardenfell reached 90,686 triangles).
+            if (cur is null || cur.P.Count > 65000 || cur.T.Count / 3 >= 65000)
             {
                 if (cur is not null) yield return Finish(cur);
                 cur = new Piece { Page = s.Page, Cutout = s.Cutout };

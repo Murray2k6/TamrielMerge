@@ -89,42 +89,66 @@ public static class DistantLod
                 .Where(w => ours.Contains(w.FormKey.ModKey) && w.EditorID is { Length: > 0 })
                 .GroupBy(w => w.FormKey).Select(g => g.First())
                 .Where(w => onlyWorlds is null || onlyWorlds.Count == 0 || onlyWorlds.Contains(w.EditorID!, StringComparer.OrdinalIgnoreCase)).ToList();
+            // Each worldspace's copies in the plugins, found once (Daggerfall has 3,444 town worldspaces).
+            var copies = new Dictionary<FormKey, List<IWorldspaceGetter>>();
+            foreach (var mod in mods.Where(m => ours.Contains(m.ModKey)))
+                foreach (var w in mod.Worldspaces)
+                {
+                    if (!copies.TryGetValue(w.FormKey, out var l)) copies[w.FormKey] = l = [];
+                    l.Add(w);
+                }
+            // First, on one thread (the plugins' readers aren't safe to share), each world's land and placements; the
+            // land is made world by world (its own work runs on all cores).
+            var jobs = new List<(string Name, string Sheet, List<Placed> Placed, IEnumerable<(int X, int Y)> Cells)>();
             int done = 0;
             foreach (var world in worlds)
             {
                 string name = world.EditorID!;
-                Progress.Report(done++ / (double)worlds.Count, $"Distant LOD: {name}");
+                Progress.Report(0.5 * done++ / worlds.Count, $"Distant LOD: reading {name}");
                 var land = new Dictionary<(int X, int Y), ICellGetter>();
                 var placed = new Dictionary<FormKey, Placed>();
-                foreach (var mod in mods.Where(m => ours.Contains(m.ModKey)))
-                    foreach (var w in mod.Worldspaces.Where(w => w.FormKey == world.FormKey))
+                foreach (var w in copies.GetValueOrDefault(world.FormKey) ?? [])
+                {
+                    var cells = w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).ToList();
+                    if (w.TopCell is { } top) cells.Add(top);
+                    foreach (var cell in cells)
                     {
-                        var cells = w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).ToList();
-                        if (w.TopCell is { } top) cells.Add(top);
-                        foreach (var cell in cells)
+                        if (what.Terrain && cell.Landscape is not null && cell.Grid is { } g) land[(g.Point.X, g.Point.Y)] = cell;
+                        if (!what.Objects && !what.Trees) continue;
+                        foreach (var r in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>())
                         {
-                            if (what.Terrain && cell.Landscape is not null && cell.Grid is { } g) land[(g.Point.X, g.Point.Y)] = cell;
-                            if (!what.Objects && !what.Trees) continue;
-                            foreach (var r in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>())
-                            {
-                                // Deleted or initially disabled, or shown by a script's choice (an enable parent): not kept.
-                                if ((r.MajorRecordFlagsRaw & 0x820) != 0 || r.EnableParent is not null || r.Placement is not { } pl) { placed.Remove(r.FormKey); continue; }
-                                if (!baseOf.TryGetValue(r.Base.FormKey, out int bi)) continue;
-                                var b = bases[bi];
-                                if (b.Tree ? !what.Trees : !what.Objects) continue;
-                                float scale = r.Scale ?? 1;
-                                if (SizeOf(b) * scale < (b.Tree ? MinTree : MinObject(4))) continue;
-                                placed[r.FormKey] = new Placed(bi, new Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z), new Vector3(pl.Rotation.X, pl.Rotation.Y, pl.Rotation.Z), scale);
-                            }
+                            // Deleted or initially disabled, or shown by a script's choice (an enable parent): not kept.
+                            if ((r.MajorRecordFlagsRaw & 0x820) != 0 || r.EnableParent is not null || r.Placement is not { } pl) { placed.Remove(r.FormKey); continue; }
+                            if (!baseOf.TryGetValue(r.Base.FormKey, out int bi)) continue;
+                            var b = bases[bi];
+                            if (b.Tree ? !what.Trees : !what.Objects) continue;
+                            float scale = r.Scale ?? 1;
+                            if (SizeOf(b) * scale < (b.Tree ? MinTree : MinObject(4))) continue;
+                            placed[r.FormKey] = new Placed(bi, new Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z), new Vector3(pl.Rotation.X, pl.Rotation.Y, pl.Rotation.Z), scale);
                         }
                     }
-                log($"{name} ({world.FormKey.ModKey.FileName}): {land.Count} cells of land, {placed.Count} objects and trees for the distance");
+                }
                 if (what.Terrain && land.Count > 0) Terrain(name, land, writeRoot, mods, skyrimData, log);
                 if ((what.Objects || what.Trees) && placed.Count > 0)
-                {
-                    EnsureSettings(name, land.Count > 0 ? land.Keys : placed.Values.Select(p => Cell(p.Pos)), outDir, writeRoot);
-                    Objects(name, [.. placed.Values], bases, ModelOf, files, writeRoot, outDir, log);
-                }
+                    jobs.Add((name, SheetOf(world.FormKey.ModKey.FileName), [.. placed.Values], land.Count > 0 ? [.. land.Keys] : placed.Values.Select(p => Cell(p.Pos)).Distinct().ToList()));
+            }
+            // Then the objects and trees, worlds in parallel, on one texture sheet per game (2026-10-14: a sheet of its own
+            // for each of Daggerfall's 3,444 town worlds, one world at a time, took two hours and tens of gigabytes).
+            var sheets = jobs.Select(j => j.Sheet).Distinct().ToDictionary(n => n, _ => new DistantAtlas(files.Find));
+            int built = 0;
+            Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 2) }, job =>
+            {
+                EnsureSettings(job.Name, job.Cells, outDir, writeRoot);
+                Objects(job.Name, job.Placed, bases, ModelOf, sheets[job.Sheet], job.Sheet, writeRoot, outDir, log);
+                int n = Interlocked.Increment(ref built);
+                Progress.Report(0.5 + 0.5 * n / jobs.Count, $"Distant LOD: {n} of {jobs.Count} worlds");
+            });
+            foreach (var (sheet, atlas) in sheets)
+            {
+                foreach (var root in new[] { outDir, writeRoot }.Distinct())
+                    if (Path.Combine(root, "textures", "terrain", sheet, "objects") is var sheetDir && Directory.Exists(sheetDir)) Directory.Delete(sheetDir, true);
+                var pages = atlas.Write(writeRoot, sheet);
+                log($"{sheet}: {pages.Count} texture sheets for its worlds' distant objects and trees");
             }
             if (writeRoot != outDir)
             {
@@ -215,12 +239,20 @@ public static class DistantLod
         public readonly List<(int Page, bool Cutout, Vector3[] P, Vector3[] N, Vector2[] UV, int[] T)> Parts = [];
     }
 
-    static void Objects(string world, List<Placed> placed, List<Base> bases, Func<string, DistantModel?> modelOf, Files files, string writeRoot, string outDir, Action<string> log)
+    /// <summary>The texture sheet a world's distant objects share: one per game, named for it.</summary>
+    static string SheetOf(string plugin)
     {
+        foreach (var game in new[] { "Daggerfall", "Redguard", "Morrowind", "Oblivion" })
+            if (plugin.StartsWith(game, StringComparison.OrdinalIgnoreCase)) return "TamrielMerge" + game;
+        return "TamrielMerge" + Path.GetFileNameWithoutExtension(plugin).Replace(" ", "");
+    }
+
+    static void Objects(string world, List<Placed> placed, List<Base> bases, Func<string, DistantModel?> modelOf, DistantAtlas atlas, string sheet, string writeRoot, string outDir, Action<string> log)
+    {
+        // The world's old chunks, and a sheet of its own from before the sheets were shared.
         foreach (var sub in new[] { Path.Combine("meshes", "terrain", world, "objects"), Path.Combine("textures", "terrain", world, "objects") })
             foreach (var root in new[] { outDir, writeRoot }.Distinct())
                 if (Directory.Exists(Path.Combine(root, sub))) Directory.Delete(Path.Combine(root, sub), true);
-        var atlas = new DistantAtlas(files.Find);
         var ready = new Dictionary<(int Base, int Level), Ready?>();
 
         Ready? Prepare(int bi, int li)
@@ -284,11 +316,10 @@ public static class DistantLod
             if (b.Tree) return index % TreeEvery(Levels[li]) == 0;
             return b.Size * p.Scale >= MinObject(Levels[li]);
         }
-        // Everything onto the sheet first (it is written before the chunks name it).
+        // Everything onto the sheet first (the chunks name its pages; the sheet is written once all worlds are done).
         for (int i = 0; i < placed.Count; i++)
             for (int li = 0; li < Levels.Length; li++)
                 if (Keeps(placed[i], li, i)) Prepare(placed[i].Base, li);
-        var pages = atlas.Write(writeRoot, world);
 
         int chunks = 0;
         var errors = new ConcurrentBag<string>();
@@ -339,11 +370,11 @@ public static class DistantLod
                     }
                 }
                 string path = Path.Combine(writeRoot, "meshes", "terrain", world, "objects", $"{world}.{level}.{x0}.{y0}.bto");
-                try { BtoWriter.Write(path, world, level, [.. shapes.Values]); Interlocked.Increment(ref chunks); }
+                try { BtoWriter.Write(path, sheet, level, [.. shapes.Values]); Interlocked.Increment(ref chunks); }
                 catch (Exception e) { errors.Add($"{Path.GetFileName(path)}: {e.Message}"); }
             });
         }
-        log($"  {world}: {chunks} object chunks, {pages.Count} texture sheets, {ready.Count(r => r.Value is not null)} distant models{(errors.IsEmpty ? "" : $"; {errors.Count} failed, first: {errors.First()}")}");
+        log($"  {world}: {chunks} object chunks, {ready.Count(r => r.Value is not null)} distant models{(errors.IsEmpty ? "" : $"; {errors.Count} failed, first: {errors.First()}")}");
     }
 
     /// <summary>Files by Data-relative path: the first loose copy (the output, then Skyrim's Data), else Skyrim's archives.</summary>
