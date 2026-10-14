@@ -53,8 +53,9 @@ User, 2026-10-14: "should be a 1 hour conversion" (the run of 10-13/14 took abou
 
 - Town and dungeon parts run several at once (`--parts-at-once N` to choose), each in a folder of its own beside a copy
   of Daggerfall.esm, its files moved into the build folder when it ends. A town part lays its towns out on one core (up
-  to half the cores run parts); a dungeon part makes up to 8 navmeshes at once (a quarter of the cores). Budget 4 GB a
-  part, plus 2 GB for the shared heights and 4 GB for everything else. The joined plugins are the same however many ran
+  to half the cores run parts); a dungeon part makes up to 8 navmeshes at once (a quarter of the cores). Budget 3 GB a
+  part (a town part goes between 1.7 and 3.3 GB, the peaks brief), plus 2 GB for the shared heights and 4 GB for
+  everything else. The joined plugins are the same however many ran
   together: each part's form IDs are its own.
 - What every part made the same is made once and shared (`_parts\_shared`): the overland's heights (2 GB; each part
   spent 22 s making its own copy, and held it in memory), which the parts read in place from one file

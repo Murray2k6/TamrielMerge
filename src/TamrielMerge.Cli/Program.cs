@@ -199,13 +199,14 @@ static class Program
                     // navmeshes at once (a quarter of the cores). Measured 2026-10-14 (town part 9): 5.7 GB each with
                     // heights of its own, 3.4 GB with the shared heights and the GC told to keep memory low
                     // (DOTNET_GCConserveMemory, 0.2 min faster too); the old 3 GB budget ran six parts in 32 GB, into the
-                    // page file, and a part took twice as long. Budget 4 GB a part, plus the shared heights' 2 GB, plus 4 GB
-                    // for everything else. Each part is built in a folder of its own
+                    // page file, and a part took twice as long. Through a town part's run its memory goes between 1.7 and 3.3
+                    // GB, the peaks brief (a big town's navmeshes) and not at once in every part: budget 3 GB a part, plus
+                    // the shared heights' 2 GB, plus 4 GB for everything else. Each part is built in a folder of its own
                     // beside a copy of Daggerfall.esm, so parts never write the same file at once; when one ends its files
                     // are moved into the build folder. The parts' form IDs are their own ranges, so the joined plugin is the
                     // same however many ran together.
                     int atOnce = opts.TryGetValue("parts-at-once", out var pa) ? Math.Max(1, int.Parse(pa))
-                        : Math.Clamp((int)((Util.Machine.FreeRamGb() - 6) / 4), 1, Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4)));
+                        : Math.Clamp((int)((Util.Machine.FreeRamGb() - 6) / 3), 1, Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4)));
                     if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, {atOnce} at a time");
                     // What every part would make the same: the overland's heights (made once here, read in place by
                     // all), and the town meshes (the first part to make one leaves a copy for the rest).
