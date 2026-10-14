@@ -9,7 +9,8 @@ QuestListsManager and Place/Person resources, MIT). It keeps:
   30000.. a dungeon, 60000.. a town's streets;
 - the named individuals (King Gothryd, Lord Castellian ...) where they stand;
 - Daggerfall's 64 global quest variables (DFQuestGlobal<n>), the player's legal standing per region, and the main quest:
-  _BRISIEN (and the tutorial) start on the first arrival in the Iliac Bay; an ending (S0000100-S0000107) finishing
+  _BRISIEN (and the tutorial) start on the first arrival in the Iliac Bay; an ending (S0000100-S0000104, S0000106)
+  finishing
   tells the story order (TMStoryOrder.StoryCompleted) that Daggerfall's story is over.}
 
 TMDfReputation Property Reputation Auto
@@ -290,8 +291,9 @@ Function QuestEnded(TMDfQuest q, Bool success)
   If i >= 0 && QuestOneTime[i]
     DoneOnce.AddForm(q)
   EndIf
-  ; Daggerfall's endings: the story is over.
-  If StringUtil.Find(q.DfName, "S00001") == 0
+  ; Daggerfall's endings (S0000008 starts the one for whoever gets the Totem: S0000100-S0000104, S0000106; S0000107 is a
+  ; reputation change S0000005 makes on the way): the story is over.
+  If StringUtil.Find(q.DfName, "S00001") == 0 && q.DfName != "S0000107"
     TMStoryOrder story = Game.GetFormFromFile(0x03372B, "Skyrim.esm") as TMStoryOrder
     If story
       story.StoryCompleted(0)

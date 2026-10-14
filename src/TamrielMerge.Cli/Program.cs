@@ -1277,6 +1277,20 @@ static class Program
                 // the rest aren't (like ob-script-inventory).
                 var allQuests = DfQuest.LoadAll(arena2);
                 Console.Write(DfQuestDump.Check(allQuests));
+                if (opts.ContainsKey("simulate"))
+                {
+                    // --simulate: the quest machine's pass rules with nothing happening; quests that would end on their own.
+                    var startRep = DfFactions.Load(arena2).ById.ToDictionary(f => f.Key, f => f.Value.Rep);
+                    int endedAlone = 0;
+                    foreach (var q in allQuests)
+                    {
+                        var (ran, ended) = DfQuestDump.SimulateStart(q, startRep);
+                        if (ended) endedAlone++;
+                        if (ended || opts.GetValueOrDefault("simulate") == q.Name)
+                            Console.WriteLine($"{q.Name}: {(ended ? "ENDS ON ITS OWN" : "waits")} after {ran.Count} actions: {string.Join(", ", ran)}");
+                    }
+                    Console.WriteLine($"simulated start-up: {allQuests.Count - endedAlone} quests wait for the player, {endedAlone} end on their own");
+                }
                 if (opts.ContainsKey("places"))
                 {
                     // --places: every fixed place and the Daggerfall location it resolves to.

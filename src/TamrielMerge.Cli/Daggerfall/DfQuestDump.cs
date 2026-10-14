@@ -73,7 +73,7 @@ public static class DfQuestDump
             {
                 int k = int.Parse(m.Groups[1].Value);
                 var a = args.FirstOrDefault(a => a.Index == k);
-                return a is null ? "-" : a.Arg.IsNone && a.Role != '#' ? (a.Role == 'n' ? "pc" : "-") : Arg(a);
+                return a is null ? "-" : a.Arg.IsNone && a.Role != '#' ? (a.Role == 'n' && x.Op.Code == 0x1A ? "pc" : "-") : Arg(a);
             });
             if (x.Op.Message >= 0) t += $" saying {x.Op.Message}";
             return "\t" + t + (x.Info.Supported ? "" : "    -- not supported: " + x.Info.Gap);
@@ -143,6 +143,72 @@ public static class DfQuestDump
         foreach (var (code, m) in missing)
             sb.AppendLine($"  not supported: 0x{code:X2} {DfQuestOps.Of(code).Name}: {m.Uses} uses in {string.Join(", ", m.Quests)} -- {DfQuestOps.Of(code).Gap}");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// The quest machine's pass rules (as TMDfQuest runs them) with nothing happening in the world: no clicks, kills or
+    /// places reached, the player at level 1, reputations as FACTION.TXT starts them, no clock run out. Returns the actions
+    /// the start-up leads to and whether the quest would end on its own (a sign of a misread operation).
+    /// </summary>
+    public static (List<string> Ran, bool Ended) SimulateStart(DfQuest q, IReadOnlyDictionary<int, int> startRep)
+    {
+        var states = new bool[64];
+        var done = new bool[q.Ops.Count];
+        var ran = new List<string>();
+        bool ended = false;
+        bool Set(int s) => s < 0 || states[s];
+        void SetState(int s, bool v)
+        {
+            if (s < 0) return;
+            bool was = states[s];
+            states[s] = v;
+            if (was && !v)
+                for (int i = 0; i < q.Ops.Count; i++)
+                    if (DfQuestOps.Of(q.Ops[i].Code).Kind == DfQuestOps.OpKind.Action && !q.Ops[i].Args[0].IsNone && q.Ops[i].Args[0].Value == s) done[i] = false;
+        }
+        int A(DfQuest.QOp o, int k) => o.Args[k].IsNone ? -1 : (int)o.Args[k].Value;
+        for (int pass = 0; pass < 20 && !ended; pass++)
+        {
+            bool changed = false;
+            var primary = new bool[64];
+            for (int i = 0; i < q.Ops.Count && !ended; i++)
+            {
+                var o = q.Ops[i];
+                var info = DfQuestOps.Of(o.Code);
+                int s = A(o, 0);
+                if (info.Kind == DfQuestOps.OpKind.Action)
+                {
+                    if (!Set(s) || done[i]) continue;
+                    bool complete = true;
+                    switch (o.Code)
+                    {
+                        case 0x06: ended = true; break;
+                        case 0x07: done[i] = true; for (int k = 1; k < 5; k++) if (A(o, k) >= 0 && k < o.ArgCount) SetState(A(o, k), false); complete = false; break;
+                        case 0x22: { var c = Enumerable.Range(1, 4).Where(k => k < o.ArgCount && A(o, k) >= 0).ToList(); if (c.Count > 0) SetState(A(o, c[0]), true); break; }
+                        case 0x23: if (A(o, 1) >= 0) SetState(A(o, 1), true); break;
+                        case 0x1D: SetState(A(o, 1), true); break;   // the player says yes
+                        case 0x25: complete = startRep.GetValueOrDefault(0) >= o.Args[3].Int; if (complete) SetState(A(o, 1), true); break;
+                        case 0x2B or 0x46 or 0x39 or 0x49 or 0x09 or 0x57 or 0x54: complete = false; break;   // waiting for the world
+                    }
+                    if (complete || o.Code == 0x07) { if (complete) done[i] = true; ran.Add($"{i}:{info.Name}"); changed = true; }
+                }
+                else if (info.Kind == DfQuestOps.OpKind.AlwaysOn)
+                {
+                    bool r = o.Code switch
+                    {
+                        0x34 => Enumerable.Range(1, 4).All(k => k >= o.ArgCount || A(o, k) < 0 || Set(A(o, k)) != o.Args[k].Not),
+                        0x35 => Enumerable.Range(1, 4).Any(k => k < o.ArgCount && A(o, k) >= 0 && Set(A(o, k)) != o.Args[k].Not),
+                        0x4F => startRep.GetValueOrDefault(o.Args[1].Int) >= o.Args[2].Int,
+                        _ => false,
+                    };
+                    if (s >= 0 && !primary[s]) { primary[s] = true; if (r != states[s]) { SetState(s, r); changed = true; } }
+                    else if (r && s >= 0 && !states[s]) { SetState(s, true); changed = true; }
+                }
+                else if (o.Code == 0x4D && s >= 0 && !states[s] && o.Args[1].Int <= 1) { SetState(s, true); changed = true; }
+            }
+            if (!changed) break;
+        }
+        return (ran, ended);
     }
 
     public static string Raw(DfQuest q, Dictionary<uint, string> names)

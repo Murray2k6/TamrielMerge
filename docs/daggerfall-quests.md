@@ -83,13 +83,16 @@ Unity leaves it out, so it is skipped. `df-quest-check --places` lists where eve
   a building also checks the town the player came in from.
 - Ending: +5 to the quest's faction when it gave its reward, -2 otherwise; what the quest made is removed (kept items and
   rewards stay). The main quest: `_TUTOR__` and `_BRISIEN` start on the first arrival in the Iliac Bay; "start quest N"
-  starts S000000N; an ending (S0000100-S0000107) finishing calls TMStoryOrder.StoryCompleted(0).
+  starts S000000N; an ending finishing (S0000008, the Totem, starts S0000100-S0000104 or S0000106; S0000107 is only a
+  reputation change S0000005 makes) calls TMStoryOrder.StoryCompleted(0).
 
 ## Dev commands
 
 - `df-quest-dump --quest NAME[,NAME] [--raw] [--names DIR] [--messages]`: a quest as readable commands (or its raw
   records); DIR is a folder of Daggerfall Unity's text quests, only for symbol names.
-- `df-quest-check [--places]`: coverage per quest; fixed places and their locations.
+- `df-quest-check [--places] [--simulate[ NAME]]`: coverage per quest; fixed places and their locations; the pass rules
+  run with nothing happening in the world (prompts answered yes): 230 quests wait for the player, and the two that end on
+  their own are S0000106 and S0000107, reputation changes that are meant to.
 - `df-quest-build [--out FILE] [--scripts]`: a scratch plugin with only the quest records (no sites), checking every
   TMDf script property against the Papyrus sources; `--scripts` compiles the scripts beside it.
 - `df-town-test --towns ... --quests`: one or more towns with the quests and their quest sites (Daggerfall: 45 sites,
