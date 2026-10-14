@@ -174,11 +174,20 @@ public static class DistantLod
 
     /// <summary>A model that reads as a tree from afar: Skyrim's trees, Morrowind's flora_tree_* and parasols,
     /// Oblivion's trees, the made models' trees; not stumps, logs, branch piles or driftwood.</summary>
+    static readonly HashSet<string> SpriteTrees = SpriteModels.Targets.Where(t => t.Kind == SpriteModels.Kind.Tree)
+        .Select(t => t.Name.ToLowerInvariant()).ToHashSet();
+
+    /// <summary>The most triangles a distant model keeps: a heavier one, even a base's own distant mesh, is made coarser.</summary>
+    const int MaxDistantTriangles = 2000;
+
     static bool IsTreeModel(string model)
     {
         var low = model.Replace('/', '\\').ToLowerInvariant();
         var file = Path.GetFileNameWithoutExtension(low);
         if (file.Contains("stump") || file.Contains("driftwood") || file.Contains("branchpile") || file.Contains("log") || file.Contains("root")) return false;
+        // Daggerfall's trees made from its sprites (Scenery504_12 and the like; 2026-10-14 they went in whole, 8,000
+        // triangles each, two million in Daggerfall city's nearest distant chunks).
+        if (SpriteTrees.Contains(file)) return true;
         return file.Contains("tree") || file.Contains("emp_parasol") || file.Contains("palm") || low.Contains("\\trees\\");
     }
 
@@ -287,8 +296,12 @@ public static class DistantLod
             }
             // The base's own distant mesh for the level when it has one, else its model made coarser.
             DistantModel? model = b.Lod[li] is { } own ? modelOf(own) : null;
+            float grid(DistantModel m) => m.Radius * (Levels[li] switch { 4 => 1 / 14f, 8 => 1 / 8f, _ => 1 / 5f });
             if (model is null && modelOf(b.Model) is { } full)
-                model = full.Simplified(full.Radius * (Levels[li] switch { 4 => 1 / 14f, 8 => 1 / 8f, _ => 1 / 5f }), dropCutouts: li > 0);
+                model = full.Simplified(grid(full), dropCutouts: li > 0);
+            // Still too heavy (a mesh made from a sprite, a detailed own distant mesh): coarser until it isn't.
+            for (int pass = 0; model is not null && pass < 4 && model.Parts.Sum(pt => pt.T.Length / 3) > MaxDistantTriangles; pass++)
+                model = model.Simplified(grid(model) * (pass + 2), dropCutouts: li > 0);
             if (model is not null)
             {
                 r = new Ready();
@@ -320,6 +333,21 @@ public static class DistantLod
         for (int i = 0; i < placed.Count; i++)
             for (int li = 0; li < Levels.Length; li++)
                 if (Keeps(placed[i], li, i)) Prepare(placed[i].Base, li);
+
+        // TAMRIELMERGE_LOD_STATS=1: which models make the most triangles, level by level.
+        if (Environment.GetEnvironmentVariable("TAMRIELMERGE_LOD_STATS") == "1")
+            for (int li = 0; li < Levels.Length; li++)
+            {
+                var tris = new Dictionary<int, (long Tris, int Count)>();
+                for (int i = 0; i < placed.Count; i++)
+                    if (Keeps(placed[i], li, i) && ready.GetValueOrDefault((placed[i].Base, li)) is { } r)
+                    {
+                        var t = tris.GetValueOrDefault(placed[i].Base);
+                        tris[placed[i].Base] = (t.Tris + r.Parts.Sum(pt => pt.T.Length / 3), t.Count + 1);
+                    }
+                log($"  {world} level {Levels[li]}: {tris.Values.Sum(t => t.Tris):N0} triangles; most: " +
+                    string.Join(", ", tris.OrderByDescending(kv => kv.Value.Tris).Take(8).Select(kv => $"{Path.GetFileName(bases[kv.Key].Model)}{(bases[kv.Key].Tree ? " (tree)" : "")} x{kv.Value.Count} = {kv.Value.Tris:N0}")));
+            }
 
         int chunks = 0;
         var errors = new ConcurrentBag<string>();
