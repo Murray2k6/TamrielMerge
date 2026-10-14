@@ -48,7 +48,7 @@ public static class DaggerfallDungeons
         // Entrance doors are placed on the whole Iliac Bay in global coordinates (a scratch worldspace), then moved into
         // the overland tiles they stand in: overrides of Daggerfall.esm's tiles, for their persistent cells only.
         var map0 = DfWorldMap.Load(arena2);
-        var field = Terrain.HeightField.Generate(map0, terrain);
+        var field = Terrain.HeightField.Shared(map0, terrain);
         var (world, moveIntoTiles) = new Terrain.OverlandTiles(field).OverrideTiles(mod, master);
         var iliacBay = master.Locations.FirstOrDefault(l => l.EditorID == "DFLocIliacBay")?.FormKey;
 

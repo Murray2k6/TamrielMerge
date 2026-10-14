@@ -52,13 +52,22 @@ parts. The batches themselves run one at a time for memory.
 User, 2026-10-14: "should be a 1 hour conversion" (the run of 10-13/14 took about 19 hours). What changed:
 
 - Town and dungeon parts run several at once (`--parts-at-once N` to choose), each in a folder of its own beside a copy
-  of Daggerfall.esm, its files moved into the build folder when it ends. A town part lays its towns out on one core and
-  peaked at 1.9 GB (budget 3 GB, up to half the cores); a dungeon part makes up to 8 navmeshes at once (budget 5 GB, a
-  quarter of the cores). The joined plugins are the same however many ran together: each part's form IDs are its own.
+  of Daggerfall.esm, its files moved into the build folder when it ends. A town part lays its towns out on one core (up
+  to half the cores run parts); a dungeon part makes up to 8 navmeshes at once (a quarter of the cores). Budget 4 GB a
+  part, plus 2 GB for the shared heights and 4 GB for everything else. The joined plugins are the same however many ran
+  together: each part's form IDs are its own.
+- What every part made the same is made once and shared (`_parts\_shared`): the overland's heights (2 GB; each part
+  spent 22 s making its own copy, and held it in memory), which the parts read in place from one file
+  (`HeightField.Shared`, `TAMRIELMERGE_HEIGHTS`), and the town block and building meshes, which the first part to make
+  one leaves for the rest (`TAMRIELMERGE_TOWN_MESHES`). The parts' GC keeps memory low (`DOTNET_GCConserveMemory=7`).
+  Town part 9 on its own, 2026-10-14: 4.8 min and 5.7 GB before, 3.6 min and 3.4 GB after (setup 28 s to 8 s). The old
+  3 GB budget had run six 5.7 GB parts in 32 GB, into the page file: parts took 6.5-8.4 min in the 19-hour run.
 - Town parts place Daggerfall.esm's own sprite models and grass instead of importing all 604 models and writing their
   files again in every part (a part's setup went to 29 s; a part now takes about 3.5 minutes).
 - Redguard, Morrowind and Oblivion are built side by side, each in a process of its own.
 - Distant LOD shares one texture sheet per game and builds its worlds in parallel (it had made a sheet of its own for
-  each of Daggerfall's 3,444 town worlds, one world at a time).
+  each of Daggerfall's 3,444 town worlds, one world at a time), and Daggerfall's trees made from its sprites go in as
+  pictures like Skyrim's trees (they went in whole, 8,000 triangles each): Daggerfall's objects and trees went from over
+  two hours and an estimated 50 GB to 6.4 minutes and 3.6 GB. `TAMRIELMERGE_LOD_STATS=1` lists the heaviest models.
 - Not counted in the hour: remastering the intro videos and rendering the menu on the processor (hours; they reuse what
   an earlier run made), and voice generation.

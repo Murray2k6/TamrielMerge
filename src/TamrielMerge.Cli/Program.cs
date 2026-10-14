@@ -195,14 +195,32 @@ static class Program
                     }
                     // Several parts at once (user, 2026-10-14: "should be a 1 hour conversion"; one at a time, a part's town
                     // layout left most of the cores idle): as many as the free memory holds, at most a share of the cores,
-                    // or --parts-at-once N. A town part lays its towns out on one core and peaked at 1.9 GB (budget 3 GB,
-                    // half the cores); a dungeon part makes up to 8 navmeshes at once (budget 5 GB, a quarter of the cores). Each part is built in a folder of its own
+                    // or --parts-at-once N. A town part lays its towns out on one core; a dungeon part makes up to 8
+                    // navmeshes at once (a quarter of the cores). Measured 2026-10-14 (town part 9): 5.7 GB each with
+                    // heights of its own, 3.4 GB with the shared heights and the GC told to keep memory low
+                    // (DOTNET_GCConserveMemory, 0.2 min faster too); the old 3 GB budget ran six parts in 32 GB, into the
+                    // page file, and a part took twice as long. Budget 4 GB a part, plus the shared heights' 2 GB, plus 4 GB
+                    // for everything else. Each part is built in a folder of its own
                     // beside a copy of Daggerfall.esm, so parts never write the same file at once; when one ends its files
                     // are moved into the build folder. The parts' form IDs are their own ranges, so the joined plugin is the
                     // same however many ran together.
                     int atOnce = opts.TryGetValue("parts-at-once", out var pa) ? Math.Max(1, int.Parse(pa))
-                        : Math.Clamp((int)((Util.Machine.FreeRamGb() - 4) / (command == "df-towns" ? 3 : 5)), 1, Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4)));
+                        : Math.Clamp((int)((Util.Machine.FreeRamGb() - 6) / 4), 1, Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4)));
                     if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, {atOnce} at a time");
+                    // What every part would make the same: the overland's heights (made once here, read in place by
+                    // all), and the town meshes (the first part to make one leaves a copy for the rest).
+                    string sharedDir = Path.Combine(outDir, "_parts", "_shared");
+                    string heights = Path.Combine(sharedDir, "heights.bin");
+                    // Made again when older than the converter (a resumed run after an update).
+                    if (pending.Count > 0 && (!File.Exists(heights) || File.GetLastWriteTimeUtc(heights) < File.GetLastWriteTimeUtc(Environment.ProcessPath!)))
+                    {
+                        if (Directory.Exists(Path.Combine(sharedDir, "meshes"))) Directory.Delete(Path.Combine(sharedDir, "meshes"), true);
+                        Directory.CreateDirectory(sharedDir);
+                        var clock = System.Diagnostics.Stopwatch.StartNew();
+                        Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom([])).Save(heights);
+                        GC.Collect();
+                        Console.WriteLine($"Heights for the parts: {new FileInfo(heights).Length / 1048576} MB in {clock.Elapsed.TotalSeconds:F0} s");
+                    }
                     var built = new System.Collections.Concurrent.ConcurrentBag<int>();
                     var gate = new object();
                     int finished = 0;
@@ -214,6 +232,9 @@ static class Program
                         var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
                         foreach (var a in new[] { command, "--plugin", Path.Combine(work, "Daggerfall.esm"), "--batch", k.ToString(), "--batches", parts.ToString() }) psi.ArgumentList.Add(a);
                         psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";   // the parent reports the parts
+                        psi.Environment["TAMRIELMERGE_HEIGHTS"] = heights;
+                        psi.Environment["TAMRIELMERGE_TOWN_MESHES"] = Path.Combine(sharedDir, "meshes");
+                        psi.Environment["DOTNET_GCConserveMemory"] = "7";
                         int code;
                         using (var p = System.Diagnostics.Process.Start(psi)!) { p.WaitForExit(); code = p.ExitCode; }
                         bool ok = code == 0 && File.Exists(Path.Combine(work, Path.GetFileName(partPath(k))));
@@ -1338,6 +1359,15 @@ static class Program
                     MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
                 });
                 Console.WriteLine($"Wrote {Path.Combine(outDir, "DaggerfallTownTest.esp")} ({new FileInfo(Path.Combine(outDir, "DaggerfallTownTest.esp")).Length / 1048576.0:F1} MB) in {sw.Elapsed.TotalSeconds:F0}s");
+                return 0;
+            }
+            case "df-heights":
+            {
+                // Dev aid: the overland heights file the conversion gives its town and dungeon parts (TAMRIELMERGE_HEIGHTS).
+                string path = Path.GetFullPath(opts.GetValueOrDefault("out", "heights.bin"));
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom(opts)).Save(path);
+                Console.WriteLine($"Wrote {path} ({new FileInfo(path).Length / 1048576} MB) in {sw.Elapsed.TotalSeconds:F0} s");
                 return 0;
             }
             case "df-towns":

@@ -1,3 +1,4 @@
+using System.IO.MemoryMappedFiles;
 using TamrielMerge.Daggerfall;
 
 namespace TamrielMerge.Skyrim.Terrain;
@@ -25,7 +26,7 @@ public sealed record TerrainSettings
 /// Global terrain heights for the whole Daggerfall map on Skyrim's vertex grid (32 quads of 128 units per cell).
 /// Row 0 is the southern edge; Skyrim's Y axis points north while Daggerfall's map rows run north to south.
 /// </summary>
-public sealed class HeightField
+public sealed unsafe class HeightField
 {
     public const int QuadsPerCell = 32, UnitsPerQuad = 128;
 
@@ -37,10 +38,75 @@ public sealed class HeightField
     /// <summary>Skyrim grid coordinate of the south-west cell.</summary>
     public int MinCellX => -CellsX / 2;
     public int MinCellY => -CellsY / 2;
-    /// <summary>Heights in Skyrim units, sea level at 0, indexed [vy * VertsX + vx].</summary>
-    public required float[] Heights { get; init; }
+    /// <summary>Heights in Skyrim units, sea level at 0, indexed [vy * VertsX + vx]; null when read from a shared file
+    /// (<see cref="Shared"/>), then <see cref="At"/> reads them.</summary>
+    public float[]? Heights { get; init; }
+    float* mapped;
+    MemoryMappedFile? mappedFile;
+    MemoryMappedViewAccessor? mappedView;
 
-    public float At(int vx, int vy) => Heights[Math.Clamp(vy, 0, VertsY - 1) * VertsX + Math.Clamp(vx, 0, VertsX - 1)];
+    public float At(int vx, int vy)
+    {
+        long i = (long)Math.Clamp(vy, 0, VertsY - 1) * VertsX + Math.Clamp(vx, 0, VertsX - 1);
+        return Heights is { } h ? h[i] : mapped[i];
+    }
+
+    /// <summary>The highest point.</summary>
+    public float Peak()
+    {
+        if (Heights is { } h) return h.Max();
+        float peak = float.MinValue;
+        for (long i = 0, n = (long)VertsX * VertsY; i < n; i++) peak = Math.Max(peak, mapped[i]);
+        return peak;
+    }
+
+    /// <summary>
+    /// The heights for Daggerfall's town and dungeon parts: each part made them itself, 22 seconds and 2 GB of memory
+    /// each, 124 times a conversion (2026-10-14, user: "should be a 1 hour conversion"). The conversion writes them once
+    /// (<see cref="Save"/>) to the file TAMRIELMERGE_HEIGHTS names, and every part reads that file in place: the
+    /// system keeps one copy in memory for all of them. Made here when there is no file or it is for other settings.
+    /// </summary>
+    public static HeightField Shared(DfWorldMap map, TerrainSettings s)
+    {
+        if (Environment.GetEnvironmentVariable("TAMRIELMERGE_HEIGHTS") is { Length: > 0 } path && File.Exists(path))
+        {
+            try
+            {
+                var file = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
+                var view = file.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+                byte* p = null;
+                view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
+                p += view.PointerOffset;
+                var head = System.Text.Encoding.UTF8.GetString(p, HeaderSize).TrimEnd('\0').Split('\n');
+                int cellsX = (DfWorldMap.Width + s.PixelsPerCell - 1) / s.PixelsPerCell, cellsY = (DfWorldMap.Height + s.PixelsPerCell - 1) / s.PixelsPerCell;
+                if (head.Length >= 4 && head[0] == Magic && head[1] == cellsX.ToString() && head[2] == cellsY.ToString() && head[3] == s.ToString())
+                    return new HeightField { Settings = s, CellsX = cellsX, CellsY = cellsY, mapped = (float*)(p + HeaderSize), mappedFile = file, mappedView = view };
+                view.SafeMemoryMappedViewHandle.ReleasePointer();
+                view.Dispose(); file.Dispose();
+                Console.WriteLine($"Heights: {Path.GetFileName(path)} is for other settings; making them here");
+            }
+            catch (IOException e) { Console.WriteLine($"Heights: {path} unreadable ({e.Message}); making them here"); }
+        }
+        return Generate(map, s);
+    }
+
+    const string Magic = "TamrielMerge heights 1";
+    const int HeaderSize = 4096;
+
+    /// <summary>Writes the heights for <see cref="Shared"/>: a header naming their size and settings, then the floats.</summary>
+    public void Save(string path)
+    {
+        if (Heights is not { } h) throw new InvalidOperationException("Only made heights are saved");
+        string temp = path + ".tmp" + Environment.ProcessId;
+        using (var f = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20))
+        {
+            var head = new byte[HeaderSize];
+            System.Text.Encoding.UTF8.GetBytes($"{Magic}\n{CellsX}\n{CellsY}\n{Settings}").CopyTo(head, 0);
+            f.Write(head);
+            f.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(h.AsSpan()));
+        }
+        File.Move(temp, path, overwrite: true);
+    }
 
     /// <summary>Continuous Daggerfall map-pixel coordinate (x east, y south) of a global vertex.</summary>
     public (double u, double v) PixelCoord(int vx, int vy)
@@ -89,10 +155,10 @@ public sealed class HeightField
                     double ramp = Math.Clamp(-h / 150, 0, 1);
                     h -= Math.Min(d, 10) * 350 * ramp * ramp * (3 - 2 * ramp);
                 }
-                field.Heights[vy * field.VertsX + vx] = (float)h;
+                field.Heights![vy * field.VertsX + vx] = (float)h;
             }
         });
-        LimitSlope(field.Heights, field.VertsX, field.VertsY, MaxStep);
+        LimitSlope(field.Heights!, field.VertsX, field.VertsY, MaxStep);
         return field;
     }
 

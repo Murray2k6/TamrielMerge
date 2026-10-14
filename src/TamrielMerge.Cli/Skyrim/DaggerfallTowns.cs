@@ -68,7 +68,7 @@ public static class DaggerfallTowns
         PluginMerger.PreparePart(mod, batch, batches);
 
         var map = DfWorldMap.Load(arena2);
-        var field = Terrain.HeightField.Generate(map, terrain);
+        var field = Terrain.HeightField.Shared(map, terrain);
         var (world, moveIntoTiles) = new Terrain.OverlandTiles(field).OverrideTiles(mod, master);
         var iliacBay = master.Locations.First(l => l.EditorID == "DFLocIliacBay").FormKey;
 
