@@ -13,13 +13,21 @@ static class Cli
     {
         var psi = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "TamrielMerge.Cli.exe"))
         { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8 };
+        psi.WorkingDirectory = MainForm.Workspace;
         foreach (var a in args) psi.ArgumentList.Add(a);
-        using var p = Process.Start(psi)!;
-        var err = p.StandardError.ReadToEndAsync();
-        string output = p.StandardOutput.ReadToEnd();
-        p.WaitForExit();
-        return (p.ExitCode, p.ExitCode == 0 ? output : output + err.Result);
+        try
+        {
+            using var p = Process.Start(psi)!;
+            var err = p.StandardError.ReadToEndAsync();
+            string output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit();
+            return (p.ExitCode, p.ExitCode == 0 ? output : output + err.Result);
+        }
+        catch (System.ComponentModel.Win32Exception e) { return (-1, $"the converter couldn't be started: {e.Message}"); }
     });
+
+    /// <summary>Thumbnails being made, by file: a texture shown twice at once (parts sharing it) waits for one run.</summary>
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task> Making = new(StringComparer.OrdinalIgnoreCase);
 
     public static string Hash(string s) => Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(s.ToLowerInvariant())))[..16];
 
@@ -27,11 +35,21 @@ static class Cli
     public static async Task<Image?> Thumb(string texture, string dir, int size = 256)
     {
         if (string.IsNullOrEmpty(texture)) return null;
-        string file = Path.Combine(Environment.CurrentDirectory, "out", "texture-thumbs", $"{Hash(texture)}_{size}.png");
-        if (!File.Exists(file)) await Run("texture-thumb", "--texture", texture, "--out", file, "--dir", dir, "--size", size.ToString());
+        string file = Path.Combine(MainForm.Workspace, "out", "texture-thumbs", $"{Hash(texture)}_{size}.png");
+        if (!File.Exists(file))
+            await Making.GetOrAdd(file, f => Task.Run(async () =>
+            {
+                try { await Run("texture-thumb", "--texture", texture, "--out", f, "--dir", dir, "--size", size.ToString()); }
+                finally { Making.TryRemove(f, out _); }
+            }));
         if (!File.Exists(file)) return null;
-        using var img = Image.FromFile(file);
-        return new Bitmap(img);
+        // A picture that can't be read (2026-10-14: a half-written one threw out of the window) shows as none.
+        try { using var img = Image.FromFile(file); return new Bitmap(img); }
+        catch (Exception e) when (e is OutOfMemoryException or System.Runtime.InteropServices.ExternalException or IOException or ArgumentException)
+        {
+            try { File.Delete(file); } catch (IOException) { }
+            return null;
+        }
     }
 }
 
@@ -58,7 +76,9 @@ public sealed class TexturesDialog : Form
     public TexturesDialog(string outputDir, string originalModel, string currentModel)
     {
         dir = outputDir; original = originalModel; model = currentModel;
-        swaps = TextureTools.LoadOverrides(dir);
+        // A choices file that can't be read starts the window empty rather than failing to open it.
+        try { swaps = TextureTools.LoadOverrides(dir); }
+        catch (Exception e) when (e is JsonException or IOException or UnauthorizedAccessException) { swaps = []; status.Text = $"Your texture choices couldn't be read ({e.Message})."; }
         Text = $"Textures — {currentModel}";
         Width = 1050; Height = 720; MinimumSize = new Size(800, 500);
         StartPosition = FormStartPosition.CenterParent;
@@ -84,7 +104,9 @@ public sealed class TexturesDialog : Form
     {
         status.Text = "Reading the model…";
         var (code, json) = await Cli.Run("model-textures", "--model", model, "--dir", dir);
-        shapes = code == 0 ? JsonSerializer.Deserialize<List<TextureTools.ShapeInfo>>(json) ?? [] : [];
+        if (IsDisposed) return;
+        try { shapes = code == 0 ? JsonSerializer.Deserialize<List<TextureTools.ShapeInfo>>(json) ?? [] : []; }
+        catch (JsonException) { shapes = []; }
         parts.Items.Clear();
         foreach (var s in shapes)
             parts.Items.Add($"{s.Index}: {s.Name}" + (s.ShaderType switch { 1 => "  (reflective)", 2 => "  (glow)", 3 => "  (parallax)", _ => "" }));
@@ -99,8 +121,12 @@ public sealed class TexturesDialog : Form
         return s;
     }
 
+    int showingPart;
+
     async void ShowPart()
     {
+        // A newer choice (another part clicked) or the window closing stops this one's pictures.
+        int ticket = ++showingPart;
         slots.SuspendLayout();
         foreach (Control c in slots.Controls) { if (c is PictureBox pb) pb.Image?.Dispose(); }
         slots.Controls.Clear(); slots.RowStyles.Clear();
@@ -124,21 +150,36 @@ public sealed class TexturesDialog : Form
             pictures.Add((pic, tex));
         }
         slots.ResumeLayout();
-        foreach (var (box, tex) in pictures) box.Image = await Cli.Thumb(tex, dir, 128);
+        foreach (var (box, tex) in pictures)
+        {
+            var img = await Cli.Thumb(tex, dir, 128);
+            if (ticket != showingPart || IsDisposed || box.IsDisposed) { img?.Dispose(); return; }
+            box.Image = img;
+        }
     }
+
+    Task? listing;
 
     async Task Change(TextureTools.ShapeInfo shape, int slot)
     {
         if (available is null)
         {
+            // One listing at a time (a second Change… waits for it), and nothing shown if the window closed meanwhile.
             status.Text = "Listing the textures your games offer…";
             UseWaitCursor = true;
-            string list = Path.Combine(Environment.CurrentDirectory, "out", "textures-available.json");
-            if (!File.Exists(list) || File.GetLastWriteTime(list) < DateTime.Now.AddHours(-12)) await Cli.Run("textures-index", "--dir", dir, "--out", list);
-            available = File.Exists(list) ? JsonSerializer.Deserialize<List<TextureTools.TextureEntry>>(File.ReadAllText(list)) : [];
-            UseWaitCursor = false;
-            status.Text = "";
+            try
+            {
+                string list = Path.Combine(MainForm.Workspace, "out", "textures-available.json");
+                listing ??= (!File.Exists(list) || File.GetLastWriteTime(list) < DateTime.Now.AddHours(-12)) ? Cli.Run("textures-index", "--dir", dir, "--out", list) : Task.CompletedTask;
+                await listing;
+                if (IsDisposed) return;
+                try { available = File.Exists(list) ? JsonSerializer.Deserialize<List<TextureTools.TextureEntry>>(File.ReadAllText(list)) ?? [] : []; }
+                catch (Exception e) when (e is JsonException or IOException) { available = []; status.Text = $"The texture list couldn't be read ({e.Message})."; return; }
+                status.Text = "";
+            }
+            finally { if (!IsDisposed) UseWaitCursor = false; listing = null; }
         }
+        if (IsDisposed) return;
         using var picker = new TexturePickerDialog(available!, dir, $"{TextureTools.SlotNames[slot]} of part {shape.Index}", helpers: slot != 0);
         if (picker.ShowDialog(this) != DialogResult.OK || picker.Chosen is null) return;
         SwapsOf(shape.Index)[slot] = @"textures\" + picker.Chosen;
@@ -148,8 +189,12 @@ public sealed class TexturesDialog : Form
 
     void Save()
     {
-        TextureTools.SaveOverrides(dir, swaps);
-        status.Text = "Saved. Build the replacements plugin in the Models window to use it in the game.";
+        try
+        {
+            TextureTools.SaveOverrides(dir, swaps);
+            status.Text = "Saved. Build the replacements plugin in the Models window to use it in the game.";
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { status.Text = $"Couldn't save your choice ({e.Message}): is the file open elsewhere?"; }
     }
 
     void MakePbr()

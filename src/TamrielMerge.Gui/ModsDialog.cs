@@ -168,6 +168,10 @@ public sealed class ModsDialog : Form
         var byDefault = ModCatalog.DefaultSelection(game, dataDir);
         // The game's own list is kept as "default", so newly enabled mods are picked up later.
         bool isDefault = chosen.Count == byDefault.Count && chosen.All(c => byDefault.Contains(c, StringComparer.OrdinalIgnoreCase));
-        ModCatalog.Save(game, isDefault ? null : chosen);
+        try { ModCatalog.Save(game, isDefault ? null : chosen); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, $"Your mod choice couldn't be saved ({e.Message}). Is TamrielMerge.mods.json open elsewhere?", "TamrielMerge");
+        }
     }
 }

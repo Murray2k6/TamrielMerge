@@ -52,6 +52,17 @@ public sealed class PartsDialog : Form
             if (part.Core) { e.NewValue = CheckState.Checked; note.Text = $"{part.Name} joins the other parts together and stays on."; return; }
             if (files.Count == 0) { e.NewValue = CheckState.Unchecked; note.Text = $"{part.Name} isn't installed: convert it (and install) first."; return; }
             bool on = e.NewValue == CheckState.Checked;
+            try { Switch(part, files, on, e); }
+            // Skyrim's or MO2's plugin list couldn't be written (read-only, or open in LOOT, Vortex or MO2): the tick goes
+            // back and the reason is shown (2026-10-14: it threw out of the window).
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                e.NewValue = e.CurrentValue;
+                note.Text = $"{part.Name} couldn't be switched {(on ? "on" : "off")}: {ex.Message}. Close Mod Organizer 2 (or LOOT, Vortex) and try again.";
+            }
+        };
+        void Switch(Parts.Part part, List<string> files, bool on, ItemCheckEventArgs e)
+        {
             if (on)
             {
                 // In the parts' order, so a part switched on goes in after the one before it; a plugin whose game is off
@@ -72,7 +83,7 @@ public sealed class PartsDialog : Form
                             (dependents.Count > 0 ? $". Also off, they need it: {string.Join(", ", dependents)}" : "");
                 if (dependents.Count > 0) BeginInvoke(Fill);
             }
-        };
+        }
         list.SelectedIndexChanged += (_, _) =>
             description.Text = list.SelectedItems.Count > 0 ? ((Parts.Part)list.SelectedItems[0].Tag!).Description : "";
         Shown += (_, _) => Fill();

@@ -20,6 +20,8 @@ public sealed class MainForm : Form
     ];
 
     readonly string workspace;
+    /// <summary>The converter's working folder (tools, output, logs), for the app's error handler.</summary>
+    public static string Workspace => FindWorkspace();
     readonly Dictionary<Game, CheckBox> gameBoxes = [];
     readonly FlowLayoutPanel gamesPanel = new() { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Dock = DockStyle.Fill };
     readonly FlowLayoutPanel toolsPanel = new() { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Dock = DockStyle.Fill };
@@ -36,6 +38,7 @@ public sealed class MainForm : Form
     readonly Button pauseButton = new() { Text = "Pause", Width = 100, Height = 34, Enabled = false };
     readonly Button voicesButton = new() { Text = "Voice generator", Width = 140, Height = 34 };
     readonly Button lodButton = new() { Text = "Distant LOD", Width = 120, Height = 34 };
+    readonly Button checkButton = new() { Text = "Check game", Width = 120, Height = 34 };
     // Progress (user, 2026-10-10: "the tool needs a progress timer and progress left bar"): the bar with how much is done
     // and left, and under it the time so far, the time left (from the last quarter hour's pace, so a run resumed part-way
     // or a slower step reads true) and when it should be done. A voice run going on without the app shows here too.
@@ -144,7 +147,8 @@ public sealed class MainForm : Form
         creaturesBox.CheckedChanged += (_, _) => respawnScale.Enabled = creaturesBox.Checked;
         options.Controls.Add(installBox);
         var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 6, 0, 0) };
-        actions.Controls.AddRange([convertButton, voicesButton, lodButton, pauseButton, cancelButton, modelsButton, partsButton, statusLabel]);
+        actions.Controls.AddRange([convertButton, voicesButton, lodButton, checkButton, pauseButton, cancelButton, modelsButton, partsButton, statusLabel]);
+        tips.SetToolTip(checkButton, "Start Skyrim through SKSE with Papyrus logging and a crash logger, then report what went wrong: how far it loaded, what a crash happened in (which plugin and record), and TamrielMerge's script errors");
         tips.SetToolTip(lodButton, "Make the distant view of the converted worlds again: the land, the buildings and big rocks, and the trees, as Skyrim shows its own far off");
         tips.SetToolTip(partsButton, "Switch TamrielMerge's parts on or off (each game, the voices, the main menu and music, models, creatures)");
         partsButton.Click += (_, _) =>
@@ -197,6 +201,7 @@ public sealed class MainForm : Form
         pauseButton.Click += (_, _) => TogglePause();
         voicesButton.Click += (_, _) => GenerateVoices();
         lodButton.Click += (_, _) => GenerateLod();
+        checkButton.Click += (_, _) => Run("Checking the game", ["game-check", "--prepare", "--launch"], false);
         clock.Tick += (_, _) =>
         {
             if (running is null) { WatchBackground(); return; }
@@ -460,6 +465,7 @@ public sealed class MainForm : Form
     /// <summary>A progress report shown: the bar, how much is done and left, and a sample for the pace.</summary>
     void ShowProgress(double fraction, string text, double at)
     {
+        if (!double.IsFinite(fraction)) return;   // a NaN report (no work to count) moved nothing
         progress = Math.Clamp(fraction, 0, 1);
         progressBar.Value = (int)(progress * 1000);
         progressLabel.Text = $"{progress:P0} done · {1 - progress:P0} left   {text}";
@@ -590,7 +596,7 @@ public sealed class MainForm : Form
         if (!line.StartsWith("PROGRESS ", StringComparison.Ordinal)) return false;
         var parts = line.Split(' ', 3);
         if (parts.Length >= 2 && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var f))
-            BeginInvoke(() => ShowProgress(f, parts.Length > 2 ? parts[2] : "", Elapsed().TotalSeconds));
+            SafeInvoke(() => ShowProgress(f, parts.Length > 2 ? parts[2] : "", Elapsed().TotalSeconds));
         return true;
     }
 
@@ -615,12 +621,14 @@ public sealed class MainForm : Form
         running.ErrorDataReceived += (_, e) => { if (e.Data is not null) Append(e.Data); };
         running.BeginOutputReadLine(); running.BeginErrorReadLine();
         running.StandardInput.Close();
-        running.Exited += (_, _) => BeginInvoke(() =>
+        running.Exited += (_, _) => { if (!IsDisposed && IsHandleCreated) try { BeginInvoke(() => Finished()); } catch (InvalidOperationException) { } };
+        void Finished()
         {
+            if (IsDisposed) return;
             int code = running?.ExitCode ?? -1;
             var took = DateTime.Now - started;
             running = null;
-            convertButton.Enabled = setupButton.Enabled = voicesButton.Enabled = lodButton.Enabled = true;
+            convertButton.Enabled = setupButton.Enabled = voicesButton.Enabled = lodButton.Enabled = checkButton.Enabled = true;
             cancelButton.Enabled = pauseButton.Enabled = false;
             if (paused) { paused = false; pauseButton.Text = "Pause"; }
             if (code == 0) { progressBar.Value = 1000; progressLabel.Text = "100% done"; }
@@ -628,13 +636,13 @@ public sealed class MainForm : Form
             statusLabel.Text = code == 0 ? $"{what}: done in {took:hh\\:mm\\:ss}." : $"{what}: stopped (exit code {code}) after {took:hh\\:mm\\:ss}.";
             Append(statusLabel.Text);
             RefreshStatus();
-        });
+        }
         started = DateTime.Now;
         pausedTotal = TimeSpan.Zero;
         progress = 0; progressBar.Value = 0; progressLabel.Text = ""; timerLabel.Text = ""; samples.Clear();
         watchingBackground = false;
         runningWhat = what;
-        convertButton.Enabled = setupButton.Enabled = voicesButton.Enabled = lodButton.Enabled = false;
+        convertButton.Enabled = setupButton.Enabled = voicesButton.Enabled = lodButton.Enabled = checkButton.Enabled = false;
         cancelButton.Enabled = pauseButton.Enabled = true;
         clock.Start();
     }
@@ -657,15 +665,39 @@ public sealed class MainForm : Form
     bool flushQueued;
 
     /// <summary>Adds a line to the log (from any thread), batched so heavy output doesn't stall the window.</summary>
+    /// <summary>Everything the log shows is also kept in logs\TamrielMerge-&lt;date&gt;.log in the workspace (user, 2026-10-14:
+    /// the conversion's LOD errors were only in the window, gone once it closed).</summary>
+    string LogFile => Path.Combine(workspace, "logs", $"TamrielMerge-{DateTime.Now:yyyy-MM-dd}.log");
+    readonly object logFileLock = new();
+
+    /// <summary>Runs <paramref name="action"/> on the window's thread, unless the window is closing or closed (2026-10-14: a
+    /// run ending or printing after the app was closed threw on the process's thread and ended the app).</summary>
+    void SafeInvoke(Action action)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try { BeginInvoke(action); }
+        catch (InvalidOperationException) { }   // closing or closed (ObjectDisposedException is one too)
+    }
+
     void Append(string line)
     {
+        try
+        {
+            lock (logFileLock)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(LogFile)!);
+                File.AppendAllText(LogFile, $"{DateTime.Now:HH:mm:ss} {line}{Environment.NewLine}");
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
         lock (pending)
         {
             pending.AppendLine(line);
             if (flushQueued) return;
             flushQueued = true;
         }
-        BeginInvoke(() =>
+        SafeInvoke(() =>
         {
             string text;
             lock (pending) { text = pending.ToString(); pending.Clear(); flushQueued = false; }

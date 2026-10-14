@@ -31,7 +31,9 @@ public sealed class ModelsDialog : Form
     public ModelsDialog(string outputDir)
     {
         dir = outputDir;
-        overrides = ModelCatalog.LoadOverrides(dir);
+        // A choices file that can't be read opens the window with none rather than failing.
+        try { overrides = ModelCatalog.LoadOverrides(dir); }
+        catch (Exception e) when (e is System.Text.Json.JsonException or IOException or UnauthorizedAccessException) { overrides = new(StringComparer.OrdinalIgnoreCase); status.Text = $"Your model choices couldn't be read ({e.Message})."; }
         Text = "Models — view and replace";
         Width = 1250; Height = 780; MinimumSize = new Size(900, 560);
         StartPosition = FormStartPosition.CenterParent;
@@ -120,16 +122,26 @@ public sealed class ModelsDialog : Form
         preview.ShowModel(m?.Model, m is null ? null : $"{m.Kind} · used by {m.Records} record(s), e.g. {m.Example} · drag to turn it");
     }
 
+    bool listingModels;
+
     async void Replace()
     {
-        if (Selected() is not { } m) return;
+        if (Selected() is not { } m || listingModels) return;
         if (available is null)
         {
+            // One listing at a time; nothing shown if the window closed meanwhile; a failure is said, not thrown.
+            if (GameInstalls.SkyrimData() is not { } skyrim) { status.Text = "Skyrim Special Edition isn't installed through Steam or GOG."; return; }
             status.Text = "Listing the models your games offer…";
             UseWaitCursor = true;
-            string? skyrim = GameInstalls.SkyrimData();
-            available = await Task.Run(() => ModelCatalog.Available(skyrim ?? "", dir));
-            UseWaitCursor = false;
+            listingModels = true;
+            try { available = await Task.Run(() => ModelCatalog.Available(skyrim, dir)); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                if (!IsDisposed) status.Text = $"The models couldn't be listed ({e.Message}).";
+                return;
+            }
+            finally { listingModels = false; if (!IsDisposed) UseWaitCursor = false; }
+            if (IsDisposed) return;
         }
         using var picker = new ModelPickerDialog(available, dir, m.Model);
         if (picker.ShowDialog(this) != DialogResult.OK || picker.Chosen is null) return;
@@ -141,8 +153,12 @@ public sealed class ModelsDialog : Form
 
     void Save()
     {
-        ModelCatalog.SaveOverrides(dir, overrides);
-        status.Text = $"{shown.Count:N0} of {all.Count:N0} models · {overrides.Count} replaced (build the plugin to use them)";
+        try
+        {
+            ModelCatalog.SaveOverrides(dir, overrides);
+            status.Text = $"{shown.Count:N0} of {all.Count:N0} models · {overrides.Count} replaced (build the plugin to use them)";
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { status.Text = $"Couldn't save your choice ({e.Message}): is the file open elsewhere?"; }
         list.Invalidate();
     }
 
