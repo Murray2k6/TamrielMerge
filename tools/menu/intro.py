@@ -313,37 +313,99 @@ def rt_preview(out, names):
 CHUNK = 150   # frames per Blender run: a whole shot (EEVEE holds steady, 5.8 GB at most; Cycles grew, 10 a run); the memory guard still stops it
 
 
+def file_hash(*paths):
+    import hashlib
+    h = hashlib.sha1()
+    for p in paths:
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                h.update(f.read())
+    return h.hexdigest()
+
+
+def stamp_matches(folder, stamp):
+    """Whether folder/stamp.json holds stamp: what the folder's contents were made from."""
+    p = os.path.join(folder, "stamp.json")
+    try:
+        return json.load(open(p)) == stamp
+    except (OSError, ValueError):
+        return False
+
+
+def write_stamp(folder, stamp):
+    os.makedirs(folder, exist_ok=True)
+    json.dump(stamp, open(os.path.join(folder, "stamp.json"), "w"), indent=1)
+
+
+def scene_stamp(s):
+    p = os.path.join(SCENES, s["scene"], "stamp.json")
+    try:
+        return json.load(open(p))
+    except (OSError, ValueError):
+        return None
+
+
 def rt_render(out, names):
     for s in chosen(names):
         dest = os.path.join(out, "rt", s["name"])
+        # Frames are made again when what they are made from changed (2026-10-14: a convert reused frames of older
+        # scenes and scripts): the scene, the render and prep scripts, the shot's path and the ray-tracing switch.
+        stamp = {"scene": scene_stamp(s), "scripts": file_hash(os.path.join(CODE, "scene3d", "blend_scene.py"), os.path.join(CODE, "scene3d", "blend_prep.py"),
+                                                               os.path.join(out, s["name"] + ".json")),
+                 "raytrace": os.environ.get("TM_GAME_RAYTRACE", "")}
+        if not stamp_matches(dest, stamp):
+            if os.path.isdir(dest):
+                for f in os.listdir(dest):
+                    if f.endswith(".png"):
+                        os.remove(os.path.join(dest, f))
+            write_stamp(dest, stamp)
         todo = [f for f in range(int(s["seconds"] * FPS)) if not os.path.exists(os.path.join(dest, f"{f:05d}.png"))]
         for i in range(0, len(todo), CHUNK):
             run_blender(out, s, dest, todo[i:i + CHUNK])
 
 
 def export(cli, plugins, names, data=None):
-    """The shots' scenes from the converted plugins (TamrielMerge.Cli scene-export), those not exported yet."""
+    """The shots' scenes from the converted plugins (TamrielMerge.Cli scene-export): exported again when the plugins or
+    the converter changed since (each scene's stamp.json: the plugins' sizes and times, the converter's, the shot's
+    settings). The shots of games converted this time are listed in SCENES/selected.json: only they are rendered and
+    packed (2026-10-14: shots of games not in this conversion came from scenes left by earlier ones)."""
+    import shutil
+    selected = []
     for s in [s for s in SHOTS if not names or s["name"] in names]:
         e, dest = s["export"], os.path.join(SCENES, s["scene"])
-        if os.path.exists(os.path.join(dest, "scene.json")):
-            continue
         plugin = os.path.join(data or "", e["plugin"]) if e.get("skyrim") else os.path.join(plugins, e["plugin"])
         if not os.path.exists(plugin):
             print(f"{s['name']}: {e['plugin']} not converted, shot left out"); continue
-        plugin = ",".join([plugin] + [q for q in (os.path.join(plugins, a) for a in e.get("also", [])) if os.path.exists(q)])
-        cmd = [cli, "scene-export", "--plugins", plugin, "--world", e["world"], "--centre", f"{e['centre'][0]},{e['centre'][1]}",
+        files = [plugin] + [q for q in (os.path.join(plugins, a) for a in e.get("also", [])) if os.path.exists(q)]
+        stamp = {"plugins": [[os.path.basename(f), os.path.getsize(f), int(os.path.getmtime(f))] for f in files],
+                 "converter": int(os.path.getmtime(cli)) if os.path.exists(cli) else 0, "export": e}
+        selected.append(s["name"])
+        if os.path.exists(os.path.join(dest, "scene.json")) and stamp_matches(dest, stamp):
+            continue
+        if os.path.isdir(dest):
+            shutil.rmtree(dest)
+        cmd = [cli, "scene-export", "--plugins", ",".join(files), "--world", e["world"], "--centre", f"{e['centre'][0]},{e['centre'][1]}",
                "--radius", str(e["radius"]), "--out", dest] + (["--data", data] if data else []) \
             + (["--land-radius", str(e["land_radius"])] if "land_radius" in e else [])
         subprocess.run(cmd, check=True)
+        write_stamp(dest, stamp)
+    os.makedirs(SCENES, exist_ok=True)
+    json.dump(selected, open(os.path.join(SCENES, "selected.json"), "w"))
 
 
 def prep(names):
+    import shutil
     for s in chosen(names):
         d = os.path.join(SCENES, s["scene"])
-        if os.path.exists(os.path.join(d, "scene.json")) and not os.path.exists(os.path.join(d, "blend", "manifest.json")):
-            # The biggest scenes' textures smaller, to fit Cycles' memory beside everything else (Stros M'Kai, Whiterun with its city: 2026-10-08).
-            size = "320" if s["scene"] in ("strosmkai", "whiterun") else "512"
+        # The biggest scenes' textures smaller, to fit Cycles' memory beside everything else (Stros M'Kai, Whiterun with its city: 2026-10-08).
+        size = "320" if s["scene"] in ("strosmkai", "whiterun") else "512"
+        stamp = {"scene": scene_stamp(s), "prep": file_hash(os.path.join(CODE, "scene3d", "blend_prep.py")), "size": size}
+        blend = os.path.join(d, "blend")
+        if os.path.exists(os.path.join(d, "scene.json")) and not (os.path.exists(os.path.join(blend, "manifest.json")) and stamp_matches(blend, stamp)):
+            if os.path.isdir(blend):
+                shutil.rmtree(blend)
             subprocess.run([RENDER_PY, "-I", os.path.join(CODE, "scene3d", "blend_prep.py"), d, "--max", size], check=True)
+            write_stamp(blend, stamp)
 
 
 def exported(s):
@@ -351,8 +413,13 @@ def exported(s):
 
 
 def chosen(names):
-    """The shots named (all, without names) among those exported: the person's converted games'."""
-    return [s for s in SHOTS if (not names or s["name"] in names) and exported(s)]
+    """The shots named (all, without names) among those exported for this conversion (SCENES/selected.json, written by
+    export): the person's converted games'."""
+    try:
+        selected = set(json.load(open(os.path.join(SCENES, "selected.json"))))
+    except (OSError, ValueError):
+        selected = None
+    return [s for s in SHOTS if (not names or s["name"] in names) and exported(s) and (selected is None or s["name"] in selected)]
 
 
 def rendered(out):

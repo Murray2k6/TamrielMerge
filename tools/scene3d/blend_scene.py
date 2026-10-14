@@ -1519,7 +1519,9 @@ def setup_render(w, h, samples, game=None):
         except (AttributeError, TypeError, ValueError):
             print(f"  (no {name})", flush=True)
     put(ee, "taa_render_samples", samples)
-    put(ee, "use_raytracing", not (game and os.environ.get("TM_GAME_RAYTRACE") != "1"))
+    # Ray traced in the game-shading mode too (user, 2026-10-09: "flybys need rt not pt"; it had been off there unless
+    # TM_GAME_RAYTRACE=1, and the black streets it was turned off for were fixed by Blender 5.2). TM_GAME_RAYTRACE=0 turns it off.
+    put(ee, "use_raytracing", os.environ.get("TM_GAME_RAYTRACE") != "0")
     put(ee, "ray_tracing_method", "SCREEN")
     opts = getattr(ee, "ray_tracing_options", None)
     if opts is not None:
