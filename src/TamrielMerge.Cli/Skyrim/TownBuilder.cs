@@ -187,6 +187,23 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
         return styleActivators[(style, exit)] = act.FormKey;
     }
 
+    /// <summary>TMDfExitDoor on an exit reference (its base's script, with the street door it falls back to).</summary>
+    VirtualMachineAdapter ExitScript(PlacedObject fallback) => new()
+    {
+        Scripts =
+        [
+            new ScriptEntry
+            {
+                Name = "TMDfExitDoor",
+                Properties =
+                [
+                    new ScriptObjectProperty { Name = "Talk", Object = TalkQuest.ToLink<ISkyrimMajorRecordGetter>() },
+                    new ScriptObjectProperty { Name = "Fallback", Object = fallback.ToLink<ISkyrimMajorRecordGetter>() },
+                ],
+            },
+        ],
+    };
+
     Quest? talkQuest;
     /// <summary>The conversation quest (filled by <see cref="TownTalk"/>), which the door scripts remember the way back on.</summary>
     public Quest TalkQuest => talkQuest ??= NewTalkQuest();
@@ -402,6 +419,7 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                     // Street doors are in block space; the rooms are in the building's own (unrotated) space.
                     var bOrigin = DfTownLayout.BuildingOrigin(b);
                     var unturn = DfDungeon.UnityRotY(DfTownLayout.BuildingYaw(b) * MathF.PI / 180f);
+                    PlacedObject? firstStreet = null;
                     foreach (var s in outside)
                     {
                         var (street, _, _) = cells.SurfaceDoor(s, origin, doorBase, streetDoorBase);
@@ -426,10 +444,16 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                         }
                         street.VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [entry] };
                         CellAt(cellsByGrid, street.Placement.Position).Persistent.Add(street);
+                        // The exit's way out when the player didn't come in by a street door (coc, older saves): the first
+                        // town's street door nearest it.
+                        exit.VirtualMachineAdapter ??= ExitScript(street);
+                        firstStreet ??= street;
                         doors++;
                         if (!doorsByType.TryGetValue(b.Data.Type, out var typed)) doorsByType[b.Data.Type] = typed = [];
                         typed.Add(street);
                     }
+                    if (firstStreet is not null)
+                        foreach (var (exit, _) in shared.Arrivals) exit.VirtualMachineAdapter ??= ExitScript(firstStreet);
                 }
             }
 
