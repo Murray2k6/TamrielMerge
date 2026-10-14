@@ -1244,6 +1244,99 @@ static class Program
                 Console.WriteLine($"{loc}: {buildings} building records, {doors} door surfaces -> {Path.GetFullPath(outPath)}");
                 return 0;
             }
+            case "df-quest-dump":
+            {
+                // Daggerfall quests decoded into readable commands, close to Daggerfall Unity's text quests (--quest NAME[,NAME];
+                // --raw: the QBN records as stored; --names DIR: a folder of Daggerfall Unity's text quests, only to borrow their
+                // symbol names when comparing; --messages: the QRC text too).
+                foreach (var name in opts["quest"].Split(','))
+                {
+                    var q = DfQuest.Load(arena2, name.ToUpperInvariant());
+                    var names = DfQuestDump.NamesFrom(opts.GetValueOrDefault("names"), q.Name);
+                    Console.Write(opts.ContainsKey("raw") ? DfQuestDump.Raw(q, names) : DfQuestDump.Readable(q, names));
+                    if (opts.ContainsKey("messages"))
+                        foreach (var (id, variants) in q.Messages.OrderBy(m => m.Key))
+                            foreach (var v in variants) Console.WriteLine($"\nMessage {id}:\n{v}");
+                }
+                return 0;
+            }
+            case "df-quest-build":
+            {
+                // A scratch plugin with only Daggerfall's quest records (the machine, reputation, every quest, Privateer's
+                // Hold's... no sites), to check the quest build without a whole Daggerfall build (--out, default
+                // out/quest-test/DFQuestTest.esp; --scripts also compiles the Papyrus scripts into that folder).
+                string outPath = Path.GetFullPath(opts.GetValueOrDefault("out", "out/quest-test/DFQuestTest.esp"));
+                Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+                var mod = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(outPath)), SkyrimRelease.SkyrimSE);
+                var masters = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }
+                    .Select(m => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, m), SkyrimRelease.SkyrimSE)).ToList();
+                var creatures = new CreatureBuilder(mod, skyrimData);
+                creatures.Build();
+                var spells = new SpellBuilder(mod, masters[0], DoorPlacer.BaseDoors);
+                spells.Build(DfSpells.Load(arena2), new PlacedObject(mod));
+                DfQuestGlobals.AddAll(mod);
+                var builder = new DfQuestBuilder(mod, arena2, masters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
+                {
+                    Foe = id => creatures.Spawn(id), Spells = spells.Spells,
+                };
+                builder.Build();
+                foreach (var p in builder.Problems) Console.WriteLine("  " + p);
+                var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                TopicSubtypes.Fill(mod);
+                mod.WriteToBinary(outPath, new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
+                });
+                Console.WriteLine($"Wrote {outPath}: {mod.Quests.Count} quests, {mod.Messages.Count} messages, {mod.DialogTopics.Count} topics, {mod.EnumerateMajorRecords().Count()} records");
+                Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
+                if (opts.ContainsKey("scripts"))
+                    AltStartBuilder.CompileScripts(skyrimData, Path.Combine(AppContext.BaseDirectory, "Papyrus"), Path.GetDirectoryName(outPath)!);
+                return 0;
+            }
+            case "df-quest-markers":
+            {
+                // How many locations' map markers the town and dungeon parts find in a built Daggerfall.esm (--master PATH),
+                // for their quest sites (QuestSites.MasterMarkers).
+                using var master = SkyrimMod.CreateFromBinaryOverlay(opts["master"], SkyrimRelease.SkyrimSE);
+                var lookup = QuestSites.MasterMarkers(master, arena2);
+                var all = DfLocations.LoadAll(arena2);
+                int found = all.Count(l => lookup(l) is not null);
+                Console.WriteLine($"map markers found for {found} of {all.Count} locations; missing e.g. {string.Join(", ", all.Where(l => lookup(l) is null).Take(5).Select(l => l.Name))}");
+                return 0;
+            }
+            case "df-quest-check":
+            {
+                // Coverage of Daggerfall's quests: per quest, how many of its operations the quest machine supports, and why
+                // the rest aren't (like ob-script-inventory).
+                var allQuests = DfQuest.LoadAll(arena2);
+                Console.Write(DfQuestDump.Check(allQuests));
+                if (opts.ContainsKey("simulate"))
+                {
+                    // --simulate: the quest machine's pass rules with nothing happening; quests that would end on their own.
+                    var startRep = DfFactions.Load(arena2).ById.ToDictionary(f => f.Key, f => f.Value.Rep);
+                    int endedAlone = 0;
+                    foreach (var q in allQuests)
+                    {
+                        var (ran, ended) = DfQuestDump.SimulateStart(q, startRep);
+                        if (ended) endedAlone++;
+                        if (ended || opts.GetValueOrDefault("simulate") == q.Name)
+                            Console.WriteLine($"{q.Name}: {(ended ? "ENDS ON ITS OWN" : "waits")} after {ran.Count} actions: {string.Join(", ", ran)}");
+                    }
+                    Console.WriteLine($"simulated start-up: {allQuests.Count - endedAlone} quests wait for the player, {endedAlone} end on their own");
+                }
+                if (opts.ContainsKey("places"))
+                {
+                    // --places: every fixed place and the Daggerfall location it resolves to.
+                    var locs = DfLocations.LoadAll(arena2);
+                    foreach (var q in allQuests)
+                        foreach (var p in q.Places.Where(p => p.Scope == 0))
+                        {
+                            var (id, dungeon, loc) = DfQuestBuilder.ResolveFixed(locs, p.P1, p.P2);
+                            Console.WriteLine($"{q.Name} place {p.Index}: 0x{p.P1:X4} 0x{(ushort)p.P2:X4} -> {(loc is null ? "NOT FOUND" : $"{loc.Name} ({loc.RegionName}, {loc.Type}) {(dungeon ? "dungeon" : "streets")}")}");
+                        }
+                }
+                return 0;
+            }
             case "df-text":
             {
                 // TEXT.RSC records (--ids 7205,7250-7259), each variant on its own line.
@@ -1353,6 +1446,31 @@ static class Program
                 guilds.Build(talk, townBuilder.TalkQuest, townBuilder.Placed, townBuilder.BreakIns);
                 Console.WriteLine($"guilds: {guilds.Members} with people here ({string.Join(", ", mod.Factions.Where(f => f.EditorID?.StartsWith("DFGuild") == true).Select(f => f.EditorID![7..]))}), {guilds.Trainers} trainers, {guilds.Responses} responses");
                 if (clutter.Missing.Count > 0) Console.WriteLine($"clutter forms not found: {string.Join(", ", clutter.Missing)}");
+                if (opts.ContainsKey("quests"))
+                {
+                    // --quests: Daggerfall's quests and these towns' quest sites too (DfQuestBuilder, QuestSites).
+                    var questMasters = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }
+                        .Select(m => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, m), SkyrimRelease.SkyrimSE)).ToList();
+                    DfQuestGlobals.AddAll(mod);
+                    var qb = new DfQuestBuilder(mod, arena2, questMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
+                    {
+                        Foe = id => townCreatures.Spawn(id), GuildsQuest = guilds.Quest, Guilds = guilds.Built,
+                    };
+                    qb.Build();
+                    var questTowns = picked.Zip(built).Select(p => new QuestSites.Town(p.First, p.Second)).ToList();
+                    var sites = QuestSites.Build(mod, "Test", qb.Machine!.FormKey, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,
+                        QuestSites.Individuals(mod, townBuilder.Placed.Concat(dungeons.PlacedPeople)), _ => null);
+                    foreach (var s in sites)
+                    {
+                        var p = s.VirtualMachineAdapter!.Scripts[0].Properties;
+                        int Len(string n) => p.FirstOrDefault(x => x.Name == n) switch { ScriptIntListProperty i => i.Data.Count, ScriptObjectListProperty o => o.Objects.Count, ScriptStringListProperty t => t.Data.Count, _ => 0 };
+                        int Filled(string n) => p.FirstOrDefault(x => x.Name == n) is ScriptObjectListProperty o ? o.Objects.Count(x => !x.Object.IsNull) : 0;
+                        Console.WriteLine($"quest sites {s.EditorID}: {Len("TownName")} towns, {Len("BType")} buildings ({Filled("BArrival")} with arrival, {Filled("BSpawn")} with a spawn marker, {Filled("BItem")} item marker), "
+                            + $"{Len("DName")} dungeons ({Filled("DSpawn")} with a spawn marker), {Len("IFaction")} individuals");
+                    }
+                    Console.WriteLine($"quest markers: {dungeons.QuestMarkers.Values.Sum(m => m.Count)} in {dungeons.QuestMarkers.Count} cells");
+                    Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
+                }
                 var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
                 TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
                 mod.WriteToBinary(Path.Combine(outDir, "DaggerfallTownTest.esp"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters

@@ -100,6 +100,29 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     public Func<int, FormKey>? QuestGlobal { get; init; }
 
     const int RandomEnemyRecord = 15, FixedEnemyRecord = 16, NoEnemy = 99, RandomTreasureRecord = 19;
+    /// <summary>Daggerfall's quest markers (Daggerfall Unity QuestMarker): 199.11 where quest people and foes are put,
+    /// 199.18 where quest items are.</summary>
+    const int QuestSpawnRecord = 11, QuestItemRecord = 18;
+
+    /// <summary>Each built dungeon's and building interior's quest markers (persistent XMarkers, item markers flagged),
+    /// for the quest machine's sites (QuestSites).</summary>
+    public Dictionary<Cell, List<(PlacedObject Marker, bool Item)>> QuestMarkers { get; } = new(ReferenceEqualityComparer.Instance);
+    /// <summary>Every dungeon built, for the quest machine's sites (QuestSites).</summary>
+    public List<(DfLocation Location, Built Built)> BuiltDungeons { get; } = [];
+
+    /// <summary>A quest marker flat as a persistent XMarker in the cell, remembered in <see cref="QuestMarkers"/>.</summary>
+    void AddQuestMarker(Cell cell, P3Float at, bool item)
+    {
+        var marker = new PlacedObject(mod)
+        {
+            Base = XMarkerHeading.ToNullableLink<IPlaceableObjectGetter>(),
+            Placement = new Placement { Position = at, Rotation = new P3Float(0, 0, 0) },
+            SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)PersistentFlag,
+        };
+        cell.Persistent.Add(marker);
+        if (!QuestMarkers.TryGetValue(cell, out var list)) QuestMarkers[cell] = list = [];
+        list.Add((marker, item));
+    }
 
     DfText? text;
     readonly Dictionary<int, Message> riddles = new();
@@ -265,6 +288,12 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                         if (Environment.GetEnvironmentVariable("TM_DEBUG_LIGHTS") == "1")
                             Console.WriteLine($"    210.{o.TextureRecord} -> {f.Kind} {fixtures.Describe(origin + o.Position)}");
                     }
+                }
+                else if (o.Type == DfRdbObjectType.Flat && o.TextureArchive == EditorFlatArchive && o.TextureRecord is QuestSpawnRecord or QuestItemRecord)
+                {
+                    var c = origin + o.Position;
+                    float floor = SurfaceY(floorPolys, c.X, c.Z, c.Y + 16, above: false) ?? c.Y;
+                    AddQuestMarker(cell, new P3Float(pos.X, pos.Y, floor * BlockMeshBuilder.Scale + 8), o.TextureRecord == QuestItemRecord);
                 }
                 else if (o.Type == DfRdbObjectType.Flat && o.TextureArchive == EditorFlatArchive && o.TextureRecord is RandomEnemyRecord or FixedEnemyRecord
                     && Creatures is { } creatures)
@@ -506,7 +535,9 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         if (!BackgroundNavmesh) nav.Finish();
 
         AddInteriorCell(cell);
-        return new Built(cell, newGameMarker, interiorDoor, exteriorDoor, nav, fixtureCounts);
+        var result = new Built(cell, newGameMarker, interiorDoor, exteriorDoor, nav, fixtureCounts);
+        BuiltDungeons.Add((location, result));
+        return result;
     }
 
     (Vector3 Min, Vector3 Max) PropBounds(PlacedObject r)

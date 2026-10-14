@@ -111,6 +111,9 @@ public sealed class TownGuilds(SkyrimMod mod, ISkyrimModGetter skyrim, DfText te
     }
 
     public int Members { get; private set; }
+    /// <summary>The guilds made, in TMDfGuilds' order (key, the faction whose reputation counts), and their quest.</summary>
+    public List<(string Key, int RepFaction)> Built { get; } = [];
+    public Quest? Quest { get; private set; }
     public int Trainers { get; private set; }
     public int Responses { get; private set; }
 
@@ -145,6 +148,8 @@ public sealed class TownGuilds(SkyrimMod mod, ISkyrimModGetter skyrim, DfText te
             Type = Quest.TypeEnum.Misc,
         };
         mod.Quests.Add(quest);
+        Quest = quest;
+        Built.AddRange(guilds.Select(g => (g.Key, g.RepFaction)));
 
         // Membership factions with Daggerfall's titles.
         var members = new List<Faction>();
