@@ -63,7 +63,16 @@ public sealed partial class MwPapyrus
             sb.AppendLine("EndEvent");
             sb.AppendLine();
             sb.AppendLine("Function MwInit()");
-            if (activate) sb.AppendLine("  BlockActivation()   ; Morrowind's OnActivate replaces the default activation (Activate performs it)");
+            if (activate)
+            {
+                // Morrowind's OnActivate holds the default activation back (Activate performs it); the state is kept
+                // across loads.
+                sb.AppendLine("  If !__blockSet");
+                sb.AppendLine("    __blockSet = True");
+                sb.AppendLine("    __blocking = True");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine("  TMMwScript.Block(Self, __blocking)");
+            }
             foreach (var v in mirrored)
             {
                 string f = properties.Values.First(p => p.Fill.Equals("local:" + v, StringComparison.OrdinalIgnoreCase)).Name;
@@ -106,6 +115,14 @@ public sealed partial class MwPapyrus
             sb.AppendLine("EndEvent");
             sb.AppendLine();
         }
+        if (activate && !polls)
+        {
+            // After Activate, a run of the script to see whether it holds the activation back again.
+            sb.AppendLine("Event OnUpdate()");
+            sb.AppendLine("  MwTick()");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
         if (activate)
         {
             sb.AppendLine("Event OnActivate(ObjectReference akActionRef)");
@@ -133,7 +150,8 @@ public sealed partial class MwPapyrus
             sb.AppendLine();
         }
         bool equipLocal = locals.ContainsKey("OnPCEquip"), skipLocal = locals.ContainsKey("PCSkipEquip");
-        if (items || uses.Contains("onpcadd") || uses.Contains("onpcdrop"))
+        bool addLocal = locals.ContainsKey("OnPCAdd"), dropLocal = locals.ContainsKey("OnPCDrop");
+        if (items || uses.Contains("onpcadd") || uses.Contains("onpcdrop") || addLocal || dropLocal)
         {
             sb.AppendLine("Event OnContainerChanged(ObjectReference akNewContainer, ObjectReference akOldContainer)");
             sb.AppendLine("  __carried = akNewContainer == PlayerRef");
@@ -149,13 +167,26 @@ public sealed partial class MwPapyrus
                 sb.AppendLine("    __pcDropped = True");
                 sb.AppendLine("  EndIf");
             }
+            // The special locals of those names: set by the game, reset by the script.
+            if (addLocal)
+            {
+                sb.AppendLine("  If __carried");
+                sb.AppendLine($"    {Var("OnPCAdd")} = 1");
+                sb.AppendLine("  EndIf");
+            }
+            if (dropLocal)
+            {
+                sb.AppendLine("  If akOldContainer == PlayerRef && !akNewContainer");
+                sb.AppendLine($"    {Var("OnPCDrop")} = 1");
+                sb.AppendLine("  EndIf");
+            }
             if (polls)
             {
                 sb.AppendLine("  If __carried");
                 sb.AppendLine("    RegisterForSingleUpdate(0.1)");
                 sb.AppendLine("  EndIf");
             }
-            if (uses.Contains("onpcadd") || uses.Contains("onpcdrop")) sb.AppendLine("  MwTick()");
+            if (uses.Contains("onpcadd") || uses.Contains("onpcdrop") || addLocal || dropLocal) sb.AppendLine("  MwTick()");
             sb.AppendLine("EndEvent");
             sb.AppendLine();
         }
@@ -167,7 +198,7 @@ public sealed partial class MwPapyrus
             sb.AppendLine("  EndIf");
             if (skipLocal)
             {
-                // PCSkipEquip: the item does its thing instead of being worn (books that open a menu…).
+                // PCSkipEquip: the item does its thing instead of being worn (books that open a menu...).
                 sb.AppendLine($"  If {Var("PCSkipEquip")} != 0");
                 sb.AppendLine("    akActor.UnequipItem(GetBaseObject(), False, True)");
                 sb.AppendLine("  EndIf");
@@ -211,7 +242,7 @@ public sealed partial class MwPapyrus
         void Lines(params string[] lines) { foreach (var l in lines) sb.AppendLine(l); }
         if (uses.Contains("dt")) Lines("Float __dt", "Float __last = -1.0");
         if (uses.Contains("cellchanged")) Lines("Cell __lastCell", "Bool __cellSeen", "Bool __cellChanged");
-        if (uses.Contains("onactivate")) Lines("Bool __activated");
+        if (uses.Contains("onactivate")) Lines("Bool __activated", "Bool __blocking", "Bool __blockSet");
         if (uses.Contains("onactivate") || uses.Contains("actionref")) Lines("ObjectReference __actionRef");
         if (uses.Contains("ondeath")) Lines("Bool __died");
         if (uses.Contains("onmurder")) Lines("Bool __murdered");
@@ -221,7 +252,7 @@ public sealed partial class MwPapyrus
         if (uses.Contains("onpcequip")) Lines("Bool __pcEquipped");
         if (uses.Contains("onpchitme")) Lines("Bool __pcHit");
         if (uses.Contains("pcsleep")) Lines("Bool __pcSleep");
-        if (kind == Kind.Object && (ctx.IsItem || uses.Contains("onpcadd") || uses.Contains("onpcdrop"))) Lines("Bool __carried");
+        if (kind == Kind.Object && (ctx.IsItem || uses.Contains("onpcadd") || uses.Contains("onpcdrop") || locals.ContainsKey("OnPCAdd") || locals.ContainsKey("OnPCDrop"))) Lines("Bool __carried");
         if (uses.Contains("startpos")) Lines("Bool __startSet", "Float __sx", "Float __sy", "Float __sz", "Float __sax", "Float __say", "Float __saz");
         foreach (var s in loopSounds.Order(StringComparer.Ordinal)) Lines($"Int __loop_{s}");
         if (uses.Contains("say")) Lines("Float __sayUntil");
@@ -233,7 +264,11 @@ public sealed partial class MwPapyrus
                 "Int Function MwTakeButton()", "  Int b = __button", "  __button = -1", "  Return b", "EndFunction");
         }
         // Events' flags: true once after the event, as Morrowind's functions are.
-        foreach (var (use, flag, fn) in new[] { ("onactivate", "__activated", "MwOnActivate"), ("ondeath", "__died", "MwOnDeath"), ("onmurder", "__murdered", "MwOnMurder"),
+        if (uses.Contains("onactivate"))
+            Lines("", "; OnActivate: true once after an activation; checking it holds the activation back (until Activate).",
+                "Bool Function MwOnActivate()", "  If !__blocking", "    __blocking = True", "    TMMwScript.Block(Self, True)", "  EndIf",
+                "  Bool was = __activated", "  __activated = False", "  Return was", "EndFunction");
+        foreach (var (use, flag, fn) in new[] { ("ondeath", "__died", "MwOnDeath"), ("onmurder", "__murdered", "MwOnMurder"),
                      ("onknockout", "__knockedOut", "MwOnKnockout"), ("onpcadd", "__pcAdded", "MwOnPCAdd"), ("onpcdrop", "__pcDropped", "MwOnPCDrop"),
                      ("onpcequip", "__pcEquipped", "MwOnPCEquip"), ("onpchitme", "__pcHit", "MwOnPCHitMe") })
         {

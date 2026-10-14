@@ -343,7 +343,7 @@ public sealed partial class MwPapyrus
 
     string PlayerRef() => Prop("player", "Actor", "PlayerRef");
 
-    /// <summary>A record the converter makes for the scripts (message boxes, Say lines, anchors, mirror factions…).</summary>
+    /// <summary>A record the converter makes for the scripts (message boxes, Say lines, anchors, mirror factions...).</summary>
     string Generated(string fill, string type, string name) => Prop(fill, type, name);
 
     string GlobalProperty(string id) => id.ToLowerInvariant() switch

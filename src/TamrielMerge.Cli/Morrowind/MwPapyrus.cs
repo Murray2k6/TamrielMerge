@@ -11,7 +11,7 @@ namespace TamrielMerge.Morrowind;
 /// while it runs). An object script becomes MW_&lt;name&gt; extends ObjectReference (Actor when only people and creatures
 /// carry it) whose body is the function MwTick, run by OnUpdate on a short timer while the object's 3D is loaded or the
 /// player carries it (0.5 s; 0.05 s for scripts that move or turn things). A script whose every statement waits on an
-/// event (OnActivate, OnDeath…) doesn't poll at all: the event runs it.</item>
+/// event (OnActivate, OnDeath...) doesn't poll at all: the event runs it.</item>
 /// <item>Events set flags the script's own functions read once, as Morrowind's do: OnActivate (the default activation is
 /// blocked while the script has OnActivate, and Activate performs it), OnDeath, OnMurder, OnKnockout, OnPCAdd, OnPCDrop,
 /// OnPCEquip (the function and the special local of that name, with PCSkipEquip), OnPCHitMe; each runs MwTick at once.
@@ -38,7 +38,7 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
     /// <summary>What the translator needs to know about the game's data.</summary>
     public interface IWorld
     {
-        /// <summary>The record type of an object ID (NPC_, CREA, MISC, GLOB, SCPT, SOUN, FACT, SPEL, REGN…), or null.</summary>
+        /// <summary>The record type of an object ID (NPC_, CREA, MISC, GLOB, SCPT, SOUN, FACT, SPEL, REGN...), or null.</summary>
         string? TypeOf(string id);
         /// <summary>Whether a reference of this object ID is placed somewhere.</summary>
         bool IsPlaced(string id);
@@ -79,7 +79,7 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
     public sealed record Context(bool OnActor = false, bool IsItem = false, List<string>? Speakers = null, string? SpeakerScript = null, bool Start = false, string? SpeakerFaction = null);
 
     /// <summary>
-    /// A script property and what fills it: <see cref="Fill"/> is "kind:id" — player, ref:ID (a placed reference),
+    /// A script property and what fills it: <see cref="Fill"/> is "kind:id" - player, ref:ID (a placed reference),
     /// base:ID (a base object), global:ID, journal:ID, script:ID (a global script's quest), cells:name (a FormList of the
     /// cells of that name), anchor:cell (a marker in that cell, "anchor:" for the exterior), faction:ID, spell:ID,
     /// sound:ID, loopsound:ID, voice:file (a sound playing a voice file), region:ID, race:ID, class:ID, message:EditorID,
@@ -144,8 +144,10 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
     readonly HashSet<string> loopSounds = new(StringComparer.OrdinalIgnoreCase);
     int statements, translated;
     bool lineOk, goodbye;
+    /// <summary>An object script checking OnActivate (which holds back the object's activation, as in Morrowind).</summary>
+    bool checksActivate;
 
-    /// <summary>Morrowind's special locals: set by the game (OnPCEquip…), or read by it (PCSkipEquip, companion…).</summary>
+    /// <summary>Morrowind's special locals: set by the game (OnPCEquip...), or read by it (PCSkipEquip, companion...).</summary>
     static readonly HashSet<string> SpecialLocals = new(StringComparer.OrdinalIgnoreCase) { "OnPCEquip", "PCSkipEquip", "OnPCDrop", "OnPCAdd", "OnPCSoulGemUse", "OnPCRepair" };
 
     public Output Translate(Script script, string id, Kind scriptKind, Context? context = null)
@@ -154,6 +156,7 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         locals.Clear(); properties.Clear(); propertyByFill.Clear(); missing.Clear(); uses.Clear();
         messages.Clear(); says.Clear(); journalIndexes.Clear(); binks.Clear(); loopSounds.Clear(); speakerLocals.Clear();
         ScriptReadsButtons = script.AllCalls().Any(c => c.Function.Equals("GetButtonPressed", StringComparison.OrdinalIgnoreCase));
+        checksActivate = kind == Kind.Object && script.AllCalls().Any(c => c.Target is null && c.Function.Equals("OnActivate", StringComparison.OrdinalIgnoreCase));
         statements = translated = 0;
         goodbye = false;
         foreach (var v in script.Variables) locals[v.Name] = v.Type.Equals("float", StringComparison.OrdinalIgnoreCase) ? T.Float : T.Int;
@@ -164,7 +167,8 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
             Kind.Global => world.GlobalScriptName(id),
             _ => PapyrusName("MWR_", id),
         };
-        string extends = kind switch { Kind.Global => "Quest", Kind.Result => "TopicInfo", _ => ctx.OnActor ? "Actor" : "ObjectReference" };
+        // A result script extends TMMwInfo, whose properties (persuasion's disposition, gold and roll) it keeps.
+        string extends = kind switch { Kind.Global => "Quest", Kind.Result => "TMMwInfo", _ => ctx.OnActor ? "Actor" : "ObjectReference" };
 
         var body = new StringBuilder();
         WriteStatements(body, script.Body, 1);
@@ -176,7 +180,7 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         if (kind == Kind.Object)
         {
             foreach (var v in locals.Keys.Where(v => world.IsDialogueLocal(v) && ctx.OnActor).ToList()) Generated("local:" + v, "Faction", "l_" + Clean(v));
-            if (ctx.IsItem || uses.Overlaps(["onpcadd", "onpcdrop", "onpcequip", "onpchitme", "onmurder"]) || locals.ContainsKey("OnPCEquip") || locals.ContainsKey("PCSkipEquip")) PlayerRef();
+            if (ctx.IsItem || uses.Overlaps(["onpcadd", "onpcdrop", "onpcequip", "onpchitme", "onmurder"]) || SpecialLocals.Any(locals.ContainsKey)) PlayerRef();
         }
         if (uses.Contains("cellchanged")) PlayerRef();
         var events = new StringBuilder();
@@ -204,8 +208,13 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
                     head.AppendLine($"    Return __{Var(v)}");
                     head.AppendLine("  EndFunction");
                     head.AppendLine($"  Function Set({pt} value)");
+                    // The faction rank changes only when the whole number does.
+                    string cast = t == T.Float ? " as Int" : "";
+                    head.AppendLine($"    Bool changed = (value{cast}) != (__{Var(v)}{cast})");
                     head.AppendLine($"    __{Var(v)} = value");
-                    head.AppendLine($"    TMMwScript.MirrorLocal(Self, {f}, value{(t == T.Float ? " as Int" : "")})");
+                    head.AppendLine("    If changed");
+                    head.AppendLine($"      TMMwScript.MirrorLocal(Self, {f}, value{cast})");
+                    head.AppendLine("    EndIf");
                     head.AppendLine("  EndFunction");
                     head.AppendLine("EndProperty");
                     uses.Add("mirror");
@@ -221,6 +230,7 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         if (kind == Kind.Result)
         {
             tick.AppendLine("Function Fragment_End(ObjectReference akSpeakerRef)");
+            tick.AppendLine("  Parent.Fragment_End(akSpeakerRef)");
             tick.Append(body);
             tick.AppendLine("EndFunction");
             tick.AppendLine();
@@ -283,7 +293,7 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
     };
 
     /// <summary>
-    /// Whether the script must run on a timer: unless every statement only acts on an event (if OnActivate…, possibly
+    /// Whether the script must run on a timer: unless every statement only acts on an event (if OnActivate..., possibly
     /// after "if MenuMode return"), it does something every frame Morrowind runs it.
     /// </summary>
     bool NeedsPolling(List<Stmt> body)

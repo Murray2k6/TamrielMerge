@@ -65,7 +65,7 @@ public sealed class MwScriptSet
                     string name = $"MWR_{MwPapyrus.Hash(body):X8}";
                     set.InfoScripts[info.Id] = name;
                     if (set.Results.ContainsKey(name)) continue;
-                    var named = output with { ScriptName = name, Source = $"ScriptName {name} extends TopicInfo Hidden\n" + body };
+                    var named = output with { ScriptName = name, Source = $"ScriptName {name} extends TMMwInfo Hidden\n" + body };
                     set.Results[name] = named;
                     set.Count("dialogue results", named, newScript: true);
                 }
@@ -99,7 +99,7 @@ public sealed class MwScriptSet
         int start = source.IndexOf("Function Fragment_End", StringComparison.Ordinal);
         int end = source.IndexOf("EndFunction", start, StringComparison.Ordinal);
         if (start < 0 || end < 0) return false;
-        return source[(source.IndexOf('\n', start) + 1)..end].Split('\n').Select(l => l.Trim()).All(l => l.Length == 0 || l.StartsWith(';'));
+        return source[(source.IndexOf('\n', start) + 1)..end].Split('\n').Select(l => l.Trim()).All(l => l.Length == 0 || l.StartsWith(';') || l.StartsWith("Parent.Fragment_End"));
     }
 
     /// <summary>The coverage report: per group, the share of statements translated, and what is missing most.</summary>

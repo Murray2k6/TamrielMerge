@@ -2532,6 +2532,14 @@ static class Program
                 Console.WriteLine($"Loaded {string.Join(", ", world.Plugins.Select(p => p.FileName))}: {world.Objects.Count} objects, {world.Interiors.Count} interiors, {world.Exteriors.Count} exterior cells ({sw.Elapsed.TotalSeconds:F0}s)");
                 var builder = new Morrowind.MwPluginBuilder(world, Morrowind.Tes3Data.Open(dataFiles, mwPlugins), outDir);
                 builder.SkyrimData = skyrimData;
+                // Scripts are translated first: the references they name are placed persistent, scripted activators are
+                // activators. --no-scripts leaves them out (and the dialogue's results to TMMwInfo's fixed set).
+                bool mwScripts = !opts.ContainsKey("no-scripts");
+                if (mwScripts)
+                {
+                    builder.PrepareScripts();
+                    Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%) ({sw.Elapsed.TotalSeconds:F0}s)");
+                }
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cells", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 int cells = 0, refs = 0;
                 foreach (var cell in world.Interiors.Values.Where(c => rx.IsMatch(c.Name)))
@@ -2563,6 +2571,11 @@ static class Program
                 {
                     builder.BuildDialogue();
                     Console.WriteLine($"  dialogue: {builder.DialogueTopics} topics, {builder.DialogueResponses} responses ({builder.DialogueLines} lines), {builder.JournalQuests} journal quests ({sw.Elapsed.TotalSeconds:F0}s)");
+                }
+                if (mwScripts)
+                {
+                    int compiled = builder.AttachScripts(msg => Console.WriteLine($"  scripts: {msg} ({sw.Elapsed.TotalSeconds:F0}s)"));
+                    Console.WriteLine($"  scripts: {compiled} compiled, {builder.ScriptsAttached} attached, {builder.ResultScriptsAttached} dialogue results, {builder.PropertiesFilled} properties filled ({builder.PropertiesUnfilled} without a record) ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
                 Console.WriteLine(builder.Start is { } st
                     ? $"  start: {st.Cell} at {st.Position}, {st.Degrees} degrees -> {builder.StartMarker.FormKey}{(builder.StartMarker.Placement is { } placed ? $" on the floor at {placed.Position}" : " (cell not built: marker unplaced)")}"
@@ -2869,7 +2882,7 @@ static class Program
                 var scriptWorld = new Morrowind.MwScriptWorld(world, Morrowind.MwDialogue.Load(world.Plugins), Morrowind.Tes3Data.Open(dataFiles, mwPlugins));
                 var only = opts.TryGetValue("id", out var idRx) ? new System.Text.RegularExpressions.Regex(idRx, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
                 var set = Morrowind.MwScriptSet.Translate(scriptWorld, only);
-                foreach (var o in set.All) File.WriteAllText(Path.Combine(srcDir, o.ScriptName + ".psc"), o.Source);
+                Morrowind.MwPluginBuilder.WriteScriptSources(set.All, srcDir);
                 var report = set.Report();
                 report.Insert(0, $"Plugins: {string.Join(", ", world.Plugins.Select(p => p.FileName))}; {scriptWorld.Scripts.Count} scripts, {scriptWorld.StartScripts.Count} start scripts ({string.Join(", ", scriptWorld.StartScripts)}), {scriptWorld.GlobalScripts.Count} run as global scripts");
                 File.WriteAllLines(Path.Combine(outDir, "coverage.txt"), report);
@@ -2877,12 +2890,42 @@ static class Program
                 Console.WriteLine($"Translated in {sw.Elapsed.TotalSeconds:F0}s into {srcDir}");
                 if (opts.ContainsKey("compile"))
                 {
-                    var (compiled, output) = Morrowind.MwPluginBuilder.CompilePapyrus(skyrimData, srcDir, Path.Combine(outDir, "Scripts"));
+                    var (compiled, output) = Morrowind.MwPluginBuilder.CompilePapyrus(skyrimData, srcDir, Path.Combine(outDir, "Scripts"), m => Console.WriteLine($"  {m} ({sw.Elapsed.TotalSeconds:F0}s)"));
                     File.WriteAllText(Path.Combine(outDir, "compile.txt"), output);
                     var errors = output.Split('\n').Select(l => l.TrimEnd()).Where(l => l.Contains("): ")).ToList();
                     foreach (var l in errors.Take(int.Parse(opts.GetValueOrDefault("errors", "40")))) Console.WriteLine(l);
                     Console.WriteLine(compiled is null ? output : $"{compiled.Count} of {Directory.GetFiles(srcDir, "*.psc").Length} scripts compiled, {errors.Count} error lines ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
+                return 0;
+            }
+            case "mw-script-attach-test":
+            {
+                // Dev aid: the plugin builder's script steps on a few interiors (--cells regex, default the prison ship and
+                // the census office) with the dialogue, using scripts compiled already by mw-script-translate (--scripts,
+                // default out/mwscripts/Scripts), into --out (default out/mwscripts-attach); lists what was attached.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/mwscripts-attach"));
+                var mwPlugins = Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var world = Morrowind.MwWorld.Load(dataFiles, mwPlugins);
+                var builder = new Morrowind.MwPluginBuilder(world, Morrowind.Tes3Data.Open(dataFiles, mwPlugins), outDir) { SkyrimData = skyrimData };
+                builder.PrepareScripts();
+                Console.WriteLine($"  scripts: {builder.ScriptCount} translated ({sw.Elapsed.TotalSeconds:F0}s)");
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cells", "^Imperial Prison Ship$|^Seyda Neen, Census and Excise Office$"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var cell in world.Interiors.Values.Where(c => rx.IsMatch(c.Name))) builder.BuildInterior(cell);
+                builder.BuildDialogue();
+                Console.WriteLine($"  cells and dialogue built ({sw.Elapsed.TotalSeconds:F0}s)");
+                int n = builder.AttachScripts(precompiled: Path.GetFullPath(opts.GetValueOrDefault("scripts", "out/mwscripts/Scripts")));
+                Console.WriteLine($"  {n} compiled scripts, {builder.ScriptsAttached} attached, {builder.ResultScriptsAttached} dialogue results, {builder.PropertiesFilled} properties filled ({builder.PropertiesUnfilled} without a record) ({sw.Elapsed.TotalSeconds:F0}s)");
+                var m = builder.Mod;
+                foreach (var rec in m.EnumerateMajorRecords().OfType<Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter>().Take(int.MaxValue))
+                {
+                    var vm = rec.GetType().GetProperty("VirtualMachineAdapter")?.GetValue(rec) as Mutagen.Bethesda.Skyrim.IAVirtualMachineAdapterGetter;
+                    if (vm is null || !vm.Scripts.Any(s => s.Name.StartsWith("MW", StringComparison.Ordinal) && !s.Name.StartsWith("MWR_"))) continue;
+                    foreach (var s in vm.Scripts.Where(s => s.Name.StartsWith("MW")))
+                        Console.WriteLine($"  {rec.EditorID ?? rec.FormKey.ToString()}: {s.Name} ({s.Properties.Count} properties: {string.Join(", ", s.Properties.Take(6).Select(p => p.Name))})");
+                }
+                foreach (var p in builder.Problems.Where(p => p.StartsWith("script")).Distinct().Take(30)) Console.WriteLine($"  problem: {p}");
                 return 0;
             }
             case "mw-script-grep":

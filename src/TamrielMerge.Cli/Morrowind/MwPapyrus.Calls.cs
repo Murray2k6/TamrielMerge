@@ -31,7 +31,7 @@ public sealed partial class MwPapyrus
     string ArgFloat(Call c, int i, string def = "0.0") => i < c.Args.Count ? Convert(Expr(c.Args[i]), T.Float) : def;
     string ArgInt(Call c, int i, string def = "0") => i < c.Args.Count ? Convert(Expr(c.Args[i]), T.Int) : def;
 
-    /// <summary>An argument naming a form (an item, an actor base, a spell…): its property; a variable holding a number isn't one.</summary>
+    /// <summary>An argument naming a form (an item, an actor base, a spell...): its property; a variable holding a number isn't one.</summary>
     string Form(Call c, int i, string type = "Form")
     {
         string id = Word(c, i);
@@ -138,8 +138,14 @@ public sealed partial class MwPapyrus
             case "activate":
             {
                 // The default activation Morrowind's OnActivate held back: by whoever activated it, else the player.
-                string who = kind == Kind.Object && uses.Contains("onactivate") ? $"TMMwScript.Activator(__actionRef, {PlayerRef()})" : PlayerRef();
+                string who = checksActivate ? $"TMMwScript.Activator(__actionRef, {PlayerRef()})" : PlayerRef();
                 if (c.Args.Count > 0) who = AsRef(RefArg(c, 0));
+                if (checksActivate && c.Target is null)
+                {
+                    // Activate lets the activation go until the script checks OnActivate again (its next run).
+                    uses.Add("onactivate");
+                    return R($"TMMwScript.DefaultActivate(Self, {who})\n__blocking = False\nTMMwScript.Block(Self, False)\nRegisterForSingleUpdate(0.1)", T.Void);
+                }
                 return R($"TMMwScript.DefaultActivate({self()}, {who})", T.Void);
             }
 
@@ -536,8 +542,8 @@ public sealed partial class MwPapyrus
         // Morrowind names effects by their game setting (sEffectLevitate) or number; the converter maps them to
         // Skyrim's magic effects where it has one.
         string id = Word(c, 0);
-        string effect = Prop("effect:" + id, "MagicEffect", "me_" + Clean(id));
-        return remove ? new Code($"TMMwScript.RemoveEffects({actorSelf()}, {effect})", T.Void) : new Code($"{actorSelf()}.HasMagicEffect({effect})", T.Bool);
+        string effects = Prop("effects:" + id, "FormList", "me_" + Clean(id));
+        return remove ? new Code($"TMMwScript.RemoveEffectsIn({actorSelf()}, {effects})", T.Void) : new Code($"TMMwScript.HasEffectIn({actorSelf()}, {effects})", T.Bool);
     }
 
     // ---- stats ----
@@ -672,7 +678,7 @@ public sealed partial class MwPapyrus
     }
 
     /// <summary>
-    /// MessageBox "text %.0f" value… "Button 1" "Button 2": with buttons (and a script that reads them), a Message
+    /// MessageBox "text %.0f" value... "Button 1" "Button 2": with buttons (and a script that reads them), a Message
     /// record shown with the values (Skyrim formats %.Nf and %g from Show's arguments); Show waits for the choice, which
     /// GetButtonPressed then returns once, as Morrowind's does on the frames after the box closes. Without buttons to
     /// read, a plain message box.
@@ -707,7 +713,7 @@ public sealed partial class MwPapyrus
     // ---- Say ----
 
     /// <summary>
-    /// Say "file" "text": the speaker says the line with Morrowind's own recording — a topic (MWSay…) whose response
+    /// Say "file" "text": the speaker says the line with Morrowind's own recording - a topic (MWSay...) whose response
     /// carries the recording (the voice planner packs it for the speaker's voice type) and the subtitle. Said by
     /// something that isn't a person (the player hearing a Daedra, a creature), it plays as a sound with the text shown.
     /// </summary>
