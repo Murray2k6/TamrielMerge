@@ -44,7 +44,7 @@ public static class DfQuestOps
         new(0x0C, "StartTimer", OpKind.Action, "sc", "start timer {1}"),
         new(0x0D, "StopTimer", OpKind.Action, "sc", "stop timer {1}"),
         new(0x11, "Unknown11", OpKind.Action, "sp##", "(0x11 {1} {2} {3})",
-            Gap: "unknown: two uses (A0C10Y05, a house and two numbers); UESP has no meaning for it and Daggerfall Unity's version leaves it out"),
+            Gap: "unknown: two uses (A0C10Y05, B0C00Y13: a place and two numbers, in the start-up); UESP has no meaning for it and Daggerfall Unity leaves it out; skipped"),
         new(0x13, "Reveal", OpKind.Action, "sp", "reveal {1}"),
         new(0x15, "InjuredFoe", OpKind.Trigger, "sf", "injured {1}"),
         new(0x16, "PlaceFoe", OpKind.Action, "sfp", "place foe {1} at {2}"),
