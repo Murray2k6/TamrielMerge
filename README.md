@@ -52,6 +52,8 @@ other from any of your games; *Textures & PBR…* changes its textures and makes
 - People and creatures, with their dialogue in Skyrim's dialogue menu, voiced: the games' own recordings, and the
   lines they never recorded spoken in Skyrim's voices (as a mod of their own you can switch off).
 - Items, factions, guilds, skills, spells, music and each game's intro video, remastered.
+- Morrowind's scripts, all of them: its quests, scripted doors, items, activators and people, its global scripts and
+  its dialogue's results, translated into Skyrim's script language (docs/morrowind-scripts.md).
 - Daggerfall's travel: days on the road to a town, seen in real time, with encounters, sea voyages and the era of
   each destination.
 - Alternative starts: begin with the stories in order, or in any game's time you own, after its opening or with it.
