@@ -1387,6 +1387,31 @@ static class Program
                 guilds.Build(talk, townBuilder.TalkQuest, townBuilder.Placed, townBuilder.BreakIns);
                 Console.WriteLine($"guilds: {guilds.Members} with people here ({string.Join(", ", mod.Factions.Where(f => f.EditorID?.StartsWith("DFGuild") == true).Select(f => f.EditorID![7..]))}), {guilds.Trainers} trainers, {guilds.Responses} responses");
                 if (clutter.Missing.Count > 0) Console.WriteLine($"clutter forms not found: {string.Join(", ", clutter.Missing)}");
+                if (opts.ContainsKey("quests"))
+                {
+                    // --quests: Daggerfall's quests and these towns' quest sites too (DfQuestBuilder, QuestSites).
+                    var questMasters = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }
+                        .Select(m => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, m), SkyrimRelease.SkyrimSE)).ToList();
+                    DfQuestGlobals.AddAll(mod);
+                    var qb = new DfQuestBuilder(mod, arena2, questMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
+                    {
+                        Foe = id => townCreatures.Spawn(id), GuildsQuest = guilds.Quest, Guilds = guilds.Built,
+                    };
+                    qb.Build();
+                    var questTowns = picked.Zip(built).Select(p => new QuestSites.Town(p.First, p.Second)).ToList();
+                    var sites = QuestSites.Build(mod, "Test", qb.Machine!.FormKey, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,
+                        QuestSites.Individuals(mod, townBuilder.Placed.Concat(dungeons.PlacedPeople)), _ => null);
+                    foreach (var s in sites)
+                    {
+                        var p = s.VirtualMachineAdapter!.Scripts[0].Properties;
+                        int Len(string n) => p.FirstOrDefault(x => x.Name == n) switch { ScriptIntListProperty i => i.Data.Count, ScriptObjectListProperty o => o.Objects.Count, ScriptStringListProperty t => t.Data.Count, _ => 0 };
+                        int Filled(string n) => p.FirstOrDefault(x => x.Name == n) is ScriptObjectListProperty o ? o.Objects.Count(x => !x.Object.IsNull) : 0;
+                        Console.WriteLine($"quest sites {s.EditorID}: {Len("TownName")} towns, {Len("BType")} buildings ({Filled("BArrival")} with arrival, {Filled("BSpawn")} with a spawn marker, {Filled("BItem")} item marker), "
+                            + $"{Len("DName")} dungeons ({Filled("DSpawn")} with a spawn marker), {Len("IFaction")} individuals");
+                    }
+                    Console.WriteLine($"quest markers: {dungeons.QuestMarkers.Values.Sum(m => m.Count)} in {dungeons.QuestMarkers.Count} cells");
+                    Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
+                }
                 var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
                 TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
                 mod.WriteToBinary(Path.Combine(outDir, "DaggerfallTownTest.esp"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters

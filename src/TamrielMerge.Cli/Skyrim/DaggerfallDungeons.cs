@@ -108,6 +108,12 @@ public static class DaggerfallDungeons
         double layout = waitStart - setup, finishWait = clock.Elapsed.TotalSeconds - waitStart;
 
         moveIntoTiles();
+        // This part's dungeons as quest sites for Daggerfall.esm's quest machine (TMDfQuestSites registers them in game).
+        if (master.Quests.FirstOrDefault(q => q.EditorID == "DFQuestMachine")?.FormKey is { } machine)
+        {
+            var sites = QuestSites.Build(mod, $"D{batch}", machine, [], dungeons.BuiltDungeons, dungeons.QuestMarkers, [], QuestSites.MasterMarkers(master, arena2));
+            Console.WriteLine($"Quest sites: {dungeons.BuiltDungeons.Count} dungeons in {sites.Count} site quests");
+        }
 
         var catalog = new CreatureCatalog { Game = "Daggerfall", Plugin = PluginName, ExteriorRespawnHours = 0, InteriorRespawnHours = 0 };
         foreach (var (placed, cell, habitat) in dungeons.CreatureSpots)

@@ -106,7 +106,9 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
 
     /// <summary>Each built dungeon's and building interior's quest markers (persistent XMarkers, item markers flagged),
     /// for the quest machine's sites (QuestSites).</summary>
-    public Dictionary<Cell, List<(PlacedObject Marker, bool Item)>> QuestMarkers { get; } = new();
+    public Dictionary<Cell, List<(PlacedObject Marker, bool Item)>> QuestMarkers { get; } = new(ReferenceEqualityComparer.Instance);
+    /// <summary>Every dungeon built, for the quest machine's sites (QuestSites).</summary>
+    public List<(DfLocation Location, Built Built)> BuiltDungeons { get; } = [];
 
     /// <summary>A quest marker flat as a persistent XMarker in the cell, remembered in <see cref="QuestMarkers"/>.</summary>
     void AddQuestMarker(Cell cell, P3Float at, bool item)
@@ -533,7 +535,9 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         if (!BackgroundNavmesh) nav.Finish();
 
         AddInteriorCell(cell);
-        return new Built(cell, newGameMarker, interiorDoor, exteriorDoor, nav, fixtureCounts);
+        var result = new Built(cell, newGameMarker, interiorDoor, exteriorDoor, nav, fixtureCounts);
+        BuiltDungeons.Add((location, result));
+        return result;
     }
 
     (Vector3 Min, Vector3 Max) PropBounds(PlacedObject r)
