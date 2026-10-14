@@ -1222,6 +1222,29 @@ static class Program
                 Console.WriteLine($"{loc}: {buildings} building records, {doors} door surfaces -> {Path.GetFullPath(outPath)}");
                 return 0;
             }
+            case "df-quest-dump":
+            {
+                // Daggerfall quests decoded into readable commands, close to Daggerfall Unity's text quests (--quest NAME[,NAME];
+                // --raw: the QBN records as stored; --names DIR: a folder of Daggerfall Unity's text quests, only to borrow their
+                // symbol names when comparing; --messages: the QRC text too).
+                foreach (var name in opts["quest"].Split(','))
+                {
+                    var q = DfQuest.Load(arena2, name.ToUpperInvariant());
+                    var names = DfQuestDump.NamesFrom(opts.GetValueOrDefault("names"), q.Name);
+                    Console.Write(opts.ContainsKey("raw") ? DfQuestDump.Raw(q, names) : DfQuestDump.Readable(q, names));
+                    if (opts.ContainsKey("messages"))
+                        foreach (var (id, variants) in q.Messages.OrderBy(m => m.Key))
+                            foreach (var v in variants) Console.WriteLine($"\nMessage {id}:\n{v}");
+                }
+                return 0;
+            }
+            case "df-quest-check":
+            {
+                // Coverage of Daggerfall's quests: per quest, how many of its operations the quest machine supports, and why
+                // the rest aren't (like ob-script-inventory).
+                Console.Write(DfQuestDump.Check(DfQuest.LoadAll(arena2)));
+                return 0;
+            }
             case "df-text":
             {
                 // TEXT.RSC records (--ids 7205,7250-7259), each variant on its own line.
