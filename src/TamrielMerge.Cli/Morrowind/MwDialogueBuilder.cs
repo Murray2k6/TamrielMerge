@@ -17,12 +17,14 @@ namespace TamrielMerge.Morrowind;
 /// <item>Greetings (type 2) are Hello topics.</item>
 /// <item>Filters and conditions become Skyrim conditions: speaker, race, class, faction and rank, cell, sex,
 /// the player's faction and rank, journal index (GetStage), globals, items carried, deaths, talked-to-PC, random,
-/// levels, skills, health. Conditions on things Skyrim doesn't track (disposition, script locals, expulsion,
+/// levels, skills, health, the speaker's script locals. Conditions on things Skyrim doesn't track (expulsion,
 /// vampirism, weather) are judged as Morrowind would with their usual value, 0.</item>
 /// <item>A response offering choices (Choice "text" n in its result) links to a child topic per choice holding the
 /// topic's responses for that choice (function 50 = n).</item>
-/// <item>Result scripts: journal updates, globals, items given or taken, joining a faction or rising in it, combat and
-/// Goodbye run from TMMwInfo (one shared TopicInfo script, per-response properties).</item>
+/// <item>Result scripts are translated to Papyrus like the game's other scripts (MWR_ fragments, docs/morrowind-scripts.md);
+/// where scripts aren't converted or one doesn't compile, journal updates, globals, items given or taken, joining a
+/// faction or rising in it, combat and Goodbye run from TMMwInfo (one shared TopicInfo script, per-response properties).
+/// Conditions on the speaker's script locals read the hidden faction ranks the translated scripts mirror them in.</item>
 /// </list>
 /// Morrowind's persuasion and voice topics (barks) are not converted here.
 /// </summary>
@@ -80,7 +82,9 @@ public sealed partial class MwPluginBuilder
     Global? MwGlobal(string id)
     {
         if (globals.TryGetValue(id, out var hit)) return hit;
-        if (!world.Objects.TryGetValue(id, out var rec) || rec.Type != "GLOB") return globals[id] = null;
+        // Globals have their own namespace: Tribunal has globals named like scripts (scriptWorld keeps them).
+        if (!world.Objects.TryGetValue(id, out var rec) || rec.Type != "GLOB")
+            if (scriptWorld?.Globals.TryGetValue(id, out rec) != true) return globals[id] = null;
         var g = new GlobalFloat(mod) { EditorID = "MWGlobal" + Sanitize(id), Data = rec.Get("FLTV")?.Float() ?? 0 };
         mod.Globals.Add(g);
         return globals[id] = g;
@@ -112,7 +116,7 @@ public sealed partial class MwPluginBuilder
     /// <summary>Converts the journal and dialogue. Call after interiors, exteriors and actors exist.</summary>
     public void BuildDialogue()
     {
-        dialogueData = MwDialogue.Load(world.Plugins);
+        dialogueData ??= MwDialogue.Load(world.Plugins);
         dialogueQuest = new Quest(mod)
         {
             EditorID = "MWDialogue",
@@ -237,7 +241,8 @@ public sealed partial class MwPluginBuilder
     /// <summary>A response's TMMwInfo entry, adding the script (and its fragment) when it has none.</summary>
     static ScriptEntry InfoEntry(DialogResponses r)
     {
-        if (r.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == InfoScript) is { } existing) return existing;
+        // TMMwInfo, or a translated result script (MWR_…), which extends it.
+        if (r.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == InfoScript || s.Name.StartsWith("MWR_", StringComparison.Ordinal)) is { } existing) return existing;
         var entry = new ScriptEntry { Name = InfoScript };
         r.VirtualMachineAdapter = new DialogResponsesAdapter
         {
@@ -335,8 +340,9 @@ public sealed partial class MwPluginBuilder
         DialogueLines += r.Responses.Count;
         DialogueResponses++;
         var result = ParseResult(info);
-        if (result.Goodbye) r.Flags.Flags |= DialogResponses.Flag.Goodbye;
-        if (result.Adapter is { } vm) r.VirtualMachineAdapter = vm;
+        if (result.Goodbye || ResultSaysGoodbye(info)) r.Flags.Flags |= DialogResponses.Flag.Goodbye;
+        // The translated result script (MWR_…), with TMMwInfo's fixed set as its fallback.
+        if (ResultAdapter(info, r, result.Adapter) is { } vm) r.VirtualMachineAdapter = vm;
         // Choices: a child topic per (choice, prompt), holding the topic's responses for that choice.
         foreach (var (text, number) in result.Choices)
         {
@@ -530,10 +536,24 @@ public sealed partial class MwPluginBuilder
                     }
                     else if (!Holds(c.Compare, 0, c.Value)) return null;
                     break;
-                case '3':   // a local of the speaker's script, which isn't converted: 0
-                    if (!Holds(c.Compare, 0, c.Value)) return null;
+                case '3':
+                    // A local of the speaker's script: mirrored by the translated scripts as the rank in a hidden faction
+                    // (MWLocal<name>); a speaker without that local isn't in it, and the response isn't theirs.
+                    if (LocalFaction(c.Name) is { } lf)
+                    {
+                        var inIt = new GetInFactionConditionData(); inIt.Faction = new FormLinkOrIndex<IFactionGetter>(inIt, lf);
+                        list.Add(Cond(inIt, CompareOperator.EqualTo, 1));
+                        var rank = new GetFactionRankConditionData(); rank.Faction = new FormLinkOrIndex<IFactionGetter>(rank, lf);
+                        list.Add(Cond(rank, op, c.Value));
+                    }
+                    else if (!Holds(c.Compare, 0, c.Value)) return null;   // no scripts: the local reads 0
                     break;
-                case 'C':   // the speaker's script lacks a local: true, there are no scripts
+                case 'C':   // the speaker's script lacks a local: not in its mirror faction
+                    if (LocalFaction(c.Name) is { } nf)
+                    {
+                        var notIn = new GetInFactionConditionData(); notIn.Faction = new FormLinkOrIndex<IFactionGetter>(notIn, nf);
+                        list.Add(Cond(notIn, CompareOperator.EqualTo, 0));
+                    }
                     break;
                 case '4':
                     if (journals.TryGetValue(c.Name, out var quest))

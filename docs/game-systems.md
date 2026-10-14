@@ -85,7 +85,7 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | Spellmaking, enchanting (soul gems, constant effect ≥ 400), recharge | missing | |
 | Alchemy apparatus (4 kinds, qualities) and formulas | missing | apparatus are misc items |
 | Repair hammers and the repair formula | missing | hammers are misc items |
-| MWScript (local, global, result scripts) | partial | dialogue results only; Morrowind scripts are next in the plan |
+| MWScript (local, global, result scripts) | done | every object, global, start and dialogue result script translated to Papyrus (MW_, MWG_, MWR_), 33,374 / 33,374 statements, all compile; docs/morrowind-scripts.md |
 | Travel: silt striders, boats, Mages Guild guides, gondolas, Propylon chambers | missing | |
 | Mark/Recall, Divine/Almsivi Intervention | done | scripts; Intervention indoors via WorldSpot markers linked to the outside door |
 | Races (powers, resistances), birthsigns, classes, attributes | missing | |
@@ -96,10 +96,10 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | Pickpocket formula | missing | |
 | Diseases, blight, corprus | missing | |
 | Vampirism (3 clans), werewolves (Bloodmoon) | missing | |
-| Strongholds, Raven Rock colony | missing | quest/script driven |
+| Strongholds, Raven Rock colony | partial | their scripts run (docs/morrowind-scripts.md); not checked in game |
 | Weather: ash and blight storms, snow | missing | |
 | Rest rules, sleep interruption from region lists | missing | |
-| Tribunal Museum of Artifacts, mercenaries | missing | script driven |
+| Tribunal Museum of Artifacts, mercenaries | partial | their scripts run (docs/morrowind-scripts.md); not checked in game |
 
 ## Oblivion (Shivering Isles, Knights of the Nine, official plugins)
 

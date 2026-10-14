@@ -22,7 +22,17 @@ Bool busy = False
 Bool hasClosedAngle = False
 Float closedAngle
 
+Bool Property Scripted = False Auto Hidden
+{A Morrowind script's OnActivate decides when the door opens (TMMwScript.TakeActivation; it calls OpenBy).}
+
 Event OnActivate(ObjectReference akActionRef)
+  If !Scripted || IsOpenTwin
+    OpenBy(akActionRef)
+  EndIf
+EndEvent
+
+; Opens (or shuts) the door for akActionRef, as activating it does.
+Function OpenBy(ObjectReference akActionRef)
   If IsOpenTwin
     TMSwingDoor swingDoor = Partner as TMSwingDoor
     If swingDoor
@@ -49,7 +59,7 @@ Event OnActivate(ObjectReference akActionRef)
       Swing(closedAngle + OpenAngle, OpenSound, True)
     EndIf
   EndIf
-EndEvent
+EndFunction
 
 Function Swing(Float target, Sound effect, Bool toOpen)
   busy = True
