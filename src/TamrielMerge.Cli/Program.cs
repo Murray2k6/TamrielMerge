@@ -1238,6 +1238,39 @@ static class Program
                 }
                 return 0;
             }
+            case "df-quest-build":
+            {
+                // A scratch plugin with only Daggerfall's quest records (the machine, reputation, every quest, Privateer's
+                // Hold's... no sites), to check the quest build without a whole Daggerfall build (--out, default
+                // out/quest-test/DFQuestTest.esp; --scripts also compiles the Papyrus scripts into that folder).
+                string outPath = Path.GetFullPath(opts.GetValueOrDefault("out", "out/quest-test/DFQuestTest.esp"));
+                Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+                var mod = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(outPath)), SkyrimRelease.SkyrimSE);
+                var masters = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }
+                    .Select(m => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, m), SkyrimRelease.SkyrimSE)).ToList();
+                var creatures = new CreatureBuilder(mod, skyrimData);
+                creatures.Build();
+                var spells = new SpellBuilder(mod, masters[0], DoorPlacer.BaseDoors);
+                spells.Build(DfSpells.Load(arena2), new PlacedObject(mod));
+                DfQuestGlobals.AddAll(mod);
+                var builder = new DfQuestBuilder(mod, arena2, masters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
+                {
+                    Foe = id => creatures.Spawn(id), Spells = spells.Spells,
+                };
+                builder.Build();
+                foreach (var p in builder.Problems) Console.WriteLine("  " + p);
+                var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                TopicSubtypes.Fill(mod);
+                mod.WriteToBinary(outPath, new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
+                });
+                Console.WriteLine($"Wrote {outPath}: {mod.Quests.Count} quests, {mod.Messages.Count} messages, {mod.DialogTopics.Count} topics, {mod.EnumerateMajorRecords().Count()} records");
+                Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
+                if (opts.ContainsKey("scripts"))
+                    AltStartBuilder.CompileScripts(skyrimData, Path.Combine(AppContext.BaseDirectory, "Papyrus"), Path.GetDirectoryName(outPath)!);
+                return 0;
+            }
             case "df-quest-check":
             {
                 // Coverage of Daggerfall's quests: per quest, how many of its operations the quest machine supports, and why
