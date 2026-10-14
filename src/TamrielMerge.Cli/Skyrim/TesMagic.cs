@@ -16,7 +16,9 @@ public enum TesCast { Spell, Ability, Disease, Power, LesserPower, CastOnce, Whe
 /// translated to these names, see <see cref="OblivionName"/>). Sub is the attribute or skill for effects that take
 /// one; Assoc the Skyrim actor a summon calls or the weapon a bound effect gives.
 /// </summary>
-public sealed record TesEffect(string Name, string? Sub, TesRange Range, int Area, int Duration, float Magnitude, FormKey? Assoc = null);
+/// <param name="Label">A scripted effect's name (Name "ScriptEffect", Sub the Papyrus script it runs).</param>
+/// <param name="Hostile">A scripted effect that harms (Oblivion's script effect "hostile" flag).</param>
+public sealed record TesEffect(string Name, string? Sub, TesRange Range, int Area, int Duration, float Magnitude, FormKey? Assoc = null, string? Label = null, bool Hostile = false);
 
 /// <summary>
 /// Morrowind's and Oblivion's magic (they share one set of effects) as Skyrim's: spells, abilities, powers, diseases,
@@ -384,6 +386,11 @@ public sealed class TesMagic
         if (n.StartsWith("Summon") && e.Assoc is { } creature)
             return new($"Summon{creature.ID:X6}", "Summon", MagicEffectArchetype.TypeEnum.SummonCreature, none, C, none, Role.Special, 0, "SummonFlameAtronach",
                 Keep: true, Assoc: creature, KeepDelivery: true);
+        // A scripted effect (Oblivion's SEFF): a magic effect running the converted script (its properties are filled
+        // by whoever converted the script).
+        if (n == "ScriptEffect" && e.Sub is { Length: > 0 } script)
+            return new($"Script{script}", e.Label is { Length: > 0 } label ? label : "Scripted Effect", MagicEffectArchetype.TypeEnum.Script, none, mysticism, none,
+                e.Hostile ? Role.Harm : Role.Special, 0, "WaterbreathingFFSelf", Script: script);
         if (n.StartsWith("Resist") && ResistOf(n[6..]) is var (resistAv, resistLabel))
             return new($"Resist{resistLabel.Replace(" ", "")}", $"Resist {resistLabel}", Peak, resistAv, R, none, Role.Buff, resistAv == ActorValue.DamageResist ? m * 2 : m, "WaterbreathingFFSelf");
         if (n.StartsWith("WeaknessTo") && ResistOf(n[10..]) is var (weakAv, weakLabel))
@@ -536,6 +543,14 @@ public sealed class TesMagic
     }
 
     void Skip(string what) => Skipped[what] = Skipped.GetValueOrDefault(what) + 1;
+
+    /// <summary>The magic effect one effect becomes on something cast or used this way (a potion's, an ingredient's).</summary>
+    public MagicEffect? EffectOf(TesEffect e, TesCast cast)
+    {
+        if (PlanFor(e) is not { } p) return null;
+        var family = FamilyOf(cast);
+        return EffectFor(p, family, family == Family.Fired ? DeliveryFor(e, p) : Delivery.Self, e);
+    }
 
     PlacedObject Anchor()
     {

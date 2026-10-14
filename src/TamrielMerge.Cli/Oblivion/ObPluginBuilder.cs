@@ -168,11 +168,24 @@ public sealed partial class ObPluginBuilder : IDisposable
                 effectOnly[key] = [new Skyrim.EffectStandIns.Emitter(System.Numerics.Vector3.Zero, Skyrim.EffectStandIns.TypicalSize(kind), 0, fileName)];
             return null;
         }
-        // A scripted activator stays an activator (it carries its converted script); the rest are statics.
-        if (rec is Ob.IActivatorGetter act && !act.Script.IsNull && translations.Count > 0)
+        // A scripted flora (Nirnroot) is Skyrim flora, harvested for its ingredient, carrying its script.
+        if (rec is Ob.IFloraGetter flora && ObScriptWorld.ScriptLink(rec) is not null && translations.Count > 0)
+        {
+            var plant = new Flora(mod) { EditorID = edid, ObjectBounds = Bounds(converted), Model = new Model { File = SkyrimModelPath(converted.Path) } };
+            if (flora.Name is { Length: > 0 } fn) plant.Name = fn;
+            if (flora.Ingredient.FormKeyNullable is { } ing && Item(ing) is { } harvest) plant.Ingredient = new FormLinkNullable<IHarvestTargetGetter>(harvest.FormKey);
+            plant.HarvestSound = new FormLinkNullable<ISoundDescriptorGetter>(Sk(0x100F88));   // ITMIngredientGrassUp
+            mod.Florae.Add(plant);
+            meshByBase[plant.FormKey] = converted;
+            return bases[key] = plant;
+        }
+        // A scripted activator stays an activator (it carries its converted script), as does any other scripted object
+        // Skyrim's kind of which can't (furniture: beds, chairs, thrones); the rest are statics.
+        if (ObScriptWorld.ScriptLink(rec) is not null && rec is Ob.IActivatorGetter or Ob.IFurnitureGetter or Ob.IFloraGetter or Ob.IStaticGetter && translations.Count > 0)
         {
             var activator = new Mutagen.Bethesda.Skyrim.Activator(mod) { EditorID = edid, ObjectBounds = Bounds(converted), Model = new Model { File = SkyrimModelPath(converted.Path) } };
-            if (act.Name is { Length: > 0 } an) activator.Name = an;
+            string? displayName = rec switch { Ob.IActivatorGetter a => a.Name, Ob.IFurnitureGetter f => f.Name, Ob.IFloraGetter fl => fl.Name, _ => null };
+            if (displayName is { Length: > 0 } an) activator.Name = an;
             mod.Activators.Add(activator);
             meshByBase[activator.FormKey] = converted;
             if (converted.Emitters.Count > 0) emittersByBase[activator.FormKey] = converted.Emitters;

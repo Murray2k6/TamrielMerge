@@ -108,12 +108,12 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | World, interiors, terrain, doors | done | |
 | Items, containers, leveled lists | done | |
 | Dialogue, voices, quests | done | |
-| Game scripts | done | translator, 2,393 / 2,393 compile |
+| Game scripts | done | translator (vanilla and OBSE): every statement translated (46,945 of 46,945 in the official plugins), MenuMode, OnAlarm, script packages, crimes, misc stats, gates through TMObState; see [oblivion-scripts.md](oblivion-scripts.md) |
 | Disposition | done | |
 | Persuasion | partial | as a topic (Admire/Boast/Joke/Coerce/Bribe), not the wheel minigame with loved/hated wedges |
 | Locks: pick by hand or Auto Attempt, tiers, keys | done | TMObLock; auto formula from UESP talk page, unconfirmed |
 | Security perks (tumblers stay set when a pick breaks) | missing | |
-| Spells, enchantments, staffs, scrolls | done | TesMagic + ObMagic: 1,234 spells, 1,333 enchantments, 339 scrolls (magic-test); scripted effects (SEFF, 145) not carried |
+| Spells, enchantments, staffs, scrolls | done | TesMagic + ObMagic: 1,234 spells, 1,333 enchantments, 339 scrolls (magic-test); scripted effects (SEFF) run their converted scripts on magic effects of their own |
 | Sigil stones, Altar of Enchanting, spellmaking | missing | |
 | Alchemy apparatus (mortar, retort, calcinator, alembic), poisons | missing | |
 | Armorer repair and hammers | missing | |

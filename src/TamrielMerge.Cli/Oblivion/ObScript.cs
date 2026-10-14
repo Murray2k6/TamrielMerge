@@ -42,6 +42,8 @@ public static class ObScript
     public sealed record Unparsed(int Line, string Text, string Reason) : Stmt(Line);
 
     public sealed record Variable(string Type, string Name);
+    /// <summary>The condition of code Oblivion never runs (after an else or elseif without its if).</summary>
+    public const string DeadCode = "__dead__";
     public sealed record Block(string Type, List<string> Parameters, List<Stmt> Body, int Line);
     public sealed record Script(string Name, List<Variable> Variables, List<Block> Blocks)
     {
@@ -146,6 +148,14 @@ public static class ObScript
                 string head = toks[0].Kind == T.Ident ? toks[0].Text.ToLowerInvariant() : "";
                 if (closers.Contains(head)) { closer = head; closerTokens = toks; closerLine = lineNo; return list; }
                 if (VarTypes.Contains(head) && toks.Count >= 3 && toks[1].Kind == T.Ident) { variables.Add(new(head, toks[1].Text)); continue; }
+                // An else / elseif without its if (one endif too many before it): Oblivion runs it as the end of a
+                // branch taken, jumping past what follows to the end of the enclosing if, so what follows never runs.
+                if (head is "else" or "elseif")
+                {
+                    var dead = Body(out closer, out closerTokens, out closerLine, closers);
+                    list.Add(new If(lineNo, [(new Name(DeadCode), dead)]));
+                    return list;
+                }
                 list.Add(Statement(toks, lineNo));
             }
             return list;
@@ -259,6 +269,7 @@ public static class ObScript
     sealed class ExprParser(List<Token> toks, bool statement = false)
     {
         int p;
+        Expr? lastCompared;
         Token Peek => toks[Math.Min(p, toks.Count - 1)];
 
         public Expr ParseAll()
@@ -281,6 +292,7 @@ public static class ObScript
             while (LevelOf(Peek) is int level and > 0 && level > minLevel)
             {
                 string op = toks[p++].Text;
+                if (level == 4) lastCompared = left;
                 var right = ParseBinary(level);
                 left = new Binary(op, left, right);
             }
@@ -291,7 +303,13 @@ public static class ObScript
         {
             // OBSE: eval (expr) evaluates an OBSE expression; * dereferences (an array element or pair value), & takes a
             // string's value.
-            if (Peek is { Kind: T.Ident } && Peek.Text.Equals("eval", StringComparison.OrdinalIgnoreCase)) { p++; return ParseUnary(); }
+            if (Peek is { Kind: T.Ident } && Peek.Text.Equals("eval", StringComparison.OrdinalIgnoreCase) && toks[p + 1] is { Kind: T.Op, Text: "(" }) { p++; return ParseUnary(); }
+            // "x >= 0 && < 10": a comparison without its left side compares the previous comparison's left side.
+            if (lastCompared is not null && Peek is { Kind: T.Op, Text: "<" or "<=" or ">" or ">=" or "==" or "!=" })
+            {
+                string op = toks[p++].Text;
+                return new Binary(op, lastCompared, ParseBinary(4));
+            }
             if (Peek is { Kind: T.Op, Text: "-" or "!" or "$" or "#" or "*" or "&" })
             {
                 string op = toks[p++].Text;
