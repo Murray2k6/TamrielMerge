@@ -60,6 +60,10 @@ public static class Dependencies
         }
     }
 
+    /// <summary>Crash Logger SSE (MIT): an SKSE plugin that writes what a crash happened in (game-check installs it).</summary>
+    public static string CrashLogger => Path.Combine(Root, "crashlogger", "SKSE", "Plugins", "CrashLogger.dll");
+    const string CrashLoggerUrl = "https://github.com/alandtse/CrashLoggerSSE/releases/download/v1.25.0/CrashLogger_1.25.0.7z";
+
     /// <summary>JPEXS FFDec (GPL-3.0), which builds the Tamriel menu's Flash movie (Skyrim/Ui/FlashMenus), in tools\ffdec.</summary>
     public static string Ffdec => Path.Combine(Root, "ffdec", "ffdec-cli.jar");
     const string FfdecUrl = "https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version26.2.1/ffdec_26.2.1.zip";
@@ -152,6 +156,7 @@ public static class Dependencies
             new("DLSS runtime (graphics plugin)", File.Exists(DlssRuntime), DlssRuntime),
             new("FFDec (Tamriel menu)", File.Exists(Ffdec), Ffdec),
             new("Java (for FFDec)", Java is not null, Java ?? JreDir),
+            new("Crash Logger (game check)", File.Exists(CrashLogger), CrashLogger),
         };
         var missing = CreationKitMissing(skyrimData);
         list.Add(new("Creation Kit", missing.Count == 0, missing.Count == 0 ? SkyrimRoot(skyrimData) : "missing " + string.Join(", ", missing.Select(m => m.File))));
@@ -376,6 +381,12 @@ public static class Dependencies
                     File.Move(f, to, overwrite: true);
                 }
             }
+        });
+        Step("Crash Logger", () => File.Exists(CrashLogger), () =>
+        {
+            string archive = Download(CrashLoggerUrl, Path.Combine(Root, "downloads", "CrashLogger.7z"));
+            string dir = Path.Combine(Root, "crashlogger");
+            if (RunQuiet(SevenZip(), $"x -y \"-o{dir}\" \"{archive}\"", 120_000) != 0) throw new InvalidOperationException("could not unpack CrashLogger.7z");
         });
         Step("Java", () => Java is not null, () =>
         {
