@@ -66,7 +66,7 @@ public static class DaggerfallPluginBuilder
         Console.WriteLine($"Creatures: {mod.Npcs.Count} actors, {mod.LeveledNpcs.Count} encounter lists; stand-in bodies for {string.Join(", ", creatures.StandIns)}");
         // Daggerfall's people (town interiors and streets, and the residents of town dungeons such as castles).
         var people = new TownPeople(mod, new VanillaActors(skyrimData), DfFactions.Load(arena2), DfNames.Load(arena2));
-        var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer) { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, FixedPropKeys = true };
+        var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer) { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, FixedPropKeys = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
         var hold = locations.First(l => l.Name == "Privateer's Hold" && l.DungeonBlocks.Count > 0);
         var holdCell = dungeons.Build(hold, world, LocationPlacer.WorldPosition(field, hold.PixelX + 0.5, hold.PixelY + 0.5));
         Console.WriteLine($"Dungeon: {hold.Name} -> {holdCell.Cell.EditorID}, {holdCell.Cell.Temporary.Count} refs, navmesh {holdCell.Navmesh.Triangles} triangles / {holdCell.Navmesh.Vertices} vertices, {holdCell.Navmesh.DoorTriangles} door links");
@@ -365,6 +365,31 @@ public static class DaggerfallPluginBuilder
         var models = new Meshes.SpriteModelImporter(mod, outDir, arena2).ImportAll(work, problems);
         foreach (var (key, made) in models) clutter.AddGenerated(key, made);
         Console.WriteLine($"Sprite models: {models.Count} of {SpriteModels.Targets.Count}{(problems.Count > 0 ? "; problems: " + string.Join("; ", problems.Take(5)) : "")}");
+    }
+
+    /// <summary>
+    /// The sprite models and grass that <paramref name="master"/> (Daggerfall.esm, built first) already has, into the
+    /// clutter placer as its own statics: a town or dungeon part places them straight from it instead of importing all
+    /// 604 models again and writing their files once more (2026-10-14: that was most of each of the 84 town parts' first
+    /// minutes, the same files every time; user: "should be a 1 hour conversion"). Returns how many; 0 when the master
+    /// has none (then the part imports them itself).
+    /// </summary>
+    public static int SpriteModelsFromMaster(ISkyrimModGetter master, ClutterPlacer clutter)
+    {
+        var byName = SpriteModels.Targets.GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+        int n = 0;
+        foreach (var st in master.Statics)
+        {
+            if (st.EditorID is not { } e || st.ObjectBounds is not { } ob) continue;
+            var min = new System.Numerics.Vector3(ob.First.X, ob.First.Y, ob.First.Z);
+            var max = new System.Numerics.Vector3(ob.Second.X, ob.Second.Y, ob.Second.Z);
+            if (e.StartsWith("DFSpriteModel", StringComparison.Ordinal) && byName.TryGetValue(e["DFSpriteModel".Length..], out var targets))
+                foreach (var t in targets) { clutter.AddGenerated((t.Archive, t.Record), new Meshes.SpriteModelImporter.Made(st.FormKey, min, max, t.Kind)); n++; }
+            else if (e.StartsWith("DFGrassStatic", StringComparison.Ordinal) && e["DFGrassStatic".Length..].Split('_') is [var a, var r]
+                     && int.TryParse(a, out int archive) && int.TryParse(r, out int record))
+            { clutter.AddGenerated((archive, record), new Meshes.SpriteModelImporter.Made(st.FormKey, min, max, SpriteModels.Kind.Plant)); n++; }
+        }
+        return n;
     }
 
     /// <summary>Towns named in <paramref name="spec"/> ("Name" or "Name@Region", comma-separated; "all"; "none").</summary>

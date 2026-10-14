@@ -14,8 +14,10 @@ static class Progress
     /// <summary>Reports <paramref name="fraction"/> (0..1) of the current range done, with what is happening.</summary>
     public static void Report(double fraction, string text)
     {
+        if (!double.IsFinite(fraction)) fraction = 0;   // nothing to count (0 of 0) is no progress, not NaN
         string line = FormattableString.Invariant($"PROGRESS {offset + span * Math.Clamp(fraction, 0, 1):F4} {text}");
-        Console.WriteLine(line);
+        // A part built beside others (convert's parts) leaves the bar to its parent.
+        if (Environment.GetEnvironmentVariable("TAMRIELMERGE_PROGRESS") != "off") Console.WriteLine(line);
         if (statusFile is null) return;
         // The status file: this process, when it started, and its latest report (written whole, then renamed).
         try

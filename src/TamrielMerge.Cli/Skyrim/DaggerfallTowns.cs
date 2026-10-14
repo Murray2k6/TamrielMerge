@@ -52,12 +52,15 @@ public static class DaggerfallTowns
         return mine;
     }
 
-    public sealed record Report(int Built, int Failed, int People, string Path);
+    /// <summary>A part's build, with where its time went (seconds): setup (shared records, sprite models), laying the towns
+    /// out, joining their talk and guilds, and writing.</summary>
+    public sealed record Report(int Built, int Failed, int People, string Path, double SetupSeconds = 0, double TownsSeconds = 0, double TalkSeconds = 0, double WriteSeconds = 0);
 
     public static Report Build(string arena2, string skyrimData, string mainPlugin, int batch, int batches, Terrain.TerrainSettings terrain)
     {
         string outDir = Path.GetDirectoryName(Path.GetFullPath(mainPlugin))!;
         string outPath = PartPath(outDir, batch);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         using var skyrim = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
         using var master = SkyrimMod.CreateFromBinaryOverlay(mainPlugin, SkyrimRelease.SkyrimSE);
         var mod = new SkyrimMod(ModKey.FromFileName(PluginName), SkyrimRelease.SkyrimSE);
@@ -75,12 +78,15 @@ public static class DaggerfallTowns
         var propReplacer = new PropReplacer(skyrim, skyrimData);
         var clutter = new ClutterPlacer(skyrim, propReplacer, master.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey));
         clutter.UseDaggerfallItems(DfItems.Lookup(master));
-        DaggerfallPluginBuilder.ImportSpriteModels(mod, outDir, arena2, clutter);
+        // Daggerfall.esm's sprite models and grass, made once by its build; imported here only if it has none.
+        int fromMaster = DaggerfallPluginBuilder.SpriteModelsFromMaster(master, clutter);
+        if (fromMaster == 0) DaggerfallPluginBuilder.ImportSpriteModels(mod, outDir, arena2, clutter);
+        else Console.WriteLine($"Sprite models and grass: {fromMaster} from {Path.GetFileName(mainPlugin)}");
         var creatures = new CreatureBuilder(mod, skyrimData);
         creatures.Build();
         var people = new TownPeople(mod, new VanillaActors(skyrimData), DfFactions.Load(arena2), DfNames.Load(arena2));
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer)
-        { Spells = spells, Clutter = clutter, Creatures = creatures, People = people };
+        { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
         var townBuilder = new TownBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), map, dungeons)
         {
             People = people,
@@ -90,6 +96,7 @@ public static class DaggerfallTowns
         };
 
         var towns = Slice(All(arena2, master), batch, batches);
+        double setup = clock.Elapsed.TotalSeconds;
         var built = new List<TownBuilder.Built>();
         int failed = 0;
         foreach (var town in towns)
@@ -103,6 +110,7 @@ public static class DaggerfallTowns
             catch (Exception e) { failed++; Console.WriteLine($"  {town.Name} ({town.RegionName}): {e.Message}"); }
         }
         Console.WriteLine($"Batch {batch}/{batches}: {built.Count} towns ({towns.Sum(t => t.ExteriorBlocks.Length)} blocks), {failed} failed, {townBuilder.SharedInteriors} shared interiors");
+        double laidOut = clock.Elapsed.TotalSeconds;
         if (built.Count > 0)
         {
             dungeons.Navmeshes.LinkExteriorEdges();
@@ -127,8 +135,9 @@ public static class DaggerfallTowns
         Console.WriteLine($"Shared with {Path.GetFileName(mainPlugin)}: {shared} records");
 
         mod.ModHeader.Description = DoorRefFix.Marker + "; " + StatueRefFix.Marker;   // doors and statues placed as the fixes make old ones
+        double talked = clock.Elapsed.TotalSeconds;
         PluginMerger.WritePart(mod, outPath, PluginMerger.Masters(Path.GetFileName(mainPlugin)), batch, batches);
-        return new Report(built.Count, failed, townBuilder.Placed.Count, outPath);
+        return new Report(built.Count, failed, townBuilder.Placed.Count, outPath, setup, laidOut - setup, talked - laidOut, clock.Elapsed.TotalSeconds - talked);
     }
 
     /// <summary>

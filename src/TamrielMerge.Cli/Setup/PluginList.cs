@@ -86,7 +86,10 @@ public static class PluginList
         }
         set
         {
-            var s = File.Exists(SettingsFile) ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(SettingsFile)) ?? [] : [];
+            Dictionary<string, string> s;
+            // A settings file that can't be read is started again rather than failing (the getter reads it the same way).
+            try { s = File.Exists(SettingsFile) ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(SettingsFile)) ?? [] : []; }
+            catch (JsonException) { s = []; }
             if (string.IsNullOrWhiteSpace(value)) s.Remove("mo2"); else s["mo2"] = value;
             File.WriteAllText(SettingsFile, JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true }));
         }

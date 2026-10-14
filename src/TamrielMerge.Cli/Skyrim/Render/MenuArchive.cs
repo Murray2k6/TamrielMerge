@@ -23,6 +23,25 @@ public static class MenuArchive
         @"music\special\mus_maintheme.xwm", @"music\special\mus_maintheme.wav",
     ];
 
+    /// <summary>
+    /// Loose copies of the menu's files in <paramref name="dataDir"/> (Skyrim's Data, or an output folder that is it):
+    /// Skyrim keeps these only inside its own archives, so loose ones are ours, from an older menu (2026-10-14: a hand
+    /// install's loose flyby of 10-10 kept overriding the archive installed on 10-14, so the game showed the old flyby and
+    /// switching the menu part off did nothing). Removed once the archive replaces them; returns what was removed.
+    /// </summary>
+    public static List<string> RemoveLoose(string dataDir)
+    {
+        var loose = Patterns.Select(p => Path.Combine(dataDir, p)).Where(File.Exists).ToList();
+        string menuTextures = Path.Combine(dataDir, MenuBuilder.TextureDir);
+        if (Directory.Exists(menuTextures)) loose.AddRange(Directory.EnumerateFiles(menuTextures, "*.dds"));
+        var removed = new List<string>();
+        foreach (var f in loose)
+            try { File.Delete(f); removed.Add(Path.GetRelativePath(dataDir, f)); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        return removed;
+    }
+
     /// <summary>Packs the menu's files in <paramref name="outDir"/>; returns how many (0: nothing to pack, the plugin left as it was).</summary>
     public static int Build(string outDir)
     {

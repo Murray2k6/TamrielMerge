@@ -165,7 +165,8 @@ static class Program
                 // The overland's town gates and dungeon entrances joined to the land's navmeshes (a light plugin after them).
                 if (plugins.Contains(Skyrim.Terrain.OverlandTiles.LandPluginName) && (plugins.Contains(Skyrim.DaggerfallTowns.PluginName) || plugins.Contains(Skyrim.DaggerfallDungeons.PluginName)))
                     using (Begin("Daggerfall's overland doors"))
-                        if (Main(["overland-doors", "--dir", outDir, "--plugins", string.Join(";", new[] { Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName }.Where(plugins.Contains))]) == 0)
+                        // Daggerfall.esm's own doors on the overland too (Privateer's Hold's: 2026-10-14, no navmesh led to it).
+                        if (Main(["overland-doors", "--dir", outDir, "--plugins", string.Join(";", new[] { "Daggerfall.esm", Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName }.Where(plugins.Contains))]) == 0)
                             plugins.Add(Skyrim.Terrain.OverlandDoorLinks.PluginName);
                 bool BuildParts(string command, int parts, string plugin, Func<int, string> partPath)
                 {
@@ -178,6 +179,7 @@ static class Program
                         return true;
                     }
                     var done = new List<string>();
+                    var pending = new List<int>();
                     for (int k = 1; k <= parts; k++)
                     {
                         // A part the stopped run finished (with its creature spots), kept.
@@ -188,16 +190,46 @@ static class Program
                                 File.Copy(Skyrim.CreatureCatalog.PathFor(Path.Combine(finalDir, partName)), Skyrim.CreatureCatalog.PathFor(partPath(k)), overwrite: true);
                             Console.WriteLine($"{plugin}: part {k} of {parts} kept from the stopped run");
                             done.Add(partPath(k));
-                            continue;
                         }
-                        Progress.Report((k - 1) / (double)parts, $"{plugin}: part {k} of {parts}");
-                        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
-                        foreach (var a in new[] { command, "--plugin", Path.Combine(outDir, "Daggerfall.esm"), "--batch", k.ToString(), "--batches", parts.ToString() }) psi.ArgumentList.Add(a);
-                        using var p = System.Diagnostics.Process.Start(psi)!;
-                        p.WaitForExit();
-                        if (p.ExitCode == 0 && File.Exists(partPath(k))) done.Add(partPath(k));
-                        else failed.Add($"{plugin} part {k} of {parts}");
+                        else pending.Add(k);
                     }
+                    // Several parts at once (user, 2026-10-14: "should be a 1 hour conversion"; one at a time, a part's town
+                    // layout left most of the cores idle): as many as the free memory holds, at most a share of the cores,
+                    // or --parts-at-once N. A town part lays its towns out on one core and peaked at 1.9 GB (budget 3 GB,
+                    // half the cores); a dungeon part makes up to 8 navmeshes at once (budget 5 GB, a quarter of the cores). Each part is built in a folder of its own
+                    // beside a copy of Daggerfall.esm, so parts never write the same file at once; when one ends its files
+                    // are moved into the build folder. The parts' form IDs are their own ranges, so the joined plugin is the
+                    // same however many ran together.
+                    int atOnce = opts.TryGetValue("parts-at-once", out var pa) ? Math.Max(1, int.Parse(pa))
+                        : Math.Clamp((int)((Util.Machine.FreeRamGb() - 4) / (command == "df-towns" ? 3 : 5)), 1, Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4)));
+                    if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, {atOnce} at a time");
+                    var built = new System.Collections.Concurrent.ConcurrentBag<int>();
+                    var gate = new object();
+                    int finished = 0;
+                    Parallel.ForEach(pending, new ParallelOptions { MaxDegreeOfParallelism = atOnce }, k =>
+                    {
+                        string work = Path.Combine(outDir, "_parts", $"{command}-{k}");
+                        Directory.CreateDirectory(work);
+                        File.Copy(Path.Combine(outDir, "Daggerfall.esm"), Path.Combine(work, "Daggerfall.esm"), overwrite: true);
+                        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
+                        foreach (var a in new[] { command, "--plugin", Path.Combine(work, "Daggerfall.esm"), "--batch", k.ToString(), "--batches", parts.ToString() }) psi.ArgumentList.Add(a);
+                        psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";   // the parent reports the parts
+                        int code;
+                        using (var p = System.Diagnostics.Process.Start(psi)!) { p.WaitForExit(); code = p.ExitCode; }
+                        bool ok = code == 0 && File.Exists(Path.Combine(work, Path.GetFileName(partPath(k))));
+                        lock (gate)
+                        {
+                            File.Delete(Path.Combine(work, "Daggerfall.esm"));
+                            Util.Drives.MoveInto(work, outDir);
+                            if (ok) built.Add(k); else failed.Add($"{plugin} part {k} of {parts}");
+                            finished++;
+                            Progress.Report(finished / (double)Math.Max(1, pending.Count), $"{plugin}: {finished} of {pending.Count} parts built");
+                        }
+                    });
+                    try { if (Directory.Exists(Path.Combine(outDir, "_parts"))) Directory.Delete(Path.Combine(outDir, "_parts"), true); } catch (IOException) { }
+                    done.AddRange(built.Order().Select(partPath));
+                    done.Sort((x, y) => PartNumber(x).CompareTo(PartNumber(y)));
+                    static int PartNumber(string path) => int.Parse(System.Text.RegularExpressions.Regex.Match(Path.GetFileName(path), @"part(\d+)").Groups[1].Value);
                     if (done.Count == 0) return false;
                     string merged = Path.Combine(outDir, plugin);
                     long records = Skyrim.PluginMerger.Merge(done, merged);
@@ -219,11 +251,43 @@ static class Program
                     return true;
                 }
                 Settle(all: false);
-                using (Has(Game.Redguard) ? Begin("Redguard") : null) Step(Game.Redguard, "Redguard.esm", ["rg-build", "--out", outDir]);
-                Settle(all: false);
-                using (Has(Game.Morrowind) ? Begin("Morrowind") : null) Step(Game.Morrowind, "Morrowind.esm", ["mw-build", "--out", outDir]);
-                Settle(all: false);
-                using (Has(Game.Oblivion) ? Begin("Oblivion") : null) Step(Game.Oblivion, "Oblivion.esm", ["ob-build", "--out", outDir]);
+                // Redguard, Morrowind and Oblivion side by side, each in a process of its own (user, 2026-10-14: "should be a
+                // 1 hour conversion"; one after another they took about 50 minutes, Oblivion alone 35). They write their own
+                // folders (TamrielMerge's rg, mw and ob folders); each one's plugin appearing is its success.
+                var games = new (Game Game, string Plugin, string[] Args)[]
+                {
+                    (Game.Redguard, "Redguard.esm", ["rg-build", "--out", outDir]),
+                    (Game.Morrowind, "Morrowind.esm", ["mw-build", "--out", outDir]),
+                    (Game.Oblivion, "Oblivion.esm", ["ob-build", "--out", outDir]),
+                };
+                var toBuild = new List<(Game Game, string Plugin, string[] Args)>();
+                foreach (var g in games)
+                {
+                    if (!found.TryGetValue(g.Game, out var install)) Console.WriteLine($"{g.Game}: not installed through Steam or GOG, skipped");
+                    else if (skip.Contains(g.Game.ToString())) Console.WriteLine($"{g.Game}: skipped (--skip)");
+                    else { Console.WriteLine($"{g.Game} ({install.Store}): converting..."); toBuild.Add(g); }
+                }
+                using (toBuild.Count > 0 ? Begin(toBuild[^1].Game.ToString()) : null)
+                {
+                    // The progress steps of the games built together, as one share.
+                    foreach (var g in toBuild.SkipLast(1)) Begin(g.Game.ToString()).Dispose();
+                    var results = new System.Collections.Concurrent.ConcurrentDictionary<Game, bool>();
+                    int ended = 0;
+                    Parallel.ForEach(toBuild, new ParallelOptions { MaxDegreeOfParallelism = toBuild.Count == 0 ? 1 : toBuild.Count }, g =>
+                    {
+                        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
+                        foreach (var a in g.Args) psi.ArgumentList.Add(a);
+                        psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";
+                        int code;
+                        try { using var p = System.Diagnostics.Process.Start(psi)!; p.WaitForExit(); code = p.ExitCode; }
+                        catch (Exception e) { Console.WriteLine($"{g.Game}: failed: {e.Message}"); code = -1; }
+                        results[g.Game] = code == 0 && File.Exists(Path.Combine(outDir, g.Plugin));
+                        int n = Interlocked.Increment(ref ended);
+                        Progress.Report(n / (double)toBuild.Count, $"{g.Game} converted ({n} of {toBuild.Count})");
+                    });
+                    foreach (var g in toBuild)
+                        if (results.GetValueOrDefault(g.Game)) plugins.Add(g.Plugin); else failed.Add(g.Game.ToString());
+                }
                 Settle(all: false);
                 var recorded = Begin("Recorded voices");
                 // The games' own voice acting as Skyrim voice files (with lip sync), for the converted dialogue.
@@ -287,6 +351,11 @@ static class Program
                         try { if (Main(outDir == finalDir ? ["lod", "--dir", outDir, "--only", "objects,trees"] : ["lod", "--dir", outDir, "--only", "objects,trees", "--assets", finalDir]) != 0) failed.Add("distant objects and trees"); }
                         catch (Exception e) { Console.WriteLine($"Distant LOD: failed: {e.Message}"); failed.Add("distant objects and trees"); }
                 if (outDir != finalDir) using (Begin("Moving the build")) Settle(all: true);
+                // An older menu's loose files where the archive now goes override it: removed (MenuArchive.RemoveLoose).
+                if (plugins.Contains(Skyrim.Render.MenuArchive.PluginName))
+                    foreach (var dir in new[] { finalDir }.Concat(opts.ContainsKey("install") ? [skyrimData] : Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase))
+                        if (Skyrim.Render.MenuArchive.RemoveLoose(dir) is { Count: > 0 } removed)
+                            Console.WriteLine($"Main menu: {removed.Count} older loose menu files removed from {dir} (they hid the new menu's archive)");
                 var creatureStep = Begin("Creatures");
                 // Procedural creatures (--procedural-creatures): ordinary creatures from all the converted games, spawning
                 // and respawning by habitat in every world (--respawn-scale multiplies the games' respawn times).
@@ -1296,6 +1365,7 @@ static class Program
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var r = Skyrim.DaggerfallTowns.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts));
                 Console.WriteLine($"Towns batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.People} people ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
+                Console.WriteLine($"  time: setup {r.SetupSeconds:F0} s, towns {r.TownsSeconds:F0} s, talk and guilds {r.TalkSeconds:F0} s, writing {r.WriteSeconds:F0} s");
                 return r.Built > 0 ? 0 : 2;
             }
             case "df-dungeons":
@@ -4175,6 +4245,97 @@ static class Program
                     File.WriteAllLines(csv, found.Select(f => string.Join(",", f.Kind, f.Cell, f.Ref, f.Base, f.X.ToString("F0"), f.Y.ToString("F0"), f.Z.ToString("F0"), f.Detail)).Prepend("kind,cell,ref,base,x,y,z,detail"));
                 return 0;
             }
+            case "game-check":
+            {
+                // What went wrong in a game session (Skyrim/GameCheck): --prepare turns Papyrus logging on and installs the
+                // crash logger; --launch starts the game through SKSE and waits for it to end; then the session's logs are
+                // scanned (--since "yyyy-MM-dd HH:mm", default the launch, else the last hour) and a report written to logs\.
+                if (opts.ContainsKey("prepare")) Skyrim.GameCheck.Prepare(skyrimData, Console.WriteLine);
+                DateTime since = opts.TryGetValue("since", out var s0) ? DateTime.Parse(s0, System.Globalization.CultureInfo.CurrentCulture) : DateTime.Now.AddHours(-1);
+                if (opts.ContainsKey("launch") && Skyrim.GameCheck.Launch(skyrimData, Console.WriteLine) is { } run) since = run.Started;
+                string workspace = Directory.GetCurrentDirectory();
+                Console.Write(Skyrim.GameCheck.Scan(since, workspace));
+                return 0;
+            }
+            case "esm-find":
+            {
+                // Dev aid: records of --plugin (default Skyrim.esm) whose editor ID matches --edid (a regex), with type and
+                // form ID; --type limits the record type (e.g. SoundDescriptor).
+                string plugin = opts.GetValueOrDefault("plugin", Path.Combine(skyrimData, "Skyrim.esm"));
+                var re = new System.Text.RegularExpressions.Regex(opts["edid"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                using var m = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
+                foreach (var r in m.EnumerateMajorRecords().Where(r => r.EditorID is { } e && re.IsMatch(e)
+                             && (!opts.TryGetValue("type", out var t) || r.Registration.Name.Equals(t, StringComparison.OrdinalIgnoreCase))).Take(60))
+                    Console.WriteLine($"{r.FormKey.ID:X6} {r.Registration.Name,-18} {r.EditorID}");
+                return 0;
+            }
+            case "plugin-check":
+            {
+                // A plugin's links checked against the load order (--data, default Skyrim's Data; --plugins A;B the ones
+                // to check, by file name): every form link must reach a record, of a type the link can hold. Links
+                // into a missing record or the wrong kind (a plugin built against an older master) crash Skyrim.
+                string data = opts.GetValueOrDefault("data", skyrimData);
+                var loadOrder = File.ReadAllLines(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Skyrim Special Edition", "Plugins.txt"))
+                    .Where(l => l.StartsWith('*')).Select(l => l[1..].Trim()).ToList();
+                var order = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Concat(loadOrder)
+                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => File.Exists(Path.Combine(data, f))).ToList();
+                var targets = opts["plugins"].Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                // Only the masters each target needs, plus the target, in load order.
+                foreach (var target in targets)
+                {
+                    var masters = Setup.Parts.MastersOf(data, target);
+                    var mods = order.Where(f => masters.Contains(f, StringComparer.OrdinalIgnoreCase) || f.Equals(target, StringComparison.OrdinalIgnoreCase))
+                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(data, f), SkyrimRelease.SkyrimSE)).ToList();
+                    try
+                    {
+                        var cache = mods.ToImmutableLinkCache();
+                        var mine = mods.Last(m => m.ModKey.FileName.String.Equals(target, StringComparison.OrdinalIgnoreCase));
+                        long records = 0, links = 0;
+                        var bad = new Dictionary<string, int>();
+                        var examples = new List<string>();
+                        foreach (var rec in mine.EnumerateMajorRecords())
+                        {
+                            records++;
+                            foreach (var link in rec.EnumerateFormLinks())
+                            {
+                                // The engine's own forms (the player, 0x14, and the rest below 0x800) aren't in any file.
+                                if (link.IsNull || link.FormKey.ID < 0x800 && link.FormKey.ModKey.FileName.String.Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase)) continue;
+                                links++;
+                                string? problem = null;
+                                if (!cache.TryResolve(link.FormKey, out var found)) problem = "missing";
+                                else if (!link.Type.IsAssignableFrom(found.GetType())) problem = $"wrong kind ({found.Registration.Name} where a {link.Type.Name} goes)";
+                                if (problem is null) continue;
+                                string key = $"{rec.Registration.Name} -> {problem}";
+                                bad[key] = bad.GetValueOrDefault(key) + 1;
+                                if (examples.Count < 12) examples.Add($"    {rec.Registration.Name} {rec.FormKey} {rec.EditorID}: {link.FormKey} {problem}");
+                            }
+                            if (records % 1_000_000 == 0) Console.WriteLine($"  {target}: {records:N0} records...");
+                        }
+                        // Exterior navmeshes: the grid they name must be their cell's, stored Y then X as Skyrim's own are
+                        // (2026-10-14: every converted one was X then Y, naming missing cells in the Iliac Bay).
+                        int navms = 0, wrongGrid = 0;
+                        foreach (var w in mine.Worldspaces)
+                            foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                                if (c.Grid is { } g)
+                                    foreach (var n in c.NavigationMeshes)
+                                        if (n.Data?.Parent is IWorldspaceNavmeshParentGetter wp)
+                                        {
+                                            navms++;
+                                            if (wp.Coordinates.X != g.Point.Y || wp.Coordinates.Y != g.Point.X)
+                                            {
+                                                wrongGrid++;
+                                                if (examples.Count < 12) examples.Add($"    NavigationMesh {n.FormKey} in cell ({g.Point.X},{g.Point.Y}) names grid Y={wp.Coordinates.X} X={wp.Coordinates.Y}");
+                                            }
+                                        }
+                        if (wrongGrid > 0) bad[$"exterior navmesh -> wrong cell grid ({navms:N0} checked)"] = wrongGrid;
+                        Console.WriteLine($"{target}: {records:N0} records, {links:N0} links, {bad.Values.Sum():N0} bad");
+                        foreach (var (k, n) in bad.OrderByDescending(kv => kv.Value).Take(20)) Console.WriteLine($"  {n,8:N0}  {k}");
+                        foreach (var e in examples) Console.WriteLine(e);
+                    }
+                    finally { foreach (var m in mods) m.Dispose(); }
+                }
+                return 0;
+            }
             case "plugin-compare":
             {
                 // Dev aid: two plugins' records by type, and their navmeshes' and land's contents, compared (--a, --b).
@@ -6946,7 +7107,7 @@ static class Program
                 object result = opts.ContainsKey("available") ? Skyrim.Models.ModelCatalog.Available(skyrimData, dir)
                     : Skyrim.Models.ModelCatalog.Used(dir, m => Console.Error.WriteLine(m));
                 string json = System.Text.Json.JsonSerializer.Serialize(result);
-                if (opts.TryGetValue("out", out var o)) File.WriteAllText(o, json); else Console.WriteLine(json);
+                if (opts.TryGetValue("out", out var o)) WriteWhole(o, json); else Console.WriteLine(json);
                 return 0;
             }
             case "model-preview":
@@ -6956,12 +7117,22 @@ static class Program
                 // tools/scene3d/preview_model.py (smooth, matte, its own textures). Kept: an existing preview is reused.
                 string model = opts["model"];
                 string outDir = Path.GetFullPath(opts["out"]);
-                if (File.Exists(Path.Combine(outDir, "view_00.png"))) return 0;
-                string scene = Path.Combine(outDir, "scene");
+                // Finished previews have done.txt; one is made in a folder of its own and moved into place whole, so the
+                // app never reads pictures still being drawn (2026-10-14: half-written frames threw in the app).
+                if (File.Exists(Path.Combine(outDir, "done.txt"))) return 0;
+                string work = outDir + ".tmp-" + Environment.ProcessId;
+                if (Directory.Exists(work)) Directory.Delete(work, true);
+                string scene = Path.Combine(work, "scene");
                 var loose = opts.GetValueOrDefault("loose", "").Split(',', StringSplitOptions.RemoveEmptyEntries).Select(Path.GetFullPath);
                 new Skyrim.Render.SceneExporter(skyrimData, loose, scene).ExportMesh(model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : Path.Combine("meshes", model));
                 string py = Setup.Dependencies.ModelPython ?? throw new InvalidOperationException("the 3D model maker's Python is missing: run setup");
-                return Setup.ToolScripts.Run(py, ["-I", Setup.ToolScripts.Path("scene3d", "preview_model.py"), scene, outDir, "--frames", opts.GetValueOrDefault("frames", "24")]);
+                int code = Setup.ToolScripts.Run(py, ["-I", Setup.ToolScripts.Path("scene3d", "preview_model.py"), scene, work, "--frames", opts.GetValueOrDefault("frames", "24")]);
+                if (code != 0 || !File.Exists(Path.Combine(work, "view_00.png"))) { try { Directory.Delete(work, true); } catch (IOException) { } return code != 0 ? code : 1; }
+                File.WriteAllText(Path.Combine(work, "done.txt"), model);
+                if (Directory.Exists(outDir)) Directory.Delete(outDir, true);   // an old, unfinished one
+                try { Directory.Move(work, outDir); }
+                catch (IOException) when (File.Exists(Path.Combine(outDir, "done.txt"))) { Directory.Delete(work, true); }   // another run finished first
+                return 0;
             }
             case "model-textures":
             {
@@ -6974,7 +7145,7 @@ static class Program
             {
                 // Every texture the user's games offer, as JSON to --out (the texture picker).
                 string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
-                File.WriteAllText(opts["out"], System.Text.Json.JsonSerializer.Serialize(Skyrim.Models.TextureTools.Available(skyrimData, dir)));
+                WriteWhole(opts["out"], System.Text.Json.JsonSerializer.Serialize(Skyrim.Models.TextureTools.Available(skyrimData, dir)));
                 return 0;
             }
             case "texture-thumb":
@@ -6983,11 +7154,14 @@ static class Program
                 string outFile = Path.GetFullPath(opts["out"]);
                 if (File.Exists(outFile)) return 0;
                 string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
-                string dds = outFile + ".dds";
+                // Made under names of this run's own and moved into place whole: two thumbnails of one texture at once
+                // (parts sharing it) no longer share a temporary file or hand the app a half-written picture.
+                string dds = $"{outFile}.{Environment.ProcessId}.dds", png = $"{outFile}.{Environment.ProcessId}.png";
                 if (!Skyrim.Models.TextureTools.Extract(opts["texture"], Skyrim.Models.TextureTools.For(dir, skyrimData), dds)) { Console.Error.WriteLine("texture not found"); return 1; }
                 string py = Setup.Dependencies.Python ?? throw new InvalidOperationException("the Python environment is missing: run setup");
-                int code = Setup.ToolScripts.Run(py, ["-I", Setup.ToolScripts.Path("textures", "pbr.py"), "thumb", dds, outFile, "--size", opts.GetValueOrDefault("size", "256")]);
+                int code = Setup.ToolScripts.Run(py, ["-I", Setup.ToolScripts.Path("textures", "pbr.py"), "thumb", dds, png, "--size", opts.GetValueOrDefault("size", "256")]);
                 File.Delete(dds);
+                if (code == 0 && File.Exists(png)) { try { File.Move(png, outFile, overwrite: true); } catch (IOException) { File.Delete(png); } }
                 return code;
             }
             case "pbr-make":
@@ -7495,6 +7669,16 @@ static class Program
     /// tool's own tools folder, so a run keeps what earlier runs upscaled.</summary>
     internal static string UpscaleFolder(Game game) =>
         Path.Combine(Setup.Dependencies.Root, "upscale", game == Game.Daggerfall ? "out-df" : "out");
+
+    /// <summary>Writes a file under a name of this process's own and moves it into place, so a reader (the app) never sees
+    /// it half-written and two writers don't mix.</summary>
+    static void WriteWhole(string path, string text)
+    {
+        string full = Path.GetFullPath(path), tmp = $"{full}.{Environment.ProcessId}.tmp";
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        File.WriteAllText(tmp, text);
+        File.Move(tmp, full, overwrite: true);
+    }
 
     /// <summary>About how much a convert writes while it builds, by the games it converts (2026-10-13: Daggerfall's land,
     /// LOD, towns and dungeons came to about 30 GB before its dungeons), with room to spare.</summary>
