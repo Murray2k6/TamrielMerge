@@ -125,8 +125,7 @@ public sealed partial class ObPluginBuilder
         {
             // A folder: Oblivion picks one of its files at random, as Skyrim does among a descriptor's files.
             string folder = source.TrimEnd('\\') + @"\";
-            foreach (var f in new[] { ".wav", ".mp3" }.SelectMany(ext => Enumerable.Range(1, 9).Select(i => $"{folder}{Path.GetFileName(source.TrimEnd('\\'))}{i:00}{ext}")))
-                if (data.Exists(f)) files.Add(f);
+            files.AddRange(data.List(folder).Where(f => !f[folder.Length..].Contains('\\')));
         }
         files = files.Where(f => f.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)).ToList();
         if (files.Count == 0) { Problems.Add($"script sound {s.EditorID}: {file} not found (or not a wav)"); return null; }
