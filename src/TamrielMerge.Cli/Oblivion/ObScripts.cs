@@ -72,7 +72,9 @@ public sealed partial class ObPluginBuilder
     public int AttachScripts()
     {
         if (scriptWorld is null) return 0;
-        string sourceDir = Path.Combine(modOutDir, "Source", "Scripts");
+        // A folder of their own: the output folder may be Skyrim's Data, whose Source\Scripts holds the vanilla sources,
+        // which compiling the whole folder (-all) would rebuild into Data\Scripts.
+        string sourceDir = Path.Combine(modOutDir, "Source", "Scripts", "TamrielMerge", "Oblivion");
         string scriptsDir = Path.Combine(modOutDir, "Scripts");
         Directory.CreateDirectory(sourceDir);
         foreach (var o in translations.Values) File.WriteAllText(Path.Combine(sourceDir, o.ScriptName + ".psc"), o.Source);
@@ -194,12 +196,14 @@ public sealed partial class ObPluginBuilder
         string game = Path.GetDirectoryName(Path.GetFullPath(skyrimData.TrimEnd('\\', '/')))!;
         string compiler = Path.Combine(game, "Papyrus Compiler", "PapyrusCompiler.exe");
         string vanilla = Path.Combine(skyrimData, "Source", "Scripts"), skse = Path.Combine(skyrimData, "Scripts", "Source");
+        // The converter's own helper scripts (TMOb…), which the translated scripts call.
+        string helpers = Path.Combine(AppContext.BaseDirectory, "Papyrus");
         if (!File.Exists(compiler) || !File.Exists(Path.Combine(vanilla, "ObjectReference.psc")))
             return (null, "no Papyrus compiler or Skyrim script sources (install the Creation Kit)");
         Directory.CreateDirectory(outDir);
         var psi = new ProcessStartInfo(compiler)
         {
-            ArgumentList = { Path.GetFullPath(sourceDir), "-all", "-q", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(sourceDir)};{skse};{vanilla}", $"-o={Path.GetFullPath(outDir)}" },
+            ArgumentList = { Path.GetFullPath(sourceDir), "-all", "-q", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(sourceDir)};{helpers};{skse};{vanilla}", $"-o={Path.GetFullPath(outDir)}" },
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
@@ -212,7 +216,7 @@ public sealed partial class ObPluginBuilder
         {
             var one = new ProcessStartInfo(compiler)
             {
-                ArgumentList = { n + ".psc", "-q", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(sourceDir)};{skse};{vanilla}", $"-o={Path.GetFullPath(outDir)}" },
+                ArgumentList = { n + ".psc", "-q", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(sourceDir)};{helpers};{skse};{vanilla}", $"-o={Path.GetFullPath(outDir)}" },
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
