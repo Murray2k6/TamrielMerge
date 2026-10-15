@@ -2363,6 +2363,37 @@ static class Program
                 Console.WriteLine($"{interiors} building interiors placed; shared per (block, building, style): {uniqueInteriors.Count}; per (block, building): {uniqueNoStyle.Count}");
                 return 0;
             }
+            case "df-flat-census":
+            {
+                // Every flat of the given texture archives (--archives 346,178) in the RDB and RMB blocks: block, record,
+                // faction/mobile field, flags and how many locations use the block.
+                var wantArchives = opts.GetValueOrDefault("archives", "346,178").Split(',').Select(int.Parse).ToHashSet();
+                var bsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                var allLocs = DfLocations.LoadAll(arena2);
+                var uses = allLocs.SelectMany(l => l.DungeonBlocks.Select(b => b.BlockName).Concat(l.ExteriorBlocks)).GroupBy(n => n, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+                var byRecord = new SortedDictionary<(int, int), int>();
+                foreach (var e in bsa.Entries)
+                {
+                    IEnumerable<(DfRdbObject O, string Where)> flats;
+                    if (e.Name.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase))
+                        flats = DfDungeonBlock.Load(bsa, e.Name).Objects.Where(o => o.Type == DfRdbObjectType.Flat).Select(o => (o, "dungeon"));
+                    else if (e.Name.EndsWith(".RMB", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var tb = DfTownBlock.Load(bsa, e.Name);
+                        flats = DfTownLayout.Exterior(tb).Objects.Where(o => o.Type == DfRdbObjectType.Flat).Select(o => (o, "outside"))
+                            .Concat(tb.Buildings.SelectMany(b => DfTownLayout.Interior(tb, b, new Dictionary<uint, DfModel>()).Objects.Where(o => o.Type == DfRdbObjectType.Flat).Select(o => (o, $"inside #{b.Index} {b.Data.Type}"))));
+                    }
+                    else continue;
+                    foreach (var (o, where) in flats.Where(f => wantArchives.Contains(f.O.TextureArchive)))
+                    {
+                        byRecord[(o.TextureArchive, o.TextureRecord)] = byRecord.GetValueOrDefault((o.TextureArchive, o.TextureRecord)) + 1;
+                        if (opts.ContainsKey("list"))
+                            Console.WriteLine($"  {e.Name} ({uses.GetValueOrDefault(e.Name)} uses) {where}: {o.TextureArchive}.{o.TextureRecord} faction {o.FactionOrMobileId} flags 0x{o.FlatFlags:X} action {o.FlatAction} at ({o.Position.X:F0},{o.Position.Y:F0},{o.Position.Z:F0})");
+                    }
+                }
+                Console.WriteLine(string.Join(", ", byRecord.Select(kv => $"{kv.Key.Item1}.{kv.Key.Item2} x{kv.Value}")));
+                return 0;
+            }
             case "df-rmb-census":
             {
                 // Parse check of every RMB (town) block in BLOCKS.BSA: totals, building types, people flats by archive,
@@ -2459,12 +2490,14 @@ static class Program
                     : ["--device", "cpu", "--threads", Math.Max(2, Environment.ProcessorCount - 4).ToString(), "--model", Setup.Dependencies.FastUpscaleModel];
                 var found = GameInstalls.Detect();
                 string work = Path.GetFullPath("out/video/work");
-                void Remaster(string name, string input, params string[] extra)
+                void Remaster(string name, string input, params string[] extra) => RemasterTo(name, Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik"), input, extra);
+                void RemasterTo(string name, string target, string input, params string[] extra)
                 {
-                    string target = Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik");
                     if (File.Exists(target)) { Console.WriteLine($"{name}: {target} already there"); return; }
                     var psi = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
-                    foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", Path.Combine(work, name.ToLowerInvariant()) }.Concat(device).Concat(extra)) psi.ArgumentList.Add(arg);
+                    // --plain needs no model (and no device): frames are only resized.
+                    string[] how = extra.Contains("--plain") ? [] : device;
+                    foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", Path.Combine(work, name.ToLowerInvariant()) }.Concat(how).Concat(extra)) psi.ArgumentList.Add(arg);
                     psi.Environment["TAMRIELMERGE_TOOLS"] = Setup.Dependencies.Root;
                     if (!opts.ContainsKey("gpu")) psi.Environment["CUDA_VISIBLE_DEVICES"] = "";
                     Console.WriteLine($"{name}: remastering {input}");
@@ -2500,14 +2533,35 @@ static class Program
                 {
                     if (File.Exists(source)) { File.Copy(source, Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik"), true); Console.WriteLine($"{name}: original intro copied"); }
                 }
-                if (found.ContainsKey(Game.Daggerfall) && canRemaster)
+                bool intros = !opts.ContainsKey("quest-videos-only");   // dev: only the quest videos (--anims 11,13 picks some)
+                if (intros && found.ContainsKey(Game.Daggerfall) && canRemaster)
                 {
                     string frames = Path.Combine(work, "dag2-frames");
                     if (!File.Exists(Path.Combine(frames, "audio.wav"))) Daggerfall.DfVid.Export(Path.Combine(arena2, "DAG2.VID"), frames);
                     Remaster("Daggerfall", frames, "--fps", "30");
                     RtLook("Daggerfall", "torch", clean: true);
                 }
-                if (found.ContainsKey(Game.Redguard) && canRemaster)
+                // Daggerfall's quest videos (ANIMnnnn.VID, "play video n": the main quest's visions and endings), as
+                // Video\TamrielMerge_DfAnim<n>.bik for TMDfQuestMachine.PlayVideo. Resized only (bicubic) unless
+                // --upscale-quest-videos runs them through the upscaler as the intro is; they need RAD's Bink compressor,
+                // ffmpeg and the Python environment, not the upscale model.
+                bool canEncode = File.Exists(python) && File.Exists(script) && File.Exists(Setup.Dependencies.RadVideo) && File.Exists(Setup.Dependencies.Ffmpeg);
+                if (found.ContainsKey(Game.Daggerfall) && canEncode && !opts.ContainsKey("no-quest-videos"))
+                {
+                    bool upscaleAnims = canRemaster && opts.ContainsKey("upscale-quest-videos");
+                    foreach (var vid in Directory.GetFiles(arena2, "ANIM*.VID").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+                    {
+                        if (!int.TryParse(Path.GetFileNameWithoutExtension(vid)[4..], out int n)) continue;
+                        if (opts.TryGetValue("anims", out var onlyAnims) && !onlyAnims.Split(',').Contains(n.ToString())) continue;
+                        string target = Path.Combine(videoDir, $"TamrielMerge_DfAnim{n}.bik");
+                        if (File.Exists(target)) continue;
+                        string frames = Path.Combine(work, $"dfanim{n}-frames");
+                        if (!File.Exists(Path.Combine(frames, "audio.wav"))) Daggerfall.DfVid.Export(vid, frames);
+                        if (upscaleAnims) RemasterTo($"DfAnim{n}", target, frames, "--fps", "30");
+                        else RemasterTo($"DfAnim{n}", target, frames, "--fps", "30", "--plain");
+                    }
+                }
+                if (intros && found.ContainsKey(Game.Redguard) && canRemaster)
                 {
                     string smk = Path.Combine(work, "INTRO.SMK");
                     if (!File.Exists(smk))
@@ -2518,12 +2572,12 @@ static class Program
                     Remaster("Redguard", smk, "--prescale", "640x480");
                     RtLook("Redguard", "auto", clean: false);
                 }
-                if (GameInstalls.DataDir(Game.Morrowind) is { } mw)
+                if (intros && GameInstalls.DataDir(Game.Morrowind) is { } mw)
                 {
                     string intro = Path.Combine(mw, "Video", "mw_intro.bik");
                     if (canRemaster) Remaster("Morrowind", intro); else CopyOriginal("Morrowind", intro);
                 }
-                if (GameInstalls.DataDir(Game.Oblivion) is { } ob)
+                if (intros && GameInstalls.DataDir(Game.Oblivion) is { } ob)
                 {
                     string intro = Path.Combine(ob, "Video", "OblivionIntro.bik");
                     if (canRemaster) Remaster("Oblivion", intro, "--prescale", "960x540", "--size", "1920x1080"); else CopyOriginal("Oblivion", intro);
@@ -3918,6 +3972,10 @@ static class Program
                 Console.WriteLine();
                 foreach (var name in new[] { "Daggerfall", "Wayrest", "Sentinel", "Privateer's Hold", "Orsinium", "Castle Necromoghan" })
                     foreach (var l in locs.Where(l => l.Name == name)) Console.WriteLine($"  {l}");
+                // --list TYPE: every location of a type with its id, blocks and buildings (e.g. --list Coven).
+                if (opts.TryGetValue("list", out var listType) && Enum.TryParse<DfLocationType>(listType, true, out var lt))
+                    foreach (var l in locs.Where(l => l.Type == lt))
+                        Console.WriteLine($"  {l.LocationId} {l.Name} ({l.RegionName}, region {l.Region}) @({l.PixelX},{l.PixelY}) blocks [{string.Join(",", l.ExteriorBlocks)}] buildings [{string.Join(",", l.Buildings.Select(b => $"{b.BuildingType}/f{b.FactionId}/q{b.Quality}"))}]");
                 return 0;
             }
             case "ground-preview":
