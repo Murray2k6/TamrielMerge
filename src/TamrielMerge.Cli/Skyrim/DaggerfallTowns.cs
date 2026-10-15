@@ -156,7 +156,7 @@ public static class DaggerfallTowns
     /// master's: links are pointed at the master's record and the copy is dropped. Places, cells, worldspaces, navmeshes,
     /// conversations, form lists and the conversation quest are this plugin's own and stay.
     /// </summary>
-    public static int UseMasterRecords(SkyrimMod mod, ISkyrimModGetter master)
+    public static int UseMasterRecords(SkyrimMod mod, ISkyrimModGetter master, Func<IMajorRecordGetter, bool>? only = null)
     {
         static bool Own(IMajorRecordGetter r) => r is ICellGetter or IWorldspaceGetter or IPlacedGetter or INavigationMeshGetter or ILandscapeGetter
             or IDialogTopicGetter or IDialogResponsesGetter or IDialogBranchGetter or ISceneGetter or IFormListGetter
@@ -164,12 +164,12 @@ public static class DaggerfallTowns
             || r is ILocationGetter l && l.EditorID != "DFLocIliacBay";
         var theirs = new Dictionary<(Type, string), FormKey>();
         foreach (var r in master.EnumerateMajorRecords())
-            if (r.EditorID is { } e && r.FormKey.ModKey == master.ModKey && !Own(r))
+            if (r.EditorID is { } e && r.FormKey.ModKey == master.ModKey && !Own(r) && (only is null || only(r)))
                 theirs.TryAdd((r.Registration.GetterType, e), r.FormKey);
         var remap = new Dictionary<FormKey, FormKey>();
         var drop = new List<(FormKey, Type)>();
         foreach (var r in mod.EnumerateMajorRecords())
-            if (r.EditorID is { } e && !Own(r) && theirs.TryGetValue((r.Registration.GetterType, e), out var key))
+            if (r.EditorID is { } e && !Own(r) && (only is null || only(r)) && theirs.TryGetValue((r.Registration.GetterType, e), out var key))
             {
                 remap[r.FormKey] = key;
                 drop.Add((r.FormKey, r.Registration.GetterType));

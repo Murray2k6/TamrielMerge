@@ -134,7 +134,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     public TownPeople? People { get; init; }
     /// <summary>The people placed in dungeons, for conversations and guilds.</summary>
     public List<TownPeople.Person> PlacedPeople { get; } = [];
-    static readonly int[] PeopleArchives = [176, 177, 179, 181, 182, 183, 184, 334, 357];
+    static readonly int[] PeopleArchives = [176, 177, 178, 179, 181, 182, 183, 184, 334, 346, 357];
     /// <summary>96, corpses: fallen adventurers, as dead thieves, warriors, mages and rogues (enemy classes' lists).</summary>
     const int CorpsesArchive = 96, StartsDeadFlag = 0x200;
     static readonly int[] CorpseClasses = [138, 144, 128, 136];
