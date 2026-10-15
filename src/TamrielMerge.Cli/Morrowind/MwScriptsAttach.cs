@@ -614,6 +614,10 @@ public sealed partial class MwPluginBuilder
         }
         entry.Properties.Add(signs);
         entry.Properties.Add(new ScriptIntListProperty { Name = "SignStats", Data = [.. signStats] });
+        // The player's values for the dialogue's filters on them.
+        var playerStats = new ScriptObjectListProperty { Name = "PlayerStats" };
+        for (int i = 0; i < MwStats.Count; i++) playerStats.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(PlayerStatGlobal(i).FormKey) });
+        entry.Properties.Add(playerStats);
         stateQuest.VirtualMachineAdapter = new QuestAdapter { Scripts = [entry] };
         return stateQuest;
     }

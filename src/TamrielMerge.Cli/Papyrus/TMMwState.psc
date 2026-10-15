@@ -150,6 +150,9 @@ Function SetStat(Actor a, Int aiStat, Int aiBase, Float afValue)
   Int slot = SlotOf(a, True)
   SetDelta(slot, aiStat, afValue - BaseOf(a, aiStat, aiBase))
   Follow(a, aiStat, was, afValue)
+  If a == Game.GetPlayer() && PlayerStats && aiStat < PlayerStats.Length && PlayerStats[aiStat]
+    PlayerStats[aiStat].SetValue(afValue)
+  EndIf
 EndFunction
 
 Function ModStat(Actor a, Int aiStat, Int aiBase, Float afBy)
@@ -266,50 +269,106 @@ EndFunction
 
 ; The player: Morrowind's race values, +10 to the two attributes they use most (Morrowind's class), growth by how
 ; they play (the Skyrim skills nearest to those each attribute governs), and their standing stone (birthsign).
+; Reckoned every few seconds at most (it reads some forty of the player's values).
 Float Function PlayerBase(Actor p, Int aiStat)
-  If aiStat > 7
-    Float s = 30.0 + p.GetLevel()
-    If s > 100.0
-      s = 100.0
-    EndIf
-    Return s
+  Float now = Utility.GetCurrentRealTime()
+  If !playerBase || now - playerAt > 5.0 || now < playerAt
+    RefreshPlayer(p)
   EndIf
-  Float v = RaceBase(p, aiStat)
-  If v < 0.0
-    v = 40.0
-  EndIf
-  Float g = Growth(p, aiStat)
-  v += g
-  ; The class's favoured attributes: the two that grew most.
-  If aiStat < 7
-    Int higher = 0
-    Int k = 0
-    While k < 7
-      If k != aiStat && Growth(p, k) > g
-        higher += 1
-      EndIf
-      k += 1
-    EndWhile
-    If higher < 2
-      v += 10.0
-    EndIf
-  EndIf
-  If v > 100.0
-    v = 100.0
-  EndIf
-  Return v + SignBonus(p, aiStat)
+  Return playerBase[aiStat]
 EndFunction
 
-Float Function SignBonus(Actor p, Int aiStat)
-  Float bonus = 0.0
+Float[] playerBase
+Float playerAt
+
+Function RefreshPlayer(Actor p)
+  Float[] growth = new Float[8]
+  Float[] values = new Float[11]
+  Int k = 0
+  While k < 8
+    growth[k] = Growth(p, k)
+    k += 1
+  EndWhile
+  ; The birthsign: the standing stone whose ability the player has.
+  Int sign = -1
   Int i = 0
-  While Signs && SignStats && i < Signs.Length
+  While sign < 0 && Signs && i < Signs.Length
     If Signs[i] && p.HasSpell(Signs[i])
-      bonus += SignStats[i * 8 + aiStat]
+      sign = i
     EndIf
     i += 1
   EndWhile
-  Return bonus
+  k = 0
+  While k < 8
+    Float v = RaceBase(p, k)
+    If v < 0.0
+      v = 40.0
+    EndIf
+    v += growth[k]
+    ; The class's favoured attributes: the two that grew most (Luck is never one).
+    If k < 7
+      Int higher = 0
+      Int j = 0
+      While j < 7
+        If j != k && growth[j] > growth[k]
+          higher += 1
+        EndIf
+        j += 1
+      EndWhile
+      If higher < 2
+        v += 10.0
+      EndIf
+    EndIf
+    If v > 100.0
+      v = 100.0
+    EndIf
+    If sign >= 0 && SignStats && sign * 8 + k < SignStats.Length
+      v += SignStats[sign * 8 + k]
+    EndIf
+    values[k] = v
+    k += 1
+  EndWhile
+  ; Athletics, Acrobatics, Unarmored: as a middling character of the player's level.
+  Float skill = 30.0 + p.GetLevel()
+  If skill > 100.0
+    skill = 100.0
+  EndIf
+  values[8] = skill
+  values[9] = skill
+  values[10] = skill
+  playerBase = values
+  playerAt = Utility.GetCurrentRealTime()
+EndFunction
+
+; ---- the player's values for the dialogue ----
+
+GlobalVariable[] Property PlayerStats Auto
+{Globals holding the player's attributes, Athletics, Acrobatics and Unarmored (by the stats' numbers), which the
+converted dialogue's filters on them read (Skyrim's conditions can't ask a script).}
+
+Event OnInit()
+  RegisterForSingleUpdate(5.0)
+EndEvent
+
+Event OnUpdate()
+  If TMMwScript.InMorrowind()
+    UpdatePlayerStats()
+  EndIf
+  RegisterForSingleUpdate(10.0)
+EndEvent
+
+Function UpdatePlayerStats()
+  If !PlayerStats
+    Return
+  EndIf
+  Actor p = Game.GetPlayer()
+  Int k = 0
+  While k < PlayerStats.Length && k < 11
+    If PlayerStats[k]
+      PlayerStats[k].SetValue(GetStat(p, k, -1))
+    EndIf
+    k += 1
+  EndWhile
 EndFunction
 
 ; Morrowind raises an attribute by the skills it governs; Skyrim's nearest skills stand in for them.

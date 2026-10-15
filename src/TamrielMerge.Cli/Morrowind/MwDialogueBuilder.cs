@@ -16,7 +16,7 @@ namespace TamrielMerge.Morrowind;
 /// alias for %PCName), its responses in Morrowind's order (the first that applies is said, in both games).</item>
 /// <item>Greetings (type 2) are Hello topics.</item>
 /// <item>Filters and conditions become Skyrim conditions: speaker, race, class, faction and rank, cell, sex,
-/// the player's faction and rank, journal index (GetStage), globals, items carried, deaths, talked-to-PC, random,
+/// the player's faction and rank, journal index (its global, MWJournalIndex…), globals, items carried, deaths, talked-to-PC, random,
 /// levels, skills, health, the speaker's script locals. Conditions on things Skyrim doesn't track (expulsion,
 /// vampirism, weather) are judged as Morrowind would with their usual value, 0.</item>
 /// <item>A response offering choices (Choice "text" n in its result) links to a child topic per choice holding the
@@ -702,6 +702,24 @@ public sealed partial class MwPluginBuilder
         ["34"] = ActorValue.Archery, ["35"] = ActorValue.Speech, ["36"] = ActorValue.Speech,
     };
 
+    /// <summary>Morrowind's filters on the player's attributes (10 Strength, 51-57 Intelligence to Luck) and on the
+    /// skills Skyrim has no counterpart for (19 Athletics, 28 Unarmored, 31 Acrobatics), by TMMwState's stat numbers.</summary>
+    static readonly Dictionary<string, int> PlayerStatFunctions = new()
+    {
+        ["10"] = 0, ["51"] = 1, ["52"] = 2, ["53"] = 3, ["54"] = 4, ["55"] = 5, ["56"] = 6, ["57"] = 7, ["19"] = 8, ["31"] = 9, ["28"] = 10,
+    };
+
+    readonly Dictionary<int, GlobalFloat> playerStatGlobals = [];
+
+    /// <summary>The global holding one of the player's Morrowind stats (TMMwState keeps it up to date), for the dialogue.</summary>
+    GlobalFloat PlayerStatGlobal(int stat)
+    {
+        if (playerStatGlobals.TryGetValue(stat, out var hit)) return hit;
+        var g = new GlobalFloat(mod) { EditorID = "MWPlayer" + char.ToUpperInvariant(MwStats.Names[stat][0]) + MwStats.Names[stat][1..], Data = 40 };
+        mod.Globals.Add(g);
+        return playerStatGlobals[stat] = g;
+    }
+
     /// <summary>Thresholds on the player's skills, attributes and reputation that Skyrim can't test pass, so the
     /// content stays reachable; states (expelled, diseased, vampire, alarmed...) count as 0.</summary>
     static bool SatisfiedWhenUnknown(string function) =>
@@ -717,7 +735,16 @@ public sealed partial class MwPluginBuilder
             case "04": return Cond(new GetActorValuePercentConditionData { ActorValue = ActorValue.Health }, op, c.Value / 100f);
             case "07": return Cond(new GetActorValuePercentConditionData { ActorValue = ActorValue.Health }, op, c.Value / 100f, player: true);
             case "43": return Cond(new GetCrimeGoldConditionData(), op, c.Value, player: true);
+            case "08": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Magicka }, op, c.Value, player: true);
+            case "09": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Stamina }, op, c.Value, player: true);
             default:
+                // The player's attributes, Athletics, Acrobatics and Unarmored: the globals TMMwState keeps them in.
+                if (PlayerStatFunctions.TryGetValue(c.Function, out int stat) && scriptWorld is not null)
+                {
+                    var g = new GetGlobalValueConditionData(); g.Global = new FormLinkOrIndex<IGlobalGetter>(g, PlayerStatGlobal(stat).FormKey);
+                    StateQuest();
+                    return Cond(g, op, c.Value);
+                }
                 if (SkillFunctions.TryGetValue(c.Function, out var av))
                     return Cond(new GetActorValueConditionData { ActorValue = av }, op, c.Value, player: true);
                 return null;

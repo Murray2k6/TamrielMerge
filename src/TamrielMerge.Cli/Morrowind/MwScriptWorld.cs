@@ -160,25 +160,14 @@ public sealed class MwScriptWorld : MwPapyrus.IWorld
 
     readonly Dictionary<string, float> soundSeconds = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>A sound's length from its WAV header (data size over bytes per second); 2 seconds when unknown.</summary>
+    /// <summary>A sound's length from its file (a WAV's header, an MP3's frames); 2 seconds when unknown.</summary>
     public float SoundSeconds(string soundId)
     {
         if (soundSeconds.TryGetValue(soundId, out var s)) return s;
         float seconds = 2;
         if (data is not null && world.Objects.TryGetValue(soundId, out var rec) && rec.Str("FNAM") is { Length: > 0 } file && data.Read(@"sound\" + file) is { Length: > 44 } bytes
-            && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F')
-        {
-            int byteRate = 0, size = 0;
-            for (int p = 12; p + 8 <= bytes.Length;)
-            {
-                string chunk = System.Text.Encoding.ASCII.GetString(bytes, p, 4);
-                int len = BitConverter.ToInt32(bytes, p + 4);
-                if (chunk == "fmt " && p + 16 <= bytes.Length) byteRate = BitConverter.ToInt32(bytes, p + 16);
-                if (chunk == "data") { size = len; break; }
-                p += 8 + len + (len & 1);
-            }
-            if (byteRate > 0 && size > 0) seconds = Math.Clamp((float)size / byteRate, 0.1f, 600f);
-        }
+            && AudioSeconds(bytes) is { } length)
+            seconds = Math.Clamp(length, 0.1f, 600f);
         return soundSeconds[soundId] = seconds;
     }
 
