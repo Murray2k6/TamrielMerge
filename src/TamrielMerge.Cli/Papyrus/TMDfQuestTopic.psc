@@ -1,6 +1,6 @@
 ScriptName TMDfQuestTopic extends TopicInfo
 {Daggerfall quest dialogue: Service 0 "Do you have any work for me?" (TMDfQuestMachine.OfferFrom), 1 an answer about a
-quest place, which marks it on the map.}
+quest place, which marks it on the map, 2 a witches' coven's summoning of a Daedra Prince (TMDfQuestMachine.SummonDaedra).}
 
 TMDfQuestMachine Property Machine Auto
 Int Property Service = 0 Auto
@@ -12,5 +12,7 @@ Function Fragment_End(ObjectReference akSpeakerRef)
     Machine.OfferFrom(akSpeakerRef as Actor)
   ElseIf Service == 1 && DfQuest && Place >= 0
     Machine.RevealSite(DfQuest.PlaceSiteOf(Place))
+  ElseIf Service == 2
+    Machine.SummonDaedra(akSpeakerRef as Actor)
   EndIf
 EndFunction

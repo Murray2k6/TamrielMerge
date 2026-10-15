@@ -8,7 +8,10 @@ Steps (each resumable; work files under --work):
   3. encode: RAD's Bink 1 compressor (radvideo64 binkc) over the PNG sequence at the frame rate, then the audio mixed in
      (binkmix), giving --output.
 
-Usage: python remaster.py --input FILE|DIR --output out.bik --work DIR [--fps 30] [--prescale 640x480] [--size 1440x1080]
+  --plain skips step 2's model: frames are only resized (bicubic), for videos that don't need the slow upscale
+  (Daggerfall's quest videos by default).
+
+Usage: python remaster.py --input FILE|DIR --output out.bik --work DIR [--fps 30] [--prescale 640x480] [--size 1440x1080] [--plain]
 """
 import argparse, glob, os, subprocess, sys, time
 
@@ -54,7 +57,8 @@ def extract(args, src_dir):
         vf = [f"fps={fps}"]
         if args.prescale:
             vf.append(f"scale={args.prescale[0]}:{args.prescale[1]}:flags=bicubic")
-        subprocess.run([FFMPEG, "-v", "error", "-y", "-i", args.input, "-vf", ",".join(vf), "-start_number", "1",
+        loop = ["-stream_loop", str(args.loop)] if args.loop > 0 else []
+        subprocess.run([FFMPEG, "-v", "error", "-y"] + loop + ["-i", args.input, "-vf", ",".join(vf), "-start_number", "1",
                         os.path.join(src_dir, "frame%05d.png")], check=True)
         subprocess.run([FFMPEG, "-v", "error", "-y", "-i", args.input, "-vn", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
                         os.path.join(src_dir, "audio.wav")], check=False)
@@ -156,6 +160,25 @@ def upscale(src_dir, up_dir, size, device="cuda", model_path=MODEL, threads=0):
     pool.shutdown()
 
 
+def resize(src_dir, up_dir, size):
+    """--plain: each frame only resized (bicubic) to size; a repeated frame reuses the last result."""
+    import io
+    os.makedirs(up_dir, exist_ok=True)
+    frames = sorted(glob.glob(os.path.join(src_dir, "frame*.png")))
+    prev_bytes, prev_dst = None, None
+    for f in frames:
+        dst = os.path.join(up_dir, os.path.basename(f))
+        data = open(f, "rb").read()
+        if not os.path.exists(dst):
+            if data == prev_bytes and prev_dst:
+                with open(prev_dst, "rb") as a, open(dst, "wb") as b:
+                    b.write(a.read())
+            else:
+                Image.open(io.BytesIO(data)).convert("RGB").resize(size, Image.BICUBIC).save(dst, compress_level=1)
+        prev_bytes, prev_dst = data, dst
+    print(f"{len(frames)} frames resized to {size[0]}x{size[1]}", flush=True)
+
+
 def run_rad(args):
     """Runs a RAD tool and closes its window once it reports "Done" (it waits open otherwise)."""
     proc = subprocess.Popen([RAD] + args)
@@ -198,6 +221,8 @@ def main():
     ap.add_argument("--device", default="cuda", help="cuda, or cpu to spare the graphics card")
     ap.add_argument("--model", default=MODEL, help="Real-ESRGAN weights (realesr-general-x4v3.pth is the fast one for CPU)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads for the model (0 = PyTorch's default)")
+    ap.add_argument("--plain", action="store_true", help="no model: frames only resized (bicubic) to --size")
+    ap.add_argument("--loop", type=int, default=0, help="a video file played this many extra times (short animations)")
     args = ap.parse_args()
     if os.path.exists(args.output):
         print(f"{args.output} already made", flush=True)
@@ -208,7 +233,10 @@ def main():
     src_dir, up_dir = os.path.join(args.work, "src"), os.path.join(args.work, "up")
     fps = extract(args, src_dir)
     print(f"frames at {fps:.3f} fps", flush=True)
-    upscale(src_dir, up_dir, args.size, args.device, args.model, args.threads)
+    if args.plain:
+        resize(src_dir, up_dir, args.size)
+    else:
+        upscale(src_dir, up_dir, args.size, args.device, args.model, args.threads)
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     encode(up_dir, src_dir, fps, os.path.abspath(args.output))
 

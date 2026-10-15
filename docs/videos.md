@@ -11,6 +11,19 @@ off its CD image), every frame upscaled with Real-ESRGAN to 1440x1080 (Oblivion'
 with RAD Video Tools' compressor, the format Skyrim plays, with the sound mixed in. On the CPU with the fast model
 unless `--gpu`. Without the tools, Morrowind's and Oblivion's own Bink intros are copied as they are.
 
+## Daggerfall's quest videos
+
+The same step makes the videos Daggerfall's quests and covens play, from the player's own ARENA2:
+
+- `ANIMnnnn.VID` (`play video n`, Daggerfall Unity PlayVideo: the main quest's visions and the seven endings, 3-15) as
+  `Video\TamrielMerge_DfAnim<n>.bik`, decoded by `DfVid` at 30 fps;
+- the Daedra Princes' `*.FLC` animations (shown when a coven summons one, `DfQuestBuilder.Daedra`) as
+  `Video\TamrielMerge_DfDaedra<NAME>.bik`, through ffmpeg and looped three times (they are about three seconds).
+
+They are only resized (`remaster.py --plain`: bicubic to 1440x1080, no model), so they need RAD's compressor, ffmpeg and
+the Python environment but not the upscaler; `--upscale-quest-videos` runs them through Real-ESRGAN as the intros are
+(slow on the CPU). `--no-quest-videos` leaves them out. Dev: `videos --quest-videos-only --anims 11,AZURA`.
+
 ## The ray-traced look (`--gpu`)
 
 User request (2026-10-08): the intros made to look ray-traced, like the path-traced menu intro. They are footage, so

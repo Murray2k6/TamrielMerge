@@ -63,9 +63,11 @@ public static class DaggerfallDungeons
         var statics = master.Statics.Where(s => s.EditorID?.StartsWith("DFDunBlk") == true).GroupBy(s => s.EditorID!).ToDictionary(g => g.Key, g => g.First().FormKey);
 
         var props = new PropReplacer(skyrim, skyrimData);
+        // The people Daggerfall stands in dungeons (Scourg Barrow's necromancers and the King of Worms, castle courts).
+        var people = new TownPeople(mod, new VanillaActors(skyrimData), DfFactions.Load(arena2), DfNames.Load(arena2));
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(System.IO.Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), props)
         {
-            Spells = spells, Creatures = creatures, MasterStatics = statics, BackgroundNavmesh = true,
+            Spells = spells, Creatures = creatures, MasterStatics = statics, BackgroundNavmesh = true, People = people,
             QuestGlobal = n => DfQuestGlobals.For(mod, n, master),
             GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y),
             Clutter = new ClutterPlacer(skyrim, props, master.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey)),
@@ -108,10 +110,19 @@ public static class DaggerfallDungeons
         double layout = waitStart - setup, finishWait = clock.Elapsed.TotalSeconds - waitStart;
 
         moveIntoTiles();
-        // This part's dungeons as quest sites for Daggerfall.esm's quest machine (TMDfQuestSites registers them in game).
+        // Its people in their Daggerfall factions and social groups: Daggerfall.esm's faction records (so their regard,
+        // the quests' work topics and the guilds are the same as in town).
+        if (dungeons.PlacedPeople.Count > 0)
+        {
+            new TownTalk(mod, DfText.Load(arena2), people.Factions).Enlist(dungeons.PlacedPeople);
+            Console.WriteLine($"People: {dungeons.PlacedPeople.Count} in dungeons; shared with {System.IO.Path.GetFileName(mainPlugin)}: "
+                + DaggerfallTowns.UseMasterRecords(mod, master, r => r is IFactionGetter or IGlobalGetter) + " records");
+        }
+        // This part's dungeons as quest sites for Daggerfall.esm's quest machine (TMDfQuestSites registers them in game),
+        // with the named individuals standing in them (the King of Worms).
         if (master.Quests.FirstOrDefault(q => q.EditorID == "DFQuestMachine")?.FormKey is { } machine)
         {
-            var sites = QuestSites.Build(mod, $"D{batch}", machine, [], dungeons.BuiltDungeons, dungeons.QuestMarkers, [], QuestSites.MasterMarkers(master, arena2));
+            var sites = QuestSites.Build(mod, $"D{batch}", machine, [], dungeons.BuiltDungeons, dungeons.QuestMarkers, QuestSites.Individuals(mod, dungeons.PlacedPeople), QuestSites.MasterMarkers(master, arena2));
             Console.WriteLine($"Quest sites: {dungeons.BuiltDungeons.Count} dungeons in {sites.Count} site quests");
         }
 

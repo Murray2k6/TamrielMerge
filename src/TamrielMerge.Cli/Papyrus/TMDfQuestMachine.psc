@@ -37,8 +37,21 @@ Int[] Property GuildFaction Auto
 {Per TMDfGuilds guild: the faction its quests' reputation goes to.}
 String[] Property GuildLetters Auto
 {Per TMDfGuilds guild: the quest-name letters its people give.}
-ActorBase[] Property MaleBases Auto
-ActorBase[] Property FemaleBases Auto
+ActorBase[] Property PersonBases Auto
+{Quest people as the town people are: ((race * 2 + female) * Dresses + dress) * FacesPerDress + face; races Breton,
+Redguard, Nord, Dark Elf, High Elf, Wood Elf, Khajiit, Argonian, Orc; dresses commoner, merchant, scholar, noble,
+barkeep, smith.}
+String[] Property PersonNames Auto
+{Daggerfall names, (race * 2 + female) * NamesPerRace + i.}
+Int[] Property RaceOfDf Auto
+{FACTION.TXT race number -> race index (-1 none).}
+Int[] Property DressByBuilding Auto
+Int[] Property DressBySGroup Auto
+Int Property Dresses = 6 Auto
+Int Property FacesPerDress = 2 Auto
+Int Property NamesPerRace = 12 Auto
+Bool[] Property RegionRedguard Auto
+{Per region: its people are Redguards (else Bretons).}
 String[] Property MaleNames Auto
 String[] Property FemaleNames Auto
 FormList[] Property GroupItems Auto
@@ -55,6 +68,9 @@ String[] Property BuildingLabels Auto
 String[] Property Gods Auto
 String[] Property Oaths Auto
 Sound Property QuestSound Auto
+Sound[] Property DfSounds Auto
+Int[] Property DfSoundIds Auto
+{Daggerfall's sounds the quests play, by DAGGER.SND record id.}
 Int Property MinutesPerPixel = 90 Auto
 {Cautious travel time per map pixel, for clocks that count the way there.}
 Int Property CommonersFaction = 0 Auto
@@ -62,7 +78,33 @@ Faction Property MerchantsGroup Auto
 Faction Property NobilityGroup Auto
 {The social group factions conversations put townsfolk in (TownTalk).}
 
+; ---- The Daedra Princes a witches' coven summons (Daggerfall Unity DaggerfallQuestPopupWindow.daedraData, MIT) ----
+Int[] Property DaedraFaction Auto
+{Per prince: Hircine, Clavicus Vile, Mehrunes Dagon, Molag Bal, Sanguine, Peryite, Malacath, Hermaeus Mora, Sheogorath,
+Boethiah, Namira, Meridia, Vaernima, Nocturnal, Mephala, Azura.}
+String[] Property DaedraQuest Auto
+Int[] Property DaedraDay Auto
+{Daggerfall's day of the year (month * 30 + day) the prince can be summoned.}
+Int[] Property DaedraWeather Auto
+{The weather that adds 30 to the chance: 0 any, 1 rain, 2 a thunderstorm.}
+String[] Property DaedraVideo Auto
+Message[] Property SummonNotToday Auto
+Message[] Property SummonAsk Auto
+{Per prince (TEXT.RSC 481, the cost added).}
+Message[] Property SummonBefore Auto
+Message[] Property SummonFailed Auto
+Message Property SummonNoGold Auto
+Form[] Property SummonFoes Auto
+{Daedra Lord, Daedra Seducer, Daedroth, Fire Daedra, Frost Daedra.}
+FormList Property StormWeathers Auto
+{Daggerfall's thunderstorms (rain counts as rain).}
+Int Property GlenmorilWitches = 419 Auto
+Int Property SheogorathIndex = 8 Auto
+
 Int Property CurrentTown = -1 Auto Hidden
+Int summonDay = -1
+Int summonIndex = -1
+Bool[] summoned
 Bool Property MainStarted = False Auto Hidden
 Int[] legal
 
@@ -99,6 +141,122 @@ TMDfQuestSites Function Source(Int site)
   Return Sources.GetAt(site / 100000) as TMDfQuestSites
 EndFunction
 
+; ---- Daedra summoning ----
+
+; Daggerfall's day of the year (Daggerfall Unity DayOfYear: twelve months of 30 days).
+Int Function DayOfYear()
+  GlobalVariable month = Game.GetFormFromFile(0x36, "Skyrim.esm") as GlobalVariable
+  GlobalVariable day = Game.GetFormFromFile(0x37, "Skyrim.esm") as GlobalVariable
+  Return (month.GetValueInt() % 12) * 30 + day.GetValueInt()
+EndFunction
+
+; 0 fair, 1 rain (or snow), 2 a thunderstorm.
+Int Function WeatherNow()
+  Weather w = Weather.GetCurrentWeather()
+  If !w || PlayerRef.IsInInterior()
+    Return 0
+  ElseIf StormWeathers && StormWeathers.HasForm(w)
+    Return 2
+  ElseIf w.GetClassification() >= 2
+    Return 1
+  EndIf
+  Return 0
+EndFunction
+
+; A witch's "Summon": Daggerfall Unity's DaggerfallQuestPopupWindow. The Glenmoril Witches always call Hircine, any other
+; coven a prince picked at random for the day (never Hircine); anyone else only the prince whose day it is. The cost is
+; 200000 - 1000 x the summoner's regard; Sheogorath comes instead 5% of the time (15% in a storm); the prince answers
+; with 30 + the player's regard with them (+30 on their weather, or always for the princes without one) percent. A prince
+; met before only speaks; the first time they offer their quest, and refusing it (or the summoning failing at a coven)
+; brings Daedra.
+Function SummonDaedra(Actor witch)
+  If !witch || !DaedraFaction
+    Return
+  EndIf
+  If !summoned
+    summoned = new Bool[16]
+  EndIf
+  Int fid = DfFactionOf(witch)
+  Bool coven = Reputation.KindOf(fid) == 8
+  Int today = DayOfYear()
+  Int prince = -1
+  If fid == GlenmorilWitches
+    prince = 0
+  ElseIf coven
+    If summonDay != today
+      summonDay = today
+      summonIndex = Utility.RandomInt(1, 15)
+    EndIf
+    prince = summonIndex
+  Else
+    prince = DaedraDay.Find(today)
+  EndIf
+  If prince < 0
+    SummonNotToday[Utility.RandomInt(0, SummonNotToday.Length - 1)].Show()
+    Return
+  EndIf
+  Int cost = 200000 - (Reputation.GetRep(fid) as Int) * 1000
+  If SummonAsk[prince].Show(cost) != 0
+    Return
+  EndIf
+  If PlayerRef.GetGoldAmount() < cost
+    SummonNoGold.Show(cost)
+    Return
+  EndIf
+  PlayerRef.RemoveItem(Game.GetForm(0xF), cost)
+  Int wx = WeatherNow()
+  Int sheogorath = 5
+  If wx == 2
+    sheogorath = 15
+  EndIf
+  If Utility.RandomInt(1, 100) <= sheogorath
+    prince = SheogorathIndex
+  EndIf
+  Int bonus = 0
+  If DaedraWeather[prince] == 0 || (DaedraWeather[prince] == 1 && wx >= 1) || (DaedraWeather[prince] == 2 && wx == 2)
+    bonus = 30
+  EndIf
+  Int chance = 30 + (Reputation.GetRep(DaedraFaction[prince]) as Int) + bonus
+  If Utility.RandomInt(1, 100) > chance
+    SummonFailed[prince].Show()
+    If coven
+      SpawnDaedra(Utility.RandomInt(1, 3))
+    EndIf
+    Return
+  EndIf
+  Game.PlayBink(DaedraVideo[prince], True)
+  If summoned[prince]
+    SummonBefore[prince].Show()
+    Return
+  EndIf
+  summoned[prince] = True
+  Int i = QuestNames.Find(DaedraQuest[prince])
+  If i >= 0 && StartQuest(i, witch, fid, True) && !Quests[i].IsRunning()
+    ; Refused: the prince's servants answer.
+    SpawnDaedra(Utility.RandomInt(3, 5))
+  EndIf
+EndFunction
+
+Function SpawnDaedra(Int count)
+  If !SummonFoes || SummonFoes.Length == 0
+    Return
+  EndIf
+  Int k = 0
+  While k < count
+    Form f = SummonFoes[Utility.RandomInt(0, SummonFoes.Length - 1)]
+    If f
+      Float a = Utility.RandomFloat(0.0, 360.0)
+      Float r = Utility.RandomFloat(300.0, 1200.0)
+      Actor d = PlayerRef.PlaceAtMe(f, 1, False, False) as Actor
+      If d
+        d.MoveTo(PlayerRef, r * Math.Sin(a), r * Math.Cos(a), 0.0)
+        d.StartCombat(PlayerRef)
+      EndIf
+    EndIf
+    k += 1
+  EndWhile
+EndFunction
+
 ; ---- Globals and law ----
 
 Bool Function GetGlobal(Int n)
@@ -132,6 +290,36 @@ Function ChangeLegal(Int amount)
   ElseIf legal[r] < -100
     legal[r] = -100
   EndIf
+EndFunction
+
+; The player's legal standing in a region (-100..100; TMDfLaw reads it for guards and the court).
+Int Function LegalOf(Int region)
+  If !legal || region < 0 || region >= legal.Length
+    Return 0
+  EndIf
+  Return legal[region]
+EndFunction
+
+Function SetLegalOf(Int region, Int value)
+  If !legal
+    legal = new Int[64]
+  EndIf
+  If region >= 0 && region < legal.Length
+    If value > 100
+      value = 100
+    ElseIf value < -100
+      value = -100
+    EndIf
+    legal[region] = value
+  EndIf
+EndFunction
+
+; The Skyrim location of a town site (None for anything else).
+Location Function SiteLocation(Int site)
+  If SiteKind(site) != 2
+    Return None
+  EndIf
+  Return Source(site).TownLocation[SiteLocal(site)]
 EndFunction
 
 ; ---- Offering ----
@@ -574,7 +762,9 @@ Int Function TownSite(Int region, Int notTown)
   Return found
 EndFunction
 
+; A fixed place: the town (or coven) built somewhere is preferred over a place only marked on the map.
 Int Function FixedSite(Int locId, Int dungeon)
+  Int mapOnly = -1
   Int s = 0
   While s < Sources.GetSize()
     TMDfQuestSites src = Sources.GetAt(s) as TMDfQuestSites
@@ -586,12 +776,16 @@ Int Function FixedSite(Int locId, Int dungeon)
     Else
       Int t = src.TownLocId.Find(locId)
       If t >= 0
-        Return s * 100000 + 60000 + t
+        If src.TownLocation[t]
+          Return s * 100000 + 60000 + t
+        ElseIf mapOnly < 0
+          mapOnly = s * 100000 + 60000 + t
+        EndIf
       EndIf
     EndIf
     s += 1
   EndWhile
-  Return -1
+  Return mapOnly
 EndFunction
 
 ; A site's references: 0 the door in, 1 where one arrives inside, 2 a quest spawn marker, 3 a quest item marker, 4 the
@@ -685,6 +879,10 @@ String Function SiteText(Int site, Int mode)
     Return src.TownName[k]
   EndIf
   If mode == 1
+    ; Daggerfall's own name for the building (Daggerfall Unity BuildingNames), else what kind it is.
+    If src.BName && k < src.BName.Length && src.BName[k] != ""
+      Return src.BName[k]
+    EndIf
     Return BuildingLabels[src.BType[k]]
   EndIf
   Return src.TownName[src.BTown[k]]
@@ -741,24 +939,46 @@ ObjectReference Function MakePerson(Int site, Int fid, Int kind)
   If !spot
     spot = Holding
   EndIf
-  Bool female = Utility.RandomInt(0, 1) == 1
-  ActorBase base
-  If female
-    base = FemaleBases[Utility.RandomInt(0, FemaleBases.Length - 1)]
-  Else
-    base = MaleBases[Utility.RandomInt(0, MaleBases.Length - 1)]
+  Int sex = Utility.RandomInt(0, 1)
+  Int ri = PersonRace(fid, site)
+  ; Dressed for their trade (a building type's people), else for their faction's social group.
+  Int dress = -1
+  If kind >= 0 && kind < DressByBuilding.Length
+    dress = DressByBuilding[kind]
   EndIf
+  If dress < 0
+    Int g = Reputation.SGroupOf(fid)
+    If g < 0 || g >= DressBySGroup.Length
+      g = 0
+    EndIf
+    dress = DressBySGroup[g]
+  EndIf
+  ActorBase base = PersonBases[((ri * 2 + sex) * Dresses + dress) * FacesPerDress + Utility.RandomInt(0, FacesPerDress - 1)]
   ObjectReference a = spot.PlaceAtMe(base, 1, True, False)
   String name
   If IsIndividual(fid)
     name = Reputation.NameOf(fid)
-  ElseIf female
-    name = FemaleNames[Utility.RandomInt(0, FemaleNames.Length - 1)]
   Else
-    name = MaleNames[Utility.RandomInt(0, MaleNames.Length - 1)]
+    name = PersonNames[(ri * 2 + sex) * NamesPerRace + Utility.RandomInt(0, NamesPerRace - 1)]
   EndIf
   a.SetDisplayName(name, True)
   Return a
+EndFunction
+
+; A quest person's race (as Daggerfall Unity's StaticNPC: the faction's race, else the region's Breton or Redguard).
+Int Function PersonRace(Int fid, Int site)
+  Int r = Reputation.RaceOf(fid)
+  If r >= 0 && r < RaceOfDf.Length && RaceOfDf[r] >= 0
+    Return RaceOfDf[r]
+  EndIf
+  Int region = SiteRegion(site)
+  If region < 0
+    region = SiteRegion(CurrentTown)
+  EndIf
+  If region >= 0 && region < RegionRedguard.Length && RegionRedguard[region]
+    Return 1
+  EndIf
+  Return 0
 EndFunction
 
 Function PlaceStranger(Int site)
@@ -810,12 +1030,48 @@ String Function FactionName(Int fid)
   Return Reputation.NameOf(fid)
 EndFunction
 
-Function Escort(String name, Bool joins)
+; "add face" / "drop face": Daggerfall Unity shows the face of someone travelling with the player (at most three); here
+; they follow the player (aliases Escort0-2 with Skyrim's follow-the-player package) until dropped.
+Function Escort(String name, Bool joins, ObjectReference who = None)
+  Actor a = who as Actor
   If joins
     Debug.Notification(name + " travels with you.")
+    If a && EscortAlias(a) < 0
+      Int k = EscortAlias(None)
+      If k >= 0
+        If a.GetParentCell() != PlayerRef.GetParentCell()
+          a.MoveTo(PlayerRef, 60.0, 60.0, 0.0)
+        EndIf
+        a.Enable()
+        (GetAlias(1 + k) as ReferenceAlias).ForceRefTo(a)
+        a.EvaluatePackage()
+      EndIf
+    EndIf
   Else
-    Debug.Notification(name + " leaves you.")
+    If name != ""
+      Debug.Notification(name + " leaves you.")
+    EndIf
+    If a
+      Int k = EscortAlias(a)
+      If k >= 0
+        (GetAlias(1 + k) as ReferenceAlias).Clear()
+        a.EvaluatePackage()
+      EndIf
+    EndIf
   EndIf
+EndFunction
+
+; The escort slot holding this actor (None: a free slot), or -1.
+Int Function EscortAlias(Actor a)
+  Int k = 0
+  While k < 3
+    ReferenceAlias r = GetAlias(1 + k) as ReferenceAlias
+    If r && r.GetActorReference() == a
+      Return k
+    EndIf
+    k += 1
+  EndWhile
+  Return -1
 EndFunction
 
 Function CurePlayer(Int what)
@@ -842,8 +1098,15 @@ Function PlayVideo(Int n)
   Game.PlayBink("TamrielMerge_DfAnim" + n + ".bik", True)
 EndFunction
 
+; "play sound N": Daggerfall's own sound with record id N in DAGGER.SND (the converter's DfSounds), else a stand-in.
 Function PlayDfSound(Int n)
-  If QuestSound
+  Int k = -1
+  If DfSoundIds
+    k = DfSoundIds.Find(n)
+  EndIf
+  If k >= 0 && DfSounds[k]
+    DfSounds[k].Play(PlayerRef)
+  ElseIf QuestSound
     QuestSound.Play(PlayerRef)
   EndIf
 EndFunction

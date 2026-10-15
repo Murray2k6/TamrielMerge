@@ -164,11 +164,12 @@ public static class DaggerfallPluginBuilder
         // what this plugin built (Privateer's Hold, its towns and their dungeons); the town and dungeon plugins add theirs.
         var questBuilder = new DfQuestBuilder(mod, arena2, itemMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
         {
-            Foe = id => creatures.Spawn(id),
+            Foe = id => creatures.Spawn(id), CityWatch = creatures.Spawn(146, passive: true),
             Spells = spells.Spells,
             GuildsQuest = guilds?.Quest,
             Guilds = guilds?.Built ?? [],
             IliacBay = iliacBay.FormKey,
+            SoundDir = outDir,
             Weapons = [.. mod.Weapons.Where(w => w.EditorID is { } e && (e.StartsWith("DFWeapIron") || e.StartsWith("DFWeapSteel"))).Select(w => w.FormKey)],
             Armor = [.. mod.Armors.Where(a => a.EditorID is { } e && (e.StartsWith("DFArmorLeather") || e.StartsWith("DFArmorChain") || e.StartsWith("DFArmorIron") || e.StartsWith("DFArmorSteel"))).Select(a => a.FormKey)],
             Books = [.. mod.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey)],
@@ -185,6 +186,12 @@ public static class DaggerfallPluginBuilder
         AddOverlandQuest(mod, layout, tiles, markers, iliacBay, field.Settings.PixelsPerCell, map);
         var (regionAreas, regionOf) = AtmosphereBuilder.AddRegions(mod, skyrim, tiles, layout, field, map);
         Console.WriteLine($"Daggerfall light: {AtmosphereBuilder.ApplyDaggerfallLight(mod, skyrim, world)} weathers copied and relit for the Iliac Bay");
+        // The Iliac Bay's thunderstorms, for the covens' summonings (Sheogorath's weather).
+        var storms = new FormList(mod) { EditorID = "DFStormWeathers" };
+        foreach (var w in mod.Weathers.Where(w => w.EditorID is { } e && (e.Contains("Storm", StringComparison.OrdinalIgnoreCase) || e.Contains("Thunder", StringComparison.OrdinalIgnoreCase))))
+            storms.Items.Add(w.ToLink<ISkyrimMajorRecordGetter>());
+        mod.FormLists.Add(storms);
+        questBuilder.Machine!.VirtualMachineAdapter!.Scripts[0].Properties.Add(new ScriptObjectProperty { Name = "StormWeathers", Object = storms.ToLink<ISkyrimMajorRecordGetter>() });
         foreach (var tile in tiles) tile.Climate = world.Climate;
         Console.WriteLine($"Music: {songs.Count} Daggerfall songs ({songs.Values.Sum() / 60:F0} min), {mod.MusicTypes.Count} music types, {mod.MusicTracks.Count} tracks");
         Console.WriteLine($"Regions: {string.Join(", ", regionAreas.Select(r => $"{r.Key} {r.Value} areas"))}");

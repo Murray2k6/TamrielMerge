@@ -37,10 +37,57 @@ public static class DfSenses
 
     static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
 
+    /// <summary>Daggerfall's language skills (DFCareer.Skills), kept as globals DFSkill&lt;name&gt; at fixed numbers
+    /// (0xDF0310 + i): Skyrim has no skills of its own for them.</summary>
+    public static readonly string[] LanguageSkills = ["Etiquette", "Streetwise", "Centaurian", "Daedric", "Dragonish", "Giantish", "Harpy", "Impish", "Nymph", "Orcish", "Spriggan"];
+    /// <summary>Daggerfall Unity's skill advancement multipliers (DaggerfallSkills): 1 for Etiquette and Streetwise, 15 for
+    /// the nine languages.</summary>
+    public static readonly int[] SkillAdvancement = [1, 1, 15, 15, 15, 15, 15, 15, 15, 15, 15];
+    /// <summary>A language skill's starting value (Daggerfall gives a character's skills outside its class a few points).</summary>
+    public const int StartingSkill = 5;
+    const uint SkillsId = 0xDF0310, EncountersId = 0xDF0320;
+
+    /// <summary>
+    /// The language an enemy may be pacified with on first meeting (Daggerfall Unity GetEnemyEntityLanguageSkill):
+    /// classes Streetwise (Nightblade, Burglar, Rogue, Acrobat, Thief, Assassin) or Etiquette (the rest); Orcish for
+    /// orcs, Harpy, Giantish (giants, gargoyles), Dragonish (dragonlings), Nymph (nymphs, lamias), Daedric (Frost and Fire
+    /// Daedra, Daedroth, Daedra Seducer, Daedra Lord), Spriggan, Centaurian, Impish (imps, dreugh), Etiquette for vampires
+    /// and liches; -1 none (animals and the rest).
+    /// </summary>
+    public static int LanguageOf(int mobileId) => mobileId switch
+    {
+        133 or 135 or 136 or 137 or 138 or 139 => 1,
+        >= 128 => 0,
+        7 or 12 or 21 or 24 => 9,
+        13 => 6,
+        16 or 22 => 5,
+        34 or 40 => 4,
+        10 or 42 => 8,
+        25 or 26 or 27 or 29 or 31 => 3,
+        2 => 10,
+        8 => 2,
+        1 or 41 => 7,
+        28 or 30 or 32 or 33 => 0,
+        _ => -1,
+    };
+
     /// <summary>The control quest in <paramref name="mod"/> (made on first call, at its fixed number).</summary>
     public static Quest Quest(SkyrimMod mod)
     {
         if (mod.Quests.FirstOrDefault(q => q.EditorID == QuestEditorId) is { } existing) return existing;
+        // Daggerfall's language skills (pacification on first meeting; Etiquette and Streetwise also plead in court).
+        var skills = new List<FormKey>();
+        for (int i = 0; i < LanguageSkills.Length; i++)
+        {
+            var g = new GlobalShort(new FormKey(mod.ModKey, SkillsId + (uint)i), SkyrimRelease.SkyrimSE) { EditorID = "DFSkill" + LanguageSkills[i], Data = (short)StartingSkill };
+            mod.Globals.Add(g);
+            skills.Add(g.FormKey);
+        }
+        // The dungeon encounter lists' actors (CreatureBuilder fills it): what a rest in a dungeon may bring.
+        var encounters = new FormList(new FormKey(mod.ModKey, EncountersId), SkyrimRelease.SkyrimSE) { EditorID = "DFRestEncounters" };
+        mod.FormLists.Add(encounters);
+        var skillList = new ScriptObjectListProperty { Name = "Skills" };
+        foreach (var k in skills) skillList.Objects.Add(new ScriptObjectProperty { Object = k.ToLink<ISkyrimMajorRecordGetter>() });
         var quest = new Quest(new FormKey(mod.ModKey, FixedId), SkyrimRelease.SkyrimSE)
         {
             EditorID = QuestEditorId,
@@ -55,7 +102,13 @@ public static class DfSenses
                 new ScriptEntry
                 {
                     Name = ControlScript,
-                    Properties = [new ScriptObjectProperty { Name = "PlayerRef", Object = Sk(0x14).ToLink<ISkyrimMajorRecordGetter>() }],
+                    Properties =
+                    [
+                        new ScriptObjectProperty { Name = "PlayerRef", Object = Sk(0x14).ToLink<ISkyrimMajorRecordGetter>() },
+                        skillList, new ScriptStringListProperty { Name = "SkillNames", Data = [.. LanguageSkills] },
+                        new ScriptIntListProperty { Name = "SkillAdvancement", Data = [.. SkillAdvancement] },
+                        new ScriptObjectProperty { Name = "Encounters", Object = encounters.ToLink<ISkyrimMajorRecordGetter>() },
+                    ],
                 },
             },
             Aliases =
@@ -84,7 +137,7 @@ public static class DfSenses
     /// Gives an actor TMDfSenses (replacing an earlier one) and makes its own scripts count: a templated actor whose
     /// template supplied its scripts (Use Script) takes the template's into its own first, so nothing it had is lost.
     /// </summary>
-    public static void Attach(Npc npc, Quest quest, bool seesInvisible, Func<FormKey, INpcGetter?> resolve)
+    public static void Attach(Npc npc, Quest quest, bool seesInvisible, Func<FormKey, INpcGetter?> resolve, int language = -1)
     {
         var flags = npc.Configuration.TemplateFlags;
         if (!npc.Template.IsNull && flags.HasFlag(NpcConfiguration.TemplateFlag.Script))
@@ -116,6 +169,7 @@ public static class DfSenses
             [
                 new ScriptObjectProperty { Name = "Senses", Object = quest.ToLink<ISkyrimMajorRecordGetter>() },
                 new ScriptBoolProperty { Name = "SeesInvisible", Data = seesInvisible },
+                new ScriptIntProperty { Name = "Language", Data = language },
             ],
         });
     }

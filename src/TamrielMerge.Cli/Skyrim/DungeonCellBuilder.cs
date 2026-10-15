@@ -134,7 +134,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     public TownPeople? People { get; init; }
     /// <summary>The people placed in dungeons, for conversations and guilds.</summary>
     public List<TownPeople.Person> PlacedPeople { get; } = [];
-    static readonly int[] PeopleArchives = [176, 177, 179, 181, 182, 183, 184, 334, 357];
+    static readonly int[] PeopleArchives = [176, 177, 178, 179, 181, 182, 183, 184, 334, 346, 357];
     /// <summary>96, corpses: fallen adventurers, as dead thieves, warriors, mages and rogues (enemy classes' lists).</summary>
     const int CorpsesArchive = 96, StartsDeadFlag = 0x200;
     static readonly int[] CorpseClasses = [138, 144, 128, 136];
@@ -335,6 +335,13 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                             Base = s.ToNullableLink<INpcGetter>(),
                             Placement = new Placement { Position = at, Rotation = new P3Float(0, 0, hash % 360 * MathF.PI / 180) },
                         };
+                        // The marker's classic spawn distance type (its sound index, Daggerfall Unity
+                        // ClassicSpawnDistanceType) for the enemy senses' "would be spawned" area; 0 is the default.
+                        if (o.SoundIndex is > 0 and <= 6)
+                            placedCreature.VirtualMachineAdapter = new VirtualMachineAdapter
+                            {
+                                Scripts = [new ScriptEntry { Name = "TMDfSpawnType", Properties = [new ScriptIntProperty { Name = "Type", Data = o.SoundIndex }] }],
+                            };
                         cell.Temporary.Add(placedCreature);
                         // Ordinary creatures for procedural creatures: fixed monsters (not bosses or people), and random
                         // encounters where the dungeon type's table is monsters.

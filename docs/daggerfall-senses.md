@@ -8,8 +8,8 @@ are not changed, and Morrowind's, Oblivion's, Redguard's and Skyrim's actors kee
 
 ## Where it is
 
-- **TMDfSenses** (Actor script) is on every hostile actor CreatureBuilder makes in Daggerfall.esm, 47 in all: 36
-  `DFCreature...` monsters (the City Watch among them), and 11 `DFLvl...` actors that stand for Skyrim's leveled lists
+- **TMDfSenses** (Actor script) is on every hostile actor CreatureBuilder makes in Daggerfall.esm, 49 in all: 36
+  `DFCreature...` monsters (the City Watch among them), and 13 `DFLvl...` actors that stand for Skyrim's leveled lists
   (the enemy classes, plus Werewolf, Vampire and Vampire Ancient). Those last ones carry
   it themselves, so their Use Script template flag is cleared. The `DFLvlEncounter...` actors keep Use Script, so whatever
   their encounter list picks brings its own copy. The lists hold the `DFLvl...` class actors, not Skyrim's lists. Passive
@@ -33,7 +33,9 @@ is 80 per metre).
 |---|---|---|
 | Sight | SightRadius 4096 classic units (102.4 m), FieldOfView 180, a raycast from eye to eye | 8192 units, heading within 90 degrees, `HasLOS` |
 | Hearing | HearingRadius 25 m, only once it has detected the player and can't see them; static geometry blocks it, doors don't | 2000 units; `HasLOS`, or Skyrim's own detection (`IsDetectedBy`) when the player is behind it |
-| Classic spawn area (gates the Stealth check) | within 1094 classic units; inside, spawn distance type 0: 1024 across and 128 up or down (384 once spawned) | 2188; inside 2048 across, 256 / 768 up or down. Every enemy uses type 0: the per-marker type (the flat's sound index) isn't kept |
+| Classic spawn area (gates the Stealth check) | within 1094 classic units; inside, by the marker's spawn distance type (its sound index, 0-6): spawn across {1024, 384, 640, 768, 768, 768, 768}, up {128, 128, 128, 384, 768, 128, 256}, down {0 (as up), 0, 0, 0, -128, -768, 0}; once spawned across {1024 x4, 768 x3}, up or down {384 x4, 768 x3} | the same x 2; the type rides on the placed enemy (`TMDfSpawnType`, types 1-6; none is type 0) |
+| Language pacification | on first detecting the player (not quest foes): chance out of 200 = Etiquette or Streetwise / 10 + Personality / 5, or a language + Personality / 10; +10 weapons sheathed, else -25; success tallies the skill 3 times and the enemy stops being hostile until struck, failure tallies a language once | the same, Skyrim's Speech for Personality; Daggerfall's skills as globals (below); quest foes are not told apart |
+| Rest spawns | resting in a dungeon on alert (an enemy saw the player within 8 hours): on 12 of each 144 minutes a 1 in 36 chance of one of the dungeon type's random encounters, 8-20 m away | each 12 minutes of a wait or sleep a 1 in 36 chance; the encounter actor of the dungeon seen last; the rest ends there (the hours after are given back within the day); placed at an actor of the cell 640-1600 units off |
 | Stealth check | within 1024 classic units, once a game minute; the player stays unnoticed with `2 x ((distance x Stealth) >> 10)` percent | 2048 units, `Utility.GetCurrentGameTime()` minutes, Skyrim's Sneak as Stealth |
 | Sneak mode | moving at less than half speed (crouching, or standing still): checks only on even minutes; faster, an enemy that has met the player always knows where they are | sneaking (not running or sprinting), or under 60 units a second |
 | Stealth skill use | one use a minute in which any enemy made the check | `Game.AdvanceSkill("Sneak", 1.0)` |
@@ -59,8 +61,31 @@ is 80 per metre).
 - **What Skyrim still decides**: who to attack and how once combat has started; sneak attacks and the detection eye on
   the HUD (both Skyrim's detection); the search movement; and a fight that it starts for its own reasons (a spell or a
   quest), which the script takes as the enemy noticing the player.
-- **Not done**: language pacification on first meeting (no language skills yet); the enemy alert that brings dungeon
-  spawns while resting (there are no rest spawns); per-marker spawn distance types.
+- **Pacified**: Aggression and Assistance stay 0, any fight with the player Skyrim starts is stopped, and it no longer
+  counts among the enemies nearby; struck by the player (or a teammate) it is hostile again and attacks.
+- **Not done**: telling quest foes apart (Daggerfall Unity never pacifies them); classic's minute-by-minute alert
+  decay inside a rest (here the alert is read when the rest begins).
+
+## Language skills
+
+Daggerfall's Etiquette, Streetwise, Centaurian, Daedric, Dragonish, Giantish, Harpy, Impish, Nymph, Orcish and Spriggan
+skills are globals in Daggerfall.esm (`DFSkill<name>`, fixed numbers 0xDF0310-0xDF031A), starting at 5, 0-100.
+TMDfSensesControl.Tally raises one as Daggerfall Unity does: a skill rises by 1 when its uses reach
+`floor(skill x multiplier x 1.04^level x 2 / 5 + 1)` (FormulaHelper.CalculateSkillUsesForAdvancement; multiplier 1 for
+Etiquette and Streetwise, 15 for the languages; Skyrim's level), with a notification. Uses: pacifying (3), a failed
+language (1), pleading in court (Etiquette to debate, Streetwise to lie; docs/daggerfall-quests.md, TMDfLaw).
+
+Which language an enemy answers to (Daggerfall Unity GetEnemyEntityLanguageSkill; `TMDfSenses.Language`, set by
+DfSenses.LanguageOf): Streetwise for Nightblades, Burglars, Rogues, Acrobats, Thieves and Assassins, Etiquette for the
+other classes and for vampires and liches; Orcish (orcs), Harpy, Giantish (giants, gargoyles), Dragonish
+(dragonlings), Nymph (nymphs, lamias), Daedric (Frost and Fire Daedra, Daedroth, Seducer, Daedra Lord), Spriggan,
+Centaurian, Impish (imps, dreugh); animals and the rest none. The classes stand for Skyrim's leveled lists, so a list
+both kinds of class use has an actor per language (`DFLvl<list>` and `DFLvl<list>Streetwise`).
+
+The rest spawns' enemies come from the dungeon types' encounter-list actors (`DFRestEncounters`, 0xDF0320).
+
+`df-senses-check` also prints how many actors answer to each language, the rest encounter lists and how many placed
+enemies have each spawn distance type (six dungeons: type 0 73, 1 81, 2 132, 3 31, 4 7, 5 13, 6 59).
 
 ## Enemies nearby
 

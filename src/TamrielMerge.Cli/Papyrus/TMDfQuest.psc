@@ -338,7 +338,11 @@ EndFunction
 Function Cleanup(Bool ended)
   Int i = 0
   While i < 16
-    ; People the quest made (not the questor or a town's own individuals) leave with it.
+    ; Anyone still travelling with the player stops; people the quest made (not the questor or a town's own
+    ; individuals) leave with it.
+    If personRef[i] && Machine.EscortAlias(personRef[i] as Actor) >= 0
+      Machine.Escort("", False, personRef[i])
+    EndIf
     If personRef[i] && personSite[i] != -2
       personRef[i].Disable()
       personRef[i].Delete()
@@ -688,7 +692,11 @@ Bool Function RunAction(Int i)
       spawnOp[slot] = i
       spawnNext[slot] = Utility.GetCurrentGameTime() + Arg(i, 2) / 1440.0
       If code == 0x54
-        spawnLeft[slot] = -1
+        ; "play sound N every M minutes K times" (Daggerfall Unity PlaySound: 0 times is for ever).
+        spawnLeft[slot] = Arg(i, 3)
+        If spawnLeft[slot] <= 0
+          spawnLeft[slot] = -1
+        EndIf
       Else
         spawnLeft[slot] = Arg(i, 4)
       EndIf
@@ -762,9 +770,9 @@ Bool Function RunAction(Int i)
     EndIf
     personHidden[Arg(i, 1)] = False
   ElseIf code == 0x37
-    Machine.Escort(Name(1, Arg(i, 1), 1), True)
+    Machine.Escort(Name(1, Arg(i, 1), 1), True, personRef[Arg(i, 1)])
   ElseIf code == 0x38
-    Machine.Escort(Name(1, Arg(i, 1), 1), False)
+    Machine.Escort(Name(1, Arg(i, 1), 1), False, personRef[Arg(i, 1)])
   ElseIf code == 0x3D
     Machine.Reputation.ChangeRep(PersonFactionOf(Arg(i, 1)), Arg(i, 2), True)
   ElseIf code == 0x41

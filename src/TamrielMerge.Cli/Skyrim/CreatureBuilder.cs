@@ -99,7 +99,7 @@ public sealed class CreatureBuilder
     readonly Dictionary<string, ISkyrimMajorRecordGetter> templates = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<int, FormKey> spawns = new();          // what leveled lists contain: an actor or a list
     readonly Dictionary<int, FormKey> placeables = new();      // what a placed reference uses: always an actor
-    readonly Dictionary<FormKey, FormKey> listActors = new();   // our "DFLvl..." actors standing for a leveled list
+    readonly Dictionary<(FormKey, int), FormKey> listActors = new();   // our "DFLvl..." actors standing for a leveled list (per pacifying language)
     INpcGetter? listActorTemplate;
     readonly Dictionary<int, FormKey> passiveSpawns = new();
     readonly Dictionary<int, FormKey> encounterLists = new();
@@ -148,7 +148,7 @@ public sealed class CreatureBuilder
                 // Enemy classes: Skyrim's leveled lists (no passive variant).
                 // Encounter lists hold the actor standing for Skyrim's list (it carries TMDfSenses), not the list
                 // itself, so a class an encounter list picks has Daggerfall's senses too.
-                placeables[id] = passiveSpawns[id] = ListActor(template.FormKey, template.EditorID!, senses: true, DfSenses.SeesThroughInvisibility.Contains(id));
+                placeables[id] = passiveSpawns[id] = ListActor(template.FormKey, template.EditorID!, senses: true, DfSenses.SeesThroughInvisibility.Contains(id), DfSenses.LanguageOf(id));
                 spawns[id] = placeables[id];
             }
         }
@@ -169,6 +169,9 @@ public sealed class CreatureBuilder
             }
             mod.LeveledNpcs.Add(list);
             encounterLists[table.Index] = ListActor(list.FormKey, list.EditorID!);
+            // A dungeon type's random encounters may come while the player rests there (TMDfSensesControl).
+            if (table.Index < UnderwaterTable && mod.FormLists.FirstOrDefault(f => f.EditorID == "DFRestEncounters") is { } rest)
+                rest.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(encounterLists[table.Index]));
         }
     }
 
@@ -176,17 +179,18 @@ public sealed class CreatureBuilder
     /// Skyrim's list of an enemy class (<paramref name="senses"/>) carries TMDfSenses as its own script (not the vanilla
     /// bandit's the list picks); one for a Daggerfall encounter list takes its scripts from what the list picks (Use
     /// Script), and everything those lists hold carries TMDfSenses.</summary>
-    FormKey ListActor(FormKey list, string listEditorId, bool senses = false, bool seesInvisible = false)
+    FormKey ListActor(FormKey list, string listEditorId, bool senses = false, bool seesInvisible = false, int language = -1)
     {
         // Vanilla has placeholders too, but for some lists only odd variants (ghostly or pre-aggroed bandits).
-        if (listActors.TryGetValue(list, out var actor)) return actor;
+        if (listActors.TryGetValue((list, language), out var actor)) return actor;
         var copy = (listActorTemplate ?? throw new InvalidOperationException("LvlBanditMelee1H not found")).Duplicate(mod.GetNextFormKey());
-        copy.EditorID = "DFLvl" + (listEditorId.StartsWith("LChar") ? listEditorId[5..] : listEditorId.StartsWith("DFLChar") ? listEditorId[7..] : listEditorId);
+        copy.EditorID = "DFLvl" + (listEditorId.StartsWith("LChar") ? listEditorId[5..] : listEditorId.StartsWith("DFLChar") ? listEditorId[7..] : listEditorId)
+            + (language == 1 ? "Streetwise" : "");   // the classes Streetwise pacifies (thieves, assassins) apart from those Etiquette does
         copy.Template.SetTo(list);
         copy.Configuration.TemplateFlags |= NpcConfiguration.TemplateFlag.Script;
-        if (senses) DfSenses.Attach(copy, Senses!, seesInvisible, Vanilla);
+        if (senses) DfSenses.Attach(copy, Senses!, seesInvisible, Vanilla, language);
         mod.Npcs.Add(copy);
-        return listActors[list] = copy.FormKey;
+        return listActors[(list, language)] = copy.FormKey;
     }
 
     Npc CopyActor(INpcGetter template, DfMobile mobile, bool passive)
@@ -218,7 +222,7 @@ public sealed class CreatureBuilder
         // Templated copies (draugr, ghosts) would otherwise take their name from the template.
         copy.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.BaseData;
         // Daggerfall's senses for its hostile ones (DfSenses); the passive ones fight only when attacked.
-        if (!passive) DfSenses.Attach(copy, Senses!, DfSenses.SeesThroughInvisibility.Contains(mobile.Id), Vanilla);
+        if (!passive) DfSenses.Attach(copy, Senses!, DfSenses.SeesThroughInvisibility.Contains(mobile.Id), Vanilla, DfSenses.LanguageOf(mobile.Id));
         mod.Npcs.Add(copy);
         return copy;
     }

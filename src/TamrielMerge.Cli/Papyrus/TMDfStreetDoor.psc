@@ -13,6 +13,8 @@ Actor[] Property Occupants Auto
 String[] Property Names Auto
 Int Property BuildingType = 17 Auto
 Int Property LockValue = 0 Auto
+String Property BuildingName = "" Auto
+{Daggerfall's name for the building ("The Dancing Griffin"), empty for houses; the quests name it so.}
 GlobalVariable Property BreakIns Auto
 {Shops broken into (the Thieves Guild takes notice, TMDfGuilds).}
 Int failedAtSkill = -1

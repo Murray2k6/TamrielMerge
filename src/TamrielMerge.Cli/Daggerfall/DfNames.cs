@@ -56,6 +56,14 @@ public sealed class DfNames
 
     static string Pick(string[] parts, DfRandom r) => parts[r.Rand() % (uint)parts.Length];
 
+    /// <summary>A first name (Daggerfall Unity NameHelper.FirstName: Redguards have a single name).</summary>
+    public string FirstName(DfNameBank bank, bool female, DfRandom r)
+    {
+        var sets = banks[(int)bank];
+        if (bank == DfNameBank.Redguard) return FullName(bank, female, r);
+        return female ? Pick(sets[2], r) + Pick(sets[3], r) : Pick(sets[0], r) + Pick(sets[1], r);
+    }
+
     /// <summary>A full name from this generator state (seed it with the NPC's name seed for Daggerfall's own name).</summary>
     public string FullName(DfNameBank bank, bool female, DfRandom r)
     {

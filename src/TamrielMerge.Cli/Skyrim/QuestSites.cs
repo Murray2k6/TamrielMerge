@@ -82,18 +82,21 @@ public static class QuestSites
         }
 
         var quests = new List<Quest>();
-        var t = new List<(Town Town, List<(int Type, FormKey Door, FormKey Arrival, FormKey Spawn, FormKey Item)> Buildings)>();
+        var t = new List<(Town Town, List<(int Type, FormKey Door, FormKey Arrival, FormKey Spawn, FormKey Item, string Name)> Buildings)>();
         foreach (var town in towns)
         {
-            var list = new List<(int, FormKey, FormKey, FormKey, FormKey)>();
+            var list = new List<(int, FormKey, FormKey, FormKey, FormKey, string)>();
             foreach (var (type, doors) in (town.Built?.DoorsByType ?? []).OrderBy(d => d.Key))
             {
                 bool house = (int)type is >= 17 and <= 22;
                 foreach (var door in doors.Take(house ? PerHouseType : PerType))
                 {
-                    var arrival = door.VirtualMachineAdapter?.Scripts.SelectMany(s => s.Properties).OfType<ScriptObjectProperty>().FirstOrDefault(p => p.Name == "Arrival")?.Object.FormKey ?? FormKey.Null;
+                    var doorProps = door.VirtualMachineAdapter?.Scripts.SelectMany(s => s.Properties).ToList() ?? [];
+                    var arrival = doorProps.OfType<ScriptObjectProperty>().FirstOrDefault(p => p.Name == "Arrival")?.Object.FormKey ?? FormKey.Null;
+                    // Daggerfall's name for the building (TownBuilder: DfBuildingNames), for the quests' text.
+                    string name = doorProps.OfType<ScriptStringProperty>().FirstOrDefault(p => p.Name == "BuildingName")?.Data ?? "";
                     var (spawn, item) = MarkersIn(cellOf.GetValueOrDefault(arrival));
-                    list.Add(((int)type, door.FormKey, arrival, spawn, item));
+                    list.Add(((int)type, door.FormKey, arrival, spawn, item, name));
                 }
             }
             t.Add((town, list));
@@ -148,6 +151,7 @@ public static class QuestSites
                             Ints("BType", bs.Select(b => b.B.Type)), Ints("BTown", bs.Select(b => b.Town)),
                             Objs("BDoor", bs.Select(b => b.B.Door)), Objs("BArrival", bs.Select(b => b.B.Arrival)),
                             Objs("BSpawn", bs.Select(b => b.B.Spawn)), Objs("BItem", bs.Select(b => b.B.Item)),
+                            new ScriptStringListProperty { Name = "BName", Data = [.. bs.Select(b => b.B.Name)] },
                             new ScriptStringListProperty { Name = "DName", Data = [.. ds.Select(d => d.Location.Name)] },
                             Ints("DRegion", ds.Select(d => d.Location.Region)), Ints("DLocId", ds.Select(d => d.Location.LocationId)),
                             Ints("DType", ds.Select(d => (int)d.Location.DungeonType)),

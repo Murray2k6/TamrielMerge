@@ -26,12 +26,13 @@ public static class DaggerfallTowns
 
     public static int PartCount(List<DfLocation> all) => (int)Math.Max(1, (all.Sum(l => (long)l.ExteriorBlocks.Length) + BlocksPerPart - 1) / BlocksPerPart);
 
-    /// <summary>The towns the batches cover, in a fixed order: every town with blocks that Daggerfall.esm doesn't build.</summary>
+    /// <summary>The towns the batches cover, in a fixed order: every town with blocks that Daggerfall.esm doesn't build, and
+    /// the witches' covens (one block each: the witches in the open, their summoning and quests; built as a town is).</summary>
     public static List<DfLocation> All(string arena2, ISkyrimModGetter master)
     {
         var inMaster = master.Worldspaces.Select(w => w.EditorID).Where(e => e?.StartsWith("DFT") == true).ToHashSet();
         return DfLocations.LoadAll(arena2)
-            .Where(l => l.ExteriorBlocks.Length > 0 && l.Type is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage)
+            .Where(l => l.ExteriorBlocks.Length > 0 && l.Type is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage or DfLocationType.Coven)
             .Where(l => !inMaster.Contains("DFT" + LocationPlacer.Sanitize(l.Name) + l.Region))
             .OrderBy(l => l.Region).ThenBy(l => l.Name, StringComparer.Ordinal).ThenBy(l => l.PixelX).ThenBy(l => l.PixelY)
             .ToList();
@@ -156,7 +157,7 @@ public static class DaggerfallTowns
     /// master's: links are pointed at the master's record and the copy is dropped. Places, cells, worldspaces, navmeshes,
     /// conversations, form lists and the conversation quest are this plugin's own and stay.
     /// </summary>
-    public static int UseMasterRecords(SkyrimMod mod, ISkyrimModGetter master)
+    public static int UseMasterRecords(SkyrimMod mod, ISkyrimModGetter master, Func<IMajorRecordGetter, bool>? only = null)
     {
         static bool Own(IMajorRecordGetter r) => r is ICellGetter or IWorldspaceGetter or IPlacedGetter or INavigationMeshGetter or ILandscapeGetter
             or IDialogTopicGetter or IDialogResponsesGetter or IDialogBranchGetter or ISceneGetter or IFormListGetter
@@ -164,12 +165,12 @@ public static class DaggerfallTowns
             || r is ILocationGetter l && l.EditorID != "DFLocIliacBay";
         var theirs = new Dictionary<(Type, string), FormKey>();
         foreach (var r in master.EnumerateMajorRecords())
-            if (r.EditorID is { } e && r.FormKey.ModKey == master.ModKey && !Own(r))
+            if (r.EditorID is { } e && r.FormKey.ModKey == master.ModKey && !Own(r) && (only is null || only(r)))
                 theirs.TryAdd((r.Registration.GetterType, e), r.FormKey);
         var remap = new Dictionary<FormKey, FormKey>();
         var drop = new List<(FormKey, Type)>();
         foreach (var r in mod.EnumerateMajorRecords())
-            if (r.EditorID is { } e && !Own(r) && theirs.TryGetValue((r.Registration.GetterType, e), out var key))
+            if (r.EditorID is { } e && !Own(r) && (only is null || only(r)) && theirs.TryGetValue((r.Registration.GetterType, e), out var key))
             {
                 remap[r.FormKey] = key;
                 drop.Add((r.FormKey, r.Registration.GetterType));

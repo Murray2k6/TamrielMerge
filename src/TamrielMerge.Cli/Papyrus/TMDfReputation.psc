@@ -15,6 +15,11 @@ Int[] Property Allies Auto
 {Three per faction (0 none).}
 Int[] Property Enemies Auto
 String[] Property Names Auto
+Int[] Property Races Auto
+{FACTION.TXT race (0 Nord, 1 Khajiit, 2 Redguard, 3 Breton, 4 Argonian, 5 Wood Elf, 6 High Elf, 7 Dark Elf, 17 Orc;
+-1 none).}
+Int[] Property SGroups Auto
+{The social group of the faction's people (its own, else the nearest parent's, as conversations count them).}
 GlobalVariable[] Property React Auto
 Int Property GenericTemple = 450 Auto
 Int Property GenericKnightlyOrder = 844 Auto
@@ -27,6 +32,22 @@ Int Function IndexOf(Int id)
     Return -1
   EndIf
   Return Ids.Find(id)
+EndFunction
+
+Int Function RaceOf(Int id)
+  Int k = IndexOf(id)
+  If k < 0 || !Races
+    Return -1
+  EndIf
+  Return Races[k]
+EndFunction
+
+Int Function SGroupOf(Int id)
+  Int k = IndexOf(id)
+  If k < 0 || !SGroups
+    Return 0
+  EndIf
+  Return SGroups[k]
 EndFunction
 
 Float Function GetRep(Int id)

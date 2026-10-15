@@ -1429,7 +1429,7 @@ static class Program
                 DfQuestGlobals.AddAll(mod);
                 var builder = new DfQuestBuilder(mod, arena2, masters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
                 {
-                    Foe = id => creatures.Spawn(id), Spells = spells.Spells,
+                    Foe = id => creatures.Spawn(id), CityWatch = creatures.Spawn(146, passive: true), Spells = spells.Spells, SoundDir = Path.GetDirectoryName(outPath),
                 };
                 builder.Build();
                 foreach (var p in builder.Problems) Console.WriteLine("  " + p);
@@ -1606,7 +1606,7 @@ static class Program
                     DfQuestGlobals.AddAll(mod);
                     var qb = new DfQuestBuilder(mod, arena2, questMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
                     {
-                        Foe = id => townCreatures.Spawn(id), GuildsQuest = guilds.Quest, Guilds = guilds.Built,
+                        Foe = id => townCreatures.Spawn(id), CityWatch = townCreatures.Spawn(146, passive: true), GuildsQuest = guilds.Quest, Guilds = guilds.Built, SoundDir = outDir,
                     };
                     qb.Build();
                     var questTowns = picked.Zip(built).Select(p => new QuestSites.Town(p.First, p.Second)).ToList();
@@ -1619,8 +1619,17 @@ static class Program
                         int Filled(string n) => p.FirstOrDefault(x => x.Name == n) is ScriptObjectListProperty o ? o.Objects.Count(x => !x.Object.IsNull) : 0;
                         Console.WriteLine($"quest sites {s.EditorID}: {Len("TownName")} towns, {Len("BType")} buildings ({Filled("BArrival")} with arrival, {Filled("BSpawn")} with a spawn marker, {Filled("BItem")} item marker), "
                             + $"{Len("DName")} dungeons ({Filled("DSpawn")} with a spawn marker), {Len("IFaction")} individuals");
+                        if (p.FirstOrDefault(x => x.Name == "BName") is ScriptStringListProperty bn && bn.Data.Any(n => n.Length > 0))
+                            Console.WriteLine($"  building names: {bn.Data.Count(n => n.Length > 0)}, e.g. {string.Join("; ", bn.Data.Where(n => n.Length > 0).Distinct().Take(12))}");
                     }
                     Console.WriteLine($"quest markers: {dungeons.QuestMarkers.Values.Sum(m => m.Count)} in {dungeons.QuestMarkers.Count} cells");
+                    // Covens: their witches in a coven faction that "Summon a Daedra Prince." answers to.
+                    var covenFactions = DfFactions.Load(arena2).ById.Values.Where(f => f.Type == DfFactionType.WitchesCoven).Select(f => $"DFFaction{f.Id}").ToHashSet();
+                    var factionEdid = mod.Factions.ToDictionary(f => f.FormKey, f => f.EditorID ?? "");
+                    int witches = townBuilder.Placed.Count(p => p.Npc.Factions.Any(r => covenFactions.Contains(factionEdid.GetValueOrDefault(r.Faction.FormKey, ""))));
+                    var summon = mod.DialogTopics.FirstOrDefault(t => t.EditorID == "DFQuestSummon");
+                    int summonFactions = summon?.Responses.SelectMany(r => r.Conditions).Select(c => c.Data).OfType<GetInFactionConditionData>().Count(d => covenFactions.Contains(factionEdid.GetValueOrDefault(d.Faction.Link.FormKey, ""))) ?? 0;
+                    if (witches > 0 || summon is not null) Console.WriteLine($"covens: {witches} witches in coven factions; the summoning topic answers {summonFactions} coven factions");
                     Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
                 }
                 var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
@@ -2363,6 +2372,37 @@ static class Program
                 Console.WriteLine($"{interiors} building interiors placed; shared per (block, building, style): {uniqueInteriors.Count}; per (block, building): {uniqueNoStyle.Count}");
                 return 0;
             }
+            case "df-flat-census":
+            {
+                // Every flat of the given texture archives (--archives 346,178) in the RDB and RMB blocks: block, record,
+                // faction/mobile field, flags and how many locations use the block.
+                var wantArchives = opts.GetValueOrDefault("archives", "346,178").Split(',').Select(int.Parse).ToHashSet();
+                var bsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                var allLocs = DfLocations.LoadAll(arena2);
+                var uses = allLocs.SelectMany(l => l.DungeonBlocks.Select(b => b.BlockName).Concat(l.ExteriorBlocks)).GroupBy(n => n, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+                var byRecord = new SortedDictionary<(int, int), int>();
+                foreach (var e in bsa.Entries)
+                {
+                    IEnumerable<(DfRdbObject O, string Where)> flats;
+                    if (e.Name.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase))
+                        flats = DfDungeonBlock.Load(bsa, e.Name).Objects.Where(o => o.Type == DfRdbObjectType.Flat).Select(o => (o, "dungeon"));
+                    else if (e.Name.EndsWith(".RMB", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var tb = DfTownBlock.Load(bsa, e.Name);
+                        flats = DfTownLayout.Exterior(tb).Objects.Where(o => o.Type == DfRdbObjectType.Flat).Select(o => (o, "outside"))
+                            .Concat(tb.Buildings.SelectMany(b => DfTownLayout.Interior(tb, b, new Dictionary<uint, DfModel>()).Objects.Where(o => o.Type == DfRdbObjectType.Flat).Select(o => (o, $"inside #{b.Index} {b.Data.Type}"))));
+                    }
+                    else continue;
+                    foreach (var (o, where) in flats.Where(f => wantArchives.Contains(f.O.TextureArchive)))
+                    {
+                        byRecord[(o.TextureArchive, o.TextureRecord)] = byRecord.GetValueOrDefault((o.TextureArchive, o.TextureRecord)) + 1;
+                        if (opts.ContainsKey("list"))
+                            Console.WriteLine($"  {e.Name} ({uses.GetValueOrDefault(e.Name)} uses) {where}: {o.TextureArchive}.{o.TextureRecord} faction {o.FactionOrMobileId} flags 0x{o.FlatFlags:X} action {o.FlatAction} at ({o.Position.X:F0},{o.Position.Y:F0},{o.Position.Z:F0})");
+                    }
+                }
+                Console.WriteLine(string.Join(", ", byRecord.Select(kv => $"{kv.Key.Item1}.{kv.Key.Item2} x{kv.Value}")));
+                return 0;
+            }
             case "df-rmb-census":
             {
                 // Parse check of every RMB (town) block in BLOCKS.BSA: totals, building types, people flats by archive,
@@ -2459,12 +2499,14 @@ static class Program
                     : ["--device", "cpu", "--threads", Math.Max(2, Environment.ProcessorCount - 4).ToString(), "--model", Setup.Dependencies.FastUpscaleModel];
                 var found = GameInstalls.Detect();
                 string work = Path.GetFullPath("out/video/work");
-                void Remaster(string name, string input, params string[] extra)
+                void Remaster(string name, string input, params string[] extra) => RemasterTo(name, Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik"), input, extra);
+                void RemasterTo(string name, string target, string input, params string[] extra)
                 {
-                    string target = Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik");
                     if (File.Exists(target)) { Console.WriteLine($"{name}: {target} already there"); return; }
                     var psi = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
-                    foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", Path.Combine(work, name.ToLowerInvariant()) }.Concat(device).Concat(extra)) psi.ArgumentList.Add(arg);
+                    // --plain needs no model (and no device): frames are only resized.
+                    string[] how = extra.Contains("--plain") ? [] : device;
+                    foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", Path.Combine(work, name.ToLowerInvariant()) }.Concat(how).Concat(extra)) psi.ArgumentList.Add(arg);
                     psi.Environment["TAMRIELMERGE_TOOLS"] = Setup.Dependencies.Root;
                     if (!opts.ContainsKey("gpu")) psi.Environment["CUDA_VISIBLE_DEVICES"] = "";
                     Console.WriteLine($"{name}: remastering {input}");
@@ -2500,14 +2542,44 @@ static class Program
                 {
                     if (File.Exists(source)) { File.Copy(source, Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik"), true); Console.WriteLine($"{name}: original intro copied"); }
                 }
-                if (found.ContainsKey(Game.Daggerfall) && canRemaster)
+                bool intros = !opts.ContainsKey("quest-videos-only");   // dev: only the quest videos (--anims 11,13 picks some)
+                if (intros && found.ContainsKey(Game.Daggerfall) && canRemaster)
                 {
                     string frames = Path.Combine(work, "dag2-frames");
                     if (!File.Exists(Path.Combine(frames, "audio.wav"))) Daggerfall.DfVid.Export(Path.Combine(arena2, "DAG2.VID"), frames);
                     Remaster("Daggerfall", frames, "--fps", "30");
                     RtLook("Daggerfall", "torch", clean: true);
                 }
-                if (found.ContainsKey(Game.Redguard) && canRemaster)
+                // Daggerfall's quest videos (ANIMnnnn.VID, "play video n": the main quest's visions and endings), as
+                // Video\TamrielMerge_DfAnim<n>.bik for TMDfQuestMachine.PlayVideo. Resized only (bicubic) unless
+                // --upscale-quest-videos runs them through the upscaler as the intro is; they need RAD's Bink compressor,
+                // ffmpeg and the Python environment, not the upscale model.
+                bool canEncode = File.Exists(python) && File.Exists(script) && File.Exists(Setup.Dependencies.RadVideo) && File.Exists(Setup.Dependencies.Ffmpeg);
+                if (found.ContainsKey(Game.Daggerfall) && canEncode && !opts.ContainsKey("no-quest-videos"))
+                {
+                    bool upscaleAnims = canRemaster && opts.ContainsKey("upscale-quest-videos");
+                    foreach (var vid in Directory.GetFiles(arena2, "ANIM*.VID").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+                    {
+                        if (!int.TryParse(Path.GetFileNameWithoutExtension(vid)[4..], out int n)) continue;
+                        if (opts.TryGetValue("anims", out var onlyAnims) && !onlyAnims.Split(',').Contains(n.ToString())) continue;
+                        string target = Path.Combine(videoDir, $"TamrielMerge_DfAnim{n}.bik");
+                        if (File.Exists(target)) continue;
+                        string frames = Path.Combine(work, $"dfanim{n}-frames");
+                        if (!File.Exists(Path.Combine(frames, "audio.wav"))) Daggerfall.DfVid.Export(vid, frames);
+                        if (upscaleAnims) RemasterTo($"DfAnim{n}", target, frames, "--fps", "30");
+                        else RemasterTo($"DfAnim{n}", target, frames, "--fps", "30", "--plain");
+                    }
+                    // The Daedra Princes' appearances when a coven summons them (ARENA2's FLC animations, through ffmpeg).
+                    foreach (var d in Skyrim.DfQuestBuilder.Daedra)
+                    {
+                        string flc = Path.Combine(arena2, d.Video + ".FLC");
+                        if (!File.Exists(flc) || opts.TryGetValue("anims", out var onlyVideos) && !onlyVideos.Split(',').Contains(d.Video, StringComparer.OrdinalIgnoreCase)) continue;
+                        string target = Path.Combine(videoDir, Skyrim.DfQuestBuilder.DaedraVideoName(d.Video));
+                        if (upscaleAnims) RemasterTo($"DfDaedra{d.Video}", target, flc, "--loop", "2");
+                        else RemasterTo($"DfDaedra{d.Video}", target, flc, "--loop", "2", "--plain");
+                    }
+                }
+                if (intros && found.ContainsKey(Game.Redguard) && canRemaster)
                 {
                     string smk = Path.Combine(work, "INTRO.SMK");
                     if (!File.Exists(smk))
@@ -2518,12 +2590,12 @@ static class Program
                     Remaster("Redguard", smk, "--prescale", "640x480");
                     RtLook("Redguard", "auto", clean: false);
                 }
-                if (GameInstalls.DataDir(Game.Morrowind) is { } mw)
+                if (intros && GameInstalls.DataDir(Game.Morrowind) is { } mw)
                 {
                     string intro = Path.Combine(mw, "Video", "mw_intro.bik");
                     if (canRemaster) Remaster("Morrowind", intro); else CopyOriginal("Morrowind", intro);
                 }
-                if (GameInstalls.DataDir(Game.Oblivion) is { } ob)
+                if (intros && GameInstalls.DataDir(Game.Oblivion) is { } ob)
                 {
                     string intro = Path.Combine(ob, "Video", "OblivionIntro.bik");
                     if (canRemaster) Remaster("Oblivion", intro, "--prescale", "960x540", "--size", "1920x1080"); else CopyOriginal("Oblivion", intro);
@@ -3945,6 +4017,10 @@ static class Program
                 Console.WriteLine();
                 foreach (var name in new[] { "Daggerfall", "Wayrest", "Sentinel", "Privateer's Hold", "Orsinium", "Castle Necromoghan" })
                     foreach (var l in locs.Where(l => l.Name == name)) Console.WriteLine($"  {l}");
+                // --list TYPE: every location of a type with its id, blocks and buildings (e.g. --list Coven).
+                if (opts.TryGetValue("list", out var listType) && Enum.TryParse<DfLocationType>(listType, true, out var lt))
+                    foreach (var l in locs.Where(l => l.Type == lt))
+                        Console.WriteLine($"  {l.LocationId} {l.Name} ({l.RegionName}, region {l.Region}) @({l.PixelX},{l.PixelY}) blocks [{string.Join(",", l.ExteriorBlocks)}] buildings [{string.Join(",", l.Buildings.Select(b => $"{b.BuildingType}/f{b.FactionId}/q{b.Quality}"))}]");
                 return 0;
             }
             case "ground-preview":
@@ -4754,6 +4830,12 @@ static class Program
                         if (senses is not { } sk || !quests.TryGetValue(sk, out var q) || q.EditorID != Skyrim.DfSenses.QuestEditorId) Problem($"{e}: Senses isn't the control quest");
                     }
                     Console.WriteLine($"actors with TMDfSenses: {carrying} of {m.Npcs.Count(n => n.FormKey.ModKey == m.ModKey)}");
+                    // Language pacification: which language each carrying actor answers to.
+                    var byLanguage = m.Npcs.Where(n => n.FormKey.ModKey == m.ModKey).Select(n => Senses(n)).OfType<IScriptEntryGetter>()
+                        .Select(s => s.Properties.OfType<IScriptIntPropertyGetter>().FirstOrDefault(p => p.Name == "Language")?.Data ?? -1)
+                        .GroupBy(l => l < 0 || l >= Skyrim.DfSenses.LanguageSkills.Length ? "none" : Skyrim.DfSenses.LanguageSkills[l]).OrderByDescending(g => g.Count());
+                    Console.WriteLine($"languages: {string.Join(", ", byLanguage.Select(g => $"{g.Key} {g.Count()}"))}");
+                    if (m.FormLists.FirstOrDefault(f => f.EditorID == "DFRestEncounters") is { } rest) Console.WriteLine($"rest encounters: {rest.Items.Count} dungeon encounter lists");
                     foreach (var l in m.LeveledNpcs.Where(l => l.EditorID?.StartsWith("DFLCharEncounter") == true))
                         foreach (var en in l.Entries ?? [])
                             if (en.Data is { } d && !Has(d.Reference.FormKey))
@@ -4766,6 +4848,9 @@ static class Program
                     var without = placed.Where(p => !Has(p.Base.FormKey)).GroupBy(p => npcs.TryGetValue(p.Base.FormKey, out var b) ? b.EditorID ?? "?" : p.Base.FormKey.ToString())
                         .OrderByDescending(g => g.Count()).ToList();
                     Console.WriteLine($"placed actors: {placed.Count}, with the senses {placed.Count - without.Sum(g => g.Count())}; without: {string.Join(", ", without.Take(25).Select(g => $"{g.Key} {g.Count()}"))}");
+                    var spawnTypes = placed.Select(p => p.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == "TMDfSpawnType")?.Properties.OfType<IScriptIntPropertyGetter>().FirstOrDefault()?.Data ?? 0)
+                        .GroupBy(t => t).OrderBy(g => g.Key);
+                    Console.WriteLine($"spawn distance types: {string.Join(", ", spawnTypes.Select(g => $"type {g.Key} {g.Count()}"))}");
                     Console.WriteLine(problems == 0 ? "no problems" : $"{problems} problems");
                     return problems == 0 ? 0 : 1;
                 }
@@ -4799,11 +4884,15 @@ static class Program
                 // A target not in Plugins.txt (a scratch plugin in a --data folder of its own) is checked after its masters.
                 order.AddRange(targets.Where(t => !order.Contains(t, StringComparer.OrdinalIgnoreCase) && File.Exists(Path.Combine(data, t))));
                 // Only the masters each target needs, plus the target, in load order.
-                foreach (var target in targets)
+                foreach (var targetSpec in targets)
                 {
-                    var masters = Setup.Parts.MastersOf(data, target);
-                    var mods = order.Where(f => masters.Contains(f, StringComparer.OrdinalIgnoreCase) || f.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(PluginPath(f), SkyrimRelease.SkyrimSE)).ToList();
+                    // A full path: a scratch plugin elsewhere, checked against its masters (in --data, else Skyrim's).
+                    string target = Path.GetFileName(targetSpec);
+                    string targetDir = Path.IsPathRooted(targetSpec) ? Path.GetDirectoryName(targetSpec)! : data;
+                    var masters = Setup.Parts.MastersOf(targetDir, target);
+                    var mods = order.Where(f => masters.Contains(f, StringComparer.OrdinalIgnoreCase) && !f.Equals(target, StringComparison.OrdinalIgnoreCase))
+                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(PluginPath(f), SkyrimRelease.SkyrimSE))
+                        .Append(SkyrimMod.CreateFromBinaryOverlay(Path.Combine(targetDir, target), SkyrimRelease.SkyrimSE)).ToList();
                     try
                     {
                         var cache = mods.ToImmutableLinkCache();
