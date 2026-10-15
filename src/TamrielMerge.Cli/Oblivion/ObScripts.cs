@@ -142,7 +142,8 @@ public sealed partial class ObPluginBuilder
         // Scripted magic effects (SEFF): the magic effects made for them carry their scripts (TesMagic names the
         // script; its properties are filled here).
         var byName = translations.Values.GroupBy(o => o.ScriptName, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-        foreach (var m in mod.MagicEffects)
+        // A copy: filling a script's properties can make more magic effects (2026-10-15: "Collection was modified").
+        foreach (var m in mod.MagicEffects.ToList())
         {
             if (m.VirtualMachineAdapter is not { } vm) continue;
             foreach (var se in vm.Scripts.Where(x => x.Properties.Count == 0 && byName.ContainsKey(x.Name)).ToList())
