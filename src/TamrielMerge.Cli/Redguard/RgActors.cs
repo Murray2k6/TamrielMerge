@@ -33,6 +33,8 @@ public sealed partial class RgPluginBuilder
         ["RICHTON"] = new("Amiel Richton", "Imperial", false), ["ROLLO"] = new("Rollo", "Redguard", false), ["SABAN"] = new("Saban", "Redguard", true),
         ["SIONA"] = new("Siona", "Redguard", true), ["TOBIAS"] = new("Tobias", "Nord", false), ["TRITHICK"] = new("Trithik", "Redguard", false),
         ["URIK"] = new("Urik", "Nord", false), ["VANDAR"] = new("Vander", "Redguard", false), ["YAELI"] = new("Yaeli", "Redguard", true),
+        // Yaeli on the island (before she hides out), and Clavicus Vile in the child's form he takes in his realm.
+        ["YAELIISL"] = new("Yaeli", "Redguard", true), ["VILEKID"] = new("Clavicus Vile", "BretonRaceChild", false),
     };
 
     /// <summary>Generic people and creatures by script-name prefix: display name and vanilla template (EditorID prefix).</summary>
@@ -53,7 +55,7 @@ public sealed partial class RgPluginBuilder
 
     Npc? PersonNpc(string script, Person p)
     {
-        var race = vanilla.Get<IRaceGetter>(p.Race + "Race");
+        var race = vanilla.Get<IRaceGetter>(p.Race.Contains("Race") ? p.Race : p.Race + "Race");
         if (race is null) { Problems.Add($"{p.Name}: race {p.Race} not found"); return null; }
         var pool = VanillaActors.WithRaceVoice(vanilla.Skyrim, vanilla.Faces(race.FormKey, p.Female), race.FormKey, p.Female);
         if (pool.Count == 0) pool = vanilla.Faces(race.FormKey, p.Female);
@@ -97,7 +99,8 @@ public sealed partial class RgPluginBuilder
     {
         if (actors.TryGetValue(script, out var hit)) return hit;
         Npc? npc = null;
-        if (People.TryGetValue(script, out var person)) npc = PersonNpc(script, person);
+        if (script.Equals("PARROT", StringComparison.OrdinalIgnoreCase)) npc = ParrotNpc();
+        else if (People.TryGetValue(script, out var person)) npc = PersonNpc(script, person);
         else if (Kinds.FirstOrDefault(k => script.StartsWith(k.Prefix, StringComparison.OrdinalIgnoreCase)) is { Prefix: not null } kind)
         {
             // One record per kind, shared by every script of that kind.
@@ -107,7 +110,35 @@ public sealed partial class RgPluginBuilder
         return actors[script] = npc;
     }
 
+    /// <summary>
+    /// Gerrick's talking parrot: Skyrim has no birds that act, so a chicken's body under the name, on a copy of the
+    /// chicken's race that may be talked to (and an old man's voice type for packing its own recordings).
+    /// </summary>
+    Npc? ParrotNpc()
+    {
+        var template = vanilla.Get<INpcGetter>("EncChicken");
+        if (template is null) { Problems.Add("parrot: EncChicken not found"); return null; }
+        var npc = mod.Npcs.DuplicateInAsNewRecord(template);
+        npc.EditorID = "RGPARROT";
+        npc.Name = "Parrot";
+        if (template.Race.FormKeyNullable is { } raceKey && vanilla.Skyrim.Races.FirstOrDefault(r => r.FormKey == raceKey) is { } race)
+        {
+            var talking = mod.Races.DuplicateInAsNewRecord(race);
+            talking.EditorID = "RGParrotRace";
+            talking.Flags |= Race.Flag.AllowPcDialog;
+            npc.Race.SetTo(talking);
+        }
+        if (vanilla.Get<IVoiceTypeGetter>("MaleOldKindly") is { } voice) npc.Voice.SetTo(voice);
+        npc.Configuration.Flags |= NpcConfiguration.Flag.Unique | NpcConfiguration.Flag.Essential;
+        npc.Packages.Clear();
+        npc.Packages.Add(new FormLink<IPackageGetter>(Sk(0x01B217)));
+        if (npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
+        return npc;
+    }
+
     readonly HashSet<string> placedPeople = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The first actor placed for each scene object script name (upper case).</summary>
+    readonly Dictionary<(string Scene, string Script), PlacedNpc> placedActors = [];
 
     /// <summary>Redguard's ordinary creatures for procedural creatures (the ogre, golem, guardians and Barbas are its
     /// bosses and set pieces).</summary>
@@ -159,6 +190,17 @@ public sealed partial class RgPluginBuilder
                 Placement = new Placement { Position = new P3Float(at.X, at.Y, at.Z - 40), Rotation = new P3Float(0, 0, yaw) },
             };
             cell.Temporary.Add(placed);
+            placedActors.TryAdd((scene.Name, o.Script.ToUpperInvariant()), placed);
+            if (ScriptOf(scene, o.Script) is not null)
+            {
+                if (namedObjects.Contains((scene.Name, o.Script)))
+                {
+                    cell.Temporary.Remove(placed);
+                    placed.SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
+                    PersistentCellFor(scene).Persistent.Add(placed);
+                }
+                carriers[(scene.Name, i)] = (placed, ObjectReferenceKind.Actor);
+            }
             if (Ordinary.FirstOrDefault(k => o.Script.StartsWith(k, StringComparison.OrdinalIgnoreCase)) is { } kind)
                 creatureSpots.Add((placed, scene, kind));
             ActorCount++;

@@ -68,7 +68,9 @@ public sealed class RgMeshConverter(RgArt art)
     /// </summary>
     public static readonly HashSet<(int Bank, int Image)> WaterImages = [(134, 6), (302, 0), (267, 4), (165, 0), (47, 0), (3, 0), (3, 1)];
 
-    public Result? Convert(RgModel model, string name, string palette, string modOutDir, bool moving = false)
+    /// <param name="moving">A variant whose collision moves with the object (keyframed), for scripted props.</param>
+    /// <param name="itemMass">A loose item's variant (_item): a dynamic box body of this mass instead of fixed collision.</param>
+    public Result? Convert(RgModel model, string name, string palette, string modOutDir, bool moving = false, float? itemMass = null)
     {
         var verts = model.Vertices.Select(RgSpace.Dir).ToList();
         // Face normals (Skyrim space) and, per vertex, the faces using it, for smoothing.
@@ -120,7 +122,7 @@ public sealed class RgMeshConverter(RgArt art)
             return new Result("", wv.Aggregate(Vector3.Min), wv.Aggregate(Vector3.Max), [], model.Faces.Count, water, falls);
         }
 
-        string rel = $@"{OutFolder}\{palette.ToLowerInvariant()}\{name.ToLowerInvariant()}{(moving ? "_moving" : "")}.nif";
+        string rel = $@"{OutFolder}\{palette.ToLowerInvariant()}\{name.ToLowerInvariant()}{(itemMass is not null ? "_item" : moving ? "_moving" : "")}.nif";
         string outPath = Path.Combine(modOutDir, rel);
         var solid = new List<(Vector3[] Pts, Vector3 N, BlockMeshBuilder.Tex Tex)>();
         using (var nif = new NifFile())
@@ -172,7 +174,9 @@ public sealed class RgMeshConverter(RgArt art)
                     s.textureClampMode = TexClampMode.WRAP_S_WRAP_T;
                 });
             }
-            if (solid.Count > 0) BlockMeshBuilder.AddCollision(nif, root, moving ? solid : BlockMeshBuilder.StairCollision(solid), moving);
+            if (itemMass is float mass && verts.Count > 0)
+                BlockMeshBuilder.AddDynamicCollision(nif, root, verts.Aggregate(Vector3.Min), verts.Aggregate(Vector3.Max), mass, BlockMeshBuilder.WoodMaterial);
+            else if (solid.Count > 0) BlockMeshBuilder.AddCollision(nif, root, moving ? solid : BlockMeshBuilder.StairCollision(solid), moving);
             BlockMeshBuilder.AddBsxFlags(nif, root);
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
             if (nif.Save(outPath) != 0) throw new IOException($"nifly failed to save {outPath}");

@@ -20,7 +20,13 @@ namespace TamrielMerge.Redguard;
 /// <item>a later line of Cyrus's in the path continues as a choice (a child topic prompting that line); the path's end
 /// lists the next menu's topics as choices, or says goodbye;</item>
 /// <item>conditions are on globals: one per Redguard flag (SOUP386.DEF, with its starting value) and one per actor
-/// variable (RAVA); assignments set them (TMMwInfo); every response is the speaker's own (GetIsID);</item>
+/// variable (RAVA); assignments set them (TMMwInfo); every response is the speaker's own (GetIsID). Game functions
+/// the code tests become Skyrim's condition functions: HaveItem(n) the player's GetItemCount of item n, another
+/// object's isDead() GetDead on its reference, AtNodeMarker the speaker's GetDistance to the scene marker,
+/// Player.health() GetActorValuePercent; what a talk always has (the player close by, facing the speaker, the speaker
+/// alive) is decided, as is InRectangle (where the speaker stands);</item>
+/// <item>items given or taken (AddItem, DropItem) and attacks (beginCombat) happen when the response is said (TMMwInfo
+/// Items, ItemCounts, Attack);</item>
 /// <item>the opening exchange is the speaker's greeting when the speaker talks first, else a topic of the main menu;
 /// Cyrus's log is a quest whose stages are the log entries.</item>
 /// </list>
@@ -148,6 +154,8 @@ public sealed partial class RgPluginBuilder
     sealed record SayNpc(int Tag) : Ev;
     sealed record Log(int Tag) : Ev;
     sealed record Set(string Key, int Value) : Ev;
+    sealed record Give(int Item, int Count) : Ev;
+    sealed record Attack : Ev;
     sealed record ToMenu(int Address) : Ev;
     sealed record Bye : Ev;
 
@@ -159,6 +167,7 @@ public sealed partial class RgPluginBuilder
     {
         public required string Actor;
         public required List<Stmt> Root;
+        public Scene? Scene;
         public readonly Dictionary<int, List<(List<Stmt> List, int Index)>> At = [];
         public readonly HashSet<int> MenuAddresses = [];
 
@@ -206,6 +215,7 @@ public sealed partial class RgPluginBuilder
         var work = new Stack<(Cursor C, Dictionary<string, int> Known, List<List<Atom>> Conds, List<Ev> Events, int Steps)>();
         work.Push((start, known, conditions, [], 0));
         int rtxNpc = Fn("RTX"), rtxAnim = Fn("rtxAnim"), rtxP = Fn("RTXp"), rtxPAnim = Fn("RTXpAnim"), addLog = Fn("AddLog"), menuNew = Fn("menuNew");
+        int addItem = Fn("AddItem"), dropItem = Fn("DropItem"), subItem = Fn("SubItem"), beginCombat = Fn("beginCombat");
         while (work.Count > 0 && results.Count < 24)
         {
             var (c, kn, conds, evs, steps) = work.Pop();
@@ -230,6 +240,9 @@ public sealed partial class RgPluginBuilder
                             else if (call.Function == rtxP || call.Function == rtxPAnim) evs.Add(new SayPlayer(t));
                             else if (call.Function == addLog) evs.Add(new Log(t));
                         }
+                        if ((call.Function == addItem || call.Function == dropItem || call.Function == subItem) && call.Args.Length >= 2 && call.Args[0] is Num item && call.Args[1] is Num count && count.V != 0)
+                            evs.Add(new Give(item.V, call.Function == addItem ? count.V : -count.V));
+                        else if (call.Function == beginCombat && call.Target is null or "Me") evs.Add(new Attack());
                         if (!done) c.Advance();
                         break;
                     case AssignStmt a:
@@ -314,9 +327,16 @@ public sealed partial class RgPluginBuilder
             else if (lhs is FnValue fv && rhs is Num rn)
             {
                 string name = functionNames.ElementAtOrDefault(fv.Function) ?? "";
-                int assumed = name switch { "PlayerDistance" => 0, "menuSelection" => -1, _ => 0 };
-                if (name is not ("PlayerDistance" or "IsHoldingWeapon" or "isFighting" or "ACTIVATE")) unhandled[name] = unhandled.GetValueOrDefault(name) + 1;
-                value = new Atom("", cmp, rn.V).Test(assumed);
+                if (FunctionAtom(prog, fv, name, cmp, rn.V) is { } fa)
+                {
+                    if (fa.Atom is { } a) atoms.Add(a); else value = fa.Value;
+                }
+                else
+                {
+                    int assumed = name switch { "PlayerDistance" => 0, "menuSelection" => -1, _ => 0 };
+                    if (name is not ("PlayerDistance" or "IsHoldingWeapon" or "isFighting" or "ACTIVATE")) unhandled[name] = unhandled.GetValueOrDefault(name) + 1;
+                    value = new Atom("", cmp, rn.V).Test(assumed);
+                }
             }
             else value = false;
             values.Add(value);
@@ -331,17 +351,139 @@ public sealed partial class RgPluginBuilder
         return atoms.Count == 0 ? (true, [], false) : (null, atoms, false);
     }
 
+    /// <summary>
+    /// A game function a conversation tests, as a condition atom (key "FN:...", made a Skyrim condition function by
+    /// <see cref="FunctionCondition"/>) or decided outright (what a talk always has). Null for what isn't handled here.
+    /// </summary>
+    (Atom? Atom, bool Value)? FunctionAtom(Program prog, FnValue fv, string name, int cmp, int value)
+    {
+        int? Const(int i) => i < fv.Args.Length && fv.Args[i] is Num n ? n.V : null;
+        bool Decide(int v) => new Atom("", cmp, value).Test(v);
+        string? target = fv.Target;
+        string? named = null;
+        if (target is not null && target.StartsWith("string:") && int.TryParse(target[7..], out var si) && prog.Scene is { } sc)
+            named = sc.Script.Strings.GetValueOrDefault(prog.Actor) is { } strs && si < strs.Count ? strs[si] : null;
+        switch (name)
+        {
+            case "HaveItem" when Const(0) is int item && ItemRecord(item) is not null:
+                return (new Atom($"FN:HaveItem:{item}", cmp, value), false);
+            case "isDead":
+                // The speaker is alive while talking; another object's death is GetDead on its reference.
+                if (named is not null && prog.Scene is not null && ReferenceFor(prog.Scene, named) is not null) return (new Atom($"FN:isDead:{named}", cmp, value), false);
+                return (null, Decide(0));
+            case "PlayerArc": case "PlayerLooking": case "PlayerInSight": case "PlayerFacing":
+                // Talking, the player stands before the speaker, facing them.
+                return (null, Decide(1));
+            case "AtNodeMarker" when Const(0) is int marker && Const(1) is int dist && prog.Scene is { } scene && marker < scene.Data.Markers.Count:
+                return (new Atom($"FN:AtNodeMarker:{marker}:{dist}", cmp, value), false);
+            case "InRectangle" when prog.Scene is { } scene2 && Const(0) is int x1 && Const(1) is int z1 && Const(2) is int x2 && Const(3) is int z2:
+            {
+                // The player is beside the speaker: is where the speaker stands inside?
+                var o = scene2.Data.Objects.FirstOrDefault(o => o.Script.Equals(prog.Actor, StringComparison.OrdinalIgnoreCase));
+                if (o is null) return null;
+                bool inside = o.Position.X >= Math.Min(x1, x2) && o.Position.X <= Math.Max(x1, x2) && o.Position.Z >= Math.Min(z1, z2) && o.Position.Z <= Math.Max(z1, z2);
+                return (null, Decide(inside ? 1 : 0));
+            }
+            case "health":
+                if (target == "Player") return (new Atom("FN:health:Player", cmp, value), false);
+                return (null, Decide(100));
+        }
+        return null;
+    }
+
+    /// <summary>The placed reference standing for a scene object by script name (people, props, markers), made
+    /// persistent so conditions and scripts can point at it.</summary>
+    IPlaced? ReferenceFor(Scene scene, string script)
+    {
+        var hit = carriers.Where(kv => kv.Key.Scene == scene.Name && scene.Data.Objects[kv.Key.Index].Script.Equals(script, StringComparison.OrdinalIgnoreCase))
+            .Select(kv => kv.Value.Ref).FirstOrDefault();
+        hit ??= placedActors.GetValueOrDefault((scene.Name, script.ToUpperInvariant()));
+        if (hit is null) return null;
+        if ((hit.MajorRecordFlagsRaw & 0x400) == 0)
+        {
+            foreach (var c in scene.Interior is { } i ? [i] : scene.Cells.Values.ToList()) c.Temporary.Remove(hit);
+            hit.MajorRecordFlagsRaw |= 0x400;
+            PersistentCellFor(scene).Persistent.Add(hit);
+        }
+        return hit;
+    }
+
+    /// <summary>A function atom as Skyrim's condition.</summary>
+    ConditionFloat FunctionCondition(Program prog, Atom a, bool or)
+    {
+        var parts = a.Key.Split(':');
+        var op = a.Cmp switch { 0 => CompareOperator.EqualTo, 1 => CompareOperator.NotEqualTo, 2 => CompareOperator.LessThan, 3 => CompareOperator.GreaterThan, 4 => CompareOperator.LessThanOrEqualTo, _ => CompareOperator.GreaterThanOrEqualTo };
+        float compare = a.Value;
+        ConditionData data;
+        switch (parts[1])
+        {
+            case "HaveItem":
+            {
+                var d = new GetItemCountConditionData();
+                d.ItemOrList = new FormLinkOrIndex<IItemOrListGetter>(d, ItemRecord(int.Parse(parts[2]))!.Value);
+                d.RunOnType = Condition.RunOnType.Reference;
+                d.Reference = new FormLink<ISkyrimMajorRecordGetter>(PlayerRef);
+                data = d;
+                break;
+            }
+            case "isDead":
+            {
+                var d = new GetDeadConditionData { RunOnType = Condition.RunOnType.Reference };
+                d.Reference = new FormLink<ISkyrimMajorRecordGetter>(ReferenceFor(prog.Scene!, parts[2])!.FormKey);
+                data = d;
+                break;
+            }
+            case "AtNodeMarker":
+            {
+                // At the marker within dist (256ths): a distance under dist/256 holds as 1.
+                var marker = MarkersOf(prog.Scene!).Items[int.Parse(parts[2])];
+                var d = new GetDistanceConditionData();
+                d.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(d, marker.FormKey);
+                data = d;
+                float limit = int.Parse(parts[3]) / 256f;
+                bool atMarker = new Atom("", a.Cmp, a.Value).Test(1);
+                return new ConditionFloat { Data = data, CompareOperator = atMarker ? CompareOperator.LessThanOrEqualTo : CompareOperator.GreaterThan, ComparisonValue = limit, Flags = or ? Condition.Flag.OR : 0 };
+            }
+            default:
+            {
+                var d = new GetActorValuePercentConditionData { RunOnType = Condition.RunOnType.Reference };
+                d.ActorValue = ActorValue.Health;
+                d.Reference = new FormLink<ISkyrimMajorRecordGetter>(PlayerRef);
+                data = d;
+                compare = a.Value / 100f;
+                break;
+            }
+        }
+        return new ConditionFloat { Data = data, CompareOperator = op, ComparisonValue = compare, Flags = or ? Condition.Flag.OR : 0 };
+    }
+
     // ---- building dialogue ----
 
     /// <summary>Converts every conversation. Call after the actors exist.</summary>
     public void BuildDialogue()
     {
-        string def = Path.Combine(rgDir, "soup386", "SOUP386.DEF");
-        functionNames = RgScript.FunctionNames(def);
-        flagDefs = RgScript.Flags(def);
-        rtx = RgRtx.Load(Path.Combine(rgDir, "ENGLISH.RTX"));
+        if (functionNames.Count == 0) LoadText();
         if (rtx is null) { Problems.Add("ENGLISH.RTX not found: no dialogue"); return; }
-        LearnProperNouns();
+        DialogueQuest();
+        int lineUp = Fn("PlayerLineUp"), menuAdd = Fn("menuAddItem");
+        foreach (var scene in scenes.Values)
+            foreach (var (actor, root) in scene.Script.Programs)
+            {
+                if (!scene.Script.Calls.Any(c => c.Actor == actor && c.Function == menuAdd) || !scene.Script.Calls.Any(c => c.Actor == actor && c.Function == lineUp)) continue;
+                // Things that talk without being people (the caverns' door the goblins answer through) keep their talk in
+                // their converted script, its menus as message boxes (RgScripts).
+                if (ActorFor(actor) is not { } npc) continue;
+                try { if (Conversation(scene, actor, root, npc)) DialogueActors++; else Problems.Add($"dialogue: {scene.Name} {actor}: no conversation found"); }
+                catch (Exception e) { Problems.Add($"dialogue {actor}: {e.Message}"); }
+            }
+        if (logQuest!.Stages.Count == 0) mod.Quests.Remove(logQuest);
+        foreach (var (fn, n) in unhandled.OrderByDescending(kv => kv.Value).Take(8)) Problems.Add($"dialogue: {n} conditions on {fn} assumed false");
+    }
+
+    /// <summary>The dialogue quest and Cyrus's log (made once: the scripts' lines need the quest before dialogue is built).</summary>
+    Quest DialogueQuest()
+    {
+        if (dialogueQuest is not null) return dialogueQuest;
         dialogueQuest = new Quest(mod)
         {
             EditorID = "RGDialogue",
@@ -353,32 +495,37 @@ public sealed partial class RgPluginBuilder
             NextAliasID = 1,
         };
         mod.Quests.Add(dialogueQuest);
-        logQuest = new Quest(mod) { EditorID = "RGCyrusLog", Name = "Cyrus's Log", Priority = 50, Type = Quest.TypeEnum.MainQuest, Stages = [] };
-        mod.Quests.Add(logQuest);
-        int lineUp = Fn("PlayerLineUp"), menuAdd = Fn("menuAddItem");
-        foreach (var scene in scenes.Values)
-            foreach (var (actor, root) in scene.Script.Programs)
-            {
-                if (!scene.Script.Calls.Any(c => c.Actor == actor && c.Function == menuAdd) || !scene.Script.Calls.Any(c => c.Actor == actor && c.Function == lineUp)) continue;
-                if (ActorFor(actor) is not { } npc) continue;
-                try { Conversation(scene, actor, root, npc); DialogueActors++; }
-                catch (Exception e) { Problems.Add($"dialogue {actor}: {e.Message}"); }
-            }
-        if (logQuest.Stages.Count == 0) mod.Quests.Remove(logQuest);
-        foreach (var (fn, n) in unhandled.OrderByDescending(kv => kv.Value).Take(8)) Problems.Add($"dialogue: {n} conditions on {fn} assumed false");
+        logQuest ??= new Quest(mod) { EditorID = "RGCyrusLog", Name = "Cyrus's Log", Priority = 50, Type = Quest.TypeEnum.MainQuest, Stages = [] };
+        if (!mod.Quests.Contains(logQuest)) mod.Quests.Add(logQuest);
+        return dialogueQuest;
     }
 
-    void Conversation(Scene scene, string actor, List<Stmt> root, Npc speaker)
+    bool Conversation(Scene scene, string actor, List<Stmt> root, Npc speaker)
     {
-        var prog = new Program { Actor = actor, Root = root };
+        var prog = new Program { Actor = actor, Root = root, Scene = scene };
         int menuNew = Fn("menuNew");
         prog.Index(root, [], menuNew);
-        var entry = prog.At.Keys.Order().FirstOrDefault(a => prog.At[a][^1].List[prog.At[a][^1].Index] is CallStmt c && c.Function == Fn("PlayerLineUp"));
-        if (!prog.At.ContainsKey(entry)) return;
+        // Where the talk starts: the first PlayerLineUp whose code reaches a menu. Some (the snake charmer, Basil,
+        // Maiko) line Cyrus up in the interrupt thread and set a flag the main thread's talk waits on; then the talk is
+        // the script's first menu, without a greeting.
+        var entries = prog.At.Keys.Order().Where(a => prog.At[a][^1].List[prog.At[a][^1].Index] is CallStmt c && c.Function == Fn("PlayerLineUp")).ToList();
+        if (entries.Count == 0) return false;
         var locals = scene.Script.Locals;
-        var openings = Follow(prog, new Cursor { Frames = prog.At[entry].ToList() }, [], []);
-        int mainMenu = openings.Select(p => p.Events.LastOrDefault()).OfType<ToMenu>().GroupBy(m => m.Address).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault(-1);
-        if (mainMenu < 0) return;
+        List<Route> openings = [];
+        int mainMenu = -1;
+        foreach (var entry in entries)
+        {
+            var found = Follow(prog, new Cursor { Frames = prog.At[entry].ToList() }, [], []);
+            int menu = found.Select(p => p.Events.LastOrDefault()).OfType<ToMenu>().GroupBy(m => m.Address).OrderByDescending(g => g.Count()).Select(g => g.Key).FirstOrDefault(-1);
+            if (openings.Count == 0) openings = found;
+            if (menu >= 0) { openings = found; mainMenu = menu; break; }
+        }
+        if (mainMenu < 0 && prog.MenuAddresses.Count > 0)
+        {
+            mainMenu = prog.MenuAddresses.Min();
+            openings = openings.Where(o => o.Events.LastOrDefault() is ToMenu).ToList();
+        }
+        if (mainMenu < 0) return false;
 
         var branches = new Dictionary<int, (DialogBranch Branch, List<DialogTopic> Topics)>();
         var pending = new Queue<int>();
@@ -399,19 +546,30 @@ public sealed partial class RgPluginBuilder
         }
         BranchFor(mainMenu);
 
-        Condition Speaker()
+        // The speaker: their own record, and for a kind (guards, pirates: one record for many scripts) also the one
+        // placed for this script, so each says its own conversation.
+        var speakerRef = People.ContainsKey(actor) ? null : placedActors.GetValueOrDefault((scene.Name, actor.ToUpperInvariant())) is { } pa ? ReferenceFor(scene, actor) : null;
+        List<Condition> SpeakerConds()
         {
             var d = new GetIsIDConditionData();
             d.Object = new FormLinkOrIndex<IReferenceableObjectGetter>(d, speaker.FormKey);
-            return new ConditionFloat { Data = d, CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1 };
+            var list = new List<Condition> { new ConditionFloat { Data = d, CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1 } };
+            if (speakerRef is not null)
+            {
+                var r = new GetIsReferenceConditionData();
+                r.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(r, speakerRef.FormKey);
+                list.Add(new ConditionFloat { Data = r, CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1 });
+            }
+            return list;
         }
         List<Condition> ConditionsOf(List<List<Atom>> clauses)
         {
-            var list = new List<Condition> { Speaker() };
+            var list = SpeakerConds();
             foreach (var clause in clauses.DistinctBy(c => string.Join("|", c)))
                 for (int i = 0; i < clause.Count; i++)
                 {
                     var a = clause[i];
+                    if (a.Key.StartsWith("FN:")) { list.Add(FunctionCondition(prog, a, i < clause.Count - 1)); continue; }
                     var g = GlobalFor(a.Key, actor, locals);
                     var d = new GetGlobalValueConditionData();
                     d.Global = new FormLinkOrIndex<IGlobalGetter>(d, g.FormKey);
@@ -439,7 +597,7 @@ public sealed partial class RgPluginBuilder
                 {
                     if (segments.Count == 0) segments.Add((null, [], []));
                     if (ev is SayNpc sn) segments[^1].Npc.Add(sn.Tag);
-                    else if (ev is Log or Set) segments[^1].Effects.Add(ev);
+                    else if (ev is Log or Set or Give or Attack) segments[^1].Effects.Add(ev);
                 }
             }
             if (segments.Count == 0) segments.Add((null, [], []));
@@ -448,7 +606,7 @@ public sealed partial class RgPluginBuilder
             for (int s = 0; s < segments.Count; s++)
             {
                 var (player, npcLines, effects) = segments[s];
-                var r = new DialogResponses(mod) { Conditions = s == 0 ? [.. conditions] : [Speaker()], Responses = [], Flags = new DialogResponseFlags() };
+                var r = new DialogResponses(mod) { Conditions = s == 0 ? [.. conditions] : [.. SpeakerConds()], Responses = [], Flags = new DialogResponseFlags() };
                 if (player is int p && Text(p) is { } prompt) r.Prompt = prompt;
                 uint n = 1;
                 foreach (var line in npcLines)
@@ -514,12 +672,16 @@ public sealed partial class RgPluginBuilder
             if (branches.TryGetValue(menu, out var b)) foreach (var t in b.Topics) r.LinkTo.Add(t.ToLink<IDialogTopicGetter>());
         linkLater.Clear();
         foreach (var (_, b) in branches) if (b.Topics.Count == 0) mod.DialogBranches.Remove(b.Branch);
+        return true;
     }
 
     readonly List<(DialogResponses Response, int Menu)> linkLater = [];
+    readonly HashSet<string> topicIds = new(StringComparer.OrdinalIgnoreCase);
 
     DialogTopic NewTopic(string edid, string? name, DialogBranch? branch, bool hello = false)
     {
+        // Tags that differ only in punctuation (?yol, !yol) sanitise alike: each EditorID once.
+        if (!topicIds.Add(edid)) { int n = 2; while (!topicIds.Add($"{edid}{n}")) n++; edid = $"{edid}{n}"; }
         var topic = new DialogTopic(mod)
         {
             EditorID = edid,
@@ -575,8 +737,18 @@ public sealed partial class RgPluginBuilder
     {
         var sets = effects.OfType<Set>().GroupBy(s => s.Key).Select(g => g.Last()).ToList();
         var logs = effects.OfType<Log>().ToList();
-        if (sets.Count == 0 && logs.Count == 0) return null;
+        var gives = effects.OfType<Give>().Where(g => ItemRecord(g.Item) is not null).ToList();
+        bool attack = effects.OfType<Attack>().Any();
+        if (sets.Count == 0 && logs.Count == 0 && gives.Count == 0 && !attack) return null;
         var entry = new ScriptEntry { Name = "TMMwInfo" };
+        if (gives.Count > 0)
+        {
+            var items = new ScriptObjectListProperty { Name = "Items" };
+            foreach (var g in gives) items.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(ItemRecord(g.Item)!.Value) });
+            entry.Properties.Add(items);
+            entry.Properties.Add(new ScriptIntListProperty { Name = "ItemCounts", Data = [.. gives.Select(g => g.Count)] });
+        }
+        if (attack) entry.Properties.Add(new ScriptBoolProperty { Name = "Attack", Data = true });
         if (sets.Count > 0)
         {
             var objs = new ScriptObjectListProperty { Name = "Globals" };
