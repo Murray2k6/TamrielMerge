@@ -1302,7 +1302,7 @@ static class Program
                 string pluginPath = opts.GetValueOrDefault("plugin", "out/rgmod/Redguard.esm");
                 var (packed, existing, missing) = Redguard.RgVoices.Build(skyrimData, rg, pluginPath,
                     Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pluginPath))!, "Redguard.voicemap.json"), opts.GetValueOrDefault("out", "out/rgvoice"));
-                Console.WriteLine($"{packed} voice files from Redguard's recordings, {existing} already there, {missing} lines without a recording");
+                Console.WriteLine($"{packed} voice files from Redguard's recordings ({Skyrim.VoiceFiles.CacheStats.Hits} of them from the lip sync cache), {existing} already there, {missing} lines without a recording");
                 return 0;
             }
             case "df-town-render":
@@ -6306,7 +6306,7 @@ static class Program
                 string pluginPath = opts.GetValueOrDefault("plugin", "out/obmod/Oblivion.esm");
                 var (packed, existing, unrecorded) = Oblivion.ObVoices.Build(skyrimData, new Oblivion.ObData(dataDir), pluginPath,
                     Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pluginPath))!, "Oblivion.voicemap.json"), opts.GetValueOrDefault("out", "out/obvoice"));
-                Console.WriteLine($"{packed} voice files from Oblivion's recordings, {existing} already there, {unrecorded} lines Oblivion didn't record");
+                Console.WriteLine($"{packed} voice files from Oblivion's recordings ({Skyrim.VoiceFiles.CacheStats.Hits} of them from the lip sync cache), {existing} already there, {unrecorded} lines Oblivion didn't record");
                 return 0;
             }
             case "ob-voice-test":
@@ -6336,6 +6336,51 @@ static class Program
                     foreach (var info in t.Responses)
                         foreach (var c in info.Conditions.OfType<IConditionFloatGetter>())
                             if (c.Data is IGetIsIDConditionDataGetter d && c.ComparisonValue == 1 && npcs.TryGetValue(d.Object.Link.FormKey, out var npc))
+            case "voice-cache-test":
+            {
+                // Dev aid: the lip sync cache (VoiceFiles.Pack) on --count N (default 8) of Oblivion's recordings, in
+                // --out (a scratch folder, its cache inside): each decoded twice (the same bytes, or the cache can't
+                // match), packed under one set of names with the cache empty, then under new names (renumbered
+                // FormIDs), timed; the second set must come from the cache, byte for byte the first.
+                string dir = Path.GetFullPath(opts["out"]);
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+                Directory.CreateDirectory(dir);
+                Skyrim.VoiceFiles.CacheDirOverride = Path.Combine(dir, "lipcache");
+                var data = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion)!);
+                int count = int.Parse(opts.GetValueOrDefault("count", "8"));
+                var mp3s = data.List(@"sound\voice").Where(p => p.EndsWith(".mp3")).Order(StringComparer.OrdinalIgnoreCase).Where((_, i) => i % 997 == 0).Take(count).ToList();
+                var wavs = new List<string>();
+                int same = 0;
+                foreach (var mp3 in mp3s)
+                {
+                    string? a = Oblivion.ObVoices.Decode(data, mp3, dir), b = Oblivion.ObVoices.Decode(data, mp3, dir);
+                    if (a is null || b is null) continue;
+                    if (File.ReadAllBytes(a).AsSpan().SequenceEqual(File.ReadAllBytes(b))) same++;
+                    File.Delete(b);
+                    wavs.Add(a);
+                }
+                Console.WriteLine($"{wavs.Count} recordings decoded, {same} the same both times");
+                double Pass(string names)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    Parallel.For(0, wavs.Count, i =>
+                    {
+                        string copy = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".wav");
+                        File.Copy(wavs[i], copy);
+                        try { Skyrim.VoiceFiles.Pack(skyrimData, copy, $"Test line {i}, as Oblivion says it.", Path.Combine(dir, names, $"line_{names}_{i}.fuz")); }
+                        finally { File.Delete(copy); }
+                    });
+                    return sw.Elapsed.TotalSeconds;
+                }
+                double first = Pass("first");
+                var afterFirst = Skyrim.VoiceFiles.CacheStats;
+                double second = Pass("second");
+                var afterSecond = Skyrim.VoiceFiles.CacheStats;
+                int identical = Enumerable.Range(0, wavs.Count).Count(i => File.Exists(Path.Combine(dir, "first", $"line_first_{i}.fuz"))
+                    && File.ReadAllBytes(Path.Combine(dir, "first", $"line_first_{i}.fuz")).AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(dir, "second", $"line_second_{i}.fuz"))));
+                Console.WriteLine($"first pass {first:F1} s ({afterFirst.Packed} packed, {afterFirst.Hits} from the cache); renumbered pass {second:F2} s ({afterSecond.Packed - afterFirst.Packed} packed, {afterSecond.Hits - afterFirst.Hits} from the cache); {identical} of {wavs.Count} identical");
+                return identical == wavs.Count && afterSecond.Hits - afterFirst.Hits == wavs.Count ? 0 : 2;
+            }
                             {
                                 string vt = npc.Template.IsNull ? "" : skNpcs.TryGetValue(npc.Template.FormKey, out var look) && voices.TryGetValue(look.Voice.FormKey, out var v) ? v : "";
                                 string id8 = info.FormKey.ID.ToString("x8");
