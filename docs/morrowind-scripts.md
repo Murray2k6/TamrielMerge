@@ -178,11 +178,19 @@ statements translated, what is missing most and the scripts with the most left. 
 Creation Kit's compiler against Skyrim's, SKSE's and TamrielMerge's sources (batches of 400) into `Scripts`, the log in
 `compile.txt`. `mw-build --no-scripts` leaves the scripts out.
 
-Results (2026-10-14, Morrowind + Tribunal + Bloodmoon + the official plugins the converter selects): 1,215 scripts
+Results (2026-10-15, Morrowind + Tribunal + Bloodmoon + the official plugins the converter selects): 1,215 scripts
 become 1,089 object scripts and 138 global scripts (5 start scripts), and the 5,553 of 16,081 dialogue results that
-do something become 3,703 result scripts; 33,374 of 33,374 statements translated (100%), and all 4,930 Papyrus
-scripts compile (about 17 minutes in batches of 400). `mw-script-attach-test` runs the builder's script steps on the
-prison ship and the census office with the dialogue: 922 scripts attached (709 people), 7,387 responses with their
-result script, 18,517 properties filled (the 1,850 left are references in cells that test doesn't build).
+do something become 3,704 result scripts (one more than before: a result whose single speaker's attributes it reads
+now differs by speaker); 33,375 of 33,375 statements translated (100%), and all 4,931 Papyrus scripts compile, with
+TMMwScript, TMMwAI, TMMwState and TMMwShare (7 minutes 19 seconds, batches side by side). `mw-script-attach-test`
+runs the builder's script steps on the prison ship and the census office with the dialogue: 922 scripts attached,
+7,387 responses with their result script, 24,027 properties filled (the 1,850 left are references in cells that test
+doesn't build); the state quest has Morrowind's 10 races (20 Skyrim races with their vampire forms) and all 13
+birthsigns' standing stones; 738 journal index globals, 3,383 journal objectives, the 11 player globals and the
+Companion Share topic are made. With `--write` the test's plugin passes `plugin-check` but for the two Mark and Recall
+effects whose anchor only the full build places.
 
-Not checked in the game yet: everything above is verified by compiling and by the builder's bookkeeping only.
+Not checked in the game yet: everything above is verified by compiling and by the builder's bookkeeping only. In
+particular WakeUpPC's way of closing the sleep menu (the menu's own onCancelPress, through SKSE's UI.Invoke) is Skyrim
+interface code the game may refuse while the sleep runs, and no script of the game streams a track that exists, so
+StreamMusic's conversion is exercised only by mods.
