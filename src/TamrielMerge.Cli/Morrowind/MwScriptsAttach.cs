@@ -156,6 +156,12 @@ public sealed partial class MwPluginBuilder
         string sourceDir = Path.Combine(modOutDir, "Source", "MWScripts");
         if (Directory.Exists(sourceDir)) Directory.Delete(sourceDir, true);
         WriteScriptSources(scriptSet.All, sourceDir);
+        // A source the same as the last build's (kept in Source\Scripts) takes that copy's time, so its compiled script
+        // from then counts as fresh and isn't compiled again (all 4,930 took 17 minutes).
+        string kept = Path.Combine(modOutDir, "Source", "Scripts");
+        foreach (var f in Directory.GetFiles(sourceDir, "*.psc"))
+            if (Path.Combine(kept, Path.GetFileName(f)) is var old && File.Exists(old) && File.ReadAllBytes(old).AsSpan().SequenceEqual(File.ReadAllBytes(f)))
+                File.SetLastWriteTimeUtc(f, File.GetLastWriteTimeUtc(old));
         var (compiled, log) = precompiled is null ? CompilePapyrus(SkyrimData!, sourceDir, Path.Combine(modOutDir, "Scripts"), progress)
             : (scriptSet.All.Select(o => o.ScriptName).Where(n => File.Exists(Path.Combine(precompiled, n + ".pex"))).ToHashSet(StringComparer.OrdinalIgnoreCase), "");
         if (compiled is null) { Problems.Add("scripts: " + log); FallBackResults(new(StringComparer.OrdinalIgnoreCase)); return 0; }
