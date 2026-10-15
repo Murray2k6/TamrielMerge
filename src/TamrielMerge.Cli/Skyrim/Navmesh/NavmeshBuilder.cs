@@ -248,16 +248,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// </summary>
     public static void AddTerrain(List<Vector3[]> output, ILandscapeGetter land, int cx, int cy, float? water)
     {
-        if (land.VertexHeightMap is not { } vhgt) return;
-        var h = new float[33, 33];
-        float rowStart = vhgt.Offset;
-        for (int y = 0; y < 33; y++)
-        {
-            rowStart += vhgt.HeightMap[0, y];
-            float v = rowStart;
-            h[0, y] = v * 8;
-            for (int x = 1; x < 33; x++) { v += vhgt.HeightMap[x, y]; h[x, y] = v * 8; }
-        }
+        if (Heights(land) is not { } h) return;
         float ox = cx * CellUnits, oy = cy * CellUnits;
         Vector3 P(int x, int y) => new(ox + x * 128, oy + y * 128, h[x, y]);
         for (int y = 0; y < 32; y++)
@@ -268,6 +259,153 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 output.Add([P(x, y), P(x + 1, y + 1), P(x, y + 1)]);
             }
     }
+
+    /// <summary>A landscape's 33 x 33 heights (units), [x, y].</summary>
+    static float[,]? Heights(ILandscapeGetter land)
+    {
+        if (land.VertexHeightMap is not { } vhgt) return null;
+        var h = new float[33, 33];
+        float rowStart = vhgt.Offset;
+        for (int y = 0; y < 33; y++)
+        {
+            rowStart += vhgt.HeightMap[0, y];
+            float v = rowStart;
+            h[0, y] = v * 8;
+            for (int x = 1; x < 33; x++) { v += vhgt.HeightMap[x, y]; h[x, y] = v * 8; }
+        }
+        return h;
+    }
+
+    /// <summary>
+    /// An open-country cell with nothing on it but its land (Daggerfall's overland), meshed straight from its heights
+    /// instead of by Recast: blocks of 16 quads (2048 units; Recast kept edges under 1600) split in four while they lie
+    /// more than <see cref="GridTolerance"/> from the ground under them or cross from walkable ground into deep water or
+    /// a slope too steep to walk, down to single 128-unit quads. Neighbouring blocks differ by one split at most, and a
+    /// block's edge gets a midpoint where the block beside it is split, so the triangles share their corners.
+    /// 2026-10-15 (user: "should be a 1 hour conversion"): Recast voxelised each of the overland's 400,000 cells for
+    /// over 50 minutes on every core, and left about 3 triangles a cell, hundreds of units off the ground on Daggerfall's
+    /// hills; an even grid per cell within 48 units took 7 minutes but made 99 million triangles.
+    /// </summary>
+    public static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateTerrainGrid(ILandscapeGetter land, int cx, int cy, float? water, List<P3Float> keep)
+    {
+        if (Heights(land) is not { } h) return null;
+        // Each 128-unit quad: walkable, or left out (more than 64 units under the water, as AddTerrain leaves out, or
+        // steeper than Recast's 50-degree limit).
+        float cosMax = MathF.Cos(50f * MathF.PI / 180f);
+        var open = new bool[32, 32];
+        static float Up(float dx, float dy) => 1f / MathF.Sqrt(1 + dx * dx + dy * dy);
+        bool any = false;
+        for (int y = 0; y < 32; y++)
+            for (int x = 0; x < 32; x++)
+            {
+                float top = MathF.Max(MathF.Max(h[x, y], h[x + 1, y]), MathF.Max(h[x, y + 1], h[x + 1, y + 1]));
+                bool deep = water is { } w && top < w - 64;
+                // The quad's two triangles' slopes (P00 P10 P11 and P00 P11 P01).
+                bool steep = Up((h[x + 1, y] - h[x, y]) / 128, (h[x + 1, y + 1] - h[x + 1, y]) / 128) < cosMax
+                          || Up((h[x + 1, y + 1] - h[x, y + 1]) / 128, (h[x, y + 1] - h[x, y]) / 128) < cosMax;
+                open[x, y] = !deep && !steep;
+                any |= open[x, y];
+            }
+        if (!any) return null;
+
+        // The blocks: leaf[x, y] is the size of the block holding quad (x, y); blocks sit on multiples of their size.
+        var leaf = new int[32, 32];
+        bool Fits(int x0, int y0, int size)
+        {
+            bool first = open[x0, y0];
+            for (int y = y0; y < y0 + size; y++)
+                for (int x = x0; x < x0 + size; x++)
+                    if (open[x, y] != first) return false;
+            if (!first) return true;
+            float a = h[x0, y0], b = h[x0 + size, y0], c = h[x0 + size, y0 + size], d = h[x0, y0 + size];
+            for (int y = 0; y <= size; y++)
+                for (int x = 0; x <= size; x++)
+                {
+                    float u = x / (float)size, v = y / (float)size;
+                    float z = u >= v ? a + u * (b - a) + v * (c - b) : a + v * (d - a) + u * (c - d);
+                    if (MathF.Abs(z - h[x0 + x, y0 + y]) > GridTolerance) return false;
+                }
+            return true;
+        }
+        void Set(int x0, int y0, int size) { for (int y = y0; y < y0 + size; y++) for (int x = x0; x < x0 + size; x++) leaf[x, y] = size; }
+        void Split(int x0, int y0, int size)
+        {
+            if (size == 1 || Fits(x0, y0, size)) { Set(x0, y0, size); return; }
+            int half = size / 2;
+            Split(x0, y0, half); Split(x0 + half, y0, half); Split(x0, y0 + half, half); Split(x0 + half, y0 + half, half);
+        }
+        for (int y = 0; y < 32; y += 16) for (int x = 0; x < 32; x += 16) Split(x, y, 16);
+        // Balance: a block twice as big as a neighbour's half is split, until none is.
+        int Smallest(int x0, int y0, int size, int side)
+        {
+            int m = int.MaxValue;
+            for (int i = 0; i < size; i++)
+            {
+                var (x, y) = side switch { 0 => (x0 - 1, y0 + i), 1 => (x0 + size, y0 + i), 2 => (x0 + i, y0 - 1), _ => (x0 + i, y0 + size) };
+                if (x is >= 0 and < 32 && y is >= 0 and < 32) m = Math.Min(m, leaf[x, y]);
+            }
+            return m;
+        }
+        for (bool changed = true; changed;)
+        {
+            changed = false;
+            for (int y = 0; y < 32; y++)
+                for (int x = 0; x < 32; x++)
+                {
+                    int size = leaf[x, y];
+                    if (size == 1 || x % size != 0 || y % size != 0) continue;
+                    if (Enumerable.Range(0, 4).Any(side => Smallest(x, y, size, side) < size / 2))
+                    {
+                        int half = size / 2;
+                        Set(x, y, half);
+                        changed = true;
+                    }
+                }
+        }
+
+        var verts = new List<P3Float>();
+        var index = new Dictionary<(int, int), int>();
+        int V(int x, int y)
+        {
+            if (!index.TryGetValue((x, y), out int i)) { i = verts.Count; verts.Add(new P3Float(cx * CellUnits + x * 128, cy * CellUnits + y * 128, h[x, y])); index[(x, y)] = i; }
+            return i;
+        }
+        var tris = new List<(int A, int B, int C)>();
+        for (int y0 = 0; y0 < 32; y0++)
+            for (int x0 = 0; x0 < 32; x0++)
+            {
+                int size = leaf[x0, y0];
+                if (x0 % size != 0 || y0 % size != 0 || !open[x0, y0]) continue;
+                int half = size / 2, x1 = x0 + size, y1 = y0 + size;
+                // Midpoints where the neighbour beside an edge is split (south, east, north, west).
+                bool ms = size > 1 && Smallest(x0, y0, size, 2) < size, me = size > 1 && Smallest(x0, y0, size, 1) < size;
+                bool mn = size > 1 && Smallest(x0, y0, size, 3) < size, mw = size > 1 && Smallest(x0, y0, size, 0) < size;
+                if (!ms && !me && !mn && !mw)
+                {
+                    tris.Add((V(x0, y0), V(x1, y0), V(x1, y1)));
+                    tris.Add((V(x0, y0), V(x1, y1), V(x0, y1)));
+                    continue;
+                }
+                // A fan from the block's centre round its corners and midpoints, counter-clockwise.
+                var ring = new List<int> { V(x0, y0) };
+                if (ms) ring.Add(V(x0 + half, y0));
+                ring.Add(V(x1, y0));
+                if (me) ring.Add(V(x1, y0 + half));
+                ring.Add(V(x1, y1));
+                if (mn) ring.Add(V(x0 + half, y1));
+                ring.Add(V(x0, y1));
+                if (mw) ring.Add(V(x0, y0 + half));
+                int centre = V(x0 + half, y0 + half);
+                for (int i = 0; i < ring.Count; i++) tris.Add((centre, ring[i], ring[(i + 1) % ring.Count]));
+            }
+        if (tris.Count == 0) return null;
+        (verts, tris) = PruneIslands(verts, tris, keep);
+        return tris.Count == 0 ? null : (verts, tris);
+    }
+
+    /// <summary>How far (units) a terrain navmesh block may lie from the ground under it (2026-10-15, measured on 600
+    /// overland cells: 48 units made 68 million triangles over the overland, 96 made 26, 128 made 17).</summary>
+    const float GridTolerance = 96f;
 
     /// <summary>Recast settings for exteriors: 16-unit voxels (terrain vertices are 128 apart), one 4096-unit tile per
     /// cell with a border, so the agent radius doesn't erode the mesh back from the cell's edges.</summary>
@@ -416,6 +554,15 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 MathF.Max(t[0].Y, MathF.Max(t[1].Y, t[2].Y)) >= y0 && MathF.Min(t[0].Y, MathF.Min(t[1].Y, t[2].Y)) <= y1;
             try
             {
+                var cell = cells[(x, y)];
+                var keep = cell.Temporary.OfType<IPlacedNpcGetter>().Select(n => n.Placement!.Position)
+                    .Concat(doors.Select(d => d.Placement!.Position).Where(p => InCell(p, x, y))).ToList();
+                // Open country with nothing standing on it near the cell: straight from its heights.
+                if (open && cell.Landscape is { } bare && !Enumerable.Range(-1, 3).Any(dy => Enumerable.Range(-1, 3).Any(dx => solidsOf(x + dx, y + dy).Any())))
+                {
+                    results[i] = GenerateTerrainGrid(bare, x, y, waterOf(cell), keep);
+                    return;
+                }
                 var tris = new List<Vector3[]>();
                 for (int dy = -1; dy <= 1; dy++)
                     for (int dx = -1; dx <= 1; dx++)
@@ -428,9 +575,6 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                             if (water is not { } w || MathF.Max(t[0].Z, MathF.Max(t[1].Z, t[2].Z)) >= w - 64) local.Add(t);
                         tris.AddRange(dx == 0 && dy == 0 ? local : local.Where(Near));
                     }
-                var cell = cells[(x, y)];
-                var keep = cell.Temporary.OfType<IPlacedNpcGetter>().Select(n => n.Placement!.Position)
-                    .Concat(doors.Select(d => d.Placement!.Position).Where(p => InCell(p, x, y))).ToList();
                 // A cell Recast can't outline in the open-country setting is tried again in the fine one.
                 try { results[i] = GenerateExterior(x, y, tris, keep, open); }
                 catch (Exception) when (open) { results[i] = GenerateExterior(x, y, tris, keep); }

@@ -6076,6 +6076,68 @@ static class Program
                 Console.WriteLine(Skyrim.VoiceFiles.Pack(skyrimData, opts["wav"], opts["text"], opts["fuz"]) ? $"wrote {opts["fuz"]}" : "failed");
                 return 0;
             }
+            case "df-navmesh-test":
+            {
+                // Dev aid: the overland's terrain navmesh (NavmeshBuilder.GenerateTerrainGrid) on --cells N land cells of
+                // --plugin (Daggerfall Land.esm), checked: triangles a cell, how far a vertex... the surface lies from the
+                // ground, and inner edges not shared by exactly two triangles (cracks).
+                string plugin = Path.GetFullPath(opts.GetValueOrDefault("plugin", Path.Combine("out", "convert", Skyrim.Terrain.OverlandTiles.LandPluginName)));
+                int want = int.Parse(opts.GetValueOrDefault("cells", "2000"));
+                using var land = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
+                var rnd = new Random(1);
+                var all = land.Worldspaces.SelectMany(w => w.SubCells).SelectMany(b => b.Items).SelectMany(sb => sb.Items)
+                    .Where(c => c.Landscape?.VertexHeightMap is not null && c.Grid is not null).ToList();
+                long tris = 0; int made = 0, cracked = 0; double worst = 0, sumErr = 0; long samples = 0;
+                foreach (var cell in all.OrderBy(_ => rnd.Next()).Take(want))
+                {
+                    int cx = cell.Grid!.Point.X, cy = cell.Grid.Point.Y;
+                    float? water = cell.Flags.HasFlag(Cell.Flag.HasWater) ? cell.WaterHeight ?? 0f : null;
+                    if (Skyrim.Navmesh.NavmeshBuilder.GenerateTerrainGrid(cell.Landscape!, cx, cy, water, []) is not { } g) continue;
+                    made++; tris += g.Tris.Count;
+                    // Inner edges: each must be shared by two triangles, unless it borders left-out ground.
+                    var edges = new Dictionary<(int, int), int>();
+                    foreach (var (ta, tb, tc) in g.Tris)
+                        foreach (var (e0, e1) in new[] { (ta, tb), (tb, tc), (tc, ta) })
+                        {
+                            var k = (Math.Min(e0, e1), Math.Max(e0, e1));
+                            edges[k] = edges.GetValueOrDefault(k) + 1;
+                        }
+                    if (edges.Values.Any(n => n > 2)) cracked++;
+                    // A T-junction: a vertex lying inside another triangle's edge.
+                    bool tee = false;
+                    var onEdge = g.Verts.Select(v => (v.X, v.Y)).ToHashSet();
+                    foreach (var ((e0, e1), n) in edges)
+                    {
+                        if (n != 1) continue;
+                        var p0 = g.Verts[e0]; var p1 = g.Verts[e1];
+                        float mx = (p0.X + p1.X) / 2, my = (p0.Y + p1.Y) / 2;
+                        bool border = (p0.X == p1.X && (p0.X % 4096 == 0)) || (p0.Y == p1.Y && (p0.Y % 4096 == 0));
+                        if (!border && onEdge.Contains((mx, my)) && edges.Keys.Any(k2 => (g.Verts[k2.Item1].X, g.Verts[k2.Item1].Y) == (mx, my) || (g.Verts[k2.Item2].X, g.Verts[k2.Item2].Y) == (mx, my))) { tee = true; break; }
+                    }
+                    if (tee) cracked++;
+                    // The surface against the ground at every height point under a triangle.
+                    var vh = cell.Landscape!.VertexHeightMap!;
+                    var hh = new float[33, 33]; float row = vh.Offset;
+                    for (int y = 0; y < 33; y++) { row += vh.HeightMap[0, y]; float v = row; hh[0, y] = v * 8; for (int x = 1; x < 33; x++) { v += vh.HeightMap[x, y]; hh[x, y] = v * 8; } }
+                    foreach (var (ta, tb, tc) in g.Tris)
+                    {
+                        var A = g.Verts[ta]; var B = g.Verts[tb]; var C = g.Verts[tc];
+                        float minX = Math.Min(A.X, Math.Min(B.X, C.X)), maxX = Math.Max(A.X, Math.Max(B.X, C.X)), minY = Math.Min(A.Y, Math.Min(B.Y, C.Y)), maxY = Math.Max(A.Y, Math.Max(B.Y, C.Y));
+                        float det = (B.Y - C.Y) * (A.X - C.X) + (C.X - B.X) * (A.Y - C.Y);
+                        for (float py = minY; py <= maxY; py += 128)
+                            for (float px = minX; px <= maxX; px += 128)
+                            {
+                                float l1 = ((B.Y - C.Y) * (px - C.X) + (C.X - B.X) * (py - C.Y)) / det, l2 = ((C.Y - A.Y) * (px - C.X) + (A.X - C.X) * (py - C.Y)) / det, l3 = 1 - l1 - l2;
+                                if (l1 < -1e-4 || l2 < -1e-4 || l3 < -1e-4) continue;
+                                float z = l1 * A.Z + l2 * B.Z + l3 * C.Z;
+                                int ix = (int)MathF.Round((px - cx * 4096) / 128), iy = (int)MathF.Round((py - cy * 4096) / 128);
+                                double e = Math.Abs(z - hh[ix, iy]); worst = Math.Max(worst, e); sumErr += e; samples++;
+                            }
+                    }
+                }
+                Console.WriteLine($"{made} cells with a navmesh of {Math.Min(want, all.Count)}: {tris / (double)Math.Max(1, made):F1} triangles a cell (x{all.Count:N0} land cells = {tris / (double)Math.Max(1, made) * all.Count / 1e6:F1} million); off the ground: mean {sumErr / Math.Max(1, samples):F1}, worst {worst:F0} units; cells with cracks: {cracked}");
+                return 0;
+            }
             case "df-navmesh":
             {
                 // Navmeshes for Daggerfall's overland, added to a built "Daggerfall Land.esm" (--plugin, default
