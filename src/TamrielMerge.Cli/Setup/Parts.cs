@@ -15,7 +15,8 @@ public static class Parts
     public static readonly IReadOnlyList<Part> All =
     [
         new("Daggerfall", "The Iliac Bay: its land, towns, dungeons, people and quests",
-            ["Daggerfall.esm", Skyrim.Terrain.OverlandTiles.LandPluginName, Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName,
+            // The land is one plugin or several (OverlandTiles.LandPluginNames; those not there are left out).
+            ["Daggerfall.esm", .. Skyrim.Terrain.OverlandTiles.LandPluginNames, Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName,
              Skyrim.Terrain.OverlandDoorLinks.PluginName]),
         new("Redguard", "Stros M'Kai in 2E 864: Cyrus's story", [Redguard.RgPluginBuilder.PluginName]),
         new("Morrowind", "Vvardenfell, Mournhold and Solstheim, with Tribunal and Bloodmoon", [Morrowind.MwPluginBuilder.PluginName]),

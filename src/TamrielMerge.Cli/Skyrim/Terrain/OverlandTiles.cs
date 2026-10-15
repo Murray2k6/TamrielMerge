@@ -264,14 +264,37 @@ public sealed class OverlandTiles
         }
     }
 
-    /// <summary>"Daggerfall Land.esm": every tile's terrain (their cells and land), with Daggerfall.esm as master.</summary>
+    /// <summary>"Daggerfall Land.esm": every tile's terrain (their cells and land), with Daggerfall.esm as master; the
+    /// first of the land's plugins (<see cref="LandPluginNames"/>).</summary>
     public const string LandPluginName = "Daggerfall Land.esm";
+    /// <summary>
+    /// The land's plugins, in load order: "Daggerfall Land.esm", then "Daggerfall Land 2.esm" and on when the land is
+    /// split. Mutagen's binary overlay reads a plugin only up to 2 GB, and the whole land with its navmeshes came to
+    /// 2.01 GB on 2026-10-15 (LAND 1,627 MB, NAVM 225, CELL 27, NAVI 19, compressed), so it is split before it gets
+    /// there (<see cref="LandPluginsWanted"/>): each plugin holds a run of the land's pieces, each one after the first has
+    /// the ones before it as masters (the land textures are in the first), and the last also holds every navmesh, over
+    /// the other plugins' cells, so the navmeshes' links between cells all stay in one plugin.
+    /// </summary>
+    public static readonly string[] LandPluginNames = [LandPluginName, "Daggerfall Land 2.esm", "Daggerfall Land 3.esm", "Daggerfall Land 4.esm"];
+    /// <summary>The land's plugins found in <paramref name="dir"/>, in load order.</summary>
+    public static List<string> LandPluginsIn(string dir) => LandPluginNames.Where(n => File.Exists(Path.Combine(dir, n))).ToList();
+    /// <summary>The land plugin with the overland's navmeshes (and the navmesh map): the last of them.</summary>
+    public static string? NavmeshPluginIn(string dir) => LandPluginsIn(dir).LastOrDefault();
+    /// <summary>How many plugins the land is split into; null: as many as <see cref="PluginBudget"/> needs.</summary>
+    public static int? LandPluginsWanted { get; set; }
+    /// <summary>Bytes each land cell adds, joined and compressed (2026-10-15: 2,009,995,802 for 399,800 cells): its land,
+    /// and its share of the navmeshes and their map.</summary>
+    const double LandBytesPerCell = (1627.2 + 26.7) * 1048576 / 399_800, NavmeshBytesPerCell = (225.4 + 19.1) * 1048576 / 399_800;
+    /// <summary>The most a land plugin is planned to hold, well under the 2 GB Mutagen reads (room for a finer navmesh).</summary>
+    const double PluginBudget = 1.6e9;
     static string LandPartPath(string dir, int part) => Path.Combine(dir, $"Daggerfall Land.part{part + 1}.esm");
 
     /// <summary>
-    /// Writes the tiles' land as one plugin (<see cref="LandPluginName"/>), built a tile at a time so only one tile's land
+    /// Writes the tiles' land as one plugin (<see cref="LandPluginName"/>), or split into several (<see cref="LandPluginNames"/>)
+    /// when it would be too big for one, built a tile at a time so only one tile's land
     /// is ever in memory (each a part, joined by <see cref="PluginMerger"/>), and each tile's distant terrain. Cells all below <see cref="TerrainBuilder.SkipBelow"/> get none (open sea).
-    /// <paramref name="regionOf"/> gives the weather region for a tile's cell (global grid), if any.
+    /// <paramref name="regionOf"/> gives the weather region for a tile's cell (global grid), if any. Returns the land
+    /// plugins' file names, in load order.
     /// </summary>
     public List<string> LandPlugins(string mainPlugin, string skyrimData, HeightField f, Daggerfall.DfWorldMap map,
         Func<int, int, int, FormKey?> regionOf, Action<string>? log = null, IReadOnlyCollection<int>? onlyTiles = null)
@@ -280,7 +303,6 @@ public sealed class OverlandTiles
         using var master = SkyrimMod.CreateFromBinaryOverlay(mainPlugin, SkyrimRelease.SkyrimSE);
         float peak = f.Peak();
         var written = new List<string>();
-        var masters = PluginMerger.Masters(Path.GetFileName(mainPlugin));
         // Daggerfall's own ground (TerrainBuilder.AddDaggerfallTextures), made in the first part built.
         using var skyrimEsm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
         string? arena2 = GameInstalls.DataDir(Game.Daggerfall);
@@ -293,13 +315,45 @@ public sealed class OverlandTiles
             var chunks = Chunks(t, LodMargin);
             foreach (var (a, b, c, d) in chunks) units.Add((t, a, b, c, d, chunks.Count == 1));
         }
+        // Which plugin each piece goes in: the land cells counted first (as BuildCell finds them), the plugins as many
+        // as the estimate needs (or LandPluginsWanted), the pieces in order, each plugin a run of them with an equal
+        // share of the bytes; the last plugin also takes the navmeshes, so it gets less land.
+        var landIn = new int[units.Count];
+        Parallel.For(0, units.Count, u =>
+        {
+            var (t, ux0, uy0, ux1, uy1, _) = units[u];
+            var (x0, y0, x1, y1) = Extent(t);
+            int n = 0;
+            for (int gy = Math.Max(uy0, y0); gy <= Math.Min(uy1, y1); gy++)
+                for (int gx = Math.Max(ux0, x0); gx <= Math.Min(ux1, x1); gx++)
+                    if (TerrainBuilder.HasLand(f, gx - f.MinCellX, gy - f.MinCellY)) n++;
+            landIn[u] = n;
+        });
+        long totalLand = landIn.Sum(n => (long)n);
+        int plugins = Math.Clamp(LandPluginsWanted ?? (int)Math.Ceiling(totalLand * (LandBytesPerCell + NavmeshBytesPerCell) / PluginBudget), 1, LandPluginNames.Length);
+        var pluginOf = new int[units.Count];
+        {
+            double share = (LandBytesPerCell + NavmeshBytesPerCell) / plugins / LandBytesPerCell;   // of the land, each plugin but the last
+            long before = 0;
+            for (int u = 0; u < units.Count; u++)
+            {
+                // By the piece's middle, so a piece goes where most of it falls.
+                pluginOf[u] = totalLand == 0 ? 0 : Math.Min(plugins - 1, (int)((before + landIn[u] / 2.0) / (totalLand * share)));
+                before += landIn[u];
+            }
+        }
+        var landMasters = Enumerable.Range(0, plugins).Select(p => PluginMerger.Masters([Path.GetFileName(mainPlugin), .. LandPluginNames.Take(p)])).ToArray();
+        if (plugins > 1) log?.Invoke($"{totalLand:N0} land cells, estimated {totalLand * (LandBytesPerCell + NavmeshBytesPerCell) / 1e9:F2} GB with the navmeshes: split into {plugins} plugins ({string.Join(", ", Enumerable.Range(0, plugins).Select(p => $"{LandPluginNames[p]} {Enumerable.Range(0, units.Count).Where(u => pluginOf[u] == p).Sum(u => landIn[u]):N0} cells"))})");
+        var writtenBy = Enumerable.Range(0, plugins).Select(_ => new List<string>()).ToArray();
         var lodFramed = new HashSet<int>();
         for (int u = 0; u < units.Count; u++)
         {
             var (t, ux0, uy0, ux1, uy1, whole) = units[u];
             var masterWorld = master.Worldspaces.FirstOrDefault(w => w.EditorID == EditorId(t));
             if (masterWorld is null) continue;
-            var mod = new SkyrimMod(ModKey.FromFileName(LandPluginName), SkyrimRelease.SkyrimSE);
+            // The land textures go in the first plugin, the one every other has as master.
+            int plugin = textured ? pluginOf[u] : 0;
+            var mod = new SkyrimMod(ModKey.FromFileName(LandPluginNames[plugin]), SkyrimRelease.SkyrimSE);
             mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Master;
             PluginMerger.PreparePart(mod, u + 1, units.Count);
             var ws = masterWorld.DeepCopy(new Worldspace.TranslationMask(defaultOn: true) { SubCells = false, TopCell = false });
@@ -342,7 +396,7 @@ public sealed class OverlandTiles
             string path = LandPartPath(outDir, u);
             string label = whole ? EditorId(t) : $"{EditorId(t)} cells {ux0},{uy0}..{ux1},{uy1}";
             if (land == 0 && !holdsTextures) { log?.Invoke($"{label}: open sea, no land"); continue; }
-            PluginMerger.WritePart(mod, path, masters, u + 1, units.Count);
+            PluginMerger.WritePart(mod, path, landMasters[plugin], u + 1, units.Count);
             var lod = new TerrainLod(mod, outDir, skyrimData);
             if (whole) lod.Build(EditorId(t), lodCells, c => c.Flags.HasFlag(Cell.Flag.HasWater) ? 0f : null, TerrainBuilder.DefaultLandHeight);
             else
@@ -356,17 +410,25 @@ public sealed class OverlandTiles
             log?.Invoke($"{label}: {land} cells with land, {lod.Chunks} distant terrain chunks{(lod.Problems.Count > 0 ? ", problems: " + string.Join("; ", lod.Problems.Take(3)) : "")}");
             Progress.Report((u + 1) / (double)units.Count, $"Land: {u + 1} of {units.Count}");
             written.Add(path);
+            writtenBy[plugin].Add(path);
         }
-        // One plugin from the tiles' parts.
-        string merged = Path.Combine(outDir, LandPluginName);
-        if (written.Count > 0)
+        // Each plugin from its pieces.
+        var names = new List<string>();
+        for (int p = 0; p < plugins; p++)
         {
-            long records = PluginMerger.Merge(written, merged);
-            foreach (var part in written) File.Delete(part);
-            log?.Invoke($"{LandPluginName}: {records} records and groups from {written.Count} tiles");
+            if (writtenBy[p].Count == 0) continue;
+            long records = PluginMerger.Merge(writtenBy[p], Path.Combine(outDir, LandPluginNames[p]));
+            foreach (var part in writtenBy[p]) File.Delete(part);
+            log?.Invoke($"{LandPluginNames[p]}: {records} records and groups from {writtenBy[p].Count} pieces, {new FileInfo(Path.Combine(outDir, LandPluginNames[p])).Length / 1048576} MB");
+            names.Add(LandPluginNames[p]);
         }
-        // The one-plugin-per-tile files of earlier builds.
-        foreach (var old in Directory.GetFiles(outDir, "Daggerfall Land *.esm")) File.Delete(old);
-        return written.Count > 0 ? [LandPluginName] : [];
+        // Land plugins an earlier build split differently (and the one-plugin-per-tile files of older ones).
+        foreach (var old in Directory.GetFiles(outDir, "Daggerfall Land *.esm").Where(o => !names.Contains(Path.GetFileName(o), StringComparer.OrdinalIgnoreCase))) File.Delete(old);
+        return names;
     }
+
+    /// <summary>The land plugins over <see cref="SafeSize"/> (Mutagen reads up to 2 GB), with their sizes in MB.</summary>
+    public static List<string> Oversized(string dir) =>
+        LandPluginsIn(dir).Where(n => new FileInfo(Path.Combine(dir, n)).Length >= SafeSize).Select(n => $"{n} ({new FileInfo(Path.Combine(dir, n)).Length / 1048576} MB)").ToList();
+    public const long SafeSize = 1_900_000_000;
 }

@@ -52,7 +52,7 @@ public static class ModelCatalog
         Directory.GetFiles(dir, "*.es?").Where(p => p.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".esp", StringComparison.OrdinalIgnoreCase))
             .Where(p => !Path.GetFileName(p).Contains(".part", StringComparison.OrdinalIgnoreCase)
                         && !Path.GetFileName(p).Equals(PluginName, StringComparison.OrdinalIgnoreCase)
-                        && !Path.GetFileName(p).Equals(Terrain.OverlandTiles.LandPluginName, StringComparison.OrdinalIgnoreCase))
+                        && !Terrain.OverlandTiles.LandPluginNames.Contains(Path.GetFileName(p), StringComparer.OrdinalIgnoreCase))
             .OrderBy(p => p).ToList();
 
     /// <summary>

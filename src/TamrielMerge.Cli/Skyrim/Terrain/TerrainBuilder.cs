@@ -200,6 +200,18 @@ public static class TerrainBuilder
 
     static int FloorDiv(int a, int b) => (int)Math.Floor((double)a / b);
 
+    /// <summary>Whether <see cref="BuildCell"/> gives field cell (<paramref name="cx"/>, <paramref name="cy"/>) land
+    /// (any of its heights at or above <see cref="SkipBelow"/>).</summary>
+    public static bool HasLand(HeightField f, int cx, int cy)
+    {
+        const int n = HeightField.QuadsPerCell + 1;
+        int vx0 = cx * HeightField.QuadsPerCell, vy0 = cy * HeightField.QuadsPerCell;
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++)
+                if (f.At(vx0 + x, vy0 + y) >= SkipBelow) return true;
+        return false;
+    }
+
     /// <summary>
     /// The cell at field cell (<paramref name="cx"/>, <paramref name="cy"/>) with its land, at grid
     /// (<paramref name="gx"/>, <paramref name="gy"/>) of the worldspace it goes in; null when it lies all under the sea.
