@@ -28,7 +28,7 @@ namespace rt
         float4 rtTex;       // the ray traced textures' width, height, 1 / width, 1 / height
         uint4 frame;        // frame number, history usable (0 / 1), occlusion rays, bounce rays
         uint4 flags;        // capsule count, sample step of the line-up check, max history frames, unused
-        float4 prevScale;   // last frame's traced width / height over the texture's (uv to texture), unused zw
+        float4 prevScale;   // last frame's traced width / height over the texture's (uv to texture); zw the motion vectors' scale
     };
 
     // The composite (Direct3D 11, a pixel shader before Skyrim's tonemapping).

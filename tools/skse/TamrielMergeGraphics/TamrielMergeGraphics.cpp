@@ -120,11 +120,13 @@ namespace
     }
 
     std::uint8_t* gameState = nullptr;
+    bool stateLayoutChecked = false;   // the game version whose renderer state was read from its code (1.7.104)
 
     void FindGameState()
     {
         int v[4]{};
         if (!GameVersion(v)) { Log("renderer state: the game's version unreadable"); return; }
+        stateLayoutChecked = v[0] == 1 && v[1] == 7 && v[2] == 104;
         char path[MAX_PATH]{};
         GetModuleFileNameA(nullptr, path, MAX_PATH);
         std::string dir(path);
@@ -139,6 +141,15 @@ namespace
     bool SafeCopy(void* to, const void* from, size_t n)
     {
         __try { std::memcpy(to, from, n); return true; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    /// A write into the game's memory, guarded (a wrong address is an exception caught, not a crash).
+    bool SafeWrite(void* to, const void* from, size_t n) { return SafeCopy(to, from, n); }
+
+    bool SafeAdd(volatile LONG* at, LONG d)
+    {
+        __try { InterlockedExchangeAdd(at, d); return true; }
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
@@ -1022,6 +1033,7 @@ namespace
     ID3D11PixelShader* sharpenPs = nullptr;
     ID3D11Buffer* sharpenCb = nullptr;
     ID3D11ShaderResourceView* dlssOutputView = nullptr;
+    ID3DDeviceContextState* sharpenState = nullptr;   // its own: NGX's state may keep DLSS's output bound as a UAV
     struct TargetView { ID3D11Resource* res; ID3D11RenderTargetView* rtv; };
     std::vector<TargetView> sharpenTargets;
     bool sharpenBroken = false;
@@ -1046,9 +1058,17 @@ namespace
 
     bool Sharpen(ID3D11DeviceContext* ctx, ID3D11Resource* out, const D3D11_TEXTURE2D_DESC& od)
     {
-        if (sharpenBroken || !dlssState) return false;
+        if (sharpenBroken) return false;
         if (!sharpenPs)
         {
+            ID3D11Device1* d1 = nullptr;
+            if (SUCCEEDED(device->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void**>(&d1))) && d1)
+            {
+                D3D_FEATURE_LEVEL level = device->GetFeatureLevel();
+                d1->CreateDeviceContextState(0, &level, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device1), nullptr, &sharpenState);
+                d1->Release();
+            }
+            if (!sharpenState) { sharpenBroken = true; Log("sharpening: no state object; DLSS's output is shown unsharpened"); return false; }
             D3D11_BUFFER_DESC bd{};
             bd.ByteWidth = sizeof(rt::SharpenConstants); bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
             if (FAILED(device->CreateVertexShader(g_FullscreenVS, sizeof(g_FullscreenVS), nullptr, &sharpenVs)) ||
@@ -1061,7 +1081,7 @@ namespace
         ID3D11DeviceContext1* c1 = nullptr;
         if (FAILED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) || !c1) return false;
         ID3DDeviceContextState* game = nullptr;
-        c1->SwapDeviceContextState(dlssState, &game);
+        c1->SwapDeviceContextState(sharpenState, &game);
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(sharpenCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
         {
@@ -1172,7 +1192,7 @@ namespace
         ID3D11ShaderResourceView* views[4]{};
         ctx->PSGetShaderResources(0, 4, views);
         ID3D11Resource* color = BoundResource(views[0]);
-        BoundResource(views[1]);
+        if (ID3D11Resource* last = BoundResource(views[1])) last->Release();
         ID3D11Resource* motion = BoundResource(views[2]);
         ID3D11Resource* depth = BoundResource(views[3]);
         ID3D11RenderTargetView* targets[2]{};
@@ -1290,14 +1310,21 @@ namespace
         // log of 2026-10-09) and DLSS saw the picture jump. Its own lock (State + 0x128, a count it also takes itself)
         // is held while DLSS upscales, so only our ratio is used; the last frame's ratio (+ 0x11C / + 0x120, which the
         // locked update no longer copies) is kept by us.
+        // Only on the version whose code this was read from (1.7.104); elsewhere the ratio is written as before.
         auto* lock = reinterpret_cast<volatile LONG*>(gameState + 0x128);
-        if (upscaling && !dynamicLocked) { InterlockedIncrement(lock); dynamicLocked = true; Log("DLSS: the game's dynamic resolution locked to %.3f", ratio); }
-        else if (!upscaling && dynamicLocked) { if (*lock > 0) InterlockedDecrement(lock); dynamicLocked = false; Log("DLSS: the game's dynamic resolution let go"); }
+        if (upscaling && !dynamicLocked && stateLayoutChecked && SafeAdd(lock, 1)) { dynamicLocked = true; Log("DLSS: the game's dynamic resolution locked to %.3f", ratio); }
+        else if (!upscaling && dynamicLocked)
+        {
+            LONG held = 0;
+            if (SafeCopy(&held, const_cast<const LONG*>(lock), sizeof(held)) && held > 0) SafeAdd(lock, -1);
+            dynamicLocked = false;
+            Log("DLSS: the game's dynamic resolution let go");
+        }
         if (upscaling || ratioChanged)
         {
             float prev[2] = { frameRatio, frameRatio }, r[2] = { ratio, ratio };
-            std::memcpy(gameState + 0x11C, prev, sizeof(prev));
-            std::memcpy(gameState + 0x114, r, sizeof(r));
+            if (dynamicLocked) SafeWrite(gameState + 0x11C, prev, sizeof(prev));
+            SafeWrite(gameState + 0x114, r, sizeof(r));
             ratioChanged = upscaling;
         }
         if (upscaling)
@@ -1309,14 +1336,14 @@ namespace
             unsigned slot = (count + 1) % 8;
             unsigned i = (jitterIndex++ % phases) + 1;
             float x = 0.5f + (Halton(i, 2) - 0.5f) / ratio, y = 0.5f + (Halton(i, 3) - 0.5f) / ratio;
-            std::memcpy(gameState + 0xD4 + slot * 4, &x, 4);
-            std::memcpy(gameState + 0xF4 + slot * 4, &y, 4);
+            SafeWrite(gameState + 0xD4 + slot * 4, &x, 4);
+            SafeWrite(gameState + 0xF4 + slot * 4, &y, 4);
             writtenJitter[slot][0] = x - 0.5f; writtenJitter[slot][1] = y - 0.5f;
             haltonChanged = true;
         }
         else if (haltonChanged && haltonSaved)
         {
-            std::memcpy(gameState + 0xD4, defaultHalton, sizeof(defaultHalton));
+            SafeWrite(gameState + 0xD4, defaultHalton, sizeof(defaultHalton));
             haltonChanged = false;
         }
         if (ratio != frameRatio) dlssReset = true;
@@ -1338,7 +1365,7 @@ namespace
     // precision positions (3 floats), 8 for half (3 halves).
     rt::Engine* rtEngine = nullptr;
     std::string rtStatus = "Off.";
-    bool rtTried = false;
+    bool rtTried = false, rtStopped = false;
 
     void RtLog(const char* s) { Log("%s", s); }
 
@@ -1370,12 +1397,16 @@ namespace
     }
 
     // A node's children (NiNode + 0x110: an NiTArray { vtable, data, capacity u16, free u16, size u16, grow u16 }).
+    // The array keeps holes where children were detached: its used length is the first free index (+ 0x122) when that
+    // is past the count of filled slots (+ 0x124); every entry is checked for null.
     bool Children(const std::uint8_t* obj, const std::uint8_t* const*& data, std::uint16_t& size)
     {
-        std::uint16_t capacity = 0;
+        std::uint16_t capacity = 0, freeIdx = 0;
         data = nullptr; size = 0;
-        if (!Read(obj + 0x118, data) || !Read(obj + 0x120, capacity) || !Read(obj + 0x124, size)) return false;
-        return data && size > 0 && size <= capacity && capacity <= 65000;
+        if (!Read(obj + 0x118, data) || !Read(obj + 0x120, capacity) || !Read(obj + 0x122, freeIdx) || !Read(obj + 0x124, size)) return false;
+        if (!data || size > capacity || capacity > 65000) return false;
+        if (freeIdx > size && freeIdx <= capacity) size = freeIdx;
+        return size > 0;
     }
 
     const std::uint8_t* ChildNamed(const std::uint8_t* obj, const char* name)
@@ -1593,6 +1624,7 @@ namespace
         double deadline = 0;
         bool outOfTime = false, characters = true;
         int shapes = 0, skinned = 0, noCpu = 0, rejected = 0, queued = 0, leftOut = 0, actors = 0;
+        unsigned visited = 0;
         std::vector<Bone> bones;     // the current reference's nodes
         bool inGroup = false, groupSkinned = false;
     };
@@ -1656,6 +1688,7 @@ namespace
     void Visit(Walk& w, const std::uint8_t* obj, int depth, int parentBone)
     {
         if (!obj || depth > 64 || w.outOfTime) return;
+        if ((++w.visited & 63) == 0 && Now() > w.deadline) { w.outOfTime = true; return; }
         std::uint32_t flags = 0;
         if (!Read(obj + 0xF4, flags) || (flags & 1)) return;       // hidden: its whole subtree
         // Too far to matter (its world bound past the ray tracing's reach).
@@ -1693,7 +1726,7 @@ namespace
                     m.key = key;
                     m.alphaTested = cls == 1;
                     if (CopyMesh(obj, r, tris, verts, m)) { rtEngine->Queue(std::move(m)); ++w.queued; }
-                    else ++w.rejected;
+                    else { rtEngine->Reject(key); ++w.rejected; }   // not copied again every frame
                 }
                 return;
             }
@@ -1706,7 +1739,6 @@ namespace
                 x.transform[i][3] = t.t[i] - w.cam[i];
             }
             w.instances.push_back(x);
-            if ((w.instances.size() & 255) == 0 && Now() > w.deadline) w.outOfTime = true;
             return;
         }
         if (depth <= 3)
@@ -1771,7 +1803,7 @@ namespace
     // The Direct3D 11 resources the tonemapping pass and the next TAA draw use: the depth and motion vectors are
     // TAA's own inputs (kept from its last draw: the same textures every frame).
     ID3D11Resource* rtDepth = nullptr, * rtMotion = nullptr;
-    unsigned tonemapFrame = ~0u;
+    unsigned tonemapFrame = ~0u, tonemapSeen = 0;
     int tonemapLogged = 0;
 
     void KeepTaaInputs(ID3D11Resource* depth, ID3D11Resource* motion)
@@ -1799,6 +1831,9 @@ namespace
     {
         if (vertices > 6 || !rtDepth) return nullptr;
         bool byShader = currentPixelShader && currentPixelShader == tonemapShader.load();
+        // Its inputs are only looked at while no tonemapping shader is known, or none was seen for a second (another
+        // variant in use): not on every small draw (menus, the HUD).
+        if (!byShader && tonemapShader.load() && presentFrame.load() - tonemapSeen < 60) return nullptr;
         ID3D11ShaderResourceView* views[3]{};
         ctx->PSGetShaderResources(0, 3, views);
         ID3D11Resource* hdr = BoundResource(views[1]);
@@ -1821,6 +1856,7 @@ namespace
                 ok = tf == DXGI_FORMAT_R8G8B8A8_UNORM || tf == DXGI_FORMAT_R8G8B8A8_TYPELESS || tf == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
                      tf == DXGI_FORMAT_R10G10B10A2_UNORM || tf == DXGI_FORMAT_R10G10B10A2_TYPELESS;
                 if (target) target->Release();
+                if (ok) tonemapShader = currentPixelShader;   // that variant by its shader from now on
                 if (ok && tonemapLogged < 4)
                 {
                     ++tonemapLogged;
@@ -1832,6 +1868,7 @@ namespace
         }
         if (lum) lum->Release();
         if (!ok && hdr) { hdr->Release(); hdr = nullptr; }
+        if (ok) tonemapSeen = presentFrame.load();
         return hdr;
     }
 
@@ -1897,6 +1934,7 @@ namespace
     {
         if (rtTried) return;
         rtTried = true;
+        rtStopped = false;
         if (rtEngine) { rtEngine->Stop(); delete rtEngine; }
         rtEngine = new rt::Engine();
         if (!rtEngine->Start(device, false, RtLog)) rtStatus = "Off: " + rtEngine->Status().substr(rtEngine->Status().find(':') + 1);
@@ -2390,10 +2428,11 @@ namespace
         // Ray-traced lighting switched on (in the menu or the ini): its Direct3D 12 side started; each frame its health
         // checked (a removed device or work over 2 s turns it off), what the GPU is done with freed.
         if (ready && settings.rayTracedLighting && !rtTried) StartRayTracingEngine();
-        if (rtEngine && !settings.rayTracedLighting && rtEngine->Running() && !menuOpen)
+        if (rtEngine && !settings.rayTracedLighting && !rtStopped && !menuOpen)
         {
-            // Turned off (and the menu closed): its video memory given back.
+            // Turned off (and the menu closed): its video memory given back, also after it turned itself off.
             rtEngine->Stop();
+            rtStopped = true;
             rtTried = false;
             rtStatus = "Off.";
             Log("ray tracing: turned off; its memory freed");

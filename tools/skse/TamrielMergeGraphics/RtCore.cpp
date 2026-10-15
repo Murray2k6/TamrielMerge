@@ -309,8 +309,10 @@ namespace rt
     {
         if (!fenceOut) return true;
         if (fenceOut->GetCompletedValue() >= valueOut) return true;
-        fenceOut->SetEventOnCompletion(valueOut, idleEvent);
-        return WaitForSingleObject(idleEvent, ms) == WAIT_OBJECT_0;
+        ResetEvent(idleEvent);   // no signal left over from a wait that timed out
+        if (FAILED(fenceOut->SetEventOnCompletion(valueOut, idleEvent))) return false;
+        WaitForSingleObject(idleEvent, ms);
+        return fenceOut->GetCompletedValue() >= valueOut;
     }
 
     bool Engine::EnsureTextures(UINT w, UINT h, float scale)
@@ -590,27 +592,82 @@ namespace rt
         c4->Signal(fenceIn11, ++valueIn);
         ctx->Flush();
 
-        // 2. Direct3D 12, list A: new meshes' BLASes, the capsules', the TLAS. Bounded.
+        // 2. Direct3D 12, list A: new meshes' BLASes, the capsules', the TLAS. Bounded. What every frame needs (the
+        // constants, the instances, the capsules, the TLAS's and the capsules' scratch) is set aside first, so new
+        // meshes streaming in can never leave a frame without its TLAS; they get what's left, the rest next frame.
         HRESULT hr = fc.allocator->Reset();
         if (SUCCEEDED(hr)) hr = fc.listA->Reset(fc.allocator, nullptr);
         if (FAILED(hr)) { SafeRelease(c1); SafeRelease(c4); Fail("couldn't record commands"); return false; }
         fc.used = 0;
         builtThisFrame = 0; trianglesThisFrame = 0;
+        auto skipFrame = [&]() {
+            fc.listA->Close();   // nothing recorded; the context's fence is unchanged, so it's free again at once
+            SafeRelease(c1); SafeRelease(c4);
+            ++framesSkipped; historyValid = false; queued.clear();
+            return false;
+        };
+        UINT capCount = static_cast<UINT>(std::min<size_t>(capsules.size(), MaxCapsules));
+        UINT want = std::min<UINT>(static_cast<UINT>(instances.size()), MaxInstances) + 1;   // + the capsules' instance
+        void* cbCpu = nullptr, * instCpu = nullptr, * aabbCpu = nullptr, * capCpu = nullptr;
+        D3D12_GPU_VIRTUAL_ADDRESS cb = UploadAlloc(fc, sizeof(RtConstants), &cbCpu);
+        D3D12_GPU_VIRTUAL_ADDRESS instGpu = UploadAlloc(fc, std::uint64_t(want) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), &instCpu);
+        D3D12_GPU_VIRTUAL_ADDRESS aabbGpu = capCount ? UploadAlloc(fc, capCount * sizeof(D3D12_RAYTRACING_AABB), &aabbCpu) : 0;
+        D3D12_GPU_VIRTUAL_ADDRESS capGpu = capCount ? UploadAlloc(fc, capCount * sizeof(RtCapsule), &capCpu) : 0;
+        if (!cb || !instGpu || (capCount && (!aabbGpu || !capGpu))) return skipFrame();
+        if (!tlas || want > tlasCapacity)
+        {
+            UINT cap = std::max<UINT>(1024, want + want / 2);
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS ti{};
+            ti.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+            ti.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+            ti.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; ti.NumDescs = cap;
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
+            dev->GetRaytracingAccelerationStructurePrebuildInfo(&ti, &pre);
+            Defer(tlas);
+            tlas = MakeBuffer(dev, pre.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+            tlasCapacity = tlas ? cap : 0;
+            tlasScratchOffset = pre.ScratchDataSizeInBytes;
+            if (!tlas) return skipFrame();
+        }
+        if (capCount && !capsuleBlas)
+        {
+            D3D12_RAYTRACING_GEOMETRY_DESC gm{};
+            gm.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+            gm.AABBs.AABBCount = MaxCapsules; gm.AABBs.AABBs.StrideInBytes = sizeof(D3D12_RAYTRACING_AABB);
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bm{};
+            bm.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            bm.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+            bm.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; bm.NumDescs = 1; bm.pGeometryDescs = &gm;
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
+            dev->GetRaytracingAccelerationStructurePrebuildInfo(&bm, &pre);
+            capsuleBlas = MakeBuffer(dev, pre.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+            capsuleScratch = pre.ScratchDataSizeInBytes;
+        }
+        if (!capsuleBlas) capCount = 0;
+        // Scratch: grown between frames (never mid-frame) to what the last frames asked for, up to ScratchMax.
+        auto align = [](std::uint64_t s) { return (s + 255) & ~255ull; };
+        std::uint64_t essential = align(tlasScratchOffset) + (capCount ? align(capsuleScratch) : 0);
+        scratchWanted = std::min(ScratchMax, std::max(scratchWanted, essential));
+        if (scratchWanted > scratchSize)
+        {
+            Defer(scratch);   // still read by earlier frames' builds: freed once they're done
+            scratchSize = std::max<std::uint64_t>(scratchWanted, 16ull << 20);
+            scratch = MakeBuffer(dev, scratchSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+            if (!scratch) { scratchSize = 0; return skipFrame(); }
+        }
+        if (essential > scratchSize) return skipFrame();
         std::uint64_t scratchUsed = 0;
         auto scratchAlloc = [&](std::uint64_t size, D3D12_GPU_VIRTUAL_ADDRESS& at) {
-            size = (size + 255) & ~255ull;
-            if (scratchUsed + size > scratchSize)
-            {
-                if (scratchUsed > 0 || size > ScratchMax) return false;   // grown only between frames' builds
-                Defer(scratch);
-                scratchSize = std::min(ScratchMax, std::max<std::uint64_t>(size, 16ull << 20));
-                scratch = MakeBuffer(dev, scratchSize, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-                if (!scratch) { scratchSize = 0; return false; }
-            }
+            size = align(size);
+            if (scratchUsed + size > scratchSize) { scratchWanted = std::min(ScratchMax, scratchUsed + size); return false; }
             at = scratch->GetGPUVirtualAddress() + scratchUsed;
             scratchUsed += size;
             return true;
         };
+        D3D12_GPU_VIRTUAL_ADDRESS tsa = 0, csa = 0;
+        scratchAlloc(tlasScratchOffset, tsa);
+        if (capCount) scratchAlloc(capsuleScratch, csa);
+
         for (auto& m : queued)
         {
             std::uint64_t tris = m.indices.size() / 3, verts = m.positions.size() / 3;
@@ -628,7 +685,7 @@ namespace rt
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
             dev->GetRaytracingAccelerationStructurePrebuildInfo(&bi, &pre);
             void* vcpu = nullptr, * icpu = nullptr;
-            D3D12_GPU_VIRTUAL_ADDRESS va = UploadAlloc(fc, m.positions.size() * 4, &vcpu);
+            D3D12_GPU_VIRTUAL_ADDRESS va = UploadAlloc(fc, m.positions.size() * 4, &vcpu);   // the upload memory left bounds it
             D3D12_GPU_VIRTUAL_ADDRESS ia = va ? UploadAlloc(fc, m.indices.size() * 2, &icpu) : 0;
             D3D12_GPU_VIRTUAL_ADDRESS sa = 0;
             if (!va || !ia || !scratchAlloc(pre.ScratchDataSizeInBytes, sa)) break;   // the rest next frame
@@ -649,61 +706,32 @@ namespace rt
         queued.clear();
 
         // Capsules: one BLAS of their boxes, rebuilt each frame.
-        UINT capCount = static_cast<UINT>(std::min<size_t>(capsules.size(), MaxCapsules));
-        D3D12_GPU_VIRTUAL_ADDRESS capData = fc.upload->GetGPUVirtualAddress();
-        bool capsOk = false;
+        D3D12_GPU_VIRTUAL_ADDRESS capData = capCount ? capGpu : fc.upload->GetGPUVirtualAddress();
         if (capCount)
         {
-            void* aabbCpu = nullptr, * dataCpu = nullptr;
-            D3D12_GPU_VIRTUAL_ADDRESS aabbs = UploadAlloc(fc, capCount * sizeof(D3D12_RAYTRACING_AABB), &aabbCpu);
-            D3D12_GPU_VIRTUAL_ADDRESS data = aabbs ? UploadAlloc(fc, capCount * sizeof(RtCapsule), &dataCpu) : 0;
-            if (data)
+            auto* box = static_cast<D3D12_RAYTRACING_AABB*>(aabbCpu);
+            for (UINT i = 0; i < capCount; ++i)
             {
-                auto* box = static_cast<D3D12_RAYTRACING_AABB*>(aabbCpu);
-                for (UINT i = 0; i < capCount; ++i)
-                {
-                    const RtCapsule& c = capsules[i];
-                    box[i] = { std::min(c.a[0], c.b[0]) - c.radius, std::min(c.a[1], c.b[1]) - c.radius, std::min(c.a[2], c.b[2]) - c.radius,
-                               std::max(c.a[0], c.b[0]) + c.radius, std::max(c.a[1], c.b[1]) + c.radius, std::max(c.a[2], c.b[2]) + c.radius };
-                }
-                std::memcpy(dataCpu, capsules.data(), capCount * sizeof(RtCapsule));
-                D3D12_RAYTRACING_GEOMETRY_DESC g{};
-                g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
-                g.AABBs.AABBCount = capCount; g.AABBs.AABBs.StartAddress = aabbs; g.AABBs.AABBs.StrideInBytes = sizeof(D3D12_RAYTRACING_AABB);
-                D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bi{};
-                bi.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-                bi.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-                bi.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; bi.NumDescs = 1; bi.pGeometryDescs = &g;
-                if (!capsuleBlas)
-                {
-                    D3D12_RAYTRACING_GEOMETRY_DESC gm = g; gm.AABBs.AABBCount = MaxCapsules;
-                    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS bm = bi; bm.pGeometryDescs = &gm;
-                    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
-                    dev->GetRaytracingAccelerationStructurePrebuildInfo(&bm, &pre);
-                    capsuleBlas = MakeBuffer(dev, pre.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-                    capsuleScratch = pre.ScratchDataSizeInBytes;
-                }
-                D3D12_GPU_VIRTUAL_ADDRESS sa = 0;
-                if (capsuleBlas && scratchAlloc(capsuleScratch, sa))
-                {
-                    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-                    bd.Inputs = bi; bd.DestAccelerationStructureData = capsuleBlas->GetGPUVirtualAddress(); bd.ScratchAccelerationStructureData = sa;
-                    fc.listA->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
-                    capData = data;
-                    capsOk = true;
-                }
+                const RtCapsule& c = capsules[i];
+                box[i] = { std::min(c.a[0], c.b[0]) - c.radius, std::min(c.a[1], c.b[1]) - c.radius, std::min(c.a[2], c.b[2]) - c.radius,
+                           std::max(c.a[0], c.b[0]) + c.radius, std::max(c.a[1], c.b[1]) + c.radius, std::max(c.a[2], c.b[2]) + c.radius };
             }
+            std::memcpy(capCpu, capsules.data(), capCount * sizeof(RtCapsule));
+            D3D12_RAYTRACING_GEOMETRY_DESC g{};
+            g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+            g.AABBs.AABBCount = capCount; g.AABBs.AABBs.StartAddress = aabbGpu; g.AABBs.AABBs.StrideInBytes = sizeof(D3D12_RAYTRACING_AABB);
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+            bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+            bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; bd.Inputs.NumDescs = 1; bd.Inputs.pGeometryDescs = &g;
+            bd.DestAccelerationStructureData = capsuleBlas->GetGPUVirtualAddress(); bd.ScratchAccelerationStructureData = csa;
+            fc.listA->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
         }
-        if (!capsOk) capCount = 0;
         capsulesThisFrame = static_cast<int>(capCount);
-        if (builtThisFrame || capsOk) UavBarrier(fc.listA, nullptr);   // the BLASes done before the TLAS reads them
+        if (builtThisFrame || capCount) UavBarrier(fc.listA, nullptr);   // the BLASes done before the TLAS reads them
 
         // The TLAS.
         UINT n = 0;
-        void* instCpu = nullptr;
-        UINT want = std::min<UINT>(static_cast<UINT>(instances.size()), MaxInstances) + 1;
-        D3D12_GPU_VIRTUAL_ADDRESS instGpu = UploadAlloc(fc, std::uint64_t(want) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), &instCpu);
-        if (instGpu)
         {
             auto* d = static_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(instCpu);
             for (const Instance& i : instances)
@@ -719,7 +747,7 @@ namespace rt
                 it->second.lastUsed = frameNo;
                 d[n++] = x;
             }
-            if (capsOk)
+            if (capCount)
             {
                 D3D12_RAYTRACING_INSTANCE_DESC x{};
                 x.Transform[0][0] = x.Transform[1][1] = x.Transform[2][2] = 1.0f;
@@ -729,35 +757,6 @@ namespace rt
             }
         }
         instancesThisFrame = static_cast<int>(n);
-        if (!tlas || n > tlasCapacity)
-        {
-            UINT cap = std::max<UINT>(1024, n + n / 2);
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS ti{};
-            ti.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-            ti.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-            ti.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; ti.NumDescs = cap;
-            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
-            dev->GetRaytracingAccelerationStructurePrebuildInfo(&ti, &pre);
-            Defer(tlas);
-            tlas = MakeBuffer(dev, pre.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-            tlasCapacity = tlas ? cap : 0;
-            tlasScratchOffset = pre.ScratchDataSizeInBytes;
-        }
-        D3D12_GPU_VIRTUAL_ADDRESS tsa = 0;
-        if (!tlas || !scratchAlloc(tlasScratchOffset, tsa))
-        {
-            // No TLAS this frame: the BLASes recorded are still built (later frames use them), nothing is traced.
-            SafeRelease(c1); SafeRelease(c4);
-            ++framesSkipped; historyValid = false;
-            if (FAILED(fc.listA->Close())) { Fail("couldn't record commands"); return false; }
-            ID3D12CommandList* la[] = { fc.listA };
-            queue->ExecuteCommandLists(1, la);
-            if (FAILED(queue->Signal(fenceOut, ++valueOut))) { Fail("the GPU didn't take the ray tracing's work"); return false; }
-            fc.fence = valueOut;
-            fc.submitted = Now();
-            ++frameNo;
-            return false;
-        }
         {
             D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
             bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
@@ -787,11 +786,9 @@ namespace rt
         k.rtTex = { float(rtTexW), float(rtTexH), 1.0f / rtTexW, 1.0f / rtTexH };
         k.frame = { frameNo, historyValid ? 1u : 0u, AoRays[quality], BounceRays[quality] };
         k.flags = { capCount, 8u, 16u, 0u };
-        k.prevScale = { prevScale[0], prevScale[1], 0, 0 };
-        void* cbCpu = nullptr;
-        D3D12_GPU_VIRTUAL_ADDRESS cb = UploadAlloc(fc, sizeof(k), &cbCpu);
-        if (SUCCEEDED(hr) && cb) { std::memcpy(cbCpu, &k, sizeof(k)); hr = fc.listB->Reset(fc.allocator, traceState); }
-        else hr = E_OUTOFMEMORY;
+        k.prevScale = { prevScale[0], prevScale[1], o.motionScale[0], o.motionScale[1] };
+        std::memcpy(cbCpu, &k, sizeof(k));
+        if (SUCCEEDED(hr)) hr = fc.listB->Reset(fc.allocator, traceState);
         if (FAILED(hr)) { SafeRelease(c1); SafeRelease(c4); Fail("couldn't record commands"); return false; }
         auto* l = fc.listB;
         l->SetComputeRootSignature(root);
@@ -915,13 +912,14 @@ namespace rt
             if (done >= it->first) { it->second->Release(); it = deferred.erase(it); }
             else ++it;
         // Meshes unused for 600 frames (10 s at 60 fps).
-        if (running && frameNo % 60 == 0)
+        ++endFrames;
+        if (running && endFrames % 60 == 0)
         {
             for (auto it = blases.begin(); it != blases.end();)
                 if (frameNo - it->second.lastUsed > 600 && done >= it->second.lastFence) { ArenaFree(it->second); it = blases.erase(it); }
                 else ++it;
-            if (frameNo % 1800 == 0) failedKeys.clear();
-            if (adapter && frameNo % 300 == 0)
+            if (endFrames % 1800 == 0) failedKeys.clear();
+            if (adapter && endFrames % 300 == 0)
             {
                 DXGI_QUERY_VIDEO_MEMORY_INFO mi{};
                 if (SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mi)))
@@ -946,7 +944,14 @@ namespace rt
 
     void Engine::Stop()
     {
-        if (dev) WaitIdle(2000);
+        if (dev && !WaitIdle(2000))
+        {
+            // The GPU is still on our work: nothing it may read is released (left for the process's end), or freeing
+            // it under the GPU could fault and take the game's device down with it.
+            running = false;
+            Log("ray tracing: the GPU didn't finish within 2 s; its memory is kept until the game ends");
+            return;
+        }
         running = false;
         for (auto& [p, u] : deferred) u->Release();
         deferred.clear();

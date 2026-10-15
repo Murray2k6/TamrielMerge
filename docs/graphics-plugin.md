@@ -94,7 +94,15 @@ about the game come from our own captures and from reading SkyrimSE.exe 1.7.104 
 - Nothing the GPU may still read is freed or rewritten: releases wait for the fence value of the last frame that used
   them; BLASes are freed after 600 frames unused and only once their last frame is done.
 - Bounded work: at most 24 BLAS builds and 262,144 triangles a frame, 40,000 instances, 4,096 capsules, a fixed number of
-  rays per pixel and ray lengths per quality, 24 candidates per ray at most (alpha-tested leaves, capsules).
+  rays per pixel and ray lengths per quality, 24 candidates per ray at most (alpha-tested leaves, capsules). What every
+  frame needs (constants, instances, capsules, the TLAS's scratch) is set aside before new meshes take the rest of the
+  frame's upload and scratch memory, so streaming meshes in (entering a city) never costs a frame its TLAS; scratch
+  grows between frames only. A mesh that fails its checks isn't copied again for 30 s; the scene walk stops at 8 ms
+  (checked every 64 nodes).
+- Stopping waits up to 2 s for the GPU; if it isn't done, nothing is released (kept until the game ends).
+- Writes into the game's memory (the ratio, the jitter table, the dynamic resolution lock) are exception-guarded, and
+  the lock (and the last-ratio write) only happen on 1.7.104, whose code they were read from.
+- Children of scene-graph nodes are read up to the array's used length (+ 0x122: it can keep holes), each checked.
 - BLASes live in 64 MB pooled buffers (free lists), under a budget (iRayTracingMemoryMB, 512) and stop growing when
   DXGI says video memory is 95% used.
 - Meshes are checked before they're built: indices in range, every position finite and inside the mesh's own bound

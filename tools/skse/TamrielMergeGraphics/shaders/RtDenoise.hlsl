@@ -26,7 +26,7 @@ void Temporal(uint3 id : SV_DispatchThreadID)
     {
         float2 uvN = (float2(id.xy) + 0.5) / float2(C.size.zw);
         int2 q = ClampPixel(int2(uvN * float2(C.size.xy)));
-        float2 prev = uvN + Motion.Load(int3(q, 0));
+        float2 prev = uvN + Motion.Load(int3(q, 0)) * C.prevScale.zw;   // as DLSS reads them (fMotionScaleX/Y)
         // The last frame's traced part, in its texture's pixels.
         float2 prevSize = C.prevScale.xy * C.rtTex.xy;
         int2 hp = int2(prev * prevSize);

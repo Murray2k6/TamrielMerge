@@ -51,6 +51,7 @@ namespace rt
         int debugView = 0;                     // 0 picture, 1 shadows, 2 occlusion, 3 bounce, 4 reflections, 5 normals
         float occlusionRadius = 110.0f, bounceDistance = 1500.0f, reflectionDistance = 3000.0f, shadowDistance = 8000.0f;
         std::uint64_t memoryBudget = 512ull << 20;   // acceleration structures
+        float motionScale[2] = { 1.0f, 1.0f };       // the motion vectors' scale (the plugin's fMotionScaleX/Y, as DLSS gets them)
     };
 
     struct FrameInputs
@@ -79,6 +80,8 @@ namespace rt
         /// How many more meshes this frame takes (the rest wait for the next frames).
         int Room() const;
         void Queue(Mesh&& mesh);
+        /// A mesh that failed its checks: not asked for again for a while (30 s at 60 fps).
+        void Reject(std::uint64_t key) { failedKeys.insert(key); }
 
         /// Inside the game's frame, before tonemapping: traces and puts the results into in.hdr. False when this frame
         /// wasn't ray traced (the picture is then left as the game drew it).
@@ -168,7 +171,7 @@ namespace rt
         std::unordered_map<std::uint64_t, Blas> blases;
         std::unordered_set<std::uint64_t> failedKeys;
         std::vector<Mesh> queued;
-        ID3D12Resource* scratch = nullptr; std::uint64_t scratchSize = 0;
+        ID3D12Resource* scratch = nullptr; std::uint64_t scratchSize = 0, scratchWanted = 0;
         ID3D12Resource* tlas = nullptr; UINT tlasCapacity = 0; std::uint64_t tlasScratchOffset = 0;
         ID3D12Resource* capsuleBlas = nullptr; std::uint64_t capsuleScratch = 0;
         std::vector<std::pair<std::uint64_t, IUnknown*>> deferred;
@@ -189,7 +192,7 @@ namespace rt
         struct GameRes { ID3D11Resource* res; ID3D11ShaderResourceView* srv; ID3D11RenderTargetView* rtv; };
         std::vector<GameRes> gameViews;
 
-        unsigned frameNo = 0, framesTraced = 0, framesSkipped = 0;
+        unsigned frameNo = 0, framesTraced = 0, framesSkipped = 0, endFrames = 0;
         double gpuMs = 0, lineUp = -1;
         unsigned lineUpSamples = 0, lowWindows = 0;
         unsigned statSamples = 0, statAgree = 0, statFrames = 0;
