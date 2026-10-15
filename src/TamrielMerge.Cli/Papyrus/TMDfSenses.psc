@@ -23,6 +23,8 @@ TMDfSensesControl Property Senses Auto
 {The control quest (TMDfSensesQuest): the player's state, the loaded enemies.}
 Bool Property SeesInvisible = False Auto
 {Daggerfall's monsters that see through invisibility (EnemyBasics.SeesThroughInvisibility).}
+Int Property Language = -1 Auto
+{The language skill that may pacify it when it first meets the player (TMDfSensesControl.SkillNames; -1 none).}
 
 ; ---- Daggerfall Unity's numbers in Skyrim units (classic units x 2) ----
 Float SightRange = 8192.0       ; SightRadius: 4096 classic units (102.4 m)
@@ -32,12 +34,15 @@ Float StealthRange = 2048.0     ; StealthCheck: within 1024 classic units
 Float SpawnRange = 2188.0       ; classic spawn: nothing beyond 1094 classic units
 Float SpawnXZ = 2048.0          ; inside, spawn distance type 0: 1024 across...
 Float SpawnY = 256.0            ; ...and 128 up or down to spawn...
-Float DespawnY = 768.0          ; ...384 to despawn
+Float SpawnYLower = 0.0         ; (the types with a lower bound: from this far below to SpawnY above)
+Float DespawnXZ = 2048.0        ; ...1024 across...
+Float DespawnY = 768.0          ; ...and 384 up or down to despawn
 Float RestRange = 960.0         ; AreEnemiesNearby(resting): an unaware enemy within 12 m
 Float GiveUpSeconds = 12.5      ; GiveUpTimer: 200 classic updates of 1/16 s
 
 Bool begun = False
 Bool hostile = False
+Bool pacified = False           ; pacified by its language on first meeting (EnemyMotor.IsHostile false)
 Bool active = False             ; Daggerfall's senses in use (the player in the Iliac Bay)
 Bool aware = False              ; it has noticed the player and fights
 Bool detected = False           ; EnemySenses.DetectedTarget
@@ -78,6 +83,10 @@ Function Begin()
     aggression = GetActorValue("Aggression")
     assistance = GetActorValue("Assistance")
     hostile = aggression > 0.0
+    SpawnArea()
+  EndIf
+  If pacified
+    Return
   EndIf
   If !hostile
     Return
@@ -86,7 +95,49 @@ Function Begin()
   RegisterForSingleUpdate(Utility.RandomFloat(0.1, 0.6))
 EndFunction
 
+; The marker's classic spawn distance type (TMDfSpawnType on the placed enemy; Daggerfall Unity EnemySenses.Start), in
+; Skyrim units (classic x 2): spawn across {1024, 384, 640, 768, 768, 768, 768}, up {128, 128, 128, 384, 768, 128, 256},
+; down {0, 0, 0, 0, -128, -768, 0} (0: as far down as up); despawn across {1024 x4, 768 x3}, up or down {384 x4, 768 x3}.
+Function SpawnArea()
+  TMDfSpawnType st = (Self as Form) as TMDfSpawnType
+  Int t = 0
+  If st
+    t = st.Type
+  EndIf
+  If t <= 0 || t > 6
+    Return
+  EndIf
+  Float[] xz = new Float[7]
+  xz[1] = 384.0
+  xz[2] = 640.0
+  xz[3] = 768.0
+  xz[4] = 768.0
+  xz[5] = 768.0
+  xz[6] = 768.0
+  Float[] up = new Float[7]
+  up[1] = 128.0
+  up[2] = 128.0
+  up[3] = 384.0
+  up[4] = 768.0
+  up[5] = 128.0
+  up[6] = 256.0
+  SpawnXZ = xz[t] * 2.0
+  SpawnY = up[t] * 2.0
+  If t == 4
+    SpawnYLower = -256.0
+  ElseIf t == 5
+    SpawnYLower = -1536.0
+  EndIf
+  If t >= 4
+    DespawnXZ = 1536.0
+    DespawnY = 1536.0
+  EndIf
+EndFunction
+
 Event OnUpdate()
+  If pacified
+    Return
+  EndIf
   If !hostile || IsDead() || !Is3DLoaded()
     Senses.Unregister(Self)
     Return
@@ -158,8 +209,16 @@ Function Sense(Actor player, Float d, Bool slow, Bool inside, Bool invisible)
     detected = False
   EndIf
   If detected
+    If !encountered && Language >= 0 && Senses.TryPacify(Self, Language)
+      ; First meeting: the player spoke its language (Daggerfall Unity EnemySenses: motor.IsHostile = false).
+      Pacify()
+      Return
+    EndIf
     encountered = True
     lastDetected = now
+    If sees
+      Senses.Alert()
+    EndIf
   EndIf
   If !aware
     If detected
@@ -196,22 +255,25 @@ Bool Function Hears(Actor player, Float d)
   Return HasLOS(player) || player.IsDetectedBy(Self)
 EndFunction
 
-; WouldBeSpawnedInClassic (spawn distance type 0): within 1094 classic units; inside, 1024 across and 128 up or down
-; (384 once spawned); outside, the 1094.
+; WouldBeSpawnedInClassic: within 1094 classic units; inside, the marker's spawn distance type's area (type 0: 1024
+; across and 128 up or down, 384 once spawned; SpawnArea); outside, the 1094.
 Bool Function Spawned(Actor player, Float d, Bool inside)
   If d >= SpawnRange
     Return False
   ElseIf !inside
     Return True
   EndIf
-  Float dz = Math.abs(GetPositionZ() - player.GetPositionZ())
+  Float ydiff = GetPositionZ() - player.GetPositionZ()
+  Float dz = Math.abs(ydiff)
   Float across = d * d - dz * dz
-  If across > SpawnXZ * SpawnXZ
+  If spawned
+    Return across <= DespawnXZ * DespawnXZ && dz <= DespawnY
+  ElseIf across > SpawnXZ * SpawnXZ
     Return False
-  ElseIf spawned
-    Return dz <= DespawnY
+  ElseIf SpawnYLower == 0.0
+    Return dz <= SpawnY
   EndIf
-  Return dz <= SpawnY
+  Return ydiff >= SpawnYLower && ydiff <= SpawnY
 EndFunction
 
 ; StealthCheck and FormulaHelper.CalculateStealthChance: once a game minute; the player stays unnoticed with
@@ -272,7 +334,31 @@ Function Release()
 EndFunction
 
 ; MakeEnemyHostileToAttacker: struck by the player (or the player's followers), it knows where they are.
+; Pacified: no longer hostile to the player until struck (MakeEnemyHostileToAttacker).
+Function Pacify()
+  pacified = True
+  aware = False
+  detected = False
+  encountered = True
+  Unaware()
+  StopCombat()
+  UnregisterForUpdate()
+  Senses.Unregister(Self)
+EndFunction
+
 Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile, Bool abPowerAttack, Bool abSneakAttack, Bool abBashAttack, Bool abHitBlocked)
+  If pacified && !IsDead()
+    Actor striker = akAggressor as Actor
+    If striker && (striker == Senses.PlayerRef || striker.IsPlayerTeammate())
+      pacified = False
+      active = True
+      Senses.Register(Self)
+      Noticed()
+      Engage(Senses.PlayerRef)
+      RegisterForSingleUpdate(0.5)
+    EndIf
+    Return
+  EndIf
   If !active || aware || IsDead()
     Return
   EndIf
@@ -286,6 +372,11 @@ EndEvent
 ; A fight with the player that Daggerfall's senses didn't start (a spell, a quest, its allies' cries) counts as being
 ; struck; one Skyrim picks just after it gave up is stopped again.
 Event OnCombatStateChanged(Actor akTarget, Int aeCombatState)
+  If pacified && aeCombatState != 0 && akTarget && (akTarget == Senses.PlayerRef || akTarget.IsPlayerTeammate()) && GetActorValue("Health") > 0.0
+    ; Pacified: only being struck turns it (OnHit).
+    StopCombat()
+    Return
+  EndIf
   If !active || aware || aeCombatState == 0 || !akTarget || IsDead()
     Return
   EndIf
@@ -309,7 +400,7 @@ EndFunction
 ; GameManager.AreEnemiesNearby for this enemy: it sees the player, or the player is where classic would have it spawned
 ; (resting: an unaware one only within 12 m).
 Bool Function NearPlayer(Bool resting)
-  If !hostile || !active || IsDead() || !Is3DLoaded()
+  If !hostile || pacified || !active || IsDead() || !Is3DLoaded()
     Return False
   EndIf
   Actor player = Senses.PlayerRef

@@ -335,6 +335,13 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                             Base = s.ToNullableLink<INpcGetter>(),
                             Placement = new Placement { Position = at, Rotation = new P3Float(0, 0, hash % 360 * MathF.PI / 180) },
                         };
+                        // The marker's classic spawn distance type (its sound index, Daggerfall Unity
+                        // ClassicSpawnDistanceType) for the enemy senses' "would be spawned" area; 0 is the default.
+                        if (o.SoundIndex is > 0 and <= 6)
+                            placedCreature.VirtualMachineAdapter = new VirtualMachineAdapter
+                            {
+                                Scripts = [new ScriptEntry { Name = "TMDfSpawnType", Properties = [new ScriptIntProperty { Name = "Type", Data = o.SoundIndex }] }],
+                            };
                         cell.Temporary.Add(placedCreature);
                         // Ordinary creatures for procedural creatures: fixed monsters (not bosses or people), and random
                         // encounters where the dungeon type's table is monsters.

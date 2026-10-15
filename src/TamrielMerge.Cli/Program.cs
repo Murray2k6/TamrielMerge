@@ -1429,7 +1429,7 @@ static class Program
                 DfQuestGlobals.AddAll(mod);
                 var builder = new DfQuestBuilder(mod, arena2, masters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
                 {
-                    Foe = id => creatures.Spawn(id), Spells = spells.Spells, SoundDir = Path.GetDirectoryName(outPath),
+                    Foe = id => creatures.Spawn(id), CityWatch = creatures.Spawn(146, passive: true), Spells = spells.Spells, SoundDir = Path.GetDirectoryName(outPath),
                 };
                 builder.Build();
                 foreach (var p in builder.Problems) Console.WriteLine("  " + p);
@@ -1606,7 +1606,7 @@ static class Program
                     DfQuestGlobals.AddAll(mod);
                     var qb = new DfQuestBuilder(mod, arena2, questMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
                     {
-                        Foe = id => townCreatures.Spawn(id), GuildsQuest = guilds.Quest, Guilds = guilds.Built, SoundDir = outDir,
+                        Foe = id => townCreatures.Spawn(id), CityWatch = townCreatures.Spawn(146, passive: true), GuildsQuest = guilds.Quest, Guilds = guilds.Built, SoundDir = outDir,
                     };
                     qb.Build();
                     var questTowns = picked.Zip(built).Select(p => new QuestSites.Town(p.First, p.Second)).ToList();
@@ -4803,6 +4803,12 @@ static class Program
                         if (senses is not { } sk || !quests.TryGetValue(sk, out var q) || q.EditorID != Skyrim.DfSenses.QuestEditorId) Problem($"{e}: Senses isn't the control quest");
                     }
                     Console.WriteLine($"actors with TMDfSenses: {carrying} of {m.Npcs.Count(n => n.FormKey.ModKey == m.ModKey)}");
+                    // Language pacification: which language each carrying actor answers to.
+                    var byLanguage = m.Npcs.Where(n => n.FormKey.ModKey == m.ModKey).Select(n => Senses(n)).OfType<IScriptEntryGetter>()
+                        .Select(s => s.Properties.OfType<IScriptIntPropertyGetter>().FirstOrDefault(p => p.Name == "Language")?.Data ?? -1)
+                        .GroupBy(l => l < 0 || l >= Skyrim.DfSenses.LanguageSkills.Length ? "none" : Skyrim.DfSenses.LanguageSkills[l]).OrderByDescending(g => g.Count());
+                    Console.WriteLine($"languages: {string.Join(", ", byLanguage.Select(g => $"{g.Key} {g.Count()}"))}");
+                    if (m.FormLists.FirstOrDefault(f => f.EditorID == "DFRestEncounters") is { } rest) Console.WriteLine($"rest encounters: {rest.Items.Count} dungeon encounter lists");
                     foreach (var l in m.LeveledNpcs.Where(l => l.EditorID?.StartsWith("DFLCharEncounter") == true))
                         foreach (var en in l.Entries ?? [])
                             if (en.Data is { } d && !Has(d.Reference.FormKey))
@@ -4815,6 +4821,9 @@ static class Program
                     var without = placed.Where(p => !Has(p.Base.FormKey)).GroupBy(p => npcs.TryGetValue(p.Base.FormKey, out var b) ? b.EditorID ?? "?" : p.Base.FormKey.ToString())
                         .OrderByDescending(g => g.Count()).ToList();
                     Console.WriteLine($"placed actors: {placed.Count}, with the senses {placed.Count - without.Sum(g => g.Count())}; without: {string.Join(", ", without.Take(25).Select(g => $"{g.Key} {g.Count()}"))}");
+                    var spawnTypes = placed.Select(p => p.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == "TMDfSpawnType")?.Properties.OfType<IScriptIntPropertyGetter>().FirstOrDefault()?.Data ?? 0)
+                        .GroupBy(t => t).OrderBy(g => g.Key);
+                    Console.WriteLine($"spawn distance types: {string.Join(", ", spawnTypes.Select(g => $"type {g.Key} {g.Count()}"))}");
                     Console.WriteLine(problems == 0 ? "no problems" : $"{problems} problems");
                     return problems == 0 ? 0 : 1;
                 }

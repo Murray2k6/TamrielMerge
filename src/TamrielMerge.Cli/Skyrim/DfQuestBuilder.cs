@@ -213,10 +213,18 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             props.Add(Objs("DfSounds", madeSounds.Select(m => m.Marker)));
         }
         Machine.Aliases.Add(new QuestAlias { ID = 0, Name = "Player", ForcedReference = new FormLinkNullable<IPlacedGetter>(PlayerRef) });
-        Machine.NextAliasID = 1;
+        // "add face": up to three people travelling with the player (Daggerfall Unity's escort faces), following them.
+        var follow = Vanilla<IPackageGetter>("PlayerFollowerPackage");
+        for (uint e = 1; e <= EscortSlots; e++)
+        {
+            var escort = new QuestAlias { ID = e, Name = $"Escort{e - 1}", Flags = QuestAlias.Flag.Optional | QuestAlias.Flag.AllowReserved | QuestAlias.Flag.AllowReuseInQuest };
+            if (follow is not null) escort.PackageData.Add(new FormLink<IPackageGetter>(follow.FormKey));
+            Machine.Aliases.Add(escort);
+        }
+        Machine.NextAliasID = 1 + EscortSlots;
         Machine.VirtualMachineAdapter = new QuestAdapter
         {
-            Scripts = [new ScriptEntry { Name = "TMDfQuestMachine", Properties = [.. props] }],
+            Scripts = [new ScriptEntry { Name = "TMDfQuestMachine", Properties = [.. props] }, Law()],
             Aliases =
             [
                 new QuestFragmentAlias
@@ -336,6 +344,50 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             Int("GlenmorilWitches", covens.FirstOrDefault(f => f.Name.Contains("Glenmoril"))?.Id ?? 419),
             Int("SheogorathIndex", Array.FindIndex(Daedra, d => d.Name == "Sheogorath")),
         ];
+    }
+
+    /// <summary>People who can travel with the player at once ("add face"; Daggerfall Unity shows three faces).</summary>
+    const uint EscortSlots = 3;
+
+    /// <summary>The City Watch who come for a player whose legal standing has fallen (passive: they talk first).</summary>
+    public FormKey? CityWatch { get; init; }
+
+    /// <summary>TMDfLaw on the machine: Daggerfall's legal standing per region read by its City Watch and court
+    /// (TEXT.RSC 8050-8064, the court's lines).</summary>
+    ScriptEntry Law()
+    {
+        var text = DfText.Load(arena2);
+        string Fill(int id, params (string Macro, string With)[] extra)
+        {
+            string s = text[id].FirstOrDefault() ?? "";
+            foreach (var (m, w) in extra) s = s.Replace(m, w);
+            s = s.Replace("%pcn", "<Alias=Player>").Replace("%pcf", "<Alias=Player>").Replace("%cri", "criminal conspiracy")
+                .Replace("%pen", "a fine or prison").Replace("%cn", "these lands");
+            return Regex.Replace(s, @"%\w+", "").Replace("  ", " ").Trim();
+        }
+        Message Msg(string edid, string body, params string[] buttons)
+        {
+            var m = new Message(mod) { EditorID = edid, Description = body, Quest = Machine!.ToNullableLink<IQuestGetter>(), Flags = Message.Flag.MessageBox, MenuButtons = [] };
+            foreach (var b in buttons) m.MenuButtons.Add(new MessageButton { Text = b });
+            mod.Messages.Add(m);
+            return m;
+        }
+        var props = new List<ScriptProperty>
+        {
+            Obj("Machine", Machine!.FormKey), Obj("PlayerRef", PlayerRef), Obj("GameHour", Sk(0x38)),
+            Obj("Arrest", Msg("DFLawArrest", "Halt! You are under arrest for criminal conspiracy. Will you come quietly?", "Yes", "No").FormKey),
+            Obj("Accused", Msg("DFLawAccused", Fill(8050), "Guilty", "Not guilty").FormKey),
+            Obj("Convince", Msg("DFLawConvince", Fill(8064), "Debate", "Lie").FormKey),
+            Obj("SentenceFine", Msg("DFLawFine", Fill(8057, ("%gtp", "%.0f"))).FormKey),
+            Obj("SentencePrison", Msg("DFLawPrison", Fill(8055, ("%dip", "%.0f"))).FormKey),
+            Obj("SentenceBoth", Msg("DFLawFineAndPrison", Fill(8058, ("%gtp", "%.0f"), ("%dip", "%.0f"))).FormKey),
+            Obj("NoGold", Msg("DFLawNoGold", Fill(8052, ("%pdg", "%.0f"))).FormKey),
+            Obj("Freed", Msg("DFLawFree", Fill(8062)).FormKey),
+            Obj("Banished", Msg("DFLawBanished", Fill(8063)).FormKey),
+        };
+        if (CityWatch is { } watch) props.Add(Obj("Watch", watch));
+        if (mod.Quests.FirstOrDefault(q => q.EditorID == DfSenses.QuestEditorId) is { } senses) props.Add(Obj("Senses", senses.FormKey));
+        return new ScriptEntry { Name = "TMDfLaw", Properties = [.. props] };
     }
 
     static int MinReq(string name)

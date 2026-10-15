@@ -292,6 +292,36 @@ Function ChangeLegal(Int amount)
   EndIf
 EndFunction
 
+; The player's legal standing in a region (-100..100; TMDfLaw reads it for guards and the court).
+Int Function LegalOf(Int region)
+  If !legal || region < 0 || region >= legal.Length
+    Return 0
+  EndIf
+  Return legal[region]
+EndFunction
+
+Function SetLegalOf(Int region, Int value)
+  If !legal
+    legal = new Int[64]
+  EndIf
+  If region >= 0 && region < legal.Length
+    If value > 100
+      value = 100
+    ElseIf value < -100
+      value = -100
+    EndIf
+    legal[region] = value
+  EndIf
+EndFunction
+
+; The Skyrim location of a town site (None for anything else).
+Location Function SiteLocation(Int site)
+  If SiteKind(site) != 2
+    Return None
+  EndIf
+  Return Source(site).TownLocation[SiteLocal(site)]
+EndFunction
+
 ; ---- Offering ----
 
 ; "Do you have any work for me?"
@@ -1000,12 +1030,48 @@ String Function FactionName(Int fid)
   Return Reputation.NameOf(fid)
 EndFunction
 
-Function Escort(String name, Bool joins)
+; "add face" / "drop face": Daggerfall Unity shows the face of someone travelling with the player (at most three); here
+; they follow the player (aliases Escort0-2 with Skyrim's follow-the-player package) until dropped.
+Function Escort(String name, Bool joins, ObjectReference who = None)
+  Actor a = who as Actor
   If joins
     Debug.Notification(name + " travels with you.")
+    If a && EscortAlias(a) < 0
+      Int k = EscortAlias(None)
+      If k >= 0
+        If a.GetParentCell() != PlayerRef.GetParentCell()
+          a.MoveTo(PlayerRef, 60.0, 60.0, 0.0)
+        EndIf
+        a.Enable()
+        (GetAlias(1 + k) as ReferenceAlias).ForceRefTo(a)
+        a.EvaluatePackage()
+      EndIf
+    EndIf
   Else
-    Debug.Notification(name + " leaves you.")
+    If name != ""
+      Debug.Notification(name + " leaves you.")
+    EndIf
+    If a
+      Int k = EscortAlias(a)
+      If k >= 0
+        (GetAlias(1 + k) as ReferenceAlias).Clear()
+        a.EvaluatePackage()
+      EndIf
+    EndIf
   EndIf
+EndFunction
+
+; The escort slot holding this actor (None: a free slot), or -1.
+Int Function EscortAlias(Actor a)
+  Int k = 0
+  While k < 3
+    ReferenceAlias r = GetAlias(1 + k) as ReferenceAlias
+    If r && r.GetActorReference() == a
+      Return k
+    EndIf
+    k += 1
+  EndWhile
+  Return -1
 EndFunction
 
 Function CurePlayer(Int what)

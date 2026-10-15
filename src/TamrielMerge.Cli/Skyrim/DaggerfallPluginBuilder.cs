@@ -164,7 +164,7 @@ public static class DaggerfallPluginBuilder
         // what this plugin built (Privateer's Hold, its towns and their dungeons); the town and dungeon plugins add theirs.
         var questBuilder = new DfQuestBuilder(mod, arena2, itemMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
         {
-            Foe = id => creatures.Spawn(id),
+            Foe = id => creatures.Spawn(id), CityWatch = creatures.Spawn(146, passive: true),
             Spells = spells.Spells,
             GuildsQuest = guilds?.Quest,
             Guilds = guilds?.Built ?? [],
