@@ -19,7 +19,9 @@ namespace TamrielMerge.Redguard;
 /// </summary>
 public sealed class RgWarp
 {
-    public const float Stretch = 2f;
+    /// <summary>How far the open land is spread, each way: 3 since 2026-10-15 (user: "redguards esm converts really
+    /// small"; chose stretch 3x): Stros M'Kai about 1.6 x 1.7 km (it was 2, about 1 x 1.1 km; Redguard's own 620 x 600 m).</summary>
+    public const float Stretch = 3f;
     const float Grid = 128, Extent = 32768, Margin = 192, Touch = 256;
     /// <summary>Settlements nearer than this share of their radii together are one block (see Build).</summary>
     public static float Close = float.TryParse(Environment.GetEnvironmentVariable("TAMRIELMERGE_WARP_CLOSE"), System.Globalization.CultureInfo.InvariantCulture, out var c) ? c : 0.35f;

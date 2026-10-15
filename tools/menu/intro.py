@@ -153,9 +153,10 @@ SHOTS = [
      "light": {"azimuth": 200, "elevation": 22, "sun": [1.0, 0.88, 0.7], "sun_power": 3.6, "sky": [0.3, 0.5, 0.8],
                "fog": [0.68, 0.74, 0.8], "fog_density": 1.0e-5, "exposure": 0.95, "water": [0.03, 0.12, 0.16],
                "cloud_cover": 0.35},
-     # The town where the island's stretch (Redguard/RgWarp: its wilds widened, settlements only moved) put it: 8500,
-     # 3500 from where it stood (its buildings matched between the exports).
-     "orbit": {"centre": [13500, 12000, 0], "angle": [-80, -52], "radius": [14250, 14250], "height": [2150, 2150],
+     # The town where the island's stretch (Redguard/RgWarp: its wilds widened, settlements only moved, each by
+     # (Stretch - 1) x its offset from the island's centre) puts it: 8500, 3500 from where it stood at a stretch of 2
+     # (its buildings matched between the exports), so 17000, 7000 at the stretch of 3 (2026-10-15).
+     "orbit": {"centre": [22000, 15500, 0], "angle": [-80, -52], "radius": [14250, 14250], "height": [2150, 2150],
                "look_z": [550, 550]}},
 ]
 
