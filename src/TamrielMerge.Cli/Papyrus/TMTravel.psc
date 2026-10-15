@@ -39,6 +39,9 @@ Float Property CellsPerSecond = 1.5 Auto
 {The fastest the land is crossed at uGridsToLoad 5 (cells a second); more grids loaded, proportionally slower.}
 Float Property RunSpeed = 380.0 Auto
 {The player's running speed at 100% (units a second).}
+TMDfSensesControl Property DfSenses Auto
+{Daggerfall's enemy senses (Daggerfall.esm's TMDfSensesQuest): in the Iliac Bay a journey can't begin, and stops, with
+its enemies nearby (Daggerfall Unity's AreEnemiesNearby). None without Daggerfall.}
 String Property MenuName = "CustomMenu" AutoReadOnly
 
 ; ---- options ----
@@ -500,6 +503,10 @@ Function Begin()
     Debug.MessageBox("Step outside first: the journey starts from the road.")
     Return
   EndIf
+  If EnemiesNearby()
+    Debug.MessageBox("You cannot travel with enemies nearby.")
+    Return
+  EndIf
   StartPoint(pickWorld)
   Plan(world, dest)
   If !planPossible
@@ -533,6 +540,10 @@ EndFunction
 ; Continues a stopped journey from where the player is, the time left being the part of the trip still ahead.
 Function Resume()
   If !paused || !jDestination || jWorld != CurrentWorld()
+    Return
+  EndIf
+  If EnemiesNearby()
+    Debug.MessageBox("You cannot travel with enemies nearby.")
     Return
   EndIf
   TMTravelWorld world = Worlds[jWorld]
@@ -705,11 +716,24 @@ EndFunction
 
 ; ---- on the road ----
 
+Int watchTicks = 0
+
+; Daggerfall's enemies near the player (in the Iliac Bay only; TMDfSensesControl).
+Bool Function EnemiesNearby()
+  Return DfSenses && DfSenses.EnemiesNearby(False)
+EndFunction
+
 ; Every half second: how fast the traveller is going, the clock set so Daggerfall's time is up on arrival, a fight
 ; stopping it, a stuck walk noticed.
 Function Watch()
   If PlayerRef.IsInCombat()
     StopJourney("You are set upon on the road! (Continue the journey from the Travel tab when the way is clear.)")
+    Return
+  EndIf
+  ; Daggerfall's enemies near the road stop it before they strike (every 2 seconds: the check asks each loaded enemy).
+  watchTicks += 1
+  If watchTicks % 4 == 0 && EnemiesNearby()
+    StopJourney("There are enemies nearby. (Continue the journey from the Travel tab when the way is clear.)")
     Return
   EndIf
   Float now = Utility.GetCurrentRealTime()
