@@ -686,24 +686,33 @@ public sealed partial class RgPluginBuilder
         var stale = names.Where(n => !Fresh(n)).ToList();
         if (stale.Count > 0)
         {
-            // The changed ones together in a folder of their own, compiled as a batch; what a batch drops (the compiler
-            // can when memory runs short) once more one at a time.
-            string batch = Path.Combine(Path.GetTempPath(), "TamrielMergeRgScripts");
-            if (Directory.Exists(batch)) Directory.Delete(batch, true);
-            Directory.CreateDirectory(batch);
-            foreach (var n in stale)
-            {
-                File.Copy(Path.Combine(sourceDir, n + ".psc"), Path.Combine(batch, n + ".psc"));
-                File.Delete(Path.Combine(outDir, n + ".pex"));
-            }
+            // The changed ones in batches, each in a folder of its own, up to four compiled at once, as Morrowind's and
+            // Oblivion's are (2026-10-15: all 904 in one run were one compiler on one core, 261 s); the source folder
+            // stays an import, so the scripts still see each other. What a batch drops (the compiler can when memory
+            // runs short) once more one at a time.
+            foreach (var n in stale) File.Delete(Path.Combine(outDir, n + ".pex"));
+            int parallel = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
+            // Batches of at most 400, and as many as can run at once when there are enough scripts (100 or more each).
+            int batches = Math.Max((stale.Count + 399) / 400, Math.Min(parallel, (stale.Count + 99) / 100));
+            int size = (stale.Count + batches - 1) / batches;
+            var chunks = stale.Chunk(size).Select((names, i) => (Index: i, Names: names)).ToList();
+            var outputs = new System.Collections.Concurrent.ConcurrentDictionary<int, string>();
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            string output = Run(batch, true, batch);
+            Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = parallel }, c =>
+            {
+                string batch = Path.Combine(Path.GetTempPath(), $"TamrielMergeRgScripts{Environment.ProcessId}_{c.Index}");
+                if (Directory.Exists(batch)) Directory.Delete(batch, true);
+                Directory.CreateDirectory(batch);
+                foreach (var n in c.Names) File.Copy(Path.Combine(sourceDir, n + ".psc"), Path.Combine(batch, n + ".psc"));
+                outputs[c.Index] = Run(batch, true, batch);
+                try { Directory.Delete(batch, true); } catch (IOException) { }
+            });
+            string output = string.Concat(outputs.OrderBy(kv => kv.Key).Select(kv => kv.Value));
             libraryChanged = false;
             File.WriteAllText(stamp, libHash);
             foreach (var n in stale.Where(n => !Fresh(n))) output += Run(n + ".psc", false, sourceDir);
-            log?.Invoke($"scripts: compiled {stale.Count} changed scripts in {sw.Elapsed.TotalSeconds:F0}s");
+            log?.Invoke($"scripts: compiled {stale.Count} changed scripts in {sw.Elapsed.TotalSeconds:F0}s ({chunks.Count} batches, up to {parallel} at once)");
             foreach (var line in output.Split('\n').Where(l => l.Contains("): ")).Take(200)) CompileFailures.Add(line.Trim());
-            try { Directory.Delete(batch, true); } catch (IOException) { }
         }
         var ok = names.Where(Fresh).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var n in names.Where(n => !ok.Contains(n)).Take(20)) Problems.Add($"script {n} didn't compile");
