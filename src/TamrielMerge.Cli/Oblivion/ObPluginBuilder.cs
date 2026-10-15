@@ -168,6 +168,8 @@ public sealed partial class ObPluginBuilder : IDisposable
                 effectOnly[key] = [new Skyrim.EffectStandIns.Emitter(System.Numerics.Vector3.Zero, Skyrim.EffectStandIns.TypicalSize(kind), 0, fileName)];
             return null;
         }
+        // Beds, chairs, benches and thrones: Skyrim furniture with the model's seats, carrying its script if it has one.
+        if (rec is Ob.IFurnitureGetter furniture && FurnitureFor(furniture, edid, converted, file) is { } seat) return bases[key] = seat;
         // A scripted flora (Nirnroot) is Skyrim flora, harvested for its ingredient, carrying its script.
         if (rec is Ob.IFloraGetter flora && ObScriptWorld.ScriptLink(rec) is not null && translations.Count > 0)
         {
@@ -191,11 +193,71 @@ public sealed partial class ObPluginBuilder : IDisposable
             if (converted.Emitters.Count > 0) emittersByBase[activator.FormKey] = converted.Emitters;
             return bases[key] = activator;
         }
+        if (converted.Moves)
+        {
+            // A model with moving parts (a water wheel, a loop of its own): Skyrim runs a model's controllers on a
+            // movable static, not on a static.
+            var movable = new MoveableStatic(mod) { EditorID = edid, ObjectBounds = Bounds(converted), Model = new Model { File = SkyrimModelPath(converted.Path) } };
+            mod.MoveableStatics.Add(movable);
+            meshByBase[movable.FormKey] = converted;
+            if (converted.Emitters.Count > 0) emittersByBase[movable.FormKey] = converted.Emitters;
+            return bases[key] = movable;
+        }
         var stat = new Static(mod) { EditorID = edid, ObjectBounds = Bounds(converted), Model = new Model { File = SkyrimModelPath(converted.Path) } };
         mod.Statics.Add(stat);
         meshByBase[stat.FormKey] = converted;
         if (converted.Emitters.Count > 0) emittersByBase[stat.FormKey] = converted.Emitters;
         return bases[key] = stat;
+    }
+
+    static readonly FormKey ActorTypeNpc = new(ModKey.FromFileName("Skyrim.esm"), 0x013794);
+    static readonly FormKey RaceToScale = new(ModKey.FromFileName("Skyrim.esm"), 0x0FD0E1);
+
+    /// <summary>
+    /// An Oblivion furniture as Skyrim furniture: the converted model with Skyrim seat or bed markers made from
+    /// Oblivion's (<see cref="ObMeshConverter.AddSeats"/>), sitting or sleeping as Oblivion's marker flags say (bit 30
+    /// sit, bit 31 sleep, as vanilla Skyrim's chairs and beds also carry them), each marker enabled when one of the
+    /// Oblivion markers it comes from is. Null when the model has no markers (it stays a static or activator).
+    /// </summary>
+    Furniture? FurnitureFor(Ob.IFurnitureGetter f, string edid, ObMeshConverter.Result mesh, string model)
+    {
+        uint flags = unchecked((uint)(f.MarkerFlags ?? 0));
+        bool sleep = (flags & 0x80000000u) != 0;
+        var seats = meshes.AddSeats(model, Path.Combine(modOutDir, mesh.Path), sleep);
+        if (seats.Count == 0) return null;
+        var furniture = new Furniture(mod)
+        {
+            EditorID = edid,
+            ObjectBounds = Bounds(mesh),
+            Model = new Model { File = SkyrimModelPath(mesh.Path) },
+            // Vanilla: chairs 0x40000000, beds 0x80000000 with "must exit to talk".
+            Flags = (Furniture.Flag)(sleep ? 0x80000000u | (uint)Furniture.Flag.MustExitToTalk : 0x40000000u),
+            InteractionKeyword = new FormLinkNullable<IKeywordGetter>(ActorTypeNpc),
+            Markers = [],
+        };
+        if (f.Name is { Length: > 0 } n) furniture.Name = n;
+        if (sleep) furniture.Keywords = [new FormLink<IKeywordGetter>(RaceToScale)];
+        // Oblivion's low 30 bits enable its markers; none set means all are. A place is used when one of its markers
+        // is enabled; the sides only disabled markers give are its disabled entries (a left-hand bed's right side).
+        bool On(int i) => (flags & 0x3FFFFFFFu) == 0 || i < 30 && (flags & (1u << i)) != 0;
+        var type = sleep ? Furniture.AnimationType.Lay : Furniture.AnimationType.Sit;
+        foreach (var s in seats)
+        {
+            ushort onSides = 0, offSides = 0;
+            for (int k = 0; k < s.Sources.Count && k < s.SourceSides.Count; k++)
+                if (On(s.Sources[k])) onSides |= s.SourceSides[k]; else offSides |= s.SourceSides[k];
+            offSides &= (ushort)~onSides;
+            furniture.Markers.Add(new FurnitureMarker
+            {
+                Enabled = s.Sources.Count == 0 || onSides != 0,
+                EntryPoints = new EntryPoints { Type = type, Points = (Furniture.Entry)s.Entries },
+                DisabledEntryPoints = offSides != 0 && onSides != 0 ? new EntryPoints { Type = type, Points = (Furniture.Entry)offSides } : null,
+            });
+        }
+        mod.Furniture.Add(furniture);
+        meshByBase[furniture.FormKey] = mesh;
+        if (mesh.Emitters.Count > 0) emittersByBase[furniture.FormKey] = mesh.Emitters;
+        return furniture;
     }
 
     /// <summary>Oblivion's interior lighting (ambient, directional, fog) as Skyrim cell lighting.</summary>
@@ -258,6 +320,7 @@ public sealed partial class ObPluginBuilder : IDisposable
     public void Write()
     {
         FinishMagic();
+        FinishJails();
         SwingDoorTwinCount = Skyrim.SwingDoorTwins.AddAll(mod);
         Directory.CreateDirectory(modOutDir);
         TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);

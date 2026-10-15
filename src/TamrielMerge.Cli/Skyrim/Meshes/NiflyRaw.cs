@@ -78,6 +78,16 @@ public static class NiflyRaw
         return set.Select(r => (long)Ptr(r)).Order().Select(p => Wrap<AVObject>((IntPtr)(p - avObjectRefOffset.Value))).ToList();
     }
 
+    /// <summary>The elements of a sync vector of plain structs of <paramref name="size"/> bytes (no pointers or strings
+    /// to find them by), e.g. furniture positions (24).</summary>
+    public static List<T> Elements<T>(object syncVector, int size) where T : class
+    {
+        IntPtr vec = Ptr(syncVector);
+        long first = Marshal.ReadInt64(vec, 0), last = Marshal.ReadInt64(vec, 8);
+        if (last < first || (last - first) % size != 0) throw new InvalidOperationException("unexpected vector layout");
+        return Enumerable.Range(0, (int)((last - first) / size)).Select(i => Wrap<T>((IntPtr)(first + (long)i * size))).ToList();
+    }
+
     /// <summary>Shortens a sync vector whose elements are <paramref name="elements"/> to its first
     /// <paramref name="count"/>.</summary>
     public static void Truncate<T>(object syncVector, List<T> elements, int count) where T : class

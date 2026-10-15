@@ -3177,6 +3177,46 @@ static class Program
                 }
                 return 0;
             }
+            case "ob-seats":
+            {
+                // Dev aid: Oblivion furniture models (--file, ';'-separated; --sleep for beds) converted to out/obprobe
+                // with their Skyrim seat or bed markers (ObFurniture): position, heading, entry sides.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var data = new Oblivion.ObData(dataDir);
+                var conv = new Oblivion.ObMeshConverter(data, new Oblivion.ObTextures(data, "out/obprobe"));
+                foreach (var f in opts["file"].Split(';'))
+                {
+                    var r = conv.Convert(f, "out/obprobe");
+                    var seats = conv.AddSeats(f, Path.Combine("out/obprobe", r.Path), opts.ContainsKey("sleep"));
+                    Console.WriteLine($"{f}: bounds {r.Min} .. {r.Max}");
+                    foreach (var s in seats) Console.WriteLine($"   {(s.Lie ? "lie" : "sit")} at {s.At} heading {s.Heading:F2} entries {s.Entries} from markers {string.Join(",", s.Sources)}");
+                }
+                return 0;
+            }
+            case "ob-nif10":
+            {
+                // Dev aid: reads Oblivion's models nifly can't (Gamebryo 10.1, 10.2 with particles) with Ob10Nif: every
+                // such model in the game (or --file a;b), with what failed where.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var data = new Oblivion.ObData(dataDir);
+                var files = opts.TryGetValue("file", out var fl) ? fl.Split(';').Select(f => f.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? f : @"meshes\" + f) : data.List("meshes");
+                int ok = 0, bad = 0;
+                foreach (var f in files)
+                {
+                    var bytes = data.Read(f);
+                    if (bytes is null || !Oblivion.Ob10Nif.IsUnreadableByNifly(bytes, out string why)) continue;
+                    try
+                    {
+                        var nif = Oblivion.Ob10Nif.Read(bytes, f);
+                        ok++;
+                        if (opts.ContainsKey("verbose"))
+                            Console.WriteLine($"  ok {f}: {nif.Blocks.Count} blocks, {nif.Blocks.OfType<Oblivion.Ob10Nif.Shape>().Count(s => s.Type == "NiParticleSystem")} particle systems; {why}");
+                    }
+                    catch (Exception e) { bad++; Console.WriteLine($"  FAIL {e.Message}"); }
+                }
+                Console.WriteLine($"{ok} read, {bad} failed");
+                return 0;
+            }
             case "ob-nif":
             {
                 // Dev aid: an Oblivion model (--file, data-relative) as nifly reads it: block types, and per shape its

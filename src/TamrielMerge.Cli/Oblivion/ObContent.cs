@@ -439,6 +439,7 @@ public sealed partial class ObPluginBuilder
         AddSpells(npc, n.Spells);
         VanillaActors.WearInventory(mod, npc, outfits, "OB");
         AddFactionsAndClass(npc, n);
+        AddCrime(npc, n);
         return npc;
     }
 

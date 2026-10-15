@@ -80,6 +80,8 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         /// <summary>The animations the converted model plays by name (PlayGamebryoAnimation; a door's Open and
         /// Close), with their lengths in seconds.</summary>
         public List<(string Name, float Length)> Sequences { get; init; } = [];
+        /// <summary>Whether parts of the model move (its own controllers or sequences).</summary>
+        public bool Moves { get; init; }
         public bool Plays(string sequence) => Sequences.Any(s => s.Name.Equals(sequence, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -230,7 +232,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         return new Result(rel, pieces.Count, solid.Count,
             all.Count > 0 ? all.Aggregate(new V3(float.MaxValue), V3.Min) : V3.Zero,
             all.Count > 0 ? all.Aggregate(new V3(float.MinValue), V3.Max) : V3.Zero, animated, solid.Select(t => t.Pts).ToList())
-        { Emitters = emitters, Sequences = sequences ?? [] };
+        { Emitters = emitters, Sequences = sequences ?? [], Moves = sequences is not null };
     }
 
     /// <summary>

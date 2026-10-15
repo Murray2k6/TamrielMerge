@@ -9,11 +9,19 @@ Actor Property PlayerRef Auto
 Event OnInit()
   RegisterForMenu("Dialogue Menu")
   RegisterForSleep()
+  RegisterForSingleUpdate(5.0)
 EndEvent
 
 Event OnPlayerLoadGame()
   RegisterForMenu("Dialogue Menu")
   RegisterForSleep()
+  RegisterForSingleUpdate(5.0)
+EndEvent
+
+; Every few seconds: whether the player is in an Oblivion jail (IsPlayerInJail), and the bounty in step with Skyrim's.
+Event OnUpdate()
+  ObState.CheckJail()
+  RegisterForSingleUpdate(5.0)
 EndEvent
 
 Event OnSleepStart(Float afSleepStartTime, Float afDesiredSleepEndTime)
