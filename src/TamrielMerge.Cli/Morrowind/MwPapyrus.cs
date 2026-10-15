@@ -68,6 +68,14 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         bool IsDialogueLocal(string variable);
         /// <summary>Scripts on people declaring a local of this name (a result script's speaker locals).</summary>
         IEnumerable<string> ScriptsDeclaring(string variable);
+        /// <summary>An NPC's or creature's Morrowind attributes and kept skills (<see cref="MwStats.Names"/>), or null.</summary>
+        int[]? BaseStats(string id);
+        /// <summary>A voice recording's length in seconds (Say's file, as Morrowind's Sound folder has it).</summary>
+        float VoiceSeconds(string file);
+        /// <summary>A music file StreamMusic names, as its path under Data Files (music\...), or null when the game has none.</summary>
+        string? MusicFile(string file);
+        /// <summary>A game setting's text (GMST), or null.</summary>
+        string? Setting(string name);
     }
 
     /// <param name="OnActor">Only people and creatures carry the (object) script.</param>
@@ -76,7 +84,10 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
     /// <param name="SpeakerScript">A result script's speaker's script, when the response has one speaker.</param>
     /// <param name="Start">A start script (runs from the beginning, while the player is in Morrowind's lands).</param>
     /// <param name="SpeakerFaction">A result script's speaker's faction (for faction functions without one).</param>
-    public sealed record Context(bool OnActor = false, bool IsItem = false, List<string>? Speakers = null, string? SpeakerScript = null, bool Start = false, string? SpeakerFaction = null);
+    /// <param name="SpeakerId">A result script's speaker, when the response has one (its stats are known).</param>
+    /// <param name="OnCreature">Creatures carry the (object) script (activated, a companion opens its inventory).</param>
+    public sealed record Context(bool OnActor = false, bool IsItem = false, List<string>? Speakers = null, string? SpeakerScript = null, bool Start = false, string? SpeakerFaction = null,
+        string? SpeakerId = null, bool OnCreature = false);
 
     /// <summary>
     /// A script property and what fills it: <see cref="Fill"/> is "kind:id" - player, ref:ID (a placed reference),
@@ -180,7 +191,8 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         if (kind == Kind.Object)
         {
             foreach (var v in locals.Keys.Where(v => world.IsDialogueLocal(v) && ctx.OnActor).ToList()) Generated("local:" + v, "Faction", "l_" + Clean(v));
-            if (ctx.IsItem || uses.Overlaps(["onpcadd", "onpcdrop", "onpcequip", "onpchitme", "onmurder"]) || SpecialLocals.Any(locals.ContainsKey)) PlayerRef();
+            if (ctx.IsItem || uses.Overlaps(["onpcadd", "onpcdrop", "onpcequip", "onpchitme", "onmurder"]) || SpecialLocals.Any(locals.ContainsKey)
+                || ctx.OnCreature && locals.ContainsKey("companion") || ctx.OnActor && locals.ContainsKey("minimumProfit")) PlayerRef();
         }
         if (uses.Contains("cellchanged")) PlayerRef();
         var events = new StringBuilder();

@@ -125,7 +125,11 @@ public sealed partial class MwPapyrus
                 uses.Add("pcsleep");
                 return R("__pcSleep", T.Bool);
             case "wakeuppc":
-                return Nothing("Skyrim can't interrupt sleep from a script; the scene is there when the player wakes");
+                // The player's rest ends (the sleep menu closed, as Skyrim's own interruption does), some hours into it as
+                // Morrowind's hourly checks would wake them.
+                if (kind == Kind.Result) return R("TMMwScript.WakeUpPC(0.0, 0.0)", T.Void);
+                uses.Add("pcsleep");
+                return R("TMMwScript.WakeUpPC(__sleepStart, __sleepEnd)", T.Void);
 
             // ---- enabling, locks, activation ----
             case "enable": return R($"{self()}.Enable()", T.Void);
@@ -230,12 +234,16 @@ public sealed partial class MwPapyrus
             case "getforcejump" or "getforcemovejump": return R("False", T.Bool);
             case "fall": return Nothing("Skyrim's actors fall by themselves");
             case "face": return R($"TMMwScript.Face({self()}, {ArgFloat(c, 0)}, {ArgFloat(c, 1)})", T.Void);
-            case "hitonme": return R("False", T.Bool);   // hit by a given weapon: Skyrim doesn't report it outside OnHit
-            case "hitattemptonme": return R("False", T.Bool);
+            case "hitonme" or "hitattemptonme":
+                // Hit (or attacked: Skyrim reports hits, blocked ones too) by that weapon since the script last asked.
+                if (kind != Kind.Object || c.Target is not null) return R("False", T.Bool);
+                uses.Add("hitonme");
+                return R($"MwHitOnMe({Form(c, 0)}, {(fn == "hitonme" ? "False" : "True")})", T.Bool);
             case "repairedonme": return R("False", T.Bool);
 
             // ---- AI packages ----
-            case "aiwander": return R($"{AI()}.Wander({actorSelf()}, {ArgFloat(c, 0)})", T.Void);
+            // AIWander range duration time idles...: the duration in hours (0: until told otherwise).
+            case "aiwander": return R($"{AI()}.Wander({actorSelf()}, {ArgFloat(c, 0)}, {ArgFloat(c, 1)})", T.Void);
             case "aitravel": return R($"{AI()}.Travel({actorSelf()}, {ArgFloat(c, 0)}, {ArgFloat(c, 1)}, {ArgFloat(c, 2)})", T.Void);
             case "aifollow" or "aiescort":
                 return R($"{AI()}.{(fn == "aifollow" ? "Follow" : "Escort")}({actorSelf()}, {AsActor(RefArg(c, 0))}, {ArgFloat(c, 1)}, {ArgFloat(c, 2)}, {ArgFloat(c, 3)}, {ArgFloat(c, 4)})", T.Void);
@@ -315,11 +323,14 @@ public sealed partial class MwPapyrus
             {
                 // A journal the game doesn't have (left over from development): Morrowind does nothing either.
                 if (Journal(c, 0) is not { } q) return Nothing($"there is no journal {Word(c, 0)} in the game");
-                if (c.Args.Count > 1 && c.Args[1] is Num jn) journalIndexes.Add((Word(c, 0), (int)jn.Value));
-                return R($"{q}.SetStage({ArgInt(c, 1)})", T.Void);
+                // The index is the journal's global (which can go back, as Morrowind's can); Journal also adds the entry
+                // (the quest's stage, or its objective when the journal returns to an entry it had).
+                bool entry = fn == "journal";
+                if (entry && c.Args.Count > 1 && c.Args[1] is Num jn) journalIndexes.Add((Word(c, 0), (int)jn.Value));
+                return R($"TMMwScript.Journal({q}, {JournalIndex(Word(c, 0))}, {ArgInt(c, 1)}, {(entry ? "True" : "False")})", T.Void);
             }
             case "getjournalindex":
-                return Journal(c, 0) is { } jq ? R($"{jq}.GetStage()", T.Int) : R("0", T.Int);   // no such journal: index 0, as in Morrowind
+                return Journal(c, 0) is not null ? R($"{JournalIndex(Word(c, 0))}.GetValueInt()", T.Int) : R("0", T.Int);   // no such journal: index 0, as in Morrowind
             case "addtopic": return Nothing("Skyrim's converted topics need no unlocking");
             case "clearinfoactor": return Nothing("Skyrim keeps no list of topics heard");
             case "startscript":
@@ -468,7 +479,11 @@ public sealed partial class MwPapyrus
                 return R($"MwSoundPlaying({Prop("sound:" + id, "Sound", "snd_" + Clean(id))})", T.Bool);
             }
             case "streammusic":
-                return Nothing("the music plays from Skyrim's music system (TamrielMerge's soundtrack)");
+            {
+                // The track, as a music type of its own played over the music of the place (and done when it ends).
+                if (world.MusicFile(Word(c, 0)) is not { } music) return Nothing($"there is no music file {Word(c, 0)} in the game");
+                return R($"TMMwScript.StreamMusic({Prop("music:" + music, "MusicType", "mu_" + Clean(Path.GetFileNameWithoutExtension(music)))})", T.Void);
+            }
             case "playbink":
             {
                 string file = Word(c, 0);
@@ -503,6 +518,10 @@ public sealed partial class MwPapyrus
     bool PropertyExists(string fill) => propertyByFill.ContainsKey(fill);
 
     string AI() => $"({Prop("ai", "Quest", "MwAI")} as TMMwAI)";
+    /// <summary>The state Morrowind keeps and Skyrim doesn't (attributes...): TMMwState on the quest MWScriptState.</summary>
+    string State() => $"({Prop("state", "Quest", "MwState")} as TMMwState)";
+    /// <summary>A journal's index, which (unlike a quest's stage) can go back: a global per journal the dialogue reads.</summary>
+    string JournalIndex(string journal) => Prop("jindex:" + journal, "GlobalVariable", "ji_" + Clean(journal));
     string Crime() => Generated("gen:MWCrimeFaction", "Faction", "MwCrime");
 
     /// <summary>A faction's reputation with the player: a global per faction (Skyrim keeps none).</summary>
@@ -580,6 +599,31 @@ public sealed partial class MwPapyrus
         ["waterwalking"] = "", ["flying"] = "",
     };
 
+    /// <summary>The stats TMMwState keeps (Skyrim has no actor value for them): Morrowind's attributes and three skills
+    /// (<see cref="MwStats.Names"/>, from the records), then effects' magnitudes (0 until a script sets them).</summary>
+    static readonly string[] KeptStats = [.. MwStats.Names, "resistparalysis", "resistnormalweapons", "resistblight", "resistcorprus", "attackbonus", "defendbonus",
+        "castpenalty", "blindness", "chameleon", "silence", "superjump", "swimspeed", "waterwalking", "flying"];
+
+    /// <summary>
+    /// A kept stat's base value where the record is known: the named person's or creature's, a result script's one
+    /// speaker's, an object script's carrier's (a property filled per record); -1 to reckon it in the game (the player:
+    /// race, birthsign, how they play; anyone else: race and level).
+    /// </summary>
+    string BaseStat(Call c, int index)
+    {
+        if (index >= MwStats.Count) return "0";
+        string? id = c.Target ?? (kind == Kind.Result ? ctx.SpeakerId : null);
+        if (id is not null)
+            return !id.Equals("player", StringComparison.OrdinalIgnoreCase) && world.BaseStats(id) is { } v ? v[index].ToString(CultureInfo.InvariantCulture) : "-1";
+        if (kind == Kind.Object && ctx.OnActor)
+        {
+            uses.Add("basestats");
+            Prop("basestats", "Int[]", "MwBaseStats");
+            return $"MwBaseStat({index})";
+        }
+        return "-1";
+    }
+
     Code StatCode(Call c, (string Verb, string Stat) s, Func<string> actorSelf)
     {
         string av = StatNames[s.Stat];
@@ -587,14 +631,15 @@ public sealed partial class MwPapyrus
         if (av.Length == 0)
         {
             // Stats Skyrim doesn't have (attributes, Athletics, Acrobatics, Unarmored, some effects) are kept per actor by
-            // TMMwScript (from the actor's level until a script sets them).
-            string name = s.Stat;
+            // TMMwState: the record's value plus what scripts changed, with what follows from them (Speed the speed...).
+            int index = Array.IndexOf(KeptStats, s.Stat.ToLowerInvariant());
+            string st = State(), b = BaseStat(c, index);
             return s.Verb switch
             {
-                "get" or "getcurrent" => new Code($"TMMwScript.GetStat({a}, \"{name}\")", T.Float),
+                "get" or "getcurrent" => new Code($"{st}.GetStat({a}, {index}, {b})", T.Float),
                 "ratio" => new Code("1.0", T.Float),
-                "set" => new Code($"TMMwScript.SetStat({a}, \"{name}\", {ArgFloat(c, 0)})", T.Void),
-                _ => new Code($"TMMwScript.SetStat({a}, \"{name}\", TMMwScript.GetStat({a}, \"{name}\") + {ArgFloat(c, 0)})", T.Void),
+                "set" => new Code($"{st}.SetStat({a}, {index}, {b}, {ArgFloat(c, 0)})", T.Void),
+                _ => new Code($"{st}.ModStat({a}, {index}, {b}, {ArgFloat(c, 0)})", T.Void),
             };
         }
         bool dynamic = av is "Health" or "Magicka" or "Stamina";
@@ -724,7 +769,8 @@ public sealed partial class MwPapyrus
         var speakers = c.Target is { } t
             ? (world.TypeOf(t) == "NPC_" ? [t] : new List<string>())
             : kind == Kind.Global ? [] : ctx.Speakers ?? [];
-        string seconds = F(Math.Clamp(text.Length / 14f, 2f, 30f));
+        // SayDone after the recording's own length (read from the file as the scripts are translated).
+        string seconds = F(world.VoiceSeconds(file) + 0.25f);
         if (kind != Kind.Result) uses.Add("say");
         string said = kind != Kind.Result ? $"\nMwSaid({seconds})" : "";
         if (speakers.Count == 0)

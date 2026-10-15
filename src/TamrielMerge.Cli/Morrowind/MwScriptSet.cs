@@ -42,7 +42,7 @@ public sealed class MwScriptSet
             bool carried = world.Carriers.ContainsKey(id);
             if (carried || !global)
                 set.Add(world, group, id, () => new MwPapyrus(world).Translate(script, id, MwPapyrus.Kind.Object,
-                    new MwPapyrus.Context(OnActor: world.OnActor(id), IsItem: world.OnItem(id), Speakers: world.Speakers(id))), set.Objects);
+                    new MwPapyrus.Context(OnActor: world.OnActor(id), IsItem: world.OnItem(id), Speakers: world.Speakers(id), OnCreature: world.OnCreature(id))), set.Objects);
             if (global)
                 set.Add(world, group, id, () => new MwPapyrus(world).Translate(script, id, MwPapyrus.Kind.Global,
                     new MwPapyrus.Context(Start: world.StartScripts.Contains(id))), set.Globals);

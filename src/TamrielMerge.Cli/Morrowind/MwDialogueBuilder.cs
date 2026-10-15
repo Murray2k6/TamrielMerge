@@ -38,6 +38,7 @@ public sealed partial class MwPluginBuilder
     readonly Dictionary<string, Class?> classes = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, Global?> globals = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, Quest> journals = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, GlobalFloat> journalIndexGlobals = new(StringComparer.OrdinalIgnoreCase);
     Quest? dialogueQuest;
     public int DialogueTopics { get; private set; }
     public int DialogueResponses { get; private set; }
@@ -90,6 +91,18 @@ public sealed partial class MwPluginBuilder
         return globals[id] = g;
     }
 
+    /// <summary>
+    /// A journal's index as Morrowind keeps it: a global (MWJournalIndex…) the scripts set (Journal, SetJournalIndex) and
+    /// the dialogue's conditions read. Unlike a quest's stages it can go back to a lower index, as Morrowind's can.
+    /// </summary>
+    GlobalFloat JournalIndexGlobal(string journal)
+    {
+        if (journalIndexGlobals.TryGetValue(journal, out var hit)) return hit;
+        var g = new GlobalFloat(mod) { EditorID = "MWJournalIndex" + Sanitize(journal), Data = 0 };
+        mod.Globals.Add(g);
+        return journalIndexGlobals[journal] = g;
+    }
+
     /// <summary>An NPC's faction and rank and class (Person calls this once the NPC exists).</summary>
     void AddFactionAndClass(Npc npc, Tes3Record rec)
     {
@@ -133,6 +146,7 @@ public sealed partial class MwPluginBuilder
         foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Topic)) Topic(topic, greeting: false);
         foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Greeting)) Topic(topic, greeting: true);
         Persuasion();
+        CompanionShare();
         // Money changers (CoinTrade): the faction is shared with the people who join it, made now or later.
         moneyChangers ??= Skyrim.CoinTrade.Tag(mod, "MWMoneyChangers", "Money changers");
         Skyrim.CoinTrade.AddExchange(mod, dialogueQuest, moneyChangers.FormKey, story: 2, prefix: "MW", title: "Money changer", baseFee: 10);
@@ -238,6 +252,57 @@ public sealed partial class MwPluginBuilder
         DialogueTopics += choices.Count + 1;
     }
 
+    /// <summary>
+    /// Morrowind's Companion Share: a topic said by whoever's script has its companion local at 1 (the local mirrored
+    /// as the rank of MWLocalcompanion), opening their inventory for the player to take and give freely (TMMwShare).
+    /// </summary>
+    void CompanionShare()
+    {
+        if (LocalFaction("companion") is not { } companion) return;
+        string name = world.Settings.TryGetValue("sCompanionShare", out var gmst) && gmst.Str("STRV") is { Length: > 0 } t ? t : "Companion Share";
+        var branch = new DialogBranch(mod)
+        {
+            EditorID = "MWCompanionShareBranch",
+            Quest = dialogueQuest!.ToLink<IQuestGetter>(),
+            Category = DialogBranch.CategoryType.Player,
+            Flags = DialogBranch.Flag.TopLevel,
+        };
+        var topic = new DialogTopic(mod)
+        {
+            EditorID = "MWCompanionShare",
+            Name = name,
+            Quest = dialogueQuest.ToNullableLink<IQuestGetter>(),
+            Branch = branch.ToNullableLink<IDialogBranchGetter>(),
+            Priority = 50,
+            Category = DialogTopic.CategoryEnum.Topic,
+            Subtype = DialogTopic.SubtypeEnum.Custom,
+            Responses = [],
+        };
+        branch.StartingTopic = topic.ToNullableLink<IDialogTopicGetter>();
+        var inIt = new GetInFactionConditionData(); inIt.Faction = new FormLinkOrIndex<IFactionGetter>(inIt, companion);
+        var rank = new GetFactionRankConditionData(); rank.Faction = new FormLinkOrIndex<IFactionGetter>(rank, companion);
+        var share = new DialogResponses(mod)
+        {
+            Conditions = [Cond(inIt, CompareOperator.EqualTo, 1), Cond(rank, CompareOperator.EqualTo, 1)],
+            Responses = [new DialogResponse { Text = "", ResponseNumber = 1, Emotion = Emotion.Neutral, EmotionValue = 50 }],
+            Flags = new DialogResponseFlags { Flags = DialogResponses.Flag.Goodbye },
+            VirtualMachineAdapter = new DialogResponsesAdapter
+            {
+                Scripts = [new ScriptEntry { Name = "TMMwShare" }],
+                ScriptFragments = new ScriptFragments
+                {
+                    ExtraBindDataVersion = 2,
+                    FileName = "TMMwShare",
+                    OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMMwShare", FragmentName = "Fragment_End" },
+                },
+            },
+        };
+        topic.Responses.Add(share);
+        mod.DialogBranches.Add(branch);
+        mod.DialogTopics.Add(topic);
+        DialogueTopics++;
+    }
+
     /// <summary>A response's TMMwInfo entry, adding the script (and its fragment) when it has none.</summary>
     static ScriptEntry InfoEntry(DialogResponses r)
     {
@@ -268,22 +333,28 @@ public sealed partial class MwPluginBuilder
             Type = topic.Name.StartsWith("A1_") || topic.Name.StartsWith("A2_") || topic.Name.StartsWith("B") && topic.Name.Length > 2 && char.IsDigit(topic.Name[1]) || topic.Name.StartsWith("C3_")
                 ? Quest.TypeEnum.MainQuest : Quest.TypeEnum.Misc,
             Stages = [],
+            Objectives = [],
         };
         foreach (var info in topic.Infos.Where(i => !i.QuestName).OrderBy(i => i.JournalIndex))
         {
             if (quest.Stages.Any(s => s.Index == info.JournalIndex)) continue;
+            ushort index = (ushort)Math.Clamp(info.JournalIndex, 0, ushort.MaxValue);
+            string text = Substitute(info.Text, info);
             quest.Stages.Add(new QuestStage
             {
-                Index = (ushort)Math.Clamp(info.JournalIndex, 0, ushort.MaxValue),
+                Index = index,
                 LogEntries =
                 [
                     new QuestLogEntry
                     {
-                        Entry = Substitute(info.Text, info),
+                        Entry = text,
                         Flags = info.QuestFinished ? QuestLogEntry.Flag.CompleteQuest : null,
                     },
                 ],
             });
+            // The same entry as an objective, shown when the journal goes back to it (TMMwScript.Journal): Morrowind adds
+            // the entry again; a stage already done can't be set again.
+            quest.Objectives.Add(new QuestObjective { Index = index, DisplayText = text, Targets = [] });
         }
         mod.Quests.Add(quest);
         journals[topic.Name] = quest;
@@ -556,9 +627,10 @@ public sealed partial class MwPluginBuilder
                     }
                     break;
                 case '4':
-                    if (journals.TryGetValue(c.Name, out var quest))
+                    // The journal's index: its global, which can go back (a quest's stage can't).
+                    if (journals.ContainsKey(c.Name))
                     {
-                        var d = new GetStageConditionData(); d.Quest = new FormLinkOrIndex<IQuestGetter>(d, quest.FormKey);
+                        var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, JournalIndexGlobal(c.Name).FormKey);
                         list.Add(Cond(d, op, c.Value));
                     }
                     else if (!Holds(c.Compare, 0, c.Value)) return null;
@@ -680,7 +752,12 @@ public sealed partial class MwPluginBuilder
             if (Regex.IsMatch(line, @"^goodbye\b", RegexOptions.IgnoreCase)) goodbye = true;
             else if ((m = Regex.Match(line, @"^journal\s*,?\s*""?([^"",\s]+)""?\s*,?\s*(\d+)", RegexOptions.IgnoreCase)).Success)
             {
-                if (journals.TryGetValue(m.Groups[1].Value, out var q)) { stageQuests.Add(q.FormKey); stages.Add(int.Parse(m.Groups[2].Value)); }
+                if (journals.TryGetValue(m.Groups[1].Value, out var q))
+                {
+                    stageQuests.Add(q.FormKey); stages.Add(int.Parse(m.Groups[2].Value));
+                    // The journal's index too (the dialogue's conditions read it).
+                    globalForms.Add(JournalIndexGlobal(m.Groups[1].Value).FormKey); globalValues.Add(int.Parse(m.Groups[2].Value));
+                }
             }
             else if ((m = Regex.Match(line, @"^choice\s*,?\s*(.*)$", RegexOptions.IgnoreCase)).Success)
             {

@@ -202,7 +202,7 @@ public sealed partial class MwPluginBuilder
             if (!compiled.Contains(t.Output.ScriptName) || !scriptWorld.Carriers.TryGetValue(t.ScriptId, out var carriers)) continue;
             foreach (var rec in carriers)
                 foreach (var carrier in ConvertedCarriers(rec))
-                    Attach(carrier, t.Output);
+                    Attach(carrier, t.Output, rec);
         }
 
         // Result scripts: their responses (or, not compiled, TMMwInfo's fixed set).
@@ -254,13 +254,13 @@ public sealed partial class MwPluginBuilder
         if (rec.Type == "DOOR" && swingDoors.GetValueOrDefault(rec.Id) is { } swing) yield return swing;
     }
 
-    void Attach(IMajorRecord carrier, MwPapyrus.Output o)
+    void Attach(IMajorRecord carrier, MwPapyrus.Output o, Tes3Record? rec = null)
     {
         if (carrier.GetType().GetProperty("VirtualMachineAdapter") is { CanWrite: true } vmProp && vmProp.PropertyType == typeof(VirtualMachineAdapter))
         {
             if (vmProp.GetValue(carrier) is not VirtualMachineAdapter vm) vmProp.SetValue(carrier, vm = new VirtualMachineAdapter());
             if (vm.Scripts.Any(s => s.Name == o.ScriptName)) return;
-            vm.Scripts.Add(Entry(o));
+            vm.Scripts.Add(Entry(o, rec));
             // A creature copied from a templated vanilla actor would take its template's scripts instead of its own.
             if (carrier is Npc npc) npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.Script;
             ScriptsAttached++;
@@ -268,17 +268,29 @@ public sealed partial class MwPluginBuilder
         else Problems.Add($"script {o.ScriptName}: {carrier.EditorID} ({carrier.GetType().Name}) can't carry scripts");
     }
 
-    ScriptEntry Entry(MwPapyrus.Output o)
+    ScriptEntry Entry(MwPapyrus.Output o, Tes3Record? carrier = null)
     {
         var entry = new ScriptEntry { Name = o.ScriptName };
-        foreach (var p in Properties(o)) entry.Properties.Add(p);
+        foreach (var p in Properties(o, carrier)) entry.Properties.Add(p);
         return entry;
     }
 
-    IEnumerable<ScriptProperty> Properties(MwPapyrus.Output o)
+    /// <param name="carrier">The Morrowind record the script is attached for (its own values: MwBaseStats).</param>
+    IEnumerable<ScriptProperty> Properties(MwPapyrus.Output o, Tes3Record? carrier = null)
     {
         foreach (var p in o.Properties)
         {
+            // The carrier's Morrowind attributes and skills (GetStrength... on itself), per record.
+            if (p.Fill == "basestats")
+            {
+                if (carrier is not null && scriptWorld?.Stats.Of(carrier.Id) is { } stats)
+                {
+                    PropertiesFilled++;
+                    yield return new ScriptIntListProperty { Name = p.Name, Data = [.. stats] };
+                }
+                else PropertiesUnfilled++;
+                continue;
+            }
             if (Fill(p) is { } key)
             {
                 PropertiesFilled++;
@@ -342,6 +354,9 @@ public sealed partial class MwPluginBuilder
             case "gen" when id == "MWCrimeFaction":
                 return Hidden(new Faction(mod) { EditorID = "MWCrimeFaction", Name = "Morrowind", Flags = Faction.FactionFlag.HiddenFromPC | Faction.FactionFlag.TrackCrime, Ranks = [new Rank { Number = 0 }] });
             case "ai": return AiQuest().FormKey;
+            case "state": return StateQuest().FormKey;
+            case "jindex": return journals.ContainsKey(id) ? JournalIndexGlobal(id).FormKey : null;
+            case "music": return StreamedMusic(id);
             case "diseases": return SpellList(id == "blight" ? 2 : 3).FormKey;
             case "effects": return EffectList(id)?.FormKey;
             case "soulgem": return SoulGemFor(id);
@@ -540,6 +555,116 @@ public sealed partial class MwPluginBuilder
         entry.Properties.Add(new ScriptObjectProperty { Name = "XMarker", Object = new FormLink<ISkyrimMajorRecordGetter>(Sk(0x3B)) });
         aiQuest.VirtualMachineAdapter = new QuestAdapter { Scripts = [entry] };
         return aiQuest;
+    }
+
+    Quest? stateQuest;
+
+    /// <summary>
+    /// The MWScriptState quest (TMMwState), which keeps Morrowind's attributes: with Morrowind's race values (by
+    /// Skyrim's race of each, and its vampire form) and birthsigns (by Skyrim's standing stones, which are Morrowind's
+    /// signs) for reckoning the player's.
+    /// </summary>
+    Quest StateQuest()
+    {
+        if (stateQuest is not null) return stateQuest;
+        VanillaNpc("EncBandit");   // opens the masters
+        stateQuest = new Quest(mod)
+        {
+            EditorID = "MWScriptState",
+            Name = "Morrowind script state",
+            Flags = Quest.Flag.StartGameEnabled,
+            Priority = 0,
+            Type = Quest.TypeEnum.None,
+        };
+        mod.Quests.Add(stateQuest);
+        var entry = new ScriptEntry { Name = "TMMwState" };
+        var races = new ScriptObjectListProperty { Name = "Races" };
+        var rows = new List<int>();
+        var male = new List<int>();
+        var female = new List<int>();
+        int row = 0;
+        foreach (var (mwRace, skyRace) in MwRaces)
+        {
+            if (scriptWorld!.Stats.Race(mwRace) is not { } values) continue;
+            bool any = false;
+            foreach (var r in skyrimEsm!.Races.Where(r => r.EditorID == skyRace || r.EditorID == skyRace + "Vampire"))
+            {
+                races.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(r.FormKey) });
+                rows.Add(row);
+                any = true;
+            }
+            if (!any) continue;
+            male.AddRange(values.Male);
+            female.AddRange(values.Female);
+            row++;
+        }
+        entry.Properties.Add(races);
+        entry.Properties.Add(new ScriptIntListProperty { Name = "RaceRows", Data = [.. rows] });
+        entry.Properties.Add(new ScriptIntListProperty { Name = "RaceMale", Data = [.. male] });
+        entry.Properties.Add(new ScriptIntListProperty { Name = "RaceFemale", Data = [.. female] });
+        var signs = new ScriptObjectListProperty { Name = "Signs" };
+        var signStats = new List<int>();
+        foreach (var (name, values) in scriptWorld!.Stats.Birthsigns())
+        {
+            // "The Lady" is Skyrim's doomLadyAbility, the Lady Stone's.
+            string word = name.Split(' ', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "";
+            if (skyrimEsm!.Spells.FirstOrDefault(sp => sp.EditorID is { } e && e.Equals("doom" + word + "Ability", StringComparison.OrdinalIgnoreCase)) is not { } stone) continue;
+            signs.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(stone.FormKey) });
+            signStats.AddRange(values);
+        }
+        entry.Properties.Add(signs);
+        entry.Properties.Add(new ScriptIntListProperty { Name = "SignStats", Data = [.. signStats] });
+        stateQuest.VirtualMachineAdapter = new QuestAdapter { Scripts = [entry] };
+        return stateQuest;
+    }
+
+    /// <summary>
+    /// StreamMusic's track (music\…, Morrowind's MP3) as Skyrim music: decoded and encoded as xWMA (the Creation Kit's
+    /// xWMAEncode; WAV without it) into Data\Music\TamrielMerge\MW, a music track, and a music type of its own that plays
+    /// it once, at once, over the place's music.
+    /// </summary>
+    FormKey? StreamedMusic(string path)
+    {
+        if (data.Read(path) is not { } bytes) { Problems.Add($"script StreamMusic: {path} not found"); return null; }
+        string name = Sanitize(Path.GetFileNameWithoutExtension(path));
+        string dir = Path.Combine(modOutDir, "Music", "TamrielMerge", "MW");
+        Directory.CreateDirectory(dir);
+        string wav = Path.Combine(dir, name + ".wav"), xwm = Path.Combine(dir, name + ".xwm");
+        string temp = Path.Combine(Path.GetTempPath(), $"tm_mw_music_{Guid.NewGuid():N}{Path.GetExtension(path)}");
+        try
+        {
+            File.WriteAllBytes(temp, bytes);
+            using (var reader = new MediaFoundationReader(temp))
+            using (var resampler = new MediaFoundationResampler(reader, new WaveFormat(44100, 16, 2)) { ResamplerQuality = 60 })
+                WaveFileWriter.CreateWaveFile(wav, resampler);
+            string game = Path.GetDirectoryName(Path.GetFullPath(SkyrimData!.TrimEnd('\\', '/')))!;
+            string encoder = Path.Combine(game, "Tools", "Audio", "xWMAEncode.exe");
+            if (File.Exists(encoder))
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo(encoder) { RedirectStandardOutput = true, RedirectStandardError = true };
+                foreach (var a in new[] { "-b", "192000", wav, xwm }) psi.ArgumentList.Add(a);
+                using var p = System.Diagnostics.Process.Start(psi)!;
+                p.StandardOutput.ReadToEnd(); p.StandardError.ReadToEnd();
+                p.WaitForExit();
+                if (p.ExitCode == 0 && File.Exists(xwm)) File.Delete(wav);
+                else Problems.Add($"script StreamMusic: xWMAEncode failed on {path}; kept as WAV");
+            }
+        }
+        catch (Exception e) { Problems.Add($"script StreamMusic: {path}: {e.Message}"); return null; }
+        finally { File.Delete(temp); }
+        // Vanilla tracks name .wav and ship .xwm; the engine takes either.
+        var track = new MusicTrack(mod) { EditorID = "MWMusic" + name, Type = MusicTrack.TypeEnum.SingleTrack, TrackFilename = $@"Data\Music\TamrielMerge\MW\{name}.wav" };
+        mod.MusicTracks.Add(track);
+        var type = new MusicType(mod)
+        {
+            EditorID = "MWStreamMusic" + name,
+            Flags = MusicType.Flag.PlaysOneSelection | MusicType.Flag.AbruptTransition,
+            Data = new MusicTypeData { Priority = 10, DuckingDecibel = 0 },
+            FadeDuration = 1,
+            Tracks = [track.ToLink<IMusicTrackGetter>()],
+        };
+        mod.MusicTypes.Add(type);
+        return type.FormKey;
     }
 
     readonly Dictionary<int, FormList> spellLists = [];

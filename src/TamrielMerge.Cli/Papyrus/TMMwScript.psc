@@ -737,25 +737,10 @@ Function UndoWerewolf(Actor a) Global
   EndIf
 EndFunction
 
-; ---- stats Skyrim has no actor value for ----
+; ---- stats ----
 
-; Morrowind's attributes (and Athletics, Acrobatics, Unarmored and some effects), which Skyrim's actors don't have:
-; reckoned as 30 plus the actor's level (up to 100), so the original game's checks (60 strength to force a stuck door,
-; 50 intelligence to read a book) pass or fail as they would for a character of that level.
-Float Function GetStat(Actor a, String asStat) Global
-  If !a
-    Return 0.0
-  EndIf
-  Float v = 30.0 + a.GetLevel()
-  If v > 100.0
-    v = 100.0
-  EndIf
-  Return v
-EndFunction
-
-; Setting one of those has no counterpart: Skyrim's actors have no attributes to change.
-Function SetStat(Actor a, String asStat, Float afValue) Global
-EndFunction
+; Morrowind's attributes (and Athletics, Acrobatics, Unarmored and some effects), which Skyrim's actors don't have, are
+; kept by TMMwState (the quest MWScriptState).
 
 ; SetHealth / SetMagicka / SetFatigue and the skills: the base (and with it the current) value.
 Function SetActorValueMw(Actor a, String asValue, Float afValue) Global
@@ -854,7 +839,62 @@ Function GoToJail(Faction akCrime, Actor akPlayer) Global
   akCrime.SetCrimeGold(0)
 EndFunction
 
+; ---- the journal ----
+
+; Journal / SetJournalIndex: Morrowind's journal index is the journal's global (the dialogue's conditions and
+; GetJournalIndex read it), so it can go back as Morrowind's does; a quest's stage can't be undone. Journal also adds the
+; entry: the quest's stage, or, when the journal goes back to an entry already in it, that entry shown again as the
+; quest's objective (until the journal moves on). SetJournalIndex sets the index only, as in Morrowind.
+Function Journal(Quest q, GlobalVariable akIndex, Int aiIndex, Bool abEntry) Global
+  If !q
+    Return
+  EndIf
+  Int was = -1
+  If akIndex
+    was = akIndex.GetValueInt()
+    akIndex.SetValueInt(aiIndex)
+  EndIf
+  If !abEntry
+    Return
+  EndIf
+  If was >= 0 && was != aiIndex && q.IsObjectiveDisplayed(was)
+    q.SetObjectiveDisplayed(was, False)
+  EndIf
+  If q.IsStageDone(aiIndex) || !q.SetStage(aiIndex)
+    If was != aiIndex
+      q.SetObjectiveDisplayed(aiIndex, True, True)
+    EndIf
+  EndIf
+EndFunction
+
 ; ---- the interface ----
+
+; WakeUpPC: the player's rest ends. Morrowind's scripts look at each hour of a rest and wake the player in one of them;
+; here the script runs as the sleep starts, so the wake comes a random part of the way through (afStart and afEnd are
+; the sleep's game times), and the sleep menu is closed as its Cancel does (SKSE).
+Function WakeUpPC(Float afStart, Float afEnd) Global
+  If !UI.IsMenuOpen("Sleep/Wait Menu")
+    Return
+  EndIf
+  If afEnd - afStart > 1.0 / 24.0
+    Float wake = afStart + Utility.RandomFloat(1.0 / 24.0, afEnd - afStart)
+    Int waited = 0
+    While waited < 600 && UI.IsMenuOpen("Sleep/Wait Menu") && Utility.GetCurrentGameTime() < wake
+      Utility.WaitMenuMode(0.05)
+      waited += 1
+    EndWhile
+  EndIf
+  If UI.IsMenuOpen("Sleep/Wait Menu")
+    UI.Invoke("Sleep/Wait Menu", "_root.SleepWaitMenu_mc.onCancelPress")
+  EndIf
+EndFunction
+
+; StreamMusic: Morrowind's track, a music type of its own that plays once over the place's music (then that resumes).
+Function StreamMusic(MusicType akMusic) Global
+  If akMusic
+    akMusic.Add()
+  EndIf
+EndFunction
 
 ; ShowRestMenu: Skyrim's wait menu (sleeping needs a bed), opened as its key would (SKSE).
 Function ShowRestMenu() Global
