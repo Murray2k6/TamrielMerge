@@ -70,5 +70,14 @@ User, 2026-10-14: "should be a 1 hour conversion" (the run of 10-13/14 took abou
   each of Daggerfall's 3,444 town worlds, one world at a time), and Daggerfall's trees made from its sprites go in as
   pictures like Skyrim's trees (they went in whole, 8,000 triangles each): Daggerfall's objects and trees went from over
   two hours and an estimated 50 GB to 6.4 minutes and 3.6 GB. `TAMRIELMERGE_LOD_STATS=1` lists the heaviest models.
+- The overland's navmesh is made from the land's heights instead of by Recast (`NavmeshBuilder.GenerateTerrainGrid`):
+  2048-unit blocks split while more than 96 units off the ground or crossing into deep water or a slope too steep to
+  walk, neighbours one split apart at most, edge midpoints where the next block is split. Recast had voxelised the
+  400,000 cells for over 50 minutes on every core and left 3 triangles a cell, hundreds of units off the ground on the
+  hills; now 3.5 minutes, 14 million triangles (38 a cell), a mean of 18 units off the ground, no cracks
+  (`df-navmesh-test`). The whole Daggerfall build (Daggerfall.esm 2.7 min, land 4.9, navmesh 3.5) takes 11 minutes.
+  Daggerfall Land.esm is then 2.01 GB: Mutagen can't read a plugin over 2 GB, so a finer navmesh needs the land split.
+- The Morrowind and Oblivion scripts compile in batches of 400, up to four at once (Morrowind's 4,930 took 17 minutes
+  one batch at a time); a Morrowind script the same as the last build's isn't compiled again.
 - Not counted in the hour: remastering the intro videos and rendering the menu on the processor (hours; they reuse what
   an earlier run made), and voice generation.
