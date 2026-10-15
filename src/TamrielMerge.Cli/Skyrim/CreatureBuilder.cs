@@ -125,8 +125,19 @@ public sealed class CreatureBuilder
         foreach (var id in wanted.Where(w => !templates.ContainsKey(w))) Missing.Add(id);
     }
 
+    /// <summary>Daggerfall's enemy senses (DfSenses): the quest its hostile actors' TMDfSenses report to.</summary>
+    public Quest? Senses { get; private set; }
+
+    Dictionary<FormKey, INpcGetter>? vanillaNpcs;
+    INpcGetter? Vanilla(FormKey key)
+    {
+        vanillaNpcs ??= masters.OfType<ISkyrimModGetter>().SelectMany(m => m.Npcs).GroupBy(n => n.FormKey).ToDictionary(g => g.Key, g => g.Last());
+        return vanillaNpcs.GetValueOrDefault(key);
+    }
+
     public void Build()
     {
+        Senses = DfSenses.Quest(mod);
         foreach (var (id, map) in Table)
         {
             if (!templates.TryGetValue(map.Template, out var template)) continue;
@@ -135,8 +146,10 @@ public sealed class CreatureBuilder
             else
             {
                 // Enemy classes: Skyrim's leveled lists (no passive variant).
-                spawns[id] = template.FormKey;
-                placeables[id] = passiveSpawns[id] = ListActor(template.FormKey, template.EditorID!);
+                // Encounter lists hold the actor standing for Skyrim's list (it carries TMDfSenses), not the list
+                // itself, so a class an encounter list picks has Daggerfall's senses too.
+                placeables[id] = passiveSpawns[id] = ListActor(template.FormKey, template.EditorID!, senses: true, DfSenses.SeesThroughInvisibility.Contains(id));
+                spawns[id] = placeables[id];
             }
         }
         // Dungeon tables (0-19) and the overland ones by climate, in and out of locations, day and night (20-37).
@@ -159,14 +172,19 @@ public sealed class CreatureBuilder
         }
     }
 
-    /// <summary>An actor to place for a leveled list: a copy of LvlBanditMelee1H templated on the list.</summary>
-    FormKey ListActor(FormKey list, string listEditorId)
+    /// <summary>An actor to place for a leveled list: a copy of LvlBanditMelee1H templated on the list. One standing for
+    /// Skyrim's list of an enemy class (<paramref name="senses"/>) carries TMDfSenses as its own script (not the vanilla
+    /// bandit's the list picks); one for a Daggerfall encounter list takes its scripts from what the list picks (Use
+    /// Script), and everything those lists hold carries TMDfSenses.</summary>
+    FormKey ListActor(FormKey list, string listEditorId, bool senses = false, bool seesInvisible = false)
     {
         // Vanilla has placeholders too, but for some lists only odd variants (ghostly or pre-aggroed bandits).
         if (listActors.TryGetValue(list, out var actor)) return actor;
         var copy = (listActorTemplate ?? throw new InvalidOperationException("LvlBanditMelee1H not found")).Duplicate(mod.GetNextFormKey());
         copy.EditorID = "DFLvl" + (listEditorId.StartsWith("LChar") ? listEditorId[5..] : listEditorId.StartsWith("DFLChar") ? listEditorId[7..] : listEditorId);
         copy.Template.SetTo(list);
+        copy.Configuration.TemplateFlags |= NpcConfiguration.TemplateFlag.Script;
+        if (senses) DfSenses.Attach(copy, Senses!, seesInvisible, Vanilla);
         mod.Npcs.Add(copy);
         return listActors[list] = copy.FormKey;
     }
@@ -199,6 +217,8 @@ public sealed class CreatureBuilder
         }
         // Templated copies (draugr, ghosts) would otherwise take their name from the template.
         copy.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.BaseData;
+        // Daggerfall's senses for its hostile ones (DfSenses); the passive ones fight only when attacked.
+        if (!passive) DfSenses.Attach(copy, Senses!, DfSenses.SeesThroughInvisibility.Contains(mobile.Id), Vanilla);
         mod.Npcs.Add(copy);
         return copy;
     }

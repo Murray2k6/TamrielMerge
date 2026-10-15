@@ -133,6 +133,8 @@ public static class DaggerfallPluginBuilder
         var iliacBay = new Location(mod) { EditorID = "DFLocIliacBay", Name = "Iliac Bay" };
         mod.Locations.Add(iliacBay);
         world.Location = iliacBay.ToNullableLink<ILocationGetter>();
+        // Daggerfall's enemy senses work only in the Iliac Bay (its creatures elsewhere keep Skyrim's own detection).
+        if (creatures.Senses is { } senses) DfSenses.SetWorld(senses, iliacBay.FormKey);
         // Towns are locations inside the Iliac Bay (their streets and buildings keep the town's location).
         foreach (var tw in townWorlds) tw.Music = world.Music;
         foreach (var townLoc in mod.Locations.Where(l => l.EditorID?.StartsWith("DFLoc") == true && l != iliacBay))

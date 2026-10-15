@@ -24,6 +24,10 @@ The journey is made in real time, in the world the player is in, without loading
   time and the way left); whatever didn't pass on the way passes on arrival.
 - The pace multiplies the traveller's speed, up to what uGridsToLoad allows: `CellsPerSecond` (1.5) cells a second at
   5 grids, proportionally less with more grids loaded, so raising uGridsToLoad keeps the streaming steady.
+- In the Iliac Bay, Daggerfall's enemies nearby (docs/daggerfall-senses.md: one that sees the player, or one within
+  classic Daggerfall's spawn area around them) stop the journey too, checked every 2 seconds, and a journey can't begin
+  or continue while they're near ("You cannot travel with enemies nearby."). Skyrim's map travel there is switched off
+  while the map is open near them.
 - A fight (the player in combat) stops the journey where it is, as does a movement key; **Continue the journey** in
   the Travel tab picks it up from there (its price already paid; the time left is the part of the trip still ahead).
 - Across the sea (a town on another landmass, or whenever by ship is chosen and the way crosses water): the player

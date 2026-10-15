@@ -47,6 +47,7 @@ public static class TravelPluginBuilder
         var worlds = new List<FormKey>();
         var opened = new List<IDisposable>();
         var masters = new List<string> { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" };
+        FormKey? dfSenses = null;
         try
         {
             foreach (var (plugin, worldName, story) in Games)
@@ -60,10 +61,12 @@ public static class TravelPluginBuilder
                     : MarkerWorld(mod, src, worldName, story, log);
                 if (world is null && story == 3 && oblivionData is not null) world = OblivionWorld(mod, src, oblivionData, log);
                 if (world is { } w) { worlds.Add(w); masters.Add(plugin); }
+                // Daggerfall's "enemies nearby" (its enemy senses' quest) for journeys in the Iliac Bay.
+                if (world is not null && story == 0) dfSenses = src.Quests.FirstOrDefault(q => q.EditorID == DfSenses.QuestEditorId)?.FormKey;
             }
             if (SkyrimWorld(mod, skyrim, log) is { } sw) worlds.Add(sw);
             if (worlds.Count == 0) { log?.Invoke("travel: no worlds"); return 0; }
-            AddTravelQuest(mod, worlds);
+            AddTravelQuest(mod, worlds, dfSenses);
             string outPath = Path.Combine(outDir ?? dir, PluginName);
             mod.WriteToBinary(outPath, new BinaryWriteParameters
             {
@@ -575,7 +578,7 @@ public static class TravelPluginBuilder
 
     // ---- the travel quest ----
 
-    static void AddTravelQuest(SkyrimMod mod, List<FormKey> worlds)
+    static void AddTravelQuest(SkyrimMod mod, List<FormKey> worlds, FormKey? dfSenses)
     {
         // A holding cell: the marker walks head for, and the ship (disabled until a voyage).
         var shipBase = new Mutagen.Bethesda.Skyrim.Activator(mod)
@@ -633,6 +636,7 @@ public static class TravelPluginBuilder
                         Objects("Worlds", worlds),
                         new ScriptObjectProperty { Name = "Ship", Object = ship.ToLink<ISkyrimMajorRecordGetter>() },
                         new ScriptObjectProperty { Name = "Waypoint", Object = waypoint.ToLink<ISkyrimMajorRecordGetter>() },
+                        .. (dfSenses is { } senses ? new ScriptProperty[] { new ScriptObjectProperty { Name = "DfSenses", Object = senses.ToLink<ISkyrimMajorRecordGetter>() } } : []),
                     ],
                 },
             },

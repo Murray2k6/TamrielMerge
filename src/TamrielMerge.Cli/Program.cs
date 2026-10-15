@@ -4614,6 +4614,79 @@ static class Program
                 Console.Write(Skyrim.GameCheck.Scan(since, workspace));
                 return 0;
             }
+            case "df-senses-check":
+            {
+                // Daggerfall's enemy senses (DfSenses, docs/daggerfall-senses.md) in a built plugin (--plugin; --master the
+                // plugin it builds on, e.g. Daggerfall.esm under a dungeon part): the control quest, every actor carrying
+                // TMDfSenses (its properties, that its own scripts count), what each encounter list picks, and placed
+                // actors without the senses; --list prints every actor.
+                string plugin = Path.GetFullPath(opts["plugin"]);
+                using var m = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
+                var others = new List<ISkyrimModDisposableGetter> { m };
+                if (opts.TryGetValue("master", out var masterPath)) others.Add(SkyrimMod.CreateFromBinaryOverlay(Path.GetFullPath(masterPath), SkyrimRelease.SkyrimSE));
+                foreach (var f in new[] { "Skyrim.esm", "Dawnguard.esm", "Dragonborn.esm" }) others.Add(SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, f), SkyrimRelease.SkyrimSE));
+                try
+                {
+                    var npcs = others.SelectMany(o => o.Npcs).GroupBy(n => n.FormKey).ToDictionary(g => g.Key, g => g.First());
+                    var lists = others.SelectMany(o => o.LeveledNpcs).GroupBy(n => n.FormKey).ToDictionary(g => g.Key, g => g.First());
+                    var quests = others.SelectMany(o => o.Quests).GroupBy(q => q.FormKey).ToDictionary(g => g.Key, g => g.First());
+                    int problems = 0;
+                    void Problem(string s) { problems++; Console.WriteLine("  PROBLEM: " + s); }
+                    IScriptEntryGetter? Senses(INpcGetter n) => n.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == Skyrim.DfSenses.ActorScript);
+                    bool UsesScript(INpcGetter n) => !n.Template.IsNull && n.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Script);
+                    // Whether an actor ends up with the senses: its own (not Use Script), or through its template.
+                    bool Has(FormKey k, int depth = 0)
+                    {
+                        if (depth > 8) return false;
+                        if (npcs.TryGetValue(k, out var n)) return UsesScript(n) ? Has(n.Template.FormKey, depth + 1) : Senses(n) is not null;
+                        if (lists.TryGetValue(k, out var l)) return (l.Entries ?? []).All(e => e.Data is { } d && Has(d.Reference.FormKey, depth + 1));
+                        return false;
+                    }
+
+                    var quest = m.Quests.FirstOrDefault(q => q.EditorID == Skyrim.DfSenses.QuestEditorId);
+                    Console.WriteLine($"{Path.GetFileName(plugin)}: control quest {(quest is null ? "none" : $"{quest.FormKey.ID:X6} flags {quest.Flags}")}");
+                    if (quest?.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == Skyrim.DfSenses.ControlScript) is { } cs)
+                        Console.WriteLine("  " + string.Join(", ", cs.Properties.Select(p => p is IScriptObjectPropertyGetter o ? $"{p.Name}={o.Object.FormKey}" : p.Name)));
+                    else if (quest is not null) Problem("the control quest has no TMDfSensesControl");
+
+                    int carrying = 0;
+                    foreach (var n in m.Npcs.Where(n => n.FormKey.ModKey == m.ModKey).OrderBy(n => n.EditorID))
+                    {
+                        var s = Senses(n);
+                        string e = n.EditorID ?? "";
+                        if (s is null)
+                        {
+                            if (opts.ContainsKey("list")) Console.WriteLine($"  -        {e}{(UsesScript(n) ? " (scripts from its template)" : "")}");
+                            continue;
+                        }
+                        carrying++;
+                        var senses = s.Properties.OfType<IScriptObjectPropertyGetter>().FirstOrDefault(p => p.Name == "Senses")?.Object.FormKey;
+                        bool sees = s.Properties.OfType<IScriptBoolPropertyGetter>().FirstOrDefault(p => p.Name == "SeesInvisible")?.Data ?? false;
+                        string others2 = string.Join(",", n.VirtualMachineAdapter!.Scripts.Where(x => x.Name != Skyrim.DfSenses.ActorScript).Select(x => x.Name));
+                        if (opts.ContainsKey("list")) Console.WriteLine($"  senses   {e}{(sees ? " sees invisible" : "")}{(others2.Length > 0 ? " +" + others2 : "")}");
+                        if (!e.StartsWith("DFCreature") && !e.StartsWith("DFLvl")) Problem($"{e} isn't one of Daggerfall's enemy actors");
+                        if (e.EndsWith("Passive")) Problem($"{e} is a passive actor");
+                        if (UsesScript(n)) Problem($"{e} takes its scripts from its template: its TMDfSenses doesn't count");
+                        if (senses is not { } sk || !quests.TryGetValue(sk, out var q) || q.EditorID != Skyrim.DfSenses.QuestEditorId) Problem($"{e}: Senses isn't the control quest");
+                    }
+                    Console.WriteLine($"actors with TMDfSenses: {carrying} of {m.Npcs.Count(n => n.FormKey.ModKey == m.ModKey)}");
+                    foreach (var l in m.LeveledNpcs.Where(l => l.EditorID?.StartsWith("DFLCharEncounter") == true))
+                        foreach (var en in l.Entries ?? [])
+                            if (en.Data is { } d && !Has(d.Reference.FormKey))
+                                Problem($"{l.EditorID} picks {(npcs.TryGetValue(d.Reference.FormKey, out var pn) ? pn.EditorID : lists.TryGetValue(d.Reference.FormKey, out var pl) ? pl.EditorID : d.Reference.FormKey.ToString())} without the senses");
+                    foreach (var a in m.Npcs.Where(n => n.EditorID?.StartsWith("DFLvlEncounter") == true))
+                        if (!UsesScript(a)) Problem($"{a.EditorID} doesn't take its scripts from its list");
+
+                    // Placed actors: how many have the senses (Daggerfall's hostile enemies) and what the rest are.
+                    var placed = m.EnumerateMajorRecords<IPlacedNpcGetter>().ToList();
+                    var without = placed.Where(p => !Has(p.Base.FormKey)).GroupBy(p => npcs.TryGetValue(p.Base.FormKey, out var b) ? b.EditorID ?? "?" : p.Base.FormKey.ToString())
+                        .OrderByDescending(g => g.Count()).ToList();
+                    Console.WriteLine($"placed actors: {placed.Count}, with the senses {placed.Count - without.Sum(g => g.Count())}; without: {string.Join(", ", without.Take(25).Select(g => $"{g.Key} {g.Count()}"))}");
+                    Console.WriteLine(problems == 0 ? "no problems" : $"{problems} problems");
+                    return problems == 0 ? 0 : 1;
+                }
+                finally { foreach (var o in others) o.Dispose(); }
+            }
             case "esm-find":
             {
                 // Dev aid: records of --plugin (default Skyrim.esm) whose editor ID matches --edid (a regex), with type and
@@ -4637,6 +4710,8 @@ static class Program
                 var order = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Concat(loadOrder)
                     .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => File.Exists(Path.Combine(data, f))).ToList();
                 var targets = opts["plugins"].Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                // A target not in Plugins.txt (a scratch plugin in a --data folder of its own) is checked after its masters.
+                order.AddRange(targets.Where(t => !order.Contains(t, StringComparer.OrdinalIgnoreCase) && File.Exists(Path.Combine(data, t))));
                 // Only the masters each target needs, plus the target, in load order.
                 foreach (var target in targets)
                 {
