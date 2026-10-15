@@ -55,6 +55,8 @@ TamrielMerge.mods.json
 /tools/skse/**/*.lib
 /tools/skse/**/*.pdb
 /tools/skse/**/nvngx_dlss.dll
+/tools/skse/**/gen/
+/tools/skse/**/test/*.exe
 
 # Upscaling and voices: their scripts only
 /tools/upscale/*

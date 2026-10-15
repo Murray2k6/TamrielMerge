@@ -3,13 +3,12 @@
 // uses these and i need the same"): NVIDIA DLSS (DLAA and the upscaling modes) and a ray-traced lighting option, chosen
 // in an in-game settings menu (F10) and kept in Data/SKSE/Plugins/TamrielMergeGraphics.ini.
 //
-// This first stage: it hooks the frame's presentation (IDXGISwapChain::Present, through the swap chain's table of
-// functions, so no game addresses are needed), draws the settings menu over the game with Dear ImGui (MIT), takes
-// the keyboard and mouse from the game while the menu is open (DirectInput's device state emptied), starts NVIDIA's
-// NGX on the game's own D3D11 device and asks whether DLSS can run (the DLSS SDK, NVIDIA RTX SDKs licence; its
-// runtime nvngx_dlss.dll ships beside this plugin). Feeding DLSS the game's colour, depth and motion vectors in place
-// of Skyrim's own temporal anti-aliasing is the next stage, once the renderer's buffers are located for the game
-// version (Address Library format 5, as TamrielMergeEra reads it).
+// It hooks the frame's presentation (IDXGISwapChain::Present, through the swap chain's table of functions, so no game
+// addresses are needed), draws the settings menu over the game with Dear ImGui (MIT), takes the keyboard and mouse from
+// the game while the menu is open, runs NVIDIA DLSS (the DLSS SDK, NVIDIA RTX SDKs licence; its runtime nvngx_dlss.dll
+// ships beside this plugin) in place of Skyrim's temporal anti-aliasing with a sharpening pass of our own after it, and
+// ray traces shadows, ambient occlusion, bounce light and reflections on a Direct3D 12 device of its own (RtCore.cpp).
+// All of it is TamrielMerge's own work, from Microsoft's and NVIDIA's SDK documentation; no other mod's code.
 //
 // Every hook is guarded: if anything isn't as expected the plugin logs it and leaves the game alone.
 
@@ -39,6 +38,9 @@
 #include "backends/imgui_impl_win32.h"
 #include "nvsdk_ngx.h"
 #include "nvsdk_ngx_helpers.h"
+#include "RtCore.h"
+#include "gen/FullscreenVS.h"
+#include "gen/SharpenPS.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
@@ -118,11 +120,13 @@ namespace
     }
 
     std::uint8_t* gameState = nullptr;
+    bool stateLayoutChecked = false;   // the game version whose renderer state was read from its code (1.7.104)
 
     void FindGameState()
     {
         int v[4]{};
         if (!GameVersion(v)) { Log("renderer state: the game's version unreadable"); return; }
+        stateLayoutChecked = v[0] == 1 && v[1] == 7 && v[2] == 104;
         char path[MAX_PATH]{};
         GetModuleFileNameA(nullptr, path, MAX_PATH);
         std::string dir(path);
@@ -137,6 +141,15 @@ namespace
     bool SafeCopy(void* to, const void* from, size_t n)
     {
         __try { std::memcpy(to, from, n); return true; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    /// A write into the game's memory, guarded (a wrong address is an exception caught, not a crash).
+    bool SafeWrite(void* to, const void* from, size_t n) { return SafeCopy(to, from, n); }
+
+    bool SafeAdd(volatile LONG* at, LONG d)
+    {
+        __try { InterlockedExchangeAdd(at, d); return true; }
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
@@ -318,6 +331,23 @@ namespace
             if (!parent) break;
             top = parent;
         }
+        // The ray tracing's camera: NiCamera's world transform, world-to-clip matrix and frustum as floats.
+        if (top)
+            if (const std::uint8_t* camNode = [&]() -> const std::uint8_t* {
+                    const std::uint8_t* data = nullptr; std::uint16_t cap = 0, size = 0;
+                    if (!Read(top + 0x118, data) || !Read(top + 0x120, cap) || !Read(top + 0x124, size) || !data || size > cap || cap > 64) return nullptr;
+                    for (std::uint16_t i = 0; i < size; ++i) { const std::uint8_t* c = nullptr; if (Read(data + i * 8, c) && c && ObjectName(c) == "WorldRoot CameraNode") return c; }
+                    return nullptr; }())
+            {
+                const std::uint8_t* data = nullptr, * cam = nullptr;
+                if (Read(camNode + 0x118, data) && data) Read(data, cam);
+                std::fprintf(f, "camera node child: %s\n", TypeName(cam).c_str());
+                float m[(0x1F0 - 0x7C) / 4]{};
+                if (cam && SafeCopy(m, cam + 0x7C, sizeof(m)))
+                    for (int i = 0; i < int(std::size(m)); ++i)
+                        std::fprintf(f, "  NiCamera + 0x%X: %g%s", 0x7C + i * 4, m[i], (i % 4 == 3) ? "\n" : ";");
+                std::fprintf(f, "\n");
+            }
         SceneDump d{ f };
         if (top) DumpObject(d, top, 0);
         std::fprintf(f, "\n%d nodes, %d shapes (%d with CPU vertices), %lld triangles\n", d.nodes, d.shapes, d.withRaw, d.triangles);
@@ -364,10 +394,16 @@ namespace
         int upscaler = DLAA;
         float sharpness = 0.2f;
         bool frameGeneration = false;
-        bool rayTracedLighting = false;
-        bool rayTracingDevelop = false;
-        float lightingStrength = 1.0f;
+        bool rayTracedLighting = false;                    // off until the user turns it on
+        int rtQuality = 1;                                 // 0 low, 1 medium, 2 high, 3 ultra
+        float shadowStrength = 0.6f;                       // ray-traced sun shadows
+        float occlusionStrength = 0.7f;                    // ray-traced ambient occlusion
+        float lightingStrength = 1.0f;                     // one bounce of diffuse light
         float reflectionStrength = 0.5f;
+        bool rtCharacters = true;                          // people and creatures as capsules along their bones
+        float rtDistance = 12000.0f;                       // how far meshes are ray traced (units)
+        int rtMemoryMB = 512;                              // video memory for the acceleration structures
+        int rtDebugView = 0;                               // 0 the picture, 1 shadows, 2 occlusion, 3 bounce, 4 reflections, 5 normals
         int menuKey = VK_F10;
         bool capture = false;      // developer: record two frames' draws (finding the renderer's passes)
         int captureFrame = 900;
@@ -392,12 +428,18 @@ namespace
         settings.upscaler = std::clamp(i("iUpscaler", settings.upscaler), 0, static_cast<int>(UltraPerformance));
         settings.sharpness = f("fSharpness", settings.sharpness);
         settings.frameGeneration = i("bFrameGeneration", 0) != 0;
-        // Ray tracing draws nothing yet (its first stage only builds the acceleration structures) but costs a third of
-        // the frame rate and hung the GPU on a world load (user's test, 2026-10-09): off unless bRayTracingDevelop=1.
-        settings.rayTracingDevelop = i("bRayTracingDevelop", 0) != 0;
-        settings.rayTracedLighting = settings.rayTracingDevelop && i("bRayTracedLighting", 0) != 0;
-        settings.lightingStrength = f("fLightingStrength", settings.lightingStrength);
-        settings.reflectionStrength = f("fReflectionStrength", settings.reflectionStrength);
+        // Ray tracing: off until turned on in the menu (its first stage hung the GPU on 2026-10-09; it is bounded and
+        // guarded now, see RtCore.h).
+        settings.rayTracedLighting = i("bRayTracedLighting", 0) != 0;
+        settings.rtQuality = std::clamp(i("iRayTracingQuality", settings.rtQuality), 0, 3);
+        settings.shadowStrength = std::clamp(f("fShadowStrength", settings.shadowStrength), 0.0f, 1.0f);
+        settings.occlusionStrength = std::clamp(f("fOcclusionStrength", settings.occlusionStrength), 0.0f, 1.0f);
+        settings.lightingStrength = std::clamp(f("fLightingStrength", settings.lightingStrength), 0.0f, 2.0f);
+        settings.reflectionStrength = std::clamp(f("fReflectionStrength", settings.reflectionStrength), 0.0f, 1.0f);
+        settings.rtCharacters = i("bRayTracedCharacters", 1) != 0;
+        settings.rtDistance = std::clamp(f("fRayTracingDistance", settings.rtDistance), 2000.0f, 40000.0f);
+        settings.rtMemoryMB = std::clamp(i("iRayTracingMemoryMB", settings.rtMemoryMB), 128, 2048);
+        settings.rtDebugView = std::clamp(i("iRayTracingDebugView", 0), 0, 5);
         settings.menuKey = i("iMenuKey", VK_F10);
         settings.capture = i("bCapture", 0) != 0;
         settings.captureFrame = i("iCaptureFrame", 900);
@@ -418,9 +460,16 @@ namespace
         w("fSharpness", std::to_string(settings.sharpness));
         w("bFrameGeneration", settings.frameGeneration ? "1" : "0");
         w("bRayTracedLighting", settings.rayTracedLighting ? "1" : "0");
-        if (settings.rayTracingDevelop) w("bRayTracingDevelop", "1");
+        WritePrivateProfileStringA("Graphics", "bRayTracingDevelop", nullptr, iniPath.c_str());   // the old lock, gone
+        w("iRayTracingQuality", std::to_string(settings.rtQuality));
+        w("fShadowStrength", std::to_string(settings.shadowStrength));
+        w("fOcclusionStrength", std::to_string(settings.occlusionStrength));
         w("fLightingStrength", std::to_string(settings.lightingStrength));
         w("fReflectionStrength", std::to_string(settings.reflectionStrength));
+        w("bRayTracedCharacters", settings.rtCharacters ? "1" : "0");
+        w("fRayTracingDistance", std::to_string(settings.rtDistance));
+        w("iRayTracingMemoryMB", std::to_string(settings.rtMemoryMB));
+        w("iRayTracingDebugView", std::to_string(settings.rtDebugView));
         w("iMenuKey", std::to_string(settings.menuKey));
         w("bSeamlessTransitions", settings.seamlessTransitions ? "1" : "0");
         WritePrivateProfileStringA("World", "iPhysicsCells", std::to_string(settings.physicsCells).c_str(), iniPath.c_str());
@@ -476,6 +525,12 @@ namespace
     // The game's upscale pass, drawn only below full resolution: the finished smaller picture to the full-size target.
     constexpr std::uint64_t UpscaleShaderHash = 4172866439863931375ull;
     std::atomic<ID3D11PixelShader*> upscaleShader{ nullptr };
+    // Skyrim's tonemapping (ISHDRTonemap, from the 10-08 capture: t0 the bloom, t1 the lit R11G11B10 picture, t2 the
+    // adapted brightness, target an 8-bit picture): the ray tracing goes into the lit picture just before it.
+    constexpr std::uint64_t TonemapShaderHash = 16801336497243392347ull;
+    std::atomic<ID3D11PixelShader*> tonemapShader{ nullptr };
+    void OnTonemapDraw(ID3D11DeviceContext* ctx, UINT vertices);
+    std::atomic<bool> inOurPass{ false };              // our own Direct3D 11 passes go through the hooked table too
     ID3D11PixelShader* currentPixelShader = nullptr;   // the render thread's, kept by PSSetShader
     bool PatchVtable(void** vtable, int index, void* hook, void** original);
 
@@ -521,6 +576,7 @@ namespace
                 refl->Release();
             }
             if (info.hash == UpscaleShaderHash) upscaleShader = *out;
+            if (info.hash == TonemapShaderHash) tonemapShader = *out;
             if (info.hash == TaaShaderHash)
             {
                 taaShader = *out;
@@ -670,29 +726,37 @@ namespace
     }
 
     using PSSetSamplers_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11SamplerState* const*);
+    // Below full size, the textures' samplers are swapped for copies biased by log2(drawn / shown), as DLSS asks.
+    // The game's own samplers are kept referenced while copied (so a freed one's address can't come back as another).
     struct BiasedSampler { D3D11_SAMPLER_DESC desc; ID3D11SamplerState* copy; };
     std::unordered_map<ID3D11SamplerState*, BiasedSampler> biasedSamplers;
+    std::unordered_map<ID3D11SamplerState*, ID3D11SamplerState*> originalOf;   // our copy -> the game's sampler
     float samplersBias = 0.0f;
 
     ID3D11SamplerState* Biased(ID3D11SamplerState* game)
     {
         if (!game) return game;
+        if (originalOf.count(game)) return game;   // already one of ours
         D3D11_SAMPLER_DESC d{};
         game->GetDesc(&d);
-        // Mipmapped (linear between mips, or anisotropic), not a shadow-comparison sampler.
-        if (!((d.Filter & 0x1) || (d.Filter & 0x40)) || (d.Filter & 0x80) || d.MaxLOD <= 0.0f) return game;
+        // Every mipmapped sampler (mips linear, point or anisotropic: the ground's too), not a plain point sampler
+        // (full-screen passes) nor a comparison / minimum / maximum one (shadows).
+        if (d.Filter == D3D11_FILTER_MIN_MAG_MIP_POINT || (d.Filter & 0x180) || d.MaxLOD <= 0.0f) return game;
         auto it = biasedSamplers.find(game);
         if (it != biasedSamplers.end())
         {
             if (std::memcmp(&it->second.desc, &d, sizeof(d)) == 0) return it->second.copy ? it->second.copy : game;
-            if (it->second.copy) it->second.copy->Release();   // the game's sampler was freed and its address reused
+            if (it->second.copy) { originalOf.erase(it->second.copy); it->second.copy->Release(); }
+            game->Release();
             biasedSamplers.erase(it);
         }
         D3D11_SAMPLER_DESC b = d;
         b.MipLODBias = std::clamp(d.MipLODBias + samplersBias, -16.0f, 15.99f);
         ID3D11SamplerState* copy = nullptr;
         if (FAILED(device->CreateSamplerState(&b, &copy))) copy = nullptr;
+        game->AddRef();
         biasedSamplers[game] = { d, copy };
+        if (copy) originalOf[copy] = game;
         return copy ? copy : game;
     }
 
@@ -700,8 +764,9 @@ namespace
     {
         if (textureBias != samplersBias)
         {
-            for (auto& [game, b] : biasedSamplers) if (b.copy) b.copy->Release();
+            for (auto& [game, b] : biasedSamplers) { if (b.copy) b.copy->Release(); game->Release(); }
             biasedSamplers.clear();
+            originalOf.clear();
             samplersBias = textureBias;
         }
         if (samplersBias == 0.0f || !samplers || count == 0 || count > D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT)
@@ -712,6 +777,25 @@ namespace
         ID3D11SamplerState* swapped[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
         for (UINT i = 0; i < count; ++i) swapped[i] = Biased(samplers[i]);
         Real<PSSetSamplers_t>(10)(ctx, start, count, swapped);
+    }
+
+    /// Once a frame: the samplers bound now passed through the bias again. Skyrim's renderer only sets a sampler when it
+    /// changes, so the ones set before upscaling started (the ground's among them: the soft road in Quality mode,
+    /// 2026-10-09) kept no bias; and when the bias changes or stops, ours go back to the game's.
+    void RebindSamplers(ID3D11DeviceContext* ctx)
+    {
+        if (!ctx || !inlineTable || (textureBias == 0.0f && originalOf.empty())) return;
+        ID3D11SamplerState* bound[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT]{};
+        ctx->PSGetSamplers(0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT, bound);
+        ID3D11SamplerState* game[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT]{};
+        for (UINT i = 0; i < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT; ++i)
+        {
+            auto it = bound[i] ? originalOf.find(bound[i]) : originalOf.end();
+            game[i] = it != originalOf.end() ? it->second : bound[i];
+            if (game[i]) game[i]->AddRef();   // kept alive across a bias change below
+        }
+        HookPSSetSamplers(ctx, 0, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT, game);
+        for (UINT i = 0; i < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT; ++i) { if (game[i]) game[i]->Release(); if (bound[i]) bound[i]->Release(); }
     }
 
     /// DLSS in place of the TAA draw or the upscale pass.
@@ -725,17 +809,25 @@ namespace
 
     void STDMETHODCALLTYPE HookDrawIndexed(ID3D11DeviceContext* ctx, UINT count, UINT start, INT base)
     {
-        if (capturing && captureFile) RecordDraw(ctx, count);
+        if (capturing && captureFile && !inOurPass) RecordDraw(ctx, count);
         ++drawCalls;
-        if (Replaced(ctx)) return;
+        if (!inOurPass)
+        {
+            if (count <= 6) OnTonemapDraw(ctx, count);
+            if (Replaced(ctx)) return;
+        }
         Real<DrawIndexed_t>(12)(ctx, count, start, base);
     }
 
     void STDMETHODCALLTYPE HookDraw(ID3D11DeviceContext* ctx, UINT count, UINT start)
     {
-        if (capturing && captureFile) RecordDraw(ctx, count);
+        if (capturing && captureFile && !inOurPass) RecordDraw(ctx, count);
         ++drawCalls;
-        if (Replaced(ctx)) return;
+        if (!inOurPass)
+        {
+            if (count <= 6) OnTonemapDraw(ctx, count);
+            if (Replaced(ctx)) return;
+        }
         Real<Draw_t>(13)(ctx, count, start);
     }
 
@@ -935,13 +1027,98 @@ namespace
         return true;
     }
 
-    /// DLSS from color (its top-left inW x inH, jittered by `jitter` in 2 * pixels / screen units) into `out`.
+    // ---- Sharpening after DLSS (DLSS 2.5.1 and later have none): our own pass (shaders\Game11.hlsl, SharpenPS) ----
+    // From DLSS's output into the game's target, by the menu's Sharpness; 0 copies the output as it is.
+    ID3D11VertexShader* sharpenVs = nullptr;
+    ID3D11PixelShader* sharpenPs = nullptr;
+    ID3D11Buffer* sharpenCb = nullptr;
+    ID3D11ShaderResourceView* dlssOutputView = nullptr;
+    ID3DDeviceContextState* sharpenState = nullptr;   // its own: NGX's state may keep DLSS's output bound as a UAV
+    struct TargetView { ID3D11Resource* res; ID3D11RenderTargetView* rtv; };
+    std::vector<TargetView> sharpenTargets;
+    bool sharpenBroken = false;
+
+    ID3D11RenderTargetView* TargetFor(ID3D11Resource* r)
+    {
+        for (auto& t : sharpenTargets) if (t.res == r) return t.rtv;
+        if (sharpenTargets.size() >= 8) { for (auto& t : sharpenTargets) { t.rtv->Release(); t.res->Release(); } sharpenTargets.clear(); }
+        D3D11_TEXTURE2D_DESC d{};
+        static_cast<ID3D11Texture2D*>(r)->GetDesc(&d);
+        if (!(d.BindFlags & D3D11_BIND_RENDER_TARGET)) return nullptr;
+        D3D11_RENDER_TARGET_VIEW_DESC v{};
+        v.Format = d.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS ? DXGI_FORMAT_R8G8B8A8_UNORM : d.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS ? DXGI_FORMAT_R10G10B10A2_UNORM :
+                   d.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS ? DXGI_FORMAT_R16G16B16A16_FLOAT : d.Format;
+        v.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        ID3D11RenderTargetView* rtv = nullptr;
+        if (FAILED(device->CreateRenderTargetView(r, &v, &rtv))) return nullptr;
+        r->AddRef();
+        sharpenTargets.push_back({ r, rtv });
+        return rtv;
+    }
+
+    bool Sharpen(ID3D11DeviceContext* ctx, ID3D11Resource* out, const D3D11_TEXTURE2D_DESC& od)
+    {
+        if (sharpenBroken) return false;
+        if (!sharpenPs)
+        {
+            ID3D11Device1* d1 = nullptr;
+            if (SUCCEEDED(device->QueryInterface(__uuidof(ID3D11Device1), reinterpret_cast<void**>(&d1))) && d1)
+            {
+                D3D_FEATURE_LEVEL level = device->GetFeatureLevel();
+                d1->CreateDeviceContextState(0, &level, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device1), nullptr, &sharpenState);
+                d1->Release();
+            }
+            if (!sharpenState) { sharpenBroken = true; Log("sharpening: no state object; DLSS's output is shown unsharpened"); return false; }
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = sizeof(rt::SharpenConstants); bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device->CreateVertexShader(g_FullscreenVS, sizeof(g_FullscreenVS), nullptr, &sharpenVs)) ||
+                FAILED(device->CreatePixelShader(g_SharpenPS, sizeof(g_SharpenPS), nullptr, &sharpenPs)) || FAILED(device->CreateBuffer(&bd, nullptr, &sharpenCb)))
+            { sharpenBroken = true; Log("sharpening: its shaders didn't load; DLSS's output is shown unsharpened"); return false; }
+        }
+        if (!dlssOutputView && FAILED(device->CreateShaderResourceView(dlssOutput, nullptr, &dlssOutputView))) { dlssOutputView = nullptr; return false; }
+        ID3D11RenderTargetView* rtv = TargetFor(out);
+        if (!rtv) return false;
+        ID3D11DeviceContext1* c1 = nullptr;
+        if (FAILED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) || !c1) return false;
+        ID3DDeviceContextState* game = nullptr;
+        c1->SwapDeviceContextState(sharpenState, &game);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(sharpenCb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        {
+            rt::SharpenConstants k{ { std::clamp(settings.sharpness, 0.0f, 1.0f), 0, 0, 0 }, { od.Width, od.Height, 0, 0 } };
+            std::memcpy(m.pData, &k, sizeof(k));
+            ctx->Unmap(sharpenCb, 0);
+        }
+        D3D11_VIEWPORT vp{ 0, 0, float(od.Width), float(od.Height), 0, 1 };
+        ctx->OMSetRenderTargets(1, &rtv, nullptr);
+        ctx->RSSetViewports(1, &vp);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(sharpenVs, nullptr, 0);
+        ctx->PSSetShader(sharpenPs, nullptr, 0);
+        ctx->PSSetConstantBuffers(1, 1, &sharpenCb);
+        ctx->PSSetShaderResources(0, 1, &dlssOutputView);
+        ctx->Draw(3, 0);
+        ID3D11ShaderResourceView* none = nullptr;
+        ctx->PSSetShaderResources(0, 1, &none);
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        c1->SwapDeviceContextState(game, nullptr);
+        if (game) game->Release();
+        c1->Release();
+        return true;
+    }
+
+    /// DLSS from color (its top-left inW x inH, jittered by `jitter` in 2 * pixels / screen units) into `out` (sharpened
+    /// by our own pass), and its unsharpened output into `history` when given.
     bool Evaluate(ID3D11DeviceContext* ctx, int mode, ID3D11Resource* color, ID3D11Resource* depth, ID3D11Resource* motion,
-                  ID3D11Resource* out, UINT inW, UINT inH, const float jitter[2])
+                  ID3D11Resource* out, UINT inW, UINT inH, const float jitter[2], ID3D11Resource* history = nullptr)
     {
         D3D11_TEXTURE2D_DESC od{};
         static_cast<ID3D11Texture2D*>(out)->GetDesc(&od);
+        ID3D11Texture2D* before = dlssOutput;
         if (!EnsureFeature(ctx, mode, inW, inH, od)) return false;
+        if (dlssOutput != before && dlssOutputView) { dlssOutputView->Release(); dlssOutputView = nullptr; }
+        ID3D11PixelShader* keep = currentPixelShader;
+        inOurPass = true;
         ID3DDeviceContextState* gameStateObj = nullptr;
         ID3D11DeviceContext1* c1 = nullptr;
         if (dlssState && SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&c1))) && c1)
@@ -949,7 +1126,7 @@ namespace
         NVSDK_NGX_D3D11_DLSS_Eval_Params ep{};
         ep.Feature.pInColor = color;
         ep.Feature.pInOutput = dlssOutput;
-        ep.Feature.InSharpness = settings.sharpness;
+        ep.Feature.InSharpness = 0.0f;   // ignored by DLSS 2.5.1 and later; ours follows
         ep.pInDepth = depth;
         ep.pInMotionVectors = motion;
         ep.InJitterOffsetX = settings.jitterSignX * jitter[0] * inW * 0.5f;
@@ -967,8 +1144,11 @@ namespace
             if (gameStateObj) { c1->SwapDeviceContextState(gameStateObj, nullptr); gameStateObj->Release(); }
             c1->Release();
         }
-        if (NVSDK_NGX_FAILED(r)) { DlssFailed("failed", r); return false; }
-        ctx->CopyResource(out, dlssOutput);
+        if (NVSDK_NGX_FAILED(r)) { inOurPass = false; currentPixelShader = keep; DlssFailed("failed", r); return false; }
+        if (history) ctx->CopyResource(history, dlssOutput);
+        if (settings.sharpness < 0.005f || !Sharpen(ctx, out, od)) ctx->CopyResource(out, dlssOutput);
+        inOurPass = false;
+        currentPixelShader = keep;
         dlssReset = false;
         lastDlssFrame = presentFrame.load();
         if (inW != featureIn[0] || inH != featureIn[1])
@@ -993,15 +1173,26 @@ namespace
     unsigned jitterChecks = 0;
 
     /// Skyrim's TAA draw: t0 the picture, t2 the motion vectors, t3 the depth; target 0 the result, 1 the history.
+    void KeepTaaInputs(ID3D11Resource* depth, ID3D11Resource* motion);
+
     bool OnTaaDraw(ID3D11DeviceContext* ctx)
     {
         frameSawTaa = true;
         ReleaseHeld();
+        {
+            // Its depth and motion vectors, for the ray tracing at the next frame's tonemapping (the same textures).
+            ID3D11ShaderResourceView* v[2]{};
+            ctx->PSGetShaderResources(2, 2, v);
+            ID3D11Resource* m = BoundResource(v[0]), * d = BoundResource(v[1]);
+            KeepTaaInputs(d, m);
+            if (m) m->Release();
+            if (d) d->Release();
+        }
         if (!DlssUsable()) return false;
         ID3D11ShaderResourceView* views[4]{};
         ctx->PSGetShaderResources(0, 4, views);
         ID3D11Resource* color = BoundResource(views[0]);
-        BoundResource(views[1]);
+        if (ID3D11Resource* last = BoundResource(views[1])) last->Release();
         ID3D11Resource* motion = BoundResource(views[2]);
         ID3D11Resource* depth = BoundResource(views[3]);
         ID3D11RenderTargetView* targets[2]{};
@@ -1020,24 +1211,28 @@ namespace
             UINT w = static_cast<UINT>(vp.Width + 0.5f), h = static_cast<UINT>(vp.Height + 0.5f);
             if (frameRatio >= 0.999f)
             {
-                done = Evaluate(ctx, DLAA, color, depth, motion, out, w, h, jitter);
-                if (done && history) ctx->CopyResource(history, out);   // Skyrim's own history kept current, for switching back
+                // Skyrim's own history kept current (unsharpened), for switching back.
+                done = Evaluate(ctx, DLAA, color, depth, motion, out, w, h, jitter, history);
             }
             else
             {
-                // Diagnostic (user, 2026-10-09: "dlss and the other upscalers are jittery"): the offset written for this
-                // frame's slot against the jitter the game reports, in full-size and in drawn pixels.
+                // The jitter (user, 2026-10-09: "dlss and the other upscalers are jittery"). Settled from the game's code
+                // (SkyrimSE.exe 1.7.104 at 0x14101E360, which advances State + 0xD0 and fills + 0x44): + 0x44 =
+                // (2 * table - 1) / State + 0x24, and + 0x24 / + 0x28 are the screen's full width / height (the
+                // dynamic resolution code steps its ratio in quarters of them): so 2j / full, as assumed. These lines
+                // show it in game: the table's offset, + 0x44 in full and drawn pixels, and + 0x24 / + 0x28.
                 if (jitterChecks < 24)
                 {
-                    unsigned count = 0;
+                    unsigned count = 0, full[2]{};
                     SafeCopy(&count, gameState + 0xD0, sizeof(count));
+                    SafeCopy(full, gameState + 0x24, sizeof(full));
                     D3D11_TEXTURE2D_DESC od{};
                     if (auto* t = static_cast<ID3D11Texture2D*>(out)) t->GetDesc(&od);
                     unsigned slot = count % 8;
                     if (jitterChecks++ % 3 == 0)
-                        Log("jitter check: frame %u slot %u table %.3f, %.3f; game %.5f, %.5f = %.3f, %.3f full px = %.3f, %.3f drawn px (%ux%u of %ux%u)",
+                        Log("jitter check: frame %u slot %u table %.3f, %.3f; game %.5f, %.5f = %.3f, %.3f full px = %.3f, %.3f drawn px (%ux%u of %ux%u; State + 0x24 %u x %u)",
                             count, slot, writtenJitter[slot][0], writtenJitter[slot][1], jitter[0], jitter[1],
-                            jitter[0] * od.Width * 0.5f, jitter[1] * od.Height * 0.5f, jitter[0] * w * 0.5f, jitter[1] * h * 0.5f, w, h, od.Width, od.Height);
+                            jitter[0] * od.Width * 0.5f, jitter[1] * od.Height * 0.5f, jitter[0] * w * 0.5f, jitter[1] * h * 0.5f, w, h, od.Width, od.Height, full[0], full[1]);
                 }
                 // Passed through; DLSS runs at the upscale pass, from the game's finished (smaller) picture.
                 D3D11_BOX box{ 0, 0, 0, w, h, 1 };
@@ -1087,7 +1282,7 @@ namespace
     }
 
     bool* autoDynamicResolution = nullptr;
-    bool autoSaved = false, autoWas = false;
+    bool autoSaved = false, autoWas = false, dynamicLocked = false;
 
     void PrepareNextFrame()
     {
@@ -1109,10 +1304,27 @@ namespace
             if (upscaling && !autoSaved) { autoWas = *autoDynamicResolution; autoSaved = true; *autoDynamicResolution = false; }
             else if (!upscaling && autoSaved) { *autoDynamicResolution = autoWas; autoSaved = false; }
         }
+        // The game's own dynamic resolution steps its ratio by +0.03 / -0.07 when frames are fast or slow (SkyrimSE.exe
+        // 1.7.104 at 0x14101E130), whatever bEnableAutoDynamicResolution says, rounded to quarters of the screen's size:
+        // 2/3 + 0.03 is 1336 x 752, so under DLSS Quality the drawn size flipped between that and our 1280 x 720 (the
+        // log of 2026-10-09) and DLSS saw the picture jump. Its own lock (State + 0x128, a count it also takes itself)
+        // is held while DLSS upscales, so only our ratio is used; the last frame's ratio (+ 0x11C / + 0x120, which the
+        // locked update no longer copies) is kept by us.
+        // Only on the version whose code this was read from (1.7.104); elsewhere the ratio is written as before.
+        auto* lock = reinterpret_cast<volatile LONG*>(gameState + 0x128);
+        if (upscaling && !dynamicLocked && stateLayoutChecked && SafeAdd(lock, 1)) { dynamicLocked = true; Log("DLSS: the game's dynamic resolution locked to %.3f", ratio); }
+        else if (!upscaling && dynamicLocked)
+        {
+            LONG held = 0;
+            if (SafeCopy(&held, const_cast<const LONG*>(lock), sizeof(held)) && held > 0) SafeAdd(lock, -1);
+            dynamicLocked = false;
+            Log("DLSS: the game's dynamic resolution let go");
+        }
         if (upscaling || ratioChanged)
         {
-            float r[2] = { ratio, ratio };
-            std::memcpy(gameState + 0x114, r, sizeof(r));
+            float prev[2] = { frameRatio, frameRatio }, r[2] = { ratio, ratio };
+            if (dynamicLocked) SafeWrite(gameState + 0x11C, prev, sizeof(prev));
+            SafeWrite(gameState + 0x114, r, sizeof(r));
             ratioChanged = upscaling;
         }
         if (upscaling)
@@ -1124,14 +1336,14 @@ namespace
             unsigned slot = (count + 1) % 8;
             unsigned i = (jitterIndex++ % phases) + 1;
             float x = 0.5f + (Halton(i, 2) - 0.5f) / ratio, y = 0.5f + (Halton(i, 3) - 0.5f) / ratio;
-            std::memcpy(gameState + 0xD4 + slot * 4, &x, 4);
-            std::memcpy(gameState + 0xF4 + slot * 4, &y, 4);
+            SafeWrite(gameState + 0xD4 + slot * 4, &x, 4);
+            SafeWrite(gameState + 0xF4 + slot * 4, &y, 4);
             writtenJitter[slot][0] = x - 0.5f; writtenJitter[slot][1] = y - 0.5f;
             haltonChanged = true;
         }
         else if (haltonChanged && haltonSaved)
         {
-            std::memcpy(gameState + 0xD4, defaultHalton, sizeof(defaultHalton));
+            SafeWrite(gameState + 0xD4, defaultHalton, sizeof(defaultHalton));
             haltonChanged = false;
         }
         if (ratio != frameRatio) dlssReset = true;
@@ -1139,94 +1351,26 @@ namespace
         textureBias = ratio < 0.999f ? std::log2(ratio) + settings.mipBiasOffset : 0.0f;
     }
 
-    // ---- Hardware ray tracing: the Direct3D 12 side ----
-    // Skyrim draws with Direct3D 11, which has no ray tracing; DXR runs on a Direct3D 12 device of our own on the same
-    // GPU (matched by the adapter's LUID), sharing textures and a fence with the game's device (ID3D11Device5).
-    ID3D12Device5* rtDevice = nullptr;
-    ID3D12CommandQueue* rtQueue = nullptr;
-    std::string rtStatus = "off";
-
-    void StartRayTracing()
-    {
-        if (rtDevice) return;
-        IDXGIDevice* dxgi = nullptr;
-        IDXGIAdapter* adapter = nullptr;
-        DXGI_ADAPTER_DESC ad{};
-        if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi))) || FAILED(dxgi->GetAdapter(&adapter)))
-        {
-            if (dxgi) dxgi->Release();
-            rtStatus = "no DXGI adapter"; Log("ray tracing: %s", rtStatus.c_str()); return;
-        }
-        adapter->GetDesc(&ad);
-        adapter->Release(); dxgi->Release();
-        IDXGIFactory4* factory = nullptr;
-        IDXGIAdapter1* same = nullptr;
-        if (FAILED(CreateDXGIFactory2(0, __uuidof(IDXGIFactory4), reinterpret_cast<void**>(&factory))) ||
-            FAILED(factory->EnumAdapterByLuid(ad.AdapterLuid, __uuidof(IDXGIAdapter1), reinterpret_cast<void**>(&same))))
-        {
-            if (factory) factory->Release();
-            rtStatus = "the game's GPU not found for Direct3D 12"; Log("ray tracing: %s", rtStatus.c_str()); return;
-        }
-        factory->Release();
-        HRESULT hr = D3D12CreateDevice(same, D3D_FEATURE_LEVEL_12_1, __uuidof(ID3D12Device5), reinterpret_cast<void**>(&rtDevice));
-        same->Release();
-        if (FAILED(hr) || !rtDevice)
-        {
-            rtDevice = nullptr;
-            rtStatus = "no Direct3D 12 on this GPU"; Log("ray tracing: %s (0x%08X)", rtStatus.c_str(), hr); return;
-        }
-        D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
-        HRESULT fhr = rtDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5));
-        Log("ray tracing: feature check 0x%08X, tier %d, render passes %d", fhr, static_cast<int>(o5.RaytracingTier), static_cast<int>(o5.RenderPassesTier));
-        D3D12_COMMAND_QUEUE_DESC qd{};
-        qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        rtDevice->CreateCommandQueue(&qd, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&rtQueue));
-        ID3D11Device5* d5 = nullptr;
-        bool fences = SUCCEEDED(device->QueryInterface(__uuidof(ID3D11Device5), reinterpret_cast<void**>(&d5))) && d5;
-        if (d5) d5->Release();
-        int tier = static_cast<int>(o5.RaytracingTier);     // 10 = DXR 1.0, 11 = 1.1, 12 = 1.2 (newer SDKs)
-        rtStatus = tier >= 10 ? ("DXR " + std::to_string(tier / 10) + "." + std::to_string(tier % 10) + (fences ? ", shared fences" : ", NO shared fences"))
-                              : "the GPU has no DXR";
-        Log("ray tracing: Direct3D 12 device on the game's GPU, %s", rtStatus.c_str());
-    }
-
-    // ---- Hardware ray tracing: the world as acceleration structures ----
+    // ---- Hardware ray tracing (RtCore.cpp): the world from the scene graph, traced before Skyrim's tonemapping ----
+    // Skyrim draws with Direct3D 11, which has no ray tracing; RtCore runs DXR on a Direct3D 12 device of its own on the
+    // same GPU. Each frame, at the tonemapping pass (found by its shader, as TAA is): the scene graph's meshes and their
+    // world transforms (camera-relative), people and creatures as capsules along their bones, the camera (NiCamera) and
+    // the sun (the sky's light node); RtCore traces from the depth buffer and puts the results into the lit picture.
     // Layout found in game (1.7.104, docs/graphics-plugin.md): NiAVObject + 0x30 parent, + 0x7C world transform
-    // (rotation 3x3, translation, scale), + 0xE4 world bound, + 0xF4 flags (bit 0 hidden); NiNode + 0x110 children;
-    // BSGeometry + 0x110 model bound, + 0x130 skin instance, + 0x138 renderer block { ID3D11Buffer* vertices,
-    // ID3D11Buffer* indices, vertex desc, refcount, CPU vertices, CPU 16-bit indices }; BSTriShape + 0x158 u16 triangle
-    // count, + 0x15A u16 vertex count. Vertices: (desc & 0xF) * 4 bytes each, position = 3 floats at offset 0.
-    struct Blas
-    {
-        ID3D12Resource* result = nullptr;
-        unsigned lastUsed = 0;
-    };
-    struct Pending { ID3D12Resource* upload; ID3D12Resource* scratch; std::uint64_t fence; };
-    struct RtShape { const std::uint8_t* object; std::uint64_t key; float world[13]; };
+    // (rotation 3x3 row-major, translation, scale), + 0xE4 world bound (centre, radius), + 0xF4 flags (bit 0 hidden);
+    // NiNode + 0x110 children; BSGeometry + 0x110 model bound, + 0x120 / + 0x128 its two properties (alpha, shader;
+    // told apart by their RTTI), + 0x130 skin instance, + 0x138 renderer block { ID3D11Buffer* vertices, ID3D11Buffer*
+    // indices, vertex desc, refcount, CPU vertices, CPU 16-bit indices }; BSTriShape + 0x158 u16 triangles, + 0x15A
+    // u16 vertices. Vertex desc: (desc & 0xF) * 4 bytes a vertex, UV offset ((desc >> 8) & 0xF) * 4: 16 for full
+    // precision positions (3 floats), 8 for half (3 halves).
+    rt::Engine* rtEngine = nullptr;
+    std::string rtStatus = "Off.";
+    bool rtTried = false, rtStopped = false;
 
-    std::unordered_map<std::uint64_t, Blas> blases;
-    std::vector<Pending> pendingFree;
-    ID3D12CommandAllocator* rtAllocator = nullptr;
-    ID3D12GraphicsCommandList4* rtList = nullptr;
-    ID3D12Fence* rtFence = nullptr;
-    HANDLE rtFenceEvent = nullptr;
-    std::uint64_t rtFenceValue = 0;
-    ID3D12Resource* tlas = nullptr, * tlasScratch = nullptr, * tlasInstances = nullptr;
-    UINT tlasCapacity = 0;
+    void RtLog(const char* s) { Log("%s", s); }
+
     const std::uint8_t* worldRoot = nullptr;
     unsigned rtFrames = 0;
-    std::uint64_t blasBytes = 0;
-
-    ID3D12Resource* Buffer(UINT64 size, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state)
-    {
-        D3D12_HEAP_PROPERTIES hp{}; hp.Type = heap;
-        D3D12_RESOURCE_DESC rd{};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; rd.Width = std::max<UINT64>(size, 256); rd.Height = 1; rd.DepthOrArraySize = 1;
-        rd.MipLevels = 1; rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR; rd.Flags = flags;
-        ID3D12Resource* r = nullptr;
-        if (FAILED(rtDevice->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, __uuidof(ID3D12Resource), reinterpret_cast<void**>(&r)))) return nullptr;
-        return r;
-    }
 
     const std::uint8_t* FindWorldRoot()
     {
@@ -1252,18 +1396,177 @@ namespace
         return TypeName(node) == "SceneGraph" ? node : nullptr;
     }
 
-    struct RtCollect
+    // A node's children (NiNode + 0x110: an NiTArray { vtable, data, capacity u16, free u16, size u16, grow u16 }).
+    // The array keeps holes where children were detached: its used length is the first free index (+ 0x122) when that
+    // is past the count of filled slots (+ 0x124); every entry is checked for null.
+    bool Children(const std::uint8_t* obj, const std::uint8_t* const*& data, std::uint16_t& size)
     {
-        std::vector<RtShape> shapes;
-        int skinned = 0, noCpu = 0, checked = 0;
-        bool check = false;                   // the transform check this time
-        double errR = 0, errRt = 0;           // transform check: world bound vs (R or R transposed) * s * local + t
-    };
+        std::uint16_t capacity = 0, freeIdx = 0;
+        data = nullptr; size = 0;
+        if (!Read(obj + 0x118, data) || !Read(obj + 0x120, capacity) || !Read(obj + 0x122, freeIdx) || !Read(obj + 0x124, size)) return false;
+        if (!data || size > capacity || capacity > 65000) return false;
+        if (freeIdx > size && freeIdx <= capacity) size = freeIdx;
+        return size > 0;
+    }
 
-    // What each class is, by its vtable (its RTTI read once): 1 a mesh we take, 2 a mesh we don't (instanced or
-    // dynamic), 0 anything else (nodes are told by their children array).
+    const std::uint8_t* ChildNamed(const std::uint8_t* obj, const char* name)
+    {
+        const std::uint8_t* const* data; std::uint16_t size;
+        if (!obj || !Children(obj, data, size)) return nullptr;
+        for (std::uint16_t i = 0; i < size; ++i)
+        {
+            const std::uint8_t* c = nullptr;
+            if (Read(data + i, c) && c && ObjectName(c) == name) return c;
+        }
+        return nullptr;
+    }
+
+    struct WorldTransform { float r[9]; float t[3]; float s; };
+    bool ReadWorld(const std::uint8_t* obj, WorldTransform& w)
+    {
+        if (!Read(obj + 0x7C, w)) return false;
+        for (float f : w.r) if (!std::isfinite(f) || std::fabs(f) > 2.0f) return false;
+        for (float f : w.t) if (!std::isfinite(f) || std::fabs(f) > 1.0e7f) return false;
+        return std::isfinite(w.s) && w.s > 0.0f && w.s < 1000.0f;
+    }
+
+    // ---- The camera: the main NiCamera ("WorldRoot CameraNode"'s child) ----
+    // Its world transform (verified layout), its frustum (left, right, top, bottom, near, far: found once by its shape,
+    // NiCamera + 0x150 expected) and its world-to-clip matrix (NiCamera + 0x110), which tells which of the rotation's
+    // axes looks forward, right and up (Gamebryo's convention: column 0 forward, 1 up, 2 right).
+    int frustumOffset = -1;
+    int axisForward = 0, axisUp = 1, axisRight = 2;
+    float signRight = 1, signUp = 1;
+    bool axesChecked = false;
+
+    bool PlausibleFrustum(const float* f, float aspect)
+    {
+        float l = f[0], r = f[1], t = f[2], b = f[3], n = f[4], fa = f[5];
+        if (!(l < 0 && r > 0 && t > 0 && b < 0)) return false;
+        if (std::fabs(l + r) > 0.05f * r || std::fabs(t + b) > 0.05f * t) return false;
+        if (r > 10 || t > 10) return false;
+        float a = (r - l) / (t - b);
+        if (aspect > 0 && (a < aspect * 0.8f || a > aspect * 1.25f)) return false;
+        return n > 0.5f && n < 1000 && fa > n * 10 && fa < 1.0e8f;
+    }
+
+    bool ReadCamera(const std::uint8_t* root, rt::Camera& cam, float pos[3], float aspect)
+    {
+        const std::uint8_t* camNode = ChildNamed(root, "WorldRoot CameraNode");
+        const std::uint8_t* const* data; std::uint16_t size;
+        if (!camNode || !Children(camNode, data, size)) return false;
+        const std::uint8_t* camera = nullptr;
+        for (std::uint16_t i = 0; i < size && !camera; ++i)
+        {
+            const std::uint8_t* c = nullptr;
+            if (Read(data + i, c) && c && TypeName(c) == "NiCamera") camera = c;
+        }
+        if (!camera) return false;
+        WorldTransform w;
+        if (!ReadWorld(camera, w)) return false;
+        float f[6]{};
+        if (frustumOffset < 0)
+        {
+            for (int o = 0x110; o <= 0x1E8 && frustumOffset < 0; o += 4)
+                if (Read(camera + o, f) && PlausibleFrustum(f, aspect)) frustumOffset = o;
+            if (frustumOffset < 0) { static bool told = false; if (!told) { Log("ray tracing: the camera's frustum not found in NiCamera"); told = true; } return false; }
+            Read(camera + frustumOffset, f);
+            Log("ray tracing: camera frustum at NiCamera + 0x%X: left %.4f right %.4f top %.4f bottom %.4f near %.2f far %.0f", frustumOffset, f[0], f[1], f[2], f[3], f[4], f[5]);
+        }
+        if (!Read(camera + frustumOffset, f) || !PlausibleFrustum(f, 0)) return false;
+        auto axis = [&](int k, float out[3]) { out[0] = w.r[k]; out[1] = w.r[3 + k]; out[2] = w.r[6 + k]; };
+        if (!axesChecked)
+        {
+            axesChecked = true;
+            float m[16]{};
+            bool have = Read(camera + 0x110, m);
+            // The world-to-clip matrix maps the camera's position plus its forward axis to the screen's centre.
+            auto clip = [&](const float p[3], bool transposed, float out[4]) {
+                for (int i = 0; i < 4; ++i)
+                {
+                    out[i] = 0;
+                    for (int j = 0; j < 3; ++j) out[i] += (transposed ? m[j * 4 + i] : m[i * 4 + j]) * p[j];
+                    out[i] += transposed ? m[12 + i] : m[i * 4 + 3];
+                }
+            };
+            bool found = false;
+            for (int tr = 0; tr < 2 && have && !found; ++tr)
+                for (int k = 0; k < 3 && !found; ++k)
+                {
+                    float a[3], p[3], c[4];
+                    axis(k, a);
+                    for (int i = 0; i < 3; ++i) p[i] = w.t[i] + a[i] * 1000;
+                    clip(p, tr != 0, c);
+                    if (!(c[3] > 0 && std::fabs(c[0] / c[3]) < 0.02f && std::fabs(c[1] / c[3]) < 0.02f)) continue;
+                    found = true;
+                    axisForward = k;
+                    for (int o = 0; o < 3; ++o)
+                    {
+                        if (o == k) continue;
+                        float b[3]; axis(o, b);
+                        for (int i = 0; i < 3; ++i) p[i] = w.t[i] + a[i] * 1000 + b[i] * 100;
+                        clip(p, tr != 0, c);
+                        float nx = c[0] / c[3], ny = c[1] / c[3];
+                        if (std::fabs(nx) > std::fabs(ny)) { axisRight = o; signRight = nx > 0 ? 1.0f : -1.0f; }
+                        else { axisUp = o; signUp = ny > 0 ? 1.0f : -1.0f; }
+                    }
+                    Log("ray tracing: camera axes from its world-to-clip matrix%s: forward column %d, right %s%d, up %s%d",
+                        tr ? " (transposed)" : "", axisForward, signRight < 0 ? "-" : "", axisRight, signUp < 0 ? "-" : "", axisUp);
+                }
+            if (!found) Log("ray tracing: the camera's world-to-clip matrix didn't confirm its axes; Gamebryo's (forward column 0, up 1, right 2) used");
+        }
+        float a[3];
+        axis(axisForward, cam.forward);
+        axis(axisRight, a); for (int i = 0; i < 3; ++i) cam.right[i] = a[i] * signRight;
+        axis(axisUp, a); for (int i = 0; i < 3; ++i) cam.up[i] = a[i] * signUp;
+        for (int i = 0; i < 4; ++i) cam.frustum[i] = f[i];
+        cam.nearZ = f[4]; cam.farZ = f[5];
+        for (int i = 0; i < 3; ++i) pos[i] = w.t[i];
+        return true;
+    }
+
+    // ---- The sun: the sky's node holding a NiDirectionalLight, its offset from the sky's centre ----
+    bool ReadSun(const std::uint8_t* root, float sun[3], bool& hiddenSky)
+    {
+        hiddenSky = true;
+        const std::uint8_t* ssn = ChildNamed(root, "shadow scene node");
+        const std::uint8_t* sky = ChildNamed(ssn, "Sky");
+        std::uint32_t flags = 1;
+        if (!sky || !Read(sky + 0xF4, flags) || (flags & 1)) return false;
+        hiddenSky = false;
+        WorldTransform sw;
+        if (!ReadWorld(sky, sw)) return false;
+        const std::uint8_t* const* data; std::uint16_t size;
+        if (!Children(sky, data, size)) return false;
+        for (std::uint16_t i = 0; i < size && i < 16; ++i)
+        {
+            const std::uint8_t* c = nullptr;
+            const std::uint8_t* const* cd; std::uint16_t cs;
+            if (!Read(data + i, c) || !c || !Children(c, cd, cs)) continue;
+            for (std::uint16_t j = 0; j < cs && j < 8; ++j)
+            {
+                const std::uint8_t* g = nullptr;
+                if (!Read(cd + j, g) || !g || TypeName(g) != "NiDirectionalLight") continue;
+                WorldTransform nw, lw;
+                if (!ReadWorld(c, nw)) return false;
+                float d[3] = { nw.t[0] - sw.t[0], nw.t[1] - sw.t[1], nw.t[2] - sw.t[2] };
+                float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                if (len < 1.0f) return false;
+                for (int k = 0; k < 3; ++k) sun[k] = d[k] / len;
+                static int told = 0;
+                if (told++ % 3600 == 0 && ReadWorld(g, lw))
+                    Log("ray tracing: sun at %.0f deg elevation (the sky's light node; its light's own axis agrees %.2f)",
+                        std::asin(std::clamp(sun[2], -1.0f, 1.0f)) * 57.29578f, -(lw.r[0] * sun[0] + lw.r[3] * sun[1] + lw.r[6] * sun[2]));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ---- The meshes ----
+    // What each class is, by its vtable (its RTTI read once): 1 a mesh we take, 2 one we don't (instanced or dynamic),
+    // 3 a fade node (a reference's 3D root: where a person's or creature's bones are gathered), 0 anything else.
     std::unordered_map<const void*, std::uint8_t> classKind;
-
     std::uint8_t KindOf(const std::uint8_t* obj)
     {
         const void* vtable = nullptr;
@@ -1274,257 +1577,368 @@ namespace
         std::uint8_t kind = 0;
         if (type.find("TriShape") != std::string::npos)
             kind = (type.find("MultiStream") != std::string::npos || type.find("Dynamic") != std::string::npos) ? 2 : 1;
+        else if (type == "BSFadeNode") kind = 3;
+        else if (type.find("Particle") != std::string::npos || type.find("Light") != std::string::npos || type == "NiCamera") kind = 2;
         classKind[vtable] = kind;
         return kind;
     }
 
-    void Collect(RtCollect& c, const std::uint8_t* obj, int depth)
+    // A mesh's properties: 0 solid, 1 alpha-tested (leaves), 2 left out (glass, decals, effects, water, sky).
+    std::unordered_map<const void*, std::uint8_t> propertyKind;   // by vtable: 1 alpha, 2 a shader to leave out, 0 other
+    int MeshClass(const std::uint8_t* shape)
     {
-        if (!obj || depth > 64) return;
+        int result = 0;
+        for (int slot = 0; slot < 2; ++slot)
+        {
+            const std::uint8_t* p = nullptr;
+            const void* vtable = nullptr;
+            if (!Read(shape + 0x120 + slot * 8, p) || !p || !Read(p, vtable) || !vtable) continue;
+            auto it = propertyKind.find(vtable);
+            if (it == propertyKind.end())
+            {
+                std::string t = TypeName(p);
+                std::uint8_t k = t == "NiAlphaProperty" ? 1 : (t == "BSEffectShaderProperty" || t == "BSWaterShaderProperty" || t == "BSSkyShaderProperty") ? 2 : 0;
+                it = propertyKind.emplace(vtable, k).first;
+            }
+            if (it->second == 2) return 2;
+            if (it->second == 1)
+            {
+                std::uint16_t f = 0;   // NiAlphaProperty + 0x30: bit 0 blending, bit 9 testing
+                if (!Read(p + 0x30, f)) continue;
+                if (f & 0x200) result = 1;
+                else if (f & 1) return 2;
+            }
+        }
+        return result;
+    }
+
+    std::uint64_t Mix(std::uint64_t h, std::uint64_t v) { h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2); return h; }
+
+    struct Bone { float p[3]; int parent; float radius; const std::uint8_t* node; };
+    struct Walk
+    {
+        std::vector<rt::Instance> instances;
+        std::vector<rt::RtCapsule> capsules;
+        float cam[3]{};
+        float maxDist = 12000;
+        double deadline = 0;
+        bool outOfTime = false, characters = true;
+        int shapes = 0, skinned = 0, noCpu = 0, rejected = 0, queued = 0, leftOut = 0, actors = 0;
+        unsigned visited = 0;
+        std::vector<Bone> bones;     // the current reference's nodes
+        bool inGroup = false, groupSkinned = false;
+    };
+
+    double Now()
+    {
+        static LARGE_INTEGER f{};
+        if (!f.QuadPart) QueryPerformanceFrequency(&f);
+        LARGE_INTEGER c{};
+        QueryPerformanceCounter(&c);
+        return double(c.QuadPart) / double(f.QuadPart);
+    }
+
+    /// A limb's thickness by its bone's name (a person's skeleton); 0 for others (then a share of the bone's length).
+    float BoneRadius(const std::string& n)
+    {
+        struct { const char* key; float r; } table[] = { { "Pelvis", 11 }, { "Spine", 11 }, { "Neck", 5 }, { "Head", 8 }, { "Thigh", 7 }, { "Calf", 5 },
+            { "Foot", 4 }, { "UpperArm", 4.5f }, { "Forearm", 3.5f }, { "Hand", 3 }, { "Clavicle", 4 } };
+        for (auto& t : table) if (n.find(t.key) != std::string::npos) return t.r;
+        return 0;
+    }
+
+    bool LeftOutNode(const std::string& n)
+    {
+        for (const char* k : { "Weapon", "Shield", "Quiver", "Camera", "AnimObject", "MagicEffects", "SCB", "Arrow", "Bolt", "Finger", "Toe" })
+            if (n.find(k) != std::string::npos) return true;
+        return false;
+    }
+
+    /// A mesh's triangles copied out of the game (guarded: it may free them meanwhile) and checked: positions finite
+    /// and inside the mesh's own bound, indices in range. Garbage (memory reused under us) is never built.
+    bool CopyMesh(const std::uint8_t* shape, const std::uint64_t r[6], std::uint16_t tris, std::uint16_t verts, rt::Mesh& m)
+    {
+        std::uint64_t desc = r[2];
+        UINT stride = static_cast<UINT>(desc & 0xF) * 4, uv = static_cast<UINT>((desc >> 8) & 0xF) * 4;
+        bool half = uv == 8;
+        if (stride < (half ? 6u : 12u)) return false;
+        float bound[4]{};
+        if (!Read(shape + 0x110, bound) || !(bound[3] > 0) || !std::isfinite(bound[3])) return false;
+        std::vector<std::uint8_t> raw(size_t(verts) * stride);
+        m.indices.resize(size_t(tris) * 3);
+        if (!SafeCopy(raw.data(), reinterpret_cast<const void*>(r[4]), raw.size()) ||
+            !SafeCopy(m.indices.data(), reinterpret_cast<const void*>(r[5]), m.indices.size() * 2)) return false;
+        for (auto i : m.indices) if (i >= verts) return false;
+        m.positions.resize(size_t(verts) * 3);
+        float reach = bound[3] * 1.25f + 4.0f, reach2 = reach * reach;
+        for (UINT v = 0; v < verts; ++v)
+        {
+            float p[3];
+            const std::uint8_t* q = raw.data() + size_t(v) * stride;
+            if (half) { std::uint16_t h[3]; std::memcpy(h, q, 6); for (int k = 0; k < 3; ++k) p[k] = HalfToFloat(h[k]); }
+            else std::memcpy(p, q, 12);
+            float d2 = 0;
+            for (int k = 0; k < 3; ++k) { if (!std::isfinite(p[k])) return false; float d = p[k] - bound[k]; d2 += d * d; }
+            if (d2 > reach2) return false;
+            std::memcpy(&m.positions[size_t(v) * 3], p, 12);
+        }
+        return true;
+    }
+
+    void Visit(Walk& w, const std::uint8_t* obj, int depth, int parentBone)
+    {
+        if (!obj || depth > 64 || w.outOfTime) return;
+        if ((++w.visited & 63) == 0 && Now() > w.deadline) { w.outOfTime = true; return; }
         std::uint32_t flags = 0;
         if (!Read(obj + 0xF4, flags) || (flags & 1)) return;       // hidden: its whole subtree
+        // Too far to matter (its world bound past the ray tracing's reach).
+        float wb[4]{};
+        if (Read(obj + 0xE4, wb) && wb[3] > 0 && std::isfinite(wb[3]))
+        {
+            float d[3] = { wb[0] - w.cam[0], wb[1] - w.cam[1], wb[2] - w.cam[2] };
+            float reach = w.maxDist + wb[3];
+            if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > reach * reach) return;
+        }
         std::uint8_t kind = KindOf(obj);
         if (kind == 2) return;
         if (kind == 1)
         {
+            ++w.shapes;
             const std::uint8_t* skin = nullptr, * renderer = nullptr;
             Read(obj + 0x130, skin); Read(obj + 0x138, renderer);
-            if (skin) { c.skinned++; return; }
+            if (skin) { ++w.skinned; if (w.inGroup) w.groupSkinned = true; return; }
+            int cls = MeshClass(obj);
+            if (cls == 2) { ++w.leftOut; return; }
             std::uint64_t r[6]{};
             std::uint16_t tris = 0, verts = 0;
             if (!renderer || !SafeCopy(r, renderer, sizeof(r)) || !r[4] || !r[5] || !Read(obj + 0x158, tris) || !Read(obj + 0x15A, verts) || !tris || !verts)
-            { c.noCpu++; return; }
-            RtShape sh{ obj, r[4] ^ (static_cast<std::uint64_t>(tris) << 48) ^ (static_cast<std::uint64_t>(verts) << 32), {} };
-            Read(obj + 0x7C, sh.world);
-            c.shapes.push_back(sh);
-            if (c.check && c.checked < 2000)
+            { ++w.noCpu; return; }
+            // The mesh's identity: its data's addresses, sizes and first bytes (memory reused for another mesh differs).
+            std::uint64_t head[4]{};
+            SafeCopy(head, reinterpret_cast<const void*>(r[4]), std::min<size_t>(sizeof(head), size_t(verts) * ((r[2] & 0xF) * 4)));
+            std::uint64_t key = Mix(Mix(Mix(Mix(r[4], r[5]), (std::uint64_t(tris) << 16) | verts), r[2]), Mix(Mix(head[0], head[1]), Mix(head[2], head[3])));
+            key = Mix(key, cls);
+            if (!rtEngine->HasMesh(key))
             {
-                float local[4]{}, wb[4]{};
-                if (Read(obj + 0x110, local) && Read(obj + 0xE4, wb) && wb[3] > 1)
+                if (rtEngine->Wants(key) && rtEngine->Room() > 0)
                 {
-                    const float* m = sh.world; float sc = m[12];
-                    for (int t = 0; t < 2; ++t)
-                    {
-                        double e = 0;
-                        for (int i = 0; i < 3; ++i)
-                        {
-                            double v = m[9 + i];
-                            for (int j = 0; j < 3; ++j) v += sc * (t == 0 ? m[i * 3 + j] : m[j * 3 + i]) * local[j];
-                            e += (v - wb[i]) * (v - wb[i]);
-                        }
-                        (t == 0 ? c.errR : c.errRt) += std::sqrt(e) / wb[3];
-                    }
-                    c.checked++;
+                    rt::Mesh m;
+                    m.key = key;
+                    m.alphaTested = cls == 1;
+                    if (CopyMesh(obj, r, tris, verts, m)) { rtEngine->Queue(std::move(m)); ++w.queued; }
+                    else { rtEngine->Reject(key); ++w.rejected; }   // not copied again every frame
                 }
+                return;
             }
+            WorldTransform t;
+            if (!ReadWorld(obj, t)) return;
+            rt::Instance x{ key, {} };
+            for (int i = 0; i < 3; ++i)
+            {
+                for (int j = 0; j < 3; ++j) x.transform[i][j] = t.s * t.r[i * 3 + j];
+                x.transform[i][3] = t.t[i] - w.cam[i];
+            }
+            w.instances.push_back(x);
             return;
         }
         if (depth <= 3)
         {
             std::string name = ObjectName(obj);
-            if (name == "Sky" || name == "Weather" || name == "WorldRoot CameraNode") return;
+            if (name == "Sky" || name == "Weather" || name == "WorldRoot CameraNode" || name == "LODRoot") return;
         }
-        const std::uint8_t* data = nullptr;
-        std::uint16_t capacity = 0, size = 0;
-        if (!Read(obj + 0x118, data) || !Read(obj + 0x120, capacity) || !Read(obj + 0x124, size)) return;
-        if (!data || size == 0 || size > capacity || capacity > 65000) return;
-        for (std::uint16_t i = 0; i < size; ++i)
+        // A reference's 3D root: its nodes are gathered as bones; if a skinned mesh is found under it, they become
+        // capsules (the mesh itself isn't traced: it moves with the bones).
+        bool group = kind == 3 && !w.inGroup && w.characters;
+        size_t first = w.bones.size();
+        if (group) { w.inGroup = true; w.groupSkinned = false; }
+        int me = parentBone;
+        if (w.inGroup && !group)
         {
-            const std::uint8_t* child = nullptr;
-            if (Read(data + i * 8, child) && child) Collect(c, child, depth + 1);
-        }
-    }
-
-    void RtWait(std::uint64_t value)
-    {
-        if (rtFence->GetCompletedValue() < value)
-        {
-            rtFence->SetEventOnCompletion(value, rtFenceEvent);
-            WaitForSingleObject(rtFenceEvent, 2000);
-        }
-    }
-
-    /// A BLAS for one mesh, from its CPU vertices and indices (copied guarded: the game may free them meanwhile).
-    bool BuildBlas(const RtShape& sh, Blas& out)
-    {
-        const std::uint8_t* renderer = nullptr;
-        std::uint64_t r[6]{};
-        std::uint16_t tris = 0, verts = 0;
-        if (!Read(sh.object + 0x138, renderer) || !renderer || !SafeCopy(r, renderer, sizeof(r)) || !Read(sh.object + 0x158, tris) || !Read(sh.object + 0x15A, verts)) return false;
-        UINT stride = static_cast<UINT>(r[2] & 0xF) * 4;
-        if (stride < 12) return false;
-        UINT64 vbytes = UINT64(verts) * stride, ibytes = UINT64(tris) * 6, ioff = (vbytes + 255) & ~255ull;
-        ID3D12Resource* upload = Buffer(ioff + ibytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-        if (!upload) return false;
-        std::uint8_t* mapped = nullptr;
-        D3D12_RANGE none{ 0, 0 };
-        upload->Map(0, &none, reinterpret_cast<void**>(&mapped));
-        bool copied = SafeCopy(mapped, reinterpret_cast<const void*>(r[4]), vbytes) && SafeCopy(mapped + ioff, reinterpret_cast<const void*>(r[5]), ibytes);
-        // Indices out of range or positions not finite (memory reused under us) are not built.
-        if (copied)
-            for (UINT64 i = 0; i < UINT64(tris) * 3; ++i)
-                if (reinterpret_cast<std::uint16_t*>(mapped + ioff)[i] >= verts) { copied = false; break; }
-        if (copied)
-            for (UINT64 v = 0; v < verts && copied; ++v)
+            WorldTransform t;
+            if (ReadWorld(obj, t))
             {
-                const float* p = reinterpret_cast<const float*>(mapped + v * stride);
-                // Daggerfall's overland reaches ~2.1 million units from its centre (one worldspace of 1000 x 500 cells).
-                for (int k = 0; k < 3; ++k) if (!std::isfinite(p[k]) || std::fabs(p[k]) > 1.0e7f) { copied = false; break; }
+                w.bones.push_back({ { t.t[0], t.t[1], t.t[2] }, parentBone, 0, obj });
+                me = static_cast<int>(w.bones.size() - 1);
             }
-        upload->Unmap(0, nullptr);
-        if (!copied) { upload->Release(); return false; }
-        D3D12_RAYTRACING_GEOMETRY_DESC g{};
-        g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        g.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-        g.Triangles.VertexBuffer.StartAddress = upload->GetGPUVirtualAddress();
-        g.Triangles.VertexBuffer.StrideInBytes = stride;
-        g.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-        g.Triangles.VertexCount = verts;
-        g.Triangles.IndexBuffer = upload->GetGPUVirtualAddress() + ioff;
-        g.Triangles.IndexFormat = DXGI_FORMAT_R16_UINT;
-        g.Triangles.IndexCount = UINT(tris) * 3;
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-        in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-        in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-        in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-        in.NumDescs = 1; in.pGeometryDescs = &g;
-        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
-        rtDevice->GetRaytracingAccelerationStructurePrebuildInfo(&in, &pre);
-        out.result = Buffer(pre.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-        ID3D12Resource* scratch = Buffer(pre.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-        if (!out.result || !scratch) { upload->Release(); if (scratch) scratch->Release(); if (out.result) out.result->Release(); out.result = nullptr; return false; }
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC b{};
-        b.Inputs = in;
-        b.DestAccelerationStructureData = out.result->GetGPUVirtualAddress();
-        b.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
-        rtList->BuildRaytracingAccelerationStructure(&b, 0, nullptr);
-        pendingFree.push_back({ upload, scratch, rtFenceValue + 1 });
-        blasBytes += pre.ResultDataMaxSizeInBytes;
-        return true;
+        }
+        const std::uint8_t* const* data; std::uint16_t size;
+        if (Children(obj, data, size))
+            for (std::uint16_t i = 0; i < size; ++i)
+            {
+                const std::uint8_t* child = nullptr;
+                if (Read(data + i, child) && child) Visit(w, child, depth + 1, me);
+            }
+        if (group)
+        {
+            if (w.groupSkinned && w.capsules.size() < 4000)
+            {
+                ++w.actors;
+                // The bones' names only now (a skinned mesh was found): thickness, and what isn't a limb.
+                for (size_t b = first; b < w.bones.size(); ++b)
+                {
+                    std::string n = ObjectName(w.bones[b].node);
+                    w.bones[b].radius = LeftOutNode(n) ? -1.0f : BoneRadius(n);
+                }
+                for (size_t b = first; b < w.bones.size(); ++b)
+                {
+                    const Bone& bn = w.bones[b];
+                    if (bn.parent < static_cast<int>(first) || bn.radius < 0) continue;
+                    const Bone& pa = w.bones[bn.parent];
+                    if (pa.radius < 0) continue;
+                    float d[3] = { bn.p[0] - pa.p[0], bn.p[1] - pa.p[1], bn.p[2] - pa.p[2] };
+                    float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                    if (len < 2.0f || len > 80.0f) continue;
+                    float r = std::min(pa.radius > 0 ? pa.radius : std::clamp(len * 0.3f, 2.5f, 10.0f), len);
+                    rt::RtCapsule c{};
+                    for (int k = 0; k < 3; ++k) { c.a[k] = pa.p[k] - w.cam[k]; c.b[k] = bn.p[k] - w.cam[k]; }
+                    c.radius = r;
+                    w.capsules.push_back(c);
+                }
+            }
+            w.bones.resize(first);
+            w.inGroup = false;
+        }
     }
 
-    /// Each frame: the visible world's meshes collected, new BLASes built (a few per frame), the TLAS rebuilt.
-    void RtFrame()
+    // The Direct3D 11 resources the tonemapping pass and the next TAA draw use: the depth and motion vectors are
+    // TAA's own inputs (kept from its last draw: the same textures every frame).
+    ID3D11Resource* rtDepth = nullptr, * rtMotion = nullptr;
+    unsigned tonemapFrame = ~0u, tonemapSeen = 0;
+    int tonemapLogged = 0;
+
+    void KeepTaaInputs(ID3D11Resource* depth, ID3D11Resource* motion)
     {
-        if (!rtDevice || !rtQueue) return;
-        if (!rtList)
+        if (depth != rtDepth) { if (rtDepth) rtDepth->Release(); rtDepth = depth; if (depth) depth->AddRef(); }
+        if (motion != rtMotion) { if (rtMotion) rtMotion->Release(); rtMotion = motion; if (motion) motion->AddRef(); }
+    }
+
+    DXGI_FORMAT TextureFormat(ID3D11Resource* r, UINT* w = nullptr, UINT* h = nullptr)
+    {
+        if (!r) return DXGI_FORMAT_UNKNOWN;
+        ID3D11Texture2D* t = nullptr;
+        if (FAILED(r->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) || !t) return DXGI_FORMAT_UNKNOWN;
+        D3D11_TEXTURE2D_DESC d{};
+        t->GetDesc(&d);
+        t->Release();
+        if (w) *w = d.Width;
+        if (h) *h = d.Height;
+        return d.Format;
+    }
+
+    /// Whether this full-screen draw is Skyrim's tonemapping: its shader, or (another variant of it) its inputs: the lit
+    /// picture (R11G11B10 float, the depth's size) at t1, the adapted brightness (a few pixels) at t2, an 8-bit target.
+    ID3D11Resource* TonemapInput(ID3D11DeviceContext* ctx, UINT vertices)
+    {
+        if (vertices > 6 || !rtDepth) return nullptr;
+        bool byShader = currentPixelShader && currentPixelShader == tonemapShader.load();
+        // Its inputs are only looked at while no tonemapping shader is known, or none was seen for a second (another
+        // variant in use): not on every small draw (menus, the HUD).
+        if (!byShader && tonemapShader.load() && presentFrame.load() - tonemapSeen < 60) return nullptr;
+        ID3D11ShaderResourceView* views[3]{};
+        ctx->PSGetShaderResources(0, 3, views);
+        ID3D11Resource* hdr = BoundResource(views[1]);
+        ID3D11Resource* lum = BoundResource(views[2]);
+        if (views[0]) views[0]->Release();
+        bool ok = false;
+        if (hdr)
         {
-            rtDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), reinterpret_cast<void**>(&rtAllocator));
-            rtDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, rtAllocator, nullptr, __uuidof(ID3D12GraphicsCommandList4), reinterpret_cast<void**>(&rtList));
-            rtList->Close();
-            rtDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), reinterpret_cast<void**>(&rtFence));
-            rtFenceEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
-            if (!rtAllocator || !rtList || !rtFence) { rtStatus = "couldn't start the ray tracing commands"; Log("ray tracing: %s", rtStatus.c_str()); rtDevice = nullptr; return; }
+            UINT w = 0, h = 0, dw = 0, dh = 0, lw = 0, lh = 0;
+            bool hdrOk = TextureFormat(hdr, &w, &h) == DXGI_FORMAT_R11G11B10_FLOAT;
+            TextureFormat(rtDepth, &dw, &dh);
+            if (byShader) ok = hdrOk;
+            else if (hdrOk && w == dw && h == dh && lum && TextureFormat(lum, &lw, &lh) != DXGI_FORMAT_UNKNOWN && lw <= 8 && lh <= 8)
+            {
+                ID3D11RenderTargetView* rtv = nullptr;
+                ctx->OMGetRenderTargets(1, &rtv, nullptr);
+                ID3D11Resource* target = nullptr;
+                if (rtv) { rtv->GetResource(&target); rtv->Release(); }
+                DXGI_FORMAT tf = TextureFormat(target);
+                ok = tf == DXGI_FORMAT_R8G8B8A8_UNORM || tf == DXGI_FORMAT_R8G8B8A8_TYPELESS || tf == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                     tf == DXGI_FORMAT_R10G10B10A2_UNORM || tf == DXGI_FORMAT_R10G10B10A2_TYPELESS;
+                if (target) target->Release();
+                if (ok) tonemapShader = currentPixelShader;   // that variant by its shader from now on
+                if (ok && tonemapLogged < 4)
+                {
+                    ++tonemapLogged;
+                    std::uint64_t hash = 0;
+                    { std::lock_guard lk(shaderLock); if (auto it = pixelShaders.find(currentPixelShader); it != pixelShaders.end()) hash = it->second.hash; }
+                    Log("ray tracing: tonemapping pass found by its inputs (shader %llu)", static_cast<unsigned long long>(hash));
+                }
+            }
         }
+        if (lum) lum->Release();
+        if (!ok && hdr) { hdr->Release(); hdr = nullptr; }
+        if (ok) tonemapSeen = presentFrame.load();
+        return hdr;
+    }
+
+    bool RayTracingWanted() { return settings.rayTracedLighting && rtEngine && rtEngine->Running(); }
+
+    /// At the tonemapping draw: the scene gathered and traced, the results put into the lit picture; the draw then goes on.
+    void OnTonemapDraw(ID3D11DeviceContext* ctx, UINT vertices)
+    {
+        if (!RayTracingWanted() || inOurPass || tonemapFrame == presentFrame.load()) return;
+        ID3D11Resource* hdr = TonemapInput(ctx, vertices);
+        if (!hdr) return;
+        tonemapFrame = presentFrame.load();
+        D3D11_VIEWPORT vp{};
+        UINT n = 1;
+        ctx->RSGetViewports(&n, &vp);
         if (!worldRoot || (rtFrames % 120) == 0) worldRoot = FindWorldRoot();
         ++rtFrames;
-        if (!worldRoot) return;
-        LARGE_INTEGER t0{}, t1{}, freq{};
-        QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&freq);
-        RtCollect c;
-        c.check = rtFrames % 300 == 1;
-        Collect(c, worldRoot, 0);
+        rt::FrameInputs in;
+        float camPos[3]{};
+        UINT tw = 0, th = 0;
+        TextureFormat(rtDepth, &tw, &th);
+        in.drawnWidth = n ? static_cast<UINT>(vp.Width + 0.5f) : tw;
+        in.drawnHeight = n ? static_cast<UINT>(vp.Height + 0.5f) : th;
+        if (!worldRoot || !ReadCamera(worldRoot, in.camera, camPos, float(in.drawnWidth) / std::max(1u, in.drawnHeight)))
+        { hdr->Release(); rtStatus = "Waiting for the game world (its camera)."; return; }
+        bool hiddenSky = true;
+        in.sunOn = ReadSun(worldRoot, in.sun, hiddenSky) && in.sun[2] > 0.03f;
+        Walk w;
+        std::memcpy(w.cam, camPos, sizeof(camPos));
+        w.maxDist = settings.rtDistance;
+        w.characters = settings.rtCharacters;
+        double t0 = Now();
+        w.deadline = t0 + 0.008;
+        Visit(w, worldRoot, 0, -1);
+        double walkMs = (Now() - t0) * 1000;
+        static bool toldTime = false;
+        if (w.outOfTime && !toldTime) { toldTime = true; Log("ray tracing: the scene walk took over 8 ms; the rest of the scene left out this frame"); }
+        rt::Options o;
+        o.quality = settings.rtQuality;
+        o.shadows = in.sunOn ? settings.shadowStrength : 0.0f;
+        o.occlusion = settings.occlusionStrength;
+        o.bounce = settings.lightingStrength;
+        o.reflections = settings.reflectionStrength;
+        o.debugView = settings.rtDebugView;
+        o.memoryBudget = std::uint64_t(settings.rtMemoryMB) << 20;
+        in.depth = rtDepth; in.motion = rtMotion; in.hdr = hdr;
+        ID3D11PixelShader* keep = currentPixelShader;
+        inOurPass = true;
+        bool shown = rtEngine->Render(ctx, in, w.instances, w.capsules, o);
+        inOurPass = false;
+        currentPixelShader = keep;
+        hdr->Release();
+        rtStatus = !rtEngine->Running() ? "Off: " + rtEngine->Status().substr(rtEngine->Status().find(':') + 1) :
+                   !rtEngine->LinedUp() ? "Paused: the traced world doesn't line up with the picture (see the log)." :
+                   shown ? "On." : "Waiting.";
+        if (rtFrames % 600 == 1)
+            Log("ray tracing: %s; scene: %d meshes (%d skinned, %d without CPU data, %d left out, %d rejected, %d queued), %d people/creatures as %zu capsules, sun %s, walk %.2f ms",
+                rtEngine->Report().c_str(), w.shapes, w.skinned, w.noCpu, w.leftOut, w.rejected, w.queued, w.actors, w.capsules.size(),
+                in.sunOn ? "on" : hiddenSky ? "none (no sky)" : "down", walkMs);
+    }
 
-        RtWait(rtFenceValue);                     // the last frame's work done: its allocator free, uploads freeable
-        for (auto it = pendingFree.begin(); it != pendingFree.end();)
-            if (it->fence <= rtFence->GetCompletedValue()) { it->upload->Release(); it->scratch->Release(); it = pendingFree.erase(it); }
-            else ++it;
-        rtAllocator->Reset();
-        rtList->Reset(rtAllocator, nullptr);
-
-        int built = 0, missing = 0;
-        std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instances;
-        instances.reserve(c.shapes.size());
-        for (auto& sh : c.shapes)
-        {
-            auto it = blases.find(sh.key);
-            if (it == blases.end())
-            {
-                if (built >= 8) { missing++; continue; }       // the rest over the next frames
-                Blas b;
-                if (!BuildBlas(sh, b)) { missing++; continue; }
-                it = blases.emplace(sh.key, b).first;
-                built++;
-            }
-            it->second.lastUsed = rtFrames;
-            D3D12_RAYTRACING_INSTANCE_DESC d{};
-            const float* m = sh.world; float sc = m[12];
-            bool finite = true;
-            for (int k = 0; k < 13; ++k) if (!std::isfinite(m[k]) || std::fabs(m[k]) > 1.0e7f) finite = false;
-            if (!finite) continue;
-            for (int i = 0; i < 3; ++i)
-            {
-                for (int j = 0; j < 3; ++j) d.Transform[i][j] = sc * m[i * 3 + j];
-                d.Transform[i][3] = m[9 + i];
-            }
-            d.InstanceMask = 0xFF;
-            d.AccelerationStructure = it->second.result->GetGPUVirtualAddress();
-            instances.push_back(d);
-        }
-        if (built)
-        {
-            // BLAS builds finish before the TLAS reads them.
-            D3D12_RESOURCE_BARRIER uav{}; uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            rtList->ResourceBarrier(1, &uav);
-        }
-        // The TLAS, rebuilt each frame.
-        UINT n = static_cast<UINT>(instances.size());
-        if (n > tlasCapacity)
-        {
-            if (tlas) tlas->Release(); if (tlasScratch) tlasScratch->Release(); if (tlasInstances) tlasInstances->Release();
-            tlasCapacity = n + n / 2 + 256;
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-            in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-            in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-            in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; in.NumDescs = tlasCapacity;
-            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO pre{};
-            rtDevice->GetRaytracingAccelerationStructurePrebuildInfo(&in, &pre);
-            tlas = Buffer(pre.ResultDataMaxSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-            tlasScratch = Buffer(pre.ScratchDataSizeInBytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-            tlasInstances = Buffer(UINT64(tlasCapacity) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_GENERIC_READ);
-        }
-        if (tlas && tlasScratch && tlasInstances && n)
-        {
-            void* mapped = nullptr;
-            D3D12_RANGE none{ 0, 0 };
-            tlasInstances->Map(0, &none, &mapped);
-            std::memcpy(mapped, instances.data(), n * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
-            tlasInstances->Unmap(0, nullptr);
-            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC b{};
-            b.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-            b.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-            b.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY; b.Inputs.NumDescs = n;
-            b.Inputs.InstanceDescs = tlasInstances->GetGPUVirtualAddress();
-            b.DestAccelerationStructureData = tlas->GetGPUVirtualAddress();
-            b.ScratchAccelerationStructureData = tlasScratch->GetGPUVirtualAddress();
-            rtList->BuildRaytracingAccelerationStructure(&b, 0, nullptr);
-        }
-        rtList->Close();
-        ID3D12CommandList* lists[] = { rtList };
-        rtQueue->ExecuteCommandLists(1, lists);
-        rtQueue->Signal(rtFence, ++rtFenceValue);
-        // Meshes unused for 10 s are dropped.
-        if (rtFrames % 600 == 0)
-        {
-            RtWait(rtFenceValue);
-            for (auto it = blases.begin(); it != blases.end();)
-                if (rtFrames - it->second.lastUsed > 600) { it->second.result->Release(); it = blases.erase(it); }
-                else ++it;
-        }
-        QueryPerformanceCounter(&t1);
-        static double worstMs = 0;
-        worstMs = std::max(worstMs, (t1.QuadPart - t0.QuadPart) * 1000.0 / freq.QuadPart);
-        if (rtFrames % 300 == 1 || built)
-        {
-            static unsigned logged = 0;
-            if (rtFrames % 300 == 1 || logged++ < 20)
-            {
-                Log("ray tracing: %zu meshes in view of the scene graph (%d skinned, %d without CPU data), %zu BLASes (%.0f MB), %d built now, %d waiting; TLAS %u instances; %.2f ms (worst %.2f); transform check over %d: R %.4f, R^T %.4f",
-                    c.shapes.size(), c.skinned, c.noCpu, blases.size(), blasBytes / 1048576.0, built, missing, n,
-                    (t1.QuadPart - t0.QuadPart) * 1000.0 / freq.QuadPart, worstMs, c.checked, c.checked ? c.errR / c.checked : 0.0, c.checked ? c.errRt / c.checked : 0.0);
-                worstMs = 0;
-            }
-        }
+    void StartRayTracingEngine()
+    {
+        if (rtTried) return;
+        rtTried = true;
+        rtStopped = false;
+        if (rtEngine) { rtEngine->Stop(); delete rtEngine; }
+        rtEngine = new rt::Engine();
+        if (!rtEngine->Start(device, false, RtLog)) rtStatus = "Off: " + rtEngine->Status().substr(rtEngine->Status().find(':') + 1);
+        else rtStatus = taaShader ? "Waiting for a game scene." : "Waiting for a game scene (ray tracing reads Skyrim's TAA inputs: TAA must be on).";
     }
 
     // ---- The game's window: the menu's keys and mouse ----
@@ -1685,29 +2099,37 @@ namespace
         if (!uiChecked) FindUi();
         const std::uint8_t* ui = nullptr;
         if (!uiSingleton || !Read(uiSingleton, ui) || !ui) return false;
-        if (!uiFound)
-        {
-            // The singleton checked by its type once: wrong offsets read something else, never menus.
-            std::string type = TypeName(ui);
-            if (type != "UI") { static bool told = false; if (!told) { Log("transitions: the menus' object is a %s, not UI", type.c_str()); told = true; } return false; }
-            uiFound = true;
-            Log("transitions: the game's menus found at %p", static_cast<const void*>(ui));
-        }
+        // RE::UI has no virtual functions (its bases are event sources and a singleton holder), so it has no RTTI to
+        // check: the 10-14 log's "the menus' object is a ?, not UI" was that check, not a wrong address. The menu stack
+        // is checked instead: every entry an IMenu with RTTI whose name is a menu's.
         const std::uint8_t* const* data = nullptr;
         std::uint32_t capacity = 0, size = 0;
         if (!Read(ui + 0x110, data) || !Read(ui + 0x118, capacity) || !Read(ui + 0x120, size)) return false;
-        if (size > capacity || size > 64 || (size && !data)) return false;
+        if (size > capacity || size > 64 || capacity > 4096 || (size && !data)) return false;
         static std::unordered_map<const void*, std::string> names;   // by vtable
         for (std::uint32_t i = 0; i < size; ++i)
         {
             const std::uint8_t* menu = nullptr;
             const void* vtable = nullptr;
-            if (!Read(data + i, menu) || !menu || !Read(menu, vtable) || !vtable) continue;
+            if (!Read(data + i, menu) || !menu || !Read(menu, vtable) || !vtable) return false;
             auto it = names.find(vtable);
             if (it == names.end()) it = names.emplace(vtable, TypeName(menu)).first;
-            out.push_back(it->second);
+            const std::string& n = it->second;
+            // A class with RTTI (an IMenu of the game's, or a mod's): a wrong offset would point at no such object.
+            if (n.empty() || n == "?")
+            {
+                static int told = 0;
+                if (told++ < 3) Log("transitions: an entry of the menu stack has no class name (%p); not used", static_cast<const void*>(menu));
+                return false;
+            }
+            out.push_back(n);
         }
-        return true;
+        if (!uiFound && size > 0)
+        {
+            uiFound = true;
+            Log("transitions: the game's menus found (UI at %p, %u open)", static_cast<const void*>(ui), size);
+        }
+        return uiFound;
     }
 
     // Menus that cover the world: no picture is kept while they are open (a save loaded from the journal shows the
@@ -1873,30 +2295,52 @@ namespace
         ImGui::TextDisabled("%s", gpuName.c_str());
         ImGui::SeparatorText("Upscaling and anti-aliasing");
         if (ImGui::Combo("Upscaler", &settings.upscaler, UpscalerNames, IM_ARRAYSIZE(UpscalerNames))) dlssReset = true;
-        // DLSS 2.5.1 and later have no sharpening of their own; ours comes with a later build.
-        ImGui::BeginDisabled(true);
-        ImGui::SliderFloat("Sharpness (coming)", &settings.sharpness, 0.0f, 1.0f, "%.2f");
+        // DLSS 2.5.1 and later have no sharpening of their own: ours runs after it (0 = none).
+        ImGui::BeginDisabled(settings.upscaler == Off);
+        ImGui::SliderFloat("Sharpness", &settings.sharpness, 0.0f, 1.0f, "%.2f");
         ImGui::EndDisabled();
         if (settings.upscaler != Off && !dlssBroken && dlssAvailable)
             ImGui::TextWrapped("%s", presentFrame - lastDlssFrame < 5 ? dlssInfo.c_str() :
                                      "Waiting for a game scene (DLSS takes the place of Skyrim's TAA, so TAA must be on in Skyrim's display settings).");
         else ImGui::TextWrapped("%s", dlssStatus.c_str());
+        settings.frameGeneration = false;
         ImGui::BeginDisabled(true);
-        ImGui::Checkbox("Frame generation (coming)", &settings.frameGeneration);
+        ImGui::Checkbox("Frame generation (not available)", &settings.frameGeneration);
         ImGui::EndDisabled();
-        ImGui::SeparatorText("Lighting");
-        ImGui::BeginDisabled(!settings.rayTracingDevelop);
-        ImGui::Checkbox(settings.rayTracingDevelop ? "Ray-traced lighting (in development)" : "Ray-traced lighting (coming)", &settings.rayTracedLighting);
-        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("NVIDIA's frame generation works only with Direct3D 12 and Vulkan games, presenting from their own\n"
+                              "swap chain with NVIDIA Reflex; Skyrim draws and presents with Direct3D 11. It would mean replacing\n"
+                              "the game's swap chain with one of our own. Not built (see docs/graphics-plugin.md).");
+        ImGui::SeparatorText("Ray-traced lighting");
+        if (ImGui::Checkbox("Ray-traced lighting", &settings.rayTracedLighting) && settings.rayTracedLighting) rtTried = rtEngine && rtEngine->Running();
         ImGui::BeginDisabled(!settings.rayTracedLighting);
+        const char* qualities[] = { "Low (half resolution)", "Medium (half resolution, more rays)", "High (full resolution)", "Ultra (full resolution, most rays)" };
+        ImGui::Combo("Quality", &settings.rtQuality, qualities, IM_ARRAYSIZE(qualities));
+        ImGui::SliderFloat("Shadows", &settings.shadowStrength, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Ambient occlusion", &settings.occlusionStrength, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Bounce light", &settings.lightingStrength, 0.0f, 2.0f, "%.2f");
         ImGui::SliderFloat("Reflections", &settings.reflectionStrength, 0.0f, 1.0f, "%.2f");
+        ImGui::Checkbox("People and creatures cast shadows", &settings.rtCharacters);
+        if (ImGui::TreeNode("More"))
+        {
+            ImGui::SliderFloat("Distance", &settings.rtDistance, 2000.0f, 40000.0f, "%.0f units");
+            ImGui::SliderInt("Video memory (MB)", &settings.rtMemoryMB, 128, 2048);
+            const char* views[] = { "The picture", "Shadows only", "Ambient occlusion only", "Bounce light only", "Reflections only", "Surface normals" };
+            ImGui::Combo("Show", &settings.rtDebugView, views, IM_ARRAYSIZE(views));
+            ImGui::TreePop();
+        }
         ImGui::EndDisabled();
+        if (settings.rayTracedLighting)
+        {
+            ImGui::TextWrapped("%s", rtStatus.c_str());
+            if (rtEngine && rtEngine->Running() && rtEngine->FramesTraced() > 0)
+                ImGui::TextDisabled("GPU %.1f ms; %zu meshes (%.0f MB); line-up %.0f%%", rtEngine->GpuMs(), rtEngine->BlasCount(),
+                                    rtEngine->BlasBytes() / 1048576.0, std::max(0.0, rtEngine->LineUp() * 100));
+        }
         ImGui::SeparatorText("Loading");
         ImGui::Checkbox("Seamless transitions", &settings.seamlessTransitions);
         ImGui::TextWrapped("%s", transitionStatus.c_str());
         ImGui::Separator();
-        ImGui::TextDisabled("The lighting options take over the picture in a coming build.");
         ImGui::TextDisabled("F10 closes this menu. Settings are saved when it closes.");
         ImGui::End();
         if (!open) { menuOpen = false; ImGui::GetIO().MouseDrawCursor = false; SaveSettings(); }
@@ -1945,7 +2389,6 @@ namespace
         HookContext(context);
         FindGameState();
         Log("renderer state at %p", static_cast<void*>(gameState));
-        if (settings.rayTracedLighting) StartRayTracing();
         autoDynamicResolution = static_cast<bool*>(FindGameSetting("bEnableAutoDynamicResolution:Display"));
         if (autoDynamicResolution) Log("the game's automatic dynamic resolution: %d", *autoDynamicResolution ? 1 : 0);
         else Log("the game's automatic dynamic resolution setting not found");
@@ -1982,9 +2425,24 @@ namespace
             lastTick = now;
             if (context && inlineTable && *reinterpret_cast<void***>(context) == inlineTable) Log("  the context's table was put back to d3d11's");
         }
-        // Ray-traced lighting switched on in the menu: its Direct3D 12 side started (once).
-        if (ready && settings.rayTracedLighting && rtStatus == "off") StartRayTracing();
-        if (ready && settings.rayTracedLighting && rtDevice) RtFrame();
+        // Ray-traced lighting switched on (in the menu or the ini): its Direct3D 12 side started; each frame its health
+        // checked (a removed device or work over 2 s turns it off), what the GPU is done with freed.
+        if (ready && settings.rayTracedLighting && !rtTried) StartRayTracingEngine();
+        if (rtEngine && !settings.rayTracedLighting && !rtStopped && !menuOpen)
+        {
+            // Turned off (and the menu closed): its video memory given back, also after it turned itself off.
+            rtEngine->Stop();
+            rtStopped = true;
+            rtTried = false;
+            rtStatus = "Off.";
+            Log("ray tracing: turned off; its memory freed");
+        }
+        if (rtEngine)
+        {
+            rtEngine->EndFrame();
+            if (!rtEngine->Running() && settings.rayTracedLighting && rtStatus.rfind("Off", 0) != 0)
+                rtStatus = "Off: " + rtEngine->Status().substr(rtEngine->Status().find(':') + 1);
+        }
         if (settings.sceneDump)
         {
             static bool f12Was = false;
@@ -2067,7 +2525,11 @@ namespace
             }
         }
         HRESULT presented = realPresent(swap, sync, flags);
-        if (ready) PrepareNextFrame();
+        if (ready)
+        {
+            PrepareNextFrame();
+            RebindSamplers(context);   // the next frame's bias on the samplers already bound
+        }
         return presented;
     }
 
