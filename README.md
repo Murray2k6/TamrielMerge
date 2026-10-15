@@ -179,7 +179,24 @@ Built with:
   (GPL-3.0), [FFDec](https://github.com/jindrapetrik/jpexs-decompiler) (GPL-3.0), [FluidSynth](https://www.fluidsynth.org/)
   (LGPL-2.1), [GeneralUser GS](https://schristiancollins.com/generaluser.php), [Blender](https://www.blender.org/),
   [ffmpeg](https://ffmpeg.org/), [RAD Video Tools](https://www.radgametools.com/bnkdown.htm),
-  [Eclipse Temurin](https://adoptium.net/): downloaded or used by setup.
+  [Eclipse Temurin](https://adoptium.net/), [WildMIDI](https://github.com/Mindwerks/wildmidi) (LGPL-3.0),
+  [Crash Logger SSE](https://github.com/alandtse/CrashLoggerSSE) (MIT, for the game check): downloaded or used by setup.
 - Creature models: see [tools/creatures/CREDITS.md](tools/creatures/CREDITS.md) (CC0, CC-BY 3.0/4.0, CC-BY-SA 3.0).
 - The ship: a free model from [CGTrader](https://www.cgtrader.com/free-3d-models/watercraft/historic-watercraft/ship-8d79bbda-ccc3-45f9-8b38-ec81c5a4d0cd).
-- [SKSE](https://skse.silverlock.org/) runs the plugins.
+- [SKSE](https://skse.silverlock.org/) runs the plugins; they read [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444).
+
+The converters are this project's own code. These projects were the references for how the games work (their
+behaviour and file formats followed, their code not included):
+
+- [Daggerfall Unity](https://github.com/Interkarma/daggerfall-unity) (MIT), by Gavin Clayton (Interkarma) and its
+  contributors: the reference for Daggerfall throughout. Its readers' layouts for ARENA2's files (BSA archives, the
+  world map and climates, blocks, models, textures, flats, factions, names, text, books, spells, creatures, quests),
+  its terrain generation and ground tiles, town and dungeon layouts, the rules of Daggerfall's actions, locks, traps,
+  enemy senses and spawning, the quest engine (its task rules and commands, QuestListsManager's offers), reputation,
+  guilds, shops, holidays and taverns, and the songs' playlists (SongManager).
+- The [Dynamic Music](https://www.nexusmods.com/daggerfallunity/) mod for Daggerfall Unity: the combat playlist.
+- [RGUnity](https://github.com/RGUnity) (MIT) and the redguard-preservation notes: Redguard's models, scenes and scripts.
+- [OpenMW](https://openmw.org/) (GPL-3.0) and the [NifTools](https://github.com/niftools/nifxml) nif.xml: Morrowind's
+  NIF format, its attributes and other formulas.
+- [xOBSE](https://github.com/llde/xOBSE): the list of OBSE's script commands, read from its source.
+- [UESP](https://en.uesp.net/) (CC BY-SA 2.5): the games' mechanics and Daggerfall's quest codes, for research.
