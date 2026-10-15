@@ -124,8 +124,9 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         var items = new DfQuestItems(mod, masters);
         var groupLists = items.GroupLists(Weapons, Armor, Books, items.MagicItems());
 
-        // People quests make: Bretons and Redguards in a few dresses, named at run time from Daggerfall's name banks.
-        var (male, female) = PersonBases();
+        // People quests make: as the town people are (TownPeople): the faction's race, else the region's, a vanilla face of
+        // that race and sex, dressed by trade or standing, with a Daggerfall name of that race.
+        var personBases = PersonBases();
         var maleNames = new List<string>();
         var femaleNames = new List<string>();
         for (int i = 0; i < 64; i++)
@@ -178,7 +179,11 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             Ints("QuestMinReq", built.Select(b => MinReq(b.Q.Name))),
             new ScriptBoolListProperty { Name = "QuestOneTime", Data = [.. built.Select(b => b.Q.Name.Length > 4 && b.Q.Name[4] == '1')] },
             Ints("GuildFaction", Guilds.Select(g => g.RepFaction)), Strs("GuildLetters", Guilds.Select(g => GuildLetters(g.Key))),
-            Objs("MaleBases", male), Objs("FemaleBases", female), Strs("MaleNames", maleNames), Strs("FemaleNames", femaleNames),
+            Objs("PersonBases", personBases), Strs("PersonNames", PersonNames()), Ints("RaceOfDf", RaceOfDf),
+            Ints("DressByBuilding", DressByBuilding), Ints("DressBySGroup", DressBySGroup), Int("Dresses", PersonDresses.Length),
+            Int("FacesPerDress", FacesPerDress), Int("NamesPerRace", NamesPerRace),
+            new ScriptBoolListProperty { Name = "RegionRedguard", Data = [.. DfFactions.RegionIsRedguard] },
+            Strs("MaleNames", maleNames), Strs("FemaleNames", femaleNames),
             Objs("GroupItems", groupLists),
             Obj("CureDisease", cure.FormKey), Obj("Diseases", diseases.FormKey),
             Strs("RegionNames", DfLocations.RegionNames), Strs("BuildingLabels", BuildingLabels),
@@ -198,6 +203,7 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         if (Vanilla<IQuestGetter>("PlayerVampireQuest") is { } vq) props.Add(Obj("VampireQuest", vq.FormKey));
         if (Vanilla<ISpellGetter>("WerewolfChange") is { } wp) props.Add(Obj("WerewolfPower", wp.FormKey));
         if (sound is not null) props.Add(Obj("QuestSound", sound.FormKey));
+        props.AddRange(Summoning());
         // The sounds quests play ("play sound N": DAGGER.SND's record N), as Daggerfall's own sounds.
         var soundIds = quests.SelectMany(q => q.Ops).Where(o => o.Code is 0x3C or 0x54 && o.ArgCount > 1).Select(o => o.Args[1].Int).Distinct().Order().ToList();
         var madeSounds = QuestSounds(soundIds);
@@ -256,6 +262,82 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
     /// <summary>The folder the plugin's loose files go in (its Sound folder is made here), for the quests' sounds.</summary>
     public string? SoundDir { get; init; }
 
+    /// <summary>The Daedra Princes a witches' coven summons (Daggerfall Unity DaggerfallQuestPopupWindow.daedraData, MIT):
+    /// name, faction, the quest they give, Daggerfall's day of the year (month * 30 + day) and video (ARENA2's FLC, as the
+    /// videos step converts it), and the weather that helps (0 none needed, 1 rain, 2 a thunderstorm).</summary>
+    public static readonly (string Name, int Faction, string Quest, int Day, string Video, int Weather)[] Daedra =
+    [
+        ("Hircine", 4, "X0C00Y00", 155, "HIRCINE", 0), ("Clavicus Vile", 1, "V0C00Y00", 1, "CLAVICUS", 0),
+        ("Mehrunes Dagon", 2, "Y0C00Y00", 320, "MEHRUNES", 0), ("Molag Bal", 3, "20C00Y00", 350, "MOLAGBAL", 0),
+        ("Sanguine", 5, "70C00Y00", 46, "SANGUINE", 1), ("Peryite", 6, "50C00Y00", 99, "PERYITE", 1),
+        ("Malacath", 7, "80C0XY00", 278, "MALACATH", 0), ("Hermaeus Mora", 8, "W0C00Y00", 65, "HERMAEUS", 0),
+        ("Sheogorath", 9, "60C00Y00", 32, "SHEOGRTH", 2), ("Boethiah", 10, "U0C00Y00", 302, "BOETHIAH", 1),
+        ("Namira", 11, "30C00Y00", 129, "NAMIRA", 0), ("Meridia", 12, "10C00Y00", 13, "MERIDIA", 0),
+        ("Vaernima", 13, "90C00Y00", 190, "VAERNIMA", 0), ("Nocturnal", 14, "40C00Y00", 248, "NOCTURNA", 1),
+        ("Mephala", 15, "Z0C00Y00", 283, "MEPHALA", 0), ("Azura", 16, "T0C00Y00", 81, "AZURA", 0),
+    ];
+
+    /// <summary>The bink a Daedra's FLC becomes (the videos step).</summary>
+    public static string DaedraVideoName(string flc) => $"TamrielMerge_DfDaedra{flc}.bik";
+
+    /// <summary>The witches' covens' summoning (TMDfQuestMachine.SummonDaedra): the princes' table, Daggerfall's lines
+    /// (TEXT.RSC 480 not today, 481 the question, 482 summoned before, 484 not come, 454 not enough gold) as messages, the
+    /// Daedra that answer a failure, and "Summon a Daedra Prince." for the covens' witches.</summary>
+    List<ScriptProperty> Summoning()
+    {
+        var text = DfText.Load(arena2);
+        string Fill(string s, string prince) => Regex.Replace(s.Replace("%dae", prince).Replace("%pcn", "<Alias=Player>").Replace("%pcf", "<Alias=Player>").Replace("%dat", "this day"), @"%\w+", "").Replace("  ", " ").Trim();
+        Message Msg(string edid, string body, bool ask)
+        {
+            var m = new Message(mod) { EditorID = edid, Description = body, Quest = Machine!.ToNullableLink<IQuestGetter>(), Flags = Message.Flag.MessageBox, MenuButtons = [] };
+            if (ask) { m.MenuButtons.Add(new MessageButton { Text = "Yes" }); m.MenuButtons.Add(new MessageButton { Text = "No" }); }
+            mod.Messages.Add(m);
+            return m;
+        }
+        string First(int id) => text[id].FirstOrDefault() ?? "";
+        var notToday = text[480].Select((l, i) => Msg($"DFSummonNotToday{i}", Fill(l, "the Daedra"), false).FormKey).ToList();
+        var ask = Daedra.Select((d, i) => Msg($"DFSummonAsk{i}", Fill(First(481), d.Name) + " The summoning will cost %.0f gold.", true).FormKey).ToList();
+        var before = Daedra.Select((d, i) => Msg($"DFSummonBefore{i}", Fill(First(482), d.Name), false).FormKey).ToList();
+        var failed = Daedra.Select((d, i) => Msg($"DFSummonFailed{i}", Fill(First(484), d.Name), false).FormKey).ToList();
+        var noGold = Msg("DFSummonNoGold", Fill(First(454), "") + " The summoning costs %.0f gold.", false);
+        // The Daedra a failed summoning (or a refused prince) sends: Daedra Lord, Seducer, Daedroth, Fire and Frost Daedra.
+        var foes = new[] { 31, 29, 27, 26, 25 }.Select(id => Foe?.Invoke(id)).OfType<FormKey>().ToList();
+
+        // "Summon a Daedra Prince." to a coven's witches (their faction is of type WitchesCoven).
+        var covens = factions.ById.Values.Where(f => f.Type == DfFactionType.WitchesCoven).OrderBy(f => f.Id).ToList();
+        var branch = new DialogBranch(mod) { EditorID = "DFQuestSummonBranch", Quest = Machine!.ToLink<IQuestGetter>(), Category = DialogBranch.CategoryType.Player, Flags = DialogBranch.Flag.TopLevel };
+        mod.DialogBranches.Add(branch);
+        var topic = NewTopic("DFQuestSummon", "Summon a Daedra Prince.", Machine!, branch);
+        branch.StartingTopic = topic.ToNullableLink<IDialogTopicGetter>();
+        var line = Line("Let us see who answers.", covens.Select((f, i) =>
+        {
+            var d = new GetInFactionConditionData();
+            d.Faction = new FormLinkOrIndex<IFactionGetter>(d, FactionRecords(mod, f).Faction.FormKey);
+            return Cond(d, CompareOperator.EqualTo, 1, or: i < covens.Count - 1);
+        }));
+        line.VirtualMachineAdapter = new DialogResponsesAdapter
+        {
+            Scripts = [new ScriptEntry { Name = "TMDfQuestTopic", Properties = [Obj("Machine", Machine!.FormKey), Int("Service", 2)] }],
+            ScriptFragments = new ScriptFragments
+            {
+                ExtraBindDataVersion = 2, FileName = "TMDfQuestTopic",
+                OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfQuestTopic", FragmentName = "Fragment_End" },
+            },
+        };
+        topic.Responses.Add(line);
+
+        return
+        [
+            Ints("DaedraFaction", Daedra.Select(d => d.Faction)), Strs("DaedraQuest", Daedra.Select(d => d.Quest)),
+            Ints("DaedraDay", Daedra.Select(d => d.Day)), Ints("DaedraWeather", Daedra.Select(d => d.Weather)),
+            Strs("DaedraVideo", Daedra.Select(d => DaedraVideoName(d.Video))),
+            Objs("SummonNotToday", notToday), Objs("SummonAsk", ask), Objs("SummonBefore", before), Objs("SummonFailed", failed),
+            Obj("SummonNoGold", noGold.FormKey), Objs("SummonFoes", foes),
+            Int("GlenmorilWitches", covens.FirstOrDefault(f => f.Name.Contains("Glenmoril"))?.Id ?? 419),
+            Int("SheogorathIndex", Array.FindIndex(Daedra, d => d.Name == "Sheogorath")),
+        ];
+    }
+
     static int MinReq(string name)
     {
         if (name.Length < 4) return 0;
@@ -308,6 +390,8 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
                         Ints("Allies", all.SelectMany(f => Enumerable.Range(0, 3).Select(i => Pad(f.Allies, i)))),
                         Ints("Enemies", all.SelectMany(f => Enumerable.Range(0, 3).Select(i => Pad(f.Enemies, i)))),
                         Strs("Names", all.Select(f => f.Name)), Objs("React", all.Select(f => FactionRecords(mod, f).React.FormKey)),
+                        Ints("Races", all.Select(f => f.Race)),
+                        Ints("SGroups", all.Select(f => factions.Effective(f.Id) is { SGroup: >= DfSocialGroup.Commoners and <= DfSocialGroup.Underworld } e ? (int)e.SGroup : 0)),
                     ],
                 },
             ],
@@ -315,48 +399,79 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         return q;
     }
 
-    /// <summary>Generic people for quests: a few faces of Bretons and Redguards of each sex, dressed by kind.</summary>
-    (List<FormKey> Male, List<FormKey> Female) PersonBases()
+    /// <summary>The races quest people can be (as the town people are: the faction's race, else the region's Breton or
+    /// Redguard), with the name bank of each (TownPeople's).</summary>
+    static readonly (string Race, DfNameBank Bank)[] PersonRaces =
+    [
+        ("BretonRace", DfNameBank.Breton), ("RedguardRace", DfNameBank.Redguard), ("NordRace", DfNameBank.Nord), ("DarkElfRace", DfNameBank.DarkElf),
+        ("HighElfRace", DfNameBank.HighElf), ("WoodElfRace", DfNameBank.WoodElf), ("KhajiitRace", DfNameBank.Khajiit), ("ArgonianRace", DfNameBank.Imperial),
+        ("OrcRace", DfNameBank.Breton),
+    ];
+    /// <summary>FACTION.TXT's race numbers (0 Nord, 1 Khajiit, 2 Redguard, 3 Breton, 4 Argonian, 5 Wood Elf, 6 High Elf,
+    /// 7 Dark Elf, 17 Orc) as indexes into <see cref="PersonRaces"/>.</summary>
+    static readonly int[] RaceOfDf = [2, 6, 1, 0, 7, 5, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, 8];
+    /// <summary>Quest people's dress (TownPeople's outfits by trade and standing): commoner, merchant, scholar, noble,
+    /// barkeep, smith.</summary>
+    static readonly FormKey[] PersonDresses = [Sk(0x0DAB76), Sk(0x095921), Sk(0x0E9AC4), Sk(0x0F8716), Sk(0x0958AA), Sk(0x0958AB)];
+    /// <summary>The dress of someone of a building type's trade (0-20; -1: by their social group).</summary>
+    static readonly int[] DressByBuilding = [1, -1, 5, 1, -1, 1, 1, 1, 1, 1, 2, -1, 1, 5, 2, 4, 3, -1, -1, -1, -1];
+    /// <summary>The dress by social group: commoners, merchants, scholars, nobility, underworld.</summary>
+    static readonly int[] DressBySGroup = [0, 1, 2, 3, 0];
+    const int FacesPerDress = 2, NamesPerRace = 12;
+
+    /// <summary>Daggerfall names per race and sex for quest people, NamesPerRace each, (race * 2 + female) * NamesPerRace + i.</summary>
+    List<string> PersonNames()
     {
-        var male = new List<FormKey>();
-        var female = new List<FormKey>();
-        FormKey[] outfits = [Sk(0x0DAB76), Sk(0x095921), Sk(0x0F8716), Sk(0x0E9AC4)];   // farm clothes, merchant, fine clothes, robes
+        var list = new List<string>();
+        for (int r = 0; r < PersonRaces.Length; r++)
+            foreach (bool female in new[] { false, true })
+                for (int i = 0; i < NamesPerRace; i++)
+                    list.Add(names.FullName(PersonRaces[r].Bank, female, new DfRandom((uint)(9000 + (r * 2 + (female ? 1 : 0)) * 104729 + i * 7919))));
+        return list;
+    }
+
+    /// <summary>Quest people: for each race, sex and dress a few vanilla faces of that race and sex (TownPeople's way: a
+    /// copy using the face as traits template), at ((race * 2 + female) * dresses + dress) * FacesPerDress + face.</summary>
+    List<FormKey> PersonBases()
+    {
+        var list = new List<FormKey>();
         int n = 0;
-        foreach (var race in new[] { "BretonRace", "RedguardRace" })
+        foreach (var (race, _) in PersonRaces)
         {
-            var raceRec = vanilla.Get<IRaceGetter>(race);
-            if (raceRec is null) continue;
+            var raceRec = vanilla.Get<IRaceGetter>(race) ?? vanilla.Get<IRaceGetter>("BretonRace")!;
             foreach (bool isFemale in new[] { false, true })
             {
                 var pool = vanilla.Faces(raceRec.FormKey, isFemale);
-                for (int i = 0; i < 4 && i < pool.Count; i++)
-                {
-                    var face = pool[(i * 7) % pool.Count];
-                    var npc = mod.Npcs.DuplicateInAsNewRecord(face);
-                    npc.EditorID = $"DFQuestPerson{n++:00}";
-                    npc.Name = isFemale ? "Woman" : "Man";
-                    npc.ShortName = null;
-                    npc.VirtualMachineAdapter = null;
-                    npc.Factions.Clear();
-                    npc.CrimeFaction.Clear();
-                    npc.Items = null;
-                    npc.SleepingOutfit.Clear();
-                    npc.DeathItem.Clear();
-                    npc.Packages.Clear();
-                    npc.Packages.Add(new FormLink<IPackageGetter>(Sk(0x09361E)));   // DefaultSandboxEditorLocation256
-                    npc.Keywords = null;
-                    npc.Perks = null;
-                    npc.Template = new FormLinkNullable<INpcSpawnGetter>(face.FormKey);
-                    npc.Configuration.TemplateFlags = NpcConfiguration.TemplateFlag.Traits;
-                    npc.Configuration.Flags = isFemale ? NpcConfiguration.Flag.Female : 0;
-                    npc.Configuration.Level = new NpcLevel { Level = 6 };
-                    npc.DefaultOutfit.SetTo(outfits[i % outfits.Length]);
-                    if (npc.AIData is { } ai) { ai.Aggression = Aggression.Unaggressive; ai.Confidence = Confidence.Cowardly; }
-                    (isFemale ? female : male).Add(npc.FormKey);
-                }
+                if (pool.Count == 0) pool = vanilla.Faces(vanilla.Get<IRaceGetter>("BretonRace")!.FormKey, isFemale);
+                for (int dress = 0; dress < PersonDresses.Length; dress++)
+                    for (int i = 0; i < FacesPerDress; i++)
+                    {
+                        var face = pool[((dress * FacesPerDress + i) * 7) % pool.Count];
+                        var npc = mod.Npcs.DuplicateInAsNewRecord(face);
+                        npc.EditorID = $"DFQuestPerson{n++:000}";
+                        npc.Name = isFemale ? "Woman" : "Man";
+                        npc.ShortName = null;
+                        npc.VirtualMachineAdapter = null;
+                        npc.Factions.Clear();
+                        npc.CrimeFaction.Clear();
+                        npc.Items = null;
+                        npc.SleepingOutfit.Clear();
+                        npc.DeathItem.Clear();
+                        npc.Packages.Clear();
+                        npc.Packages.Add(new FormLink<IPackageGetter>(Sk(0x09361E)));   // DefaultSandboxEditorLocation256
+                        npc.Keywords = null;
+                        npc.Perks = null;
+                        npc.Template = new FormLinkNullable<INpcSpawnGetter>(face.FormKey);
+                        npc.Configuration.TemplateFlags = NpcConfiguration.TemplateFlag.Traits;
+                        npc.Configuration.Flags = isFemale ? NpcConfiguration.Flag.Female : 0;
+                        npc.Configuration.Level = new NpcLevel { Level = (short)(dress == 3 ? 15 : 6) };
+                        npc.DefaultOutfit.SetTo(PersonDresses[dress]);
+                        if (npc.AIData is { } ai) { ai.Aggression = Aggression.Unaggressive; ai.Confidence = Confidence.Cowardly; }
+                        list.Add(npc.FormKey);
+                    }
             }
         }
-        return (male, female);
+        return list;
     }
 
     /// <summary>"Do you have any work for me?" to any Daggerfall townsperson (TMDfQuestTopic: the machine's offer).</summary>

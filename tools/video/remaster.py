@@ -57,7 +57,8 @@ def extract(args, src_dir):
         vf = [f"fps={fps}"]
         if args.prescale:
             vf.append(f"scale={args.prescale[0]}:{args.prescale[1]}:flags=bicubic")
-        subprocess.run([FFMPEG, "-v", "error", "-y", "-i", args.input, "-vf", ",".join(vf), "-start_number", "1",
+        loop = ["-stream_loop", str(args.loop)] if args.loop > 0 else []
+        subprocess.run([FFMPEG, "-v", "error", "-y"] + loop + ["-i", args.input, "-vf", ",".join(vf), "-start_number", "1",
                         os.path.join(src_dir, "frame%05d.png")], check=True)
         subprocess.run([FFMPEG, "-v", "error", "-y", "-i", args.input, "-vn", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
                         os.path.join(src_dir, "audio.wav")], check=False)
@@ -221,6 +222,7 @@ def main():
     ap.add_argument("--model", default=MODEL, help="Real-ESRGAN weights (realesr-general-x4v3.pth is the fast one for CPU)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads for the model (0 = PyTorch's default)")
     ap.add_argument("--plain", action="store_true", help="no model: frames only resized (bicubic) to --size")
+    ap.add_argument("--loop", type=int, default=0, help="a video file played this many extra times (short animations)")
     args = ap.parse_args()
     if os.path.exists(args.output):
         print(f"{args.output} already made", flush=True)

@@ -1621,6 +1621,13 @@ static class Program
                             + $"{Len("DName")} dungeons ({Filled("DSpawn")} with a spawn marker), {Len("IFaction")} individuals");
                     }
                     Console.WriteLine($"quest markers: {dungeons.QuestMarkers.Values.Sum(m => m.Count)} in {dungeons.QuestMarkers.Count} cells");
+                    // Covens: their witches in a coven faction that "Summon a Daedra Prince." answers to.
+                    var covenFactions = DfFactions.Load(arena2).ById.Values.Where(f => f.Type == DfFactionType.WitchesCoven).Select(f => $"DFFaction{f.Id}").ToHashSet();
+                    var factionEdid = mod.Factions.ToDictionary(f => f.FormKey, f => f.EditorID ?? "");
+                    int witches = townBuilder.Placed.Count(p => p.Npc.Factions.Any(r => covenFactions.Contains(factionEdid.GetValueOrDefault(r.Faction.FormKey, ""))));
+                    var summon = mod.DialogTopics.FirstOrDefault(t => t.EditorID == "DFQuestSummon");
+                    int summonFactions = summon?.Responses.SelectMany(r => r.Conditions).Select(c => c.Data).OfType<GetInFactionConditionData>().Count(d => covenFactions.Contains(factionEdid.GetValueOrDefault(d.Faction.Link.FormKey, ""))) ?? 0;
+                    if (witches > 0 || summon is not null) Console.WriteLine($"covens: {witches} witches in coven factions; the summoning topic answers {summonFactions} coven factions");
                     Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
                 }
                 var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
@@ -2559,6 +2566,15 @@ static class Program
                         if (!File.Exists(Path.Combine(frames, "audio.wav"))) Daggerfall.DfVid.Export(vid, frames);
                         if (upscaleAnims) RemasterTo($"DfAnim{n}", target, frames, "--fps", "30");
                         else RemasterTo($"DfAnim{n}", target, frames, "--fps", "30", "--plain");
+                    }
+                    // The Daedra Princes' appearances when a coven summons them (ARENA2's FLC animations, through ffmpeg).
+                    foreach (var d in Skyrim.DfQuestBuilder.Daedra)
+                    {
+                        string flc = Path.Combine(arena2, d.Video + ".FLC");
+                        if (!File.Exists(flc) || opts.TryGetValue("anims", out var onlyVideos) && !onlyVideos.Split(',').Contains(d.Video, StringComparer.OrdinalIgnoreCase)) continue;
+                        string target = Path.Combine(videoDir, Skyrim.DfQuestBuilder.DaedraVideoName(d.Video));
+                        if (upscaleAnims) RemasterTo($"DfDaedra{d.Video}", target, flc, "--loop", "2");
+                        else RemasterTo($"DfDaedra{d.Video}", target, flc, "--loop", "2", "--plain");
                     }
                 }
                 if (intros && found.ContainsKey(Game.Redguard) && canRemaster)

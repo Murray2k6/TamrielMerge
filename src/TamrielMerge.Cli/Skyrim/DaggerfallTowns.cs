@@ -26,12 +26,13 @@ public static class DaggerfallTowns
 
     public static int PartCount(List<DfLocation> all) => (int)Math.Max(1, (all.Sum(l => (long)l.ExteriorBlocks.Length) + BlocksPerPart - 1) / BlocksPerPart);
 
-    /// <summary>The towns the batches cover, in a fixed order: every town with blocks that Daggerfall.esm doesn't build.</summary>
+    /// <summary>The towns the batches cover, in a fixed order: every town with blocks that Daggerfall.esm doesn't build, and
+    /// the witches' covens (one block each: the witches in the open, their summoning and quests; built as a town is).</summary>
     public static List<DfLocation> All(string arena2, ISkyrimModGetter master)
     {
         var inMaster = master.Worldspaces.Select(w => w.EditorID).Where(e => e?.StartsWith("DFT") == true).ToHashSet();
         return DfLocations.LoadAll(arena2)
-            .Where(l => l.ExteriorBlocks.Length > 0 && l.Type is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage)
+            .Where(l => l.ExteriorBlocks.Length > 0 && l.Type is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage or DfLocationType.Coven)
             .Where(l => !inMaster.Contains("DFT" + LocationPlacer.Sanitize(l.Name) + l.Region))
             .OrderBy(l => l.Region).ThenBy(l => l.Name, StringComparer.Ordinal).ThenBy(l => l.PixelX).ThenBy(l => l.PixelY)
             .ToList();

@@ -186,6 +186,12 @@ public static class DaggerfallPluginBuilder
         AddOverlandQuest(mod, layout, tiles, markers, iliacBay, field.Settings.PixelsPerCell, map);
         var (regionAreas, regionOf) = AtmosphereBuilder.AddRegions(mod, skyrim, tiles, layout, field, map);
         Console.WriteLine($"Daggerfall light: {AtmosphereBuilder.ApplyDaggerfallLight(mod, skyrim, world)} weathers copied and relit for the Iliac Bay");
+        // The Iliac Bay's thunderstorms, for the covens' summonings (Sheogorath's weather).
+        var storms = new FormList(mod) { EditorID = "DFStormWeathers" };
+        foreach (var w in mod.Weathers.Where(w => w.EditorID is { } e && (e.Contains("Storm", StringComparison.OrdinalIgnoreCase) || e.Contains("Thunder", StringComparison.OrdinalIgnoreCase))))
+            storms.Items.Add(w.ToLink<ISkyrimMajorRecordGetter>());
+        mod.FormLists.Add(storms);
+        questBuilder.Machine!.VirtualMachineAdapter!.Scripts[0].Properties.Add(new ScriptObjectProperty { Name = "StormWeathers", Object = storms.ToLink<ISkyrimMajorRecordGetter>() });
         foreach (var tile in tiles) tile.Climate = world.Climate;
         Console.WriteLine($"Music: {songs.Count} Daggerfall songs ({songs.Values.Sum() / 60:F0} min), {mod.MusicTypes.Count} music types, {mod.MusicTracks.Count} tracks");
         Console.WriteLine($"Regions: {string.Join(", ", regionAreas.Select(r => $"{r.Key} {r.Value} areas"))}");

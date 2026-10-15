@@ -107,6 +107,8 @@ public sealed class TownPeople(SkyrimMod mod, VanillaActors vanilla, DfFactions 
         Set(346, "0:F Noble; 1:M Chef; 2:M Commoner; 3:M Jester; 4:M Chef; 5:M Chef; 6:M Commoner; 7:M Noble; 8:M Commoner; 9:F Wench; 10:F Noble;"
             + "11:F Wench; 12:M Commoner; 13:M Commoner; 14:M Mage; 15:M Commoner; 16:M Noble; 17:F Noble; 18:F Commoner; 19:M Knight; 20:M Guard;"
             + "21:M Ruler; 22:F Ruler");
+        // 179, the witches' covens: two kinds of naked witch, the beldam (one a coven), a black-cowled dancer, a red-haired one.
+        Set(179, "0:F Wench; 1:F Wench; 2:F Necromancer; 3:F Monk; 4:F Hunter");
         Set(178, "0:M Necromancer; 1:F Necromancer; 2:M Necromancer; 3:M Necromancer; 4:M Necromancer; 5:F Wench; 6:F Wench");
         return d;
     }
