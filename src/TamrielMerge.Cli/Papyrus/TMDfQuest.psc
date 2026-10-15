@@ -694,7 +694,8 @@ Bool Function RunAction(Int i)
       EndIf
     EndIf
     Return False
-  ElseIf code == 0x13 || code == 0x1B
+  ElseIf code == 0x13 || code == 0x1B || code == 0x11
+    ; reveal, reveal on the map, and a place's location marker (0x11).
     Machine.RevealSite(placeSite[Arg(i, 1)])
   ElseIf code == 0x0A || code == 0x0B
     If Arg(i, 1) >= 0

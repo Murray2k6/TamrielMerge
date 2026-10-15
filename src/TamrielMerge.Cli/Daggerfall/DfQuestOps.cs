@@ -43,8 +43,10 @@ public static class DfQuestOps
         new(0x0B, "DialogLink", OpKind.Action, "spni", "dialog link for location {1} person {2} item {3}"),
         new(0x0C, "StartTimer", OpKind.Action, "sc", "start timer {1}"),
         new(0x0D, "StopTimer", OpKind.Action, "sc", "stop timer {1}"),
-        new(0x11, "Unknown11", OpKind.Action, "sp##", "(0x11 {1} {2} {3})",
-            Gap: "unknown: two uses (A0C10Y05, B0C00Y13: a place and two numbers, in the start-up); UESP has no meaning for it and Daggerfall Unity leaves it out; skipped"),
+        // A place's location marker (two uses, in A0C10Y05's and B0C00Y13's start-up: the place and two numbers). Daggerfall
+        // Unity's text of those quests drops it ("location action removed", "this location marker is unused"); here it
+        // marks the place on the map as reveal does (user, 2026-10-15: "2 quest missing from daggerfall").
+        new(0x11, "LocationMarker", OpKind.Action, "sp##", "location marker {1} ({2} {3})"),
         new(0x13, "Reveal", OpKind.Action, "sp", "reveal {1}"),
         new(0x15, "InjuredFoe", OpKind.Trigger, "sf", "injured {1}"),
         new(0x16, "PlaceFoe", OpKind.Action, "sfp", "place foe {1} at {2}"),
