@@ -268,6 +268,7 @@ static class Program
                     if (pending.Count > 0 && (!File.Exists(heights) || File.GetLastWriteTimeUtc(heights) < File.GetLastWriteTimeUtc(Environment.ProcessPath!)))
                     {
                         if (Directory.Exists(Path.Combine(sharedDir, "meshes"))) Directory.Delete(Path.Combine(sharedDir, "meshes"), true);
+                        if (Directory.Exists(Path.Combine(sharedDir, "navmeshes"))) Directory.Delete(Path.Combine(sharedDir, "navmeshes"), true);
                         Directory.CreateDirectory(sharedDir);
                         var clock = System.Diagnostics.Stopwatch.StartNew();
                         Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom([])).Save(heights);
@@ -287,6 +288,8 @@ static class Program
                         psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";   // the parent reports the parts
                         psi.Environment["TAMRIELMERGE_HEIGHTS"] = heights;
                         psi.Environment["TAMRIELMERGE_TOWN_MESHES"] = Path.Combine(sharedDir, "meshes");
+                        // Street navmeshes too: a town cell of the same input as one another part made takes its mesh (NavmeshBuilder.SharedExteriors).
+                        psi.Environment["TAMRIELMERGE_NAVMESHES"] = Path.Combine(sharedDir, "navmeshes");
                         // A first generation of 256 MB: a town part makes 500 MB of short-lived objects a second, and the default
                         // budget collected 200 times every 5 seconds (part 9: 2.2 minutes, with it 1.8; half a gigabyte more).
                         psi.Environment["DOTNET_GCgen0size"] = "0x10000000";

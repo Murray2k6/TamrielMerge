@@ -498,7 +498,62 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// </summary>
     readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong, ulong, bool), Lazy<(P3Float[] Verts, (int A, int B, int C)[] Tris)?>> exteriorCache = new();
     public int ExteriorReused => exteriorReused;
-    int exteriorReused;
+    /// <summary>Of the meshes made here, those another process had left in <see cref="SharedExteriors"/>.</summary>
+    public int ExteriorShared => exteriorShared;
+    int exteriorReused, exteriorShared;
+
+    /// <summary>
+    /// A folder the conversion's town parts share (TAMRIELMERGE_NAVMESHES, as the town meshes' TAMRIELMERGE_TOWN_MESHES):
+    /// each mesh made here is left there as &lt;key&gt;.bin, and one another part made is read instead of being made again.
+    /// </summary>
+    public static string? SharedExteriors { get; set; } = Environment.GetEnvironmentVariable("TAMRIELMERGE_NAVMESHES") is { Length: > 0 } d ? d : null;
+
+    // A mesh file: "TMNV", the vertex count (-1: nothing walkable), the vertices (x, y, z), the triangle count, the
+    // triangles (a, b, c).
+    static bool ReadShared(string file, out (P3Float[], (int, int, int)[])? mesh)
+    {
+        try
+        {
+            mesh = null;
+            if (!File.Exists(file)) return false;
+            using var r = new BinaryReader(File.OpenRead(file));
+            if (r.ReadUInt32() != 0x564E4D54) return false;
+            int nv = r.ReadInt32();
+            if (nv < 0) return true;
+            var verts = new P3Float[nv];
+            for (int i = 0; i < nv; i++) verts[i] = new P3Float(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+            var tris = new (int, int, int)[r.ReadInt32()];
+            for (int i = 0; i < tris.Length; i++) tris[i] = (r.ReadInt32(), r.ReadInt32(), r.ReadInt32());
+            mesh = (verts, tris);
+            return true;
+        }
+        catch (IOException) { mesh = null; return false; }
+    }
+
+    static void WriteShared(string file, (P3Float[] Verts, (int A, int B, int C)[] Tris)? mesh)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+            string tmp = file + "." + Environment.ProcessId + ".tmp";
+            using (var w = new BinaryWriter(File.Create(tmp)))
+            {
+                w.Write(0x564E4D54u);
+                if (mesh is not { } m) w.Write(-1);
+                else
+                {
+                    w.Write(m.Verts.Length);
+                    foreach (var v in m.Verts) { w.Write(v.X); w.Write(v.Y); w.Write(v.Z); }
+                    w.Write(m.Tris.Length);
+                    foreach (var (a, b, c) in m.Tris) { w.Write(a); w.Write(b); w.Write(c); }
+                }
+            }
+            // Renamed when whole; another part may have left the same one meanwhile (the same mesh).
+            if (!File.Exists(file)) File.Move(tmp, file, overwrite: true); else File.Delete(tmp);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
 
     static (ulong, ulong) InputKey(List<Vector3[]> tris, int cx, int cy)
     {
@@ -522,9 +577,16 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var local = exteriorCache.GetOrAdd((k1, k2, open), _ => new Lazy<(P3Float[], (int, int, int)[])?>(() =>
         {
             made = true;
-            if (GenerateExteriorRaw(cx, cy, triangles, open) is not { } raw) return null;
-            float ox = cx * CellUnits, oy = cy * CellUnits;
-            return (raw.Verts.Select(v => new P3Float(v.X - ox, v.Y - oy, v.Z)).ToArray(), raw.Tris.ToArray());
+            string? file = SharedExteriors is { } dir ? Path.Combine(dir, $"{k1:x16}{k2:x16}{(open ? "o" : "")}.bin") : null;
+            if (file is not null && ReadShared(file, out var shared)) { Interlocked.Increment(ref exteriorShared); return shared; }
+            (P3Float[], (int, int, int)[])? mesh = null;
+            if (GenerateExteriorRaw(cx, cy, triangles, open) is { } raw)
+            {
+                float ox = cx * CellUnits, oy = cy * CellUnits;
+                mesh = (raw.Verts.Select(v => new P3Float(v.X - ox, v.Y - oy, v.Z)).ToArray(), raw.Tris.ToArray());
+            }
+            if (file is not null) WriteShared(file, mesh);
+            return mesh;
         })).Value;
         if (!made) Interlocked.Increment(ref exteriorReused);
         if (local is not { } m) return null;
