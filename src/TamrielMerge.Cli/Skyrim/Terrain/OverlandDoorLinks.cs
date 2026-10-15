@@ -48,13 +48,22 @@ public static class OverlandDoorLinks
             var worldCopies = new Dictionary<FormKey, Worldspace>();
             var navCopies = new Dictionary<FormKey, (NavigationMesh Navm, NavigationMapInfo? Info)>();
             int linked = 0, noNavmesh = 0, noTriangle = 0;
+            static (int X, int Y) GridOf(P3Float p) => ((int)Math.Floor(p.X / 4096), (int)Math.Floor(p.Y / 4096));
+            // The doors' cells, found in one pass over each world's cells (2026-10-15: each door searched the whole
+            // 1000 x 500 overland for its cell, 7,700 times, for over 20 minutes).
+            var cellsAt = new Dictionary<(FormKey World, int X, int Y), ICellGetter>();
+            foreach (var group in doors.GroupBy(d => d.World))
+            {
+                var wanted = group.Select(d => GridOf(d.Door.Placement!.Position)).ToHashSet();
+                foreach (var c in tiles[group.Key].SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                    if (c.Grid is { } g && wanted.Contains((g.Point.X, g.Point.Y))) cellsAt[(group.Key, g.Point.X, g.Point.Y)] = c;
+            }
             foreach (var (worldKey, door) in doors)
             {
                 var src = tiles[worldKey];
                 var p = door.Placement!.Position;
-                int gx = (int)Math.Floor(p.X / 4096), gy = (int)Math.Floor(p.Y / 4096);
-                var cell = src.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items)
-                    .FirstOrDefault(c => c.Grid is { } g && g.Point.X == gx && g.Point.Y == gy);
+                var (gx, gy) = GridOf(p);
+                var cell = cellsAt.GetValueOrDefault((worldKey, gx, gy));
                 var srcNavm = cell?.NavigationMeshes.FirstOrDefault();
                 if (cell is null || srcNavm?.Data is null) { noNavmesh++; continue; }
                 // The triangle the door stands on: the one under it, else the nearest edge, its height counted half,
