@@ -2482,9 +2482,10 @@ static class Program
                     : ["--device", "cpu", "--threads", Math.Max(2, Environment.ProcessorCount - 4).ToString(), "--model", Setup.Dependencies.FastUpscaleModel];
                 var found = GameInstalls.Detect();
                 string work = Path.GetFullPath("out/video/work");
-                void Remaster(string name, string input, params string[] extra)
+                void Remaster(string name, string input, params string[] extra) => RemasterTo($"TamrielMerge_{name}Intro.bik", name, input, extra);
+                void RemasterTo(string file, string name, string input, params string[] extra)
                 {
-                    string target = Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik");
+                    string target = Path.Combine(videoDir, file);
                     if (File.Exists(target)) { Console.WriteLine($"{name}: {target} already there"); return; }
                     var psi = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
                     foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", Path.Combine(work, name.ToLowerInvariant()) }.Concat(device).Concat(extra)) psi.ArgumentList.Add(arg);
@@ -2540,6 +2541,24 @@ static class Program
                     }
                     Remaster("Redguard", smk, "--prescale", "640x480");
                     RtLook("Redguard", "auto", clean: false);
+                    // The story's movies (QueueMovie n, WonGame's ending), their lines drawn on (RgMovies).
+                    using var disc = new Redguard.RgCdImage(Path.Combine(GameInstalls.DataDir(Game.Redguard)!, "REDGUARD.bin"));
+                    foreach (var movie in Redguard.RgMovies.Load(GameInstalls.DataDir(Game.Redguard)!).Where(m => m.Number > 0))
+                    {
+                        string mw = Path.Combine(work, $"redguard-movie{movie.Number}");
+                        Directory.CreateDirectory(mw);
+                        string file = Path.Combine(mw, movie.File);
+                        if (!File.Exists(file))
+                        {
+                            if (disc.Read(movie.File) is not { } bytes) { Console.WriteLine($"Redguard: {movie.File} not on the CD"); continue; }
+                            File.WriteAllBytes(file, bytes);
+                        }
+                        string subs = Path.Combine(mw, "lines.json");
+                        File.WriteAllText(subs, Redguard.RgMovies.SubtitlesJson(movie));
+                        var extra = new List<string> { "--prescale", "640x480", "--subtitles", subs };
+                        if (opts.ContainsKey("no-upscale")) extra.Add("--no-upscale");
+                        RemasterTo($"TamrielMerge_RedguardMovie{movie.Number}.bik", $"Redguard movie {movie.Number}", file, [.. extra]);
+                    }
                 }
                 if (GameInstalls.DataDir(Game.Morrowind) is { } mw)
                 {

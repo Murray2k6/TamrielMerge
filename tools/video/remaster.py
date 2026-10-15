@@ -7,8 +7,12 @@ Steps (each resumable; work files under --work):
   2. upscale: each frame through the model (x4), then resized to --size (default 1440x1080, 4:3).
   3. encode: RAD's Bink 1 compressor (radvideo64 binkc) over the PNG sequence at the frame rate, then the audio mixed in
      (binkmix), giving --output.
+--subtitles FILE.json: [{"start": frame, "end": frame, "text": "..."}] (the source's frame numbers, from 0) drawn at the
+foot of the upscaled frames before encoding (Redguard's movies show their lines as text, MENU.INI movie#_text).
+--no-upscale: frames only resized to --size (bicubic), no model (quick; for checking a conversion).
 
 Usage: python remaster.py --input FILE|DIR --output out.bik --work DIR [--fps 30] [--prescale 640x480] [--size 1440x1080]
+       [--subtitles lines.json] [--no-upscale]
 """
 import argparse, glob, os, subprocess, sys, time
 
@@ -156,6 +160,64 @@ def upscale(src_dir, up_dir, size, device="cuda", model_path=MODEL, threads=0):
     pool.shutdown()
 
 
+def resize_only(src_dir, up_dir, size):
+    """--no-upscale: each frame resized to the output size (bicubic)."""
+    os.makedirs(up_dir, exist_ok=True)
+    for f in sorted(glob.glob(os.path.join(src_dir, "frame*.png"))):
+        dst = os.path.join(up_dir, os.path.basename(f))
+        if not os.path.exists(dst):
+            Image.open(f).convert("RGB").resize(size, Image.BICUBIC).save(dst, compress_level=1)
+
+
+def subtitle(up_dir, lines_path):
+    """Draws each line on its frames (source frame n is frame n + 1 of the sequence), once (a marker file)."""
+    done = os.path.join(up_dir, "subtitled.done")
+    if os.path.exists(done):
+        return
+    import json
+    from PIL import ImageDraw, ImageFont
+    lines = json.load(open(lines_path, encoding="utf-8-sig"))
+    frames = sorted(glob.glob(os.path.join(up_dir, "frame*.png")))
+    if not frames:
+        return
+    w, h = Image.open(frames[0]).size
+    size = max(18, h // 24)
+    font = None
+    for name in ("arial.ttf", "segoeui.ttf", "DejaVuSans.ttf"):
+        try:
+            font = ImageFont.truetype(name, size)
+            break
+        except OSError:
+            pass
+    if font is None:
+        font = ImageFont.load_default()
+    for line in lines:
+        for n in range(int(line["start"]), int(line["end"]) + 1):
+            path = os.path.join(up_dir, f"frame{n + 1:05d}.png")
+            if not os.path.exists(path):
+                continue
+            img = Image.open(path).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            # Wrapped to the frame's width, centred near the foot, white with a dark outline.
+            words, rows, row = line["text"].split(), [], ""
+            for word in words:
+                test = (row + " " + word).strip()
+                if draw.textlength(test, font=font) > w * 0.86 and row:
+                    rows.append(row)
+                    row = word
+                else:
+                    row = test
+            rows.append(row)
+            y = h - (len(rows) + 1) * int(size * 1.25)
+            for r in rows:
+                x = (w - draw.textlength(r, font=font)) / 2
+                draw.text((x, y), r, font=font, fill=(255, 255, 255), stroke_width=max(1, size // 12), stroke_fill=(0, 0, 0))
+                y += int(size * 1.25)
+            img.save(path + ".tmp.png", compress_level=1)
+            os.replace(path + ".tmp.png", path)
+    open(done, "w").close()
+
+
 def run_rad(args):
     """Runs a RAD tool and closes its window once it reports "Done" (it waits open otherwise)."""
     proc = subprocess.Popen([RAD] + args)
@@ -198,6 +260,8 @@ def main():
     ap.add_argument("--device", default="cuda", help="cuda, or cpu to spare the graphics card")
     ap.add_argument("--model", default=MODEL, help="Real-ESRGAN weights (realesr-general-x4v3.pth is the fast one for CPU)")
     ap.add_argument("--threads", type=int, default=0, help="CPU threads for the model (0 = PyTorch's default)")
+    ap.add_argument("--subtitles", help="JSON lines drawn on the frames (start/end source frames, text)")
+    ap.add_argument("--no-upscale", action="store_true", help="resize only, no model")
     args = ap.parse_args()
     if os.path.exists(args.output):
         print(f"{args.output} already made", flush=True)
@@ -208,7 +272,12 @@ def main():
     src_dir, up_dir = os.path.join(args.work, "src"), os.path.join(args.work, "up")
     fps = extract(args, src_dir)
     print(f"frames at {fps:.3f} fps", flush=True)
-    upscale(src_dir, up_dir, args.size, args.device, args.model, args.threads)
+    if args.no_upscale:
+        resize_only(src_dir, up_dir, args.size)
+    else:
+        upscale(src_dir, up_dir, args.size, args.device, args.model, args.threads)
+    if args.subtitles:
+        subtitle(up_dir, args.subtitles)
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     encode(up_dir, src_dir, fps, os.path.abspath(args.output))
 
