@@ -135,8 +135,8 @@ out\gui\TamrielMerge.exe
 The repository holds the source, scripts and documents. What the tool downloads (`setup`) and what it makes from your
 games aren't in it. The models made from Daggerfall's sprites come with the release; from source, the conversion's
 *Missing models* step makes them (AI, on the graphics card). The SKSE plugins' sources are in `tools/skse`, built
-already, and rebuilt with their `build.ps1` (Visual Studio's C++ tools; the graphics plugin also needs Dear ImGui and
-NVIDIA's DLSS SDK in `tools/skse/third_party`, not included).
+already, and rebuilt with their `build.ps1` (Visual Studio's C++ tools): TamrielMergeEra (the era in the game's dates)
+and TamrielMergeSeamless (Skyrim's physics area widened for Daggerfall's one-worldspace overland).
 
 ## Documentation
 
@@ -156,7 +156,6 @@ How each part works, in `docs/`:
 | [videos.md](docs/videos.md) | the remastered intro videos |
 | [menu.md](docs/menu.md) | the main menu flyby and theme |
 | [parts.md](docs/parts.md) | the mod organizer |
-| [graphics-plugin.md](docs/graphics-plugin.md) | the SKSE graphics plugin |
 | [daggerfall-quests.md](docs/daggerfall-quests.md), [daggerfall-talk-reputation.md](docs/daggerfall-talk-reputation.md) | Daggerfall's quests, conversation and reputation |
 
 ## Credits and licences
@@ -183,6 +182,4 @@ Built with:
   [Eclipse Temurin](https://adoptium.net/): downloaded or used by setup.
 - Creature models: see [tools/creatures/CREDITS.md](tools/creatures/CREDITS.md) (CC0, CC-BY 3.0/4.0, CC-BY-SA 3.0).
 - The ship: a free model from [CGTrader](https://www.cgtrader.com/free-3d-models/watercraft/historic-watercraft/ship-8d79bbda-ccc3-45f9-8b38-ec81c5a4d0cd).
-- [SKSE](https://skse.silverlock.org/) runs the plugins; the graphics plugin uses [Dear ImGui](https://github.com/ocornut/imgui)
-  (MIT) and NVIDIA's [DLSS SDK](https://github.com/NVIDIA/DLSS), whose runtime setup downloads under the NVIDIA RTX
-  SDKs licence.
+- [SKSE](https://skse.silverlock.org/) runs the plugins.

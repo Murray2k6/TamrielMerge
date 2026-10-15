@@ -20,8 +20,6 @@ namespace TamrielMerge.Setup;
 /// there is, else blender.org's portable build in tools\blender;</item>
 /// <item>onnxruntime and DeepBump's colour-to-normals model (GPL-3.0, downloaded, run by our own code) for the model
 /// viewer's PBR tool (tools\textures\pbr.py);</item>
-/// <item>NVIDIA's DLSS runtime (nvngx_dlss.dll, NVIDIA RTX SDKs licence, which allows shipping it with an app) beside
-/// the graphics plugin (tools\skse\TamrielMergeGraphics), from NVIDIA's DLSS repository.</item>
 /// </list>
 /// The Creation Kit's tools (xWMAEncode, LipGenerator, the Papyrus compiler) come only with the Creation Kit on Steam,
 /// so they are checked for, not installed.
@@ -48,18 +46,6 @@ public static class Dependencies
     /// <summary>DeepBump's colour-to-normals model (GPL-3.0), for the PBR tool.</summary>
     public static string NormalsModel => Path.Combine(Root, "pbr", "deepbump256.onnx");
     const string NormalsModelUrl = "https://raw.githubusercontent.com/HugoTini/DeepBump/master/deepbump256.onnx";
-    /// <summary>NVIDIA's DLSS runtime, beside the graphics plugin: the first copy up from the tool (a project's
-    /// tools\skse), else in the tools folder where setup downloads it.</summary>
-    public static string DlssRuntime
-    {
-        get
-        {
-            for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-                if (Path.Combine(dir.FullName, "tools", "skse", "TamrielMergeGraphics", "nvngx_dlss.dll") is var p && File.Exists(p)) return p;
-            return Path.Combine(Root, "skse", "TamrielMergeGraphics", "nvngx_dlss.dll");
-        }
-    }
-
     /// <summary>Crash Logger SSE (MIT): an SKSE plugin that writes what a crash happened in (game-check installs it).</summary>
     public static string CrashLogger => Path.Combine(Root, "crashlogger", "SKSE", "Plugins", "CrashLogger.dll");
     const string CrashLoggerUrl = "https://github.com/alandtse/CrashLoggerSSE/releases/download/v1.25.0/CrashLogger_1.25.0.7z";
@@ -82,7 +68,6 @@ public static class Dependencies
             return Directory.Exists(JreDir) ? Directory.EnumerateFiles(JreDir, "java.exe", SearchOption.AllDirectories).FirstOrDefault() : null;
         }
     }
-    const string DlssRuntimeUrl = "https://raw.githubusercontent.com/NVIDIA/DLSS/main/lib/Windows_x86_64/rel/nvngx_dlss.dll";
     static bool DepthModelReady => Directory.Exists(Path.Combine(ModelCache, "hub", "models--depth-anything--Depth-Anything-V2-Base-hf", "snapshots"));
 
     const string BlenderVersion = "5.2.2";   // 5.1.2's EEVEE drew enclosed streets black in the flyby (2026-10-11)
@@ -153,7 +138,6 @@ public static class Dependencies
             new("Depth model (Depth Anything V2)", DepthModelReady, ModelCache),
             new("Blender (ray-traced menu intro)", Blender is not null, Blender ?? Path.Combine(Root, "blender")),
             new("Normals model (PBR tool)", File.Exists(NormalsModel), NormalsModel),
-            new("DLSS runtime (graphics plugin)", File.Exists(DlssRuntime), DlssRuntime),
             new("FFDec (Tamriel menu)", File.Exists(Ffdec), Ffdec),
             new("Java (for FFDec)", Java is not null, Java ?? JreDir),
             new("Crash Logger (game check)", File.Exists(CrashLogger), CrashLogger),
@@ -364,7 +348,6 @@ public static class Dependencies
         });
 
         Step("Normals model", () => File.Exists(NormalsModel), () => Download(NormalsModelUrl, NormalsModel));
-        Step("DLSS runtime", () => File.Exists(DlssRuntime), () => Download(DlssRuntimeUrl, DlssRuntime));
         Step("FFDec", () => File.Exists(Ffdec), () =>
         {
             string zip = Download(FfdecUrl, Path.Combine(Root, "downloads", "ffdec.zip"));

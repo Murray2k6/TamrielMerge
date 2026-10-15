@@ -54,7 +54,6 @@ TamrielMerge.mods.json
 /tools/skse/**/*.exp
 /tools/skse/**/*.lib
 /tools/skse/**/*.pdb
-/tools/skse/**/nvngx_dlss.dll
 /tools/skse/**/gen/
 /tools/skse/**/test/*.exe
 

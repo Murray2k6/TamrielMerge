@@ -8,7 +8,7 @@ namespace TamrielMerge.Skyrim.Terrain;
 
 /// <summary>
 /// The Iliac Bay overland split into tiles, each its own worldspace centred on its own origin, when it is too big for
-/// one. Skyrim's physics ends 64 cells from a worldspace's centre (its Havok broad phase box), which TamrielMergeGraphics
+/// one. Skyrim's physics ends 64 cells from a worldspace's centre (its Havok broad phase box), which TamrielMergeSeamless
 /// (our SKSE plugin) widens to 512 cells at load ([World] iPhysicsCells), so since 2026-10-12 a map up to 1024 cells a
 /// side is one worldspace (user: travel seen "without loading", the map not made smaller): Daggerfall's 1000 x 500 at
 /// one map pixel a cell is one, built in chunks (<see cref="Chunks"/>) so a build holds only a chunk of land at a time.
@@ -22,7 +22,7 @@ public sealed class OverlandTiles
 {
     public const int CellUnits = HeightField.QuadsPerCell * HeightField.UnitsPerQuad;
     /// <summary>Largest map (cells per side) kept as one worldspace: ±512 cells from its centre, the physics box
-    /// TamrielMergeGraphics makes (was 256: ±128, with tiles past it).</summary>
+    /// TamrielMergeSeamless makes (was 256: ±128, with tiles past it).</summary>
     public const int SingleLimit = 1024;
     /// <summary>A big worldspace's land, distant terrain and navmesh are built this many cells square at a time (a
     /// multiple of the distant terrain's largest chunk, so none of its chunks is split).</summary>

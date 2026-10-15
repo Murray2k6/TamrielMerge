@@ -95,29 +95,6 @@ public static class GameCheck
         return places.Where(File.Exists).OrderByDescending(File.GetLastWriteTime).FirstOrDefault();
     }
 
-    /// <summary>The graphics plugin's state in the session: DLSS, the ray tracing (its camera, sun and tonemapping pass
-    /// found, its last report: meshes, GPU time, the line-up check), the seamless transitions' menus.</summary>
-    static void GraphicsSummary(string[] lines, string path, StringBuilder r)
-    {
-        r.AppendLine($"Graphics plugin ({path}):");
-        string? Last(string pattern) => lines.LastOrDefault(l => Regex.IsMatch(l, pattern));
-        string? First(string pattern) => lines.FirstOrDefault(l => Regex.IsMatch(l, pattern));
-        var picks = new List<string?>
-        {
-            First("^DLSS available"), Last("^DLSS: (DLAA|DLSS)"), First("^DLSS: first frame"), Last("dynamic resolution (locked|let go)"),
-            First("^jitter check"),
-            First("^ray tracing: Direct3D 12 device"), First("^ray tracing: ready"), Last("^ray tracing: OFF"),
-            First("^ray tracing: camera frustum"), First("^ray tracing: camera axes|world-to-clip matrix didn't"), Last("^ray tracing: sun at"),
-            First("^ray tracing: tonemapping pass found"), Last("^ray tracing: .*instances"), Last("line up|lined up again"),
-            First("^transitions: the game's menus found"), Last("^transitions: "),
-        };
-        var shown = picks.Where(p => p is not null).Distinct().ToList();
-        if (shown.Count == 0) r.AppendLine("  (nothing from DLSS, ray tracing or the transitions in this session)");
-        foreach (var l in shown) r.AppendLine($"  {l!.Trim()}");
-        var fps = lines.Where(l => l.StartsWith("frame ")).ToList();
-        if (fps.Count > 0) r.AppendLine($"  {fps[^1].Trim()} (the last of {fps.Count} frame-rate lines)");
-    }
-
     public static string Scan(DateTime since, string workspace, string? skyrimData = null)
     {
         var r = new StringBuilder();
@@ -158,14 +135,13 @@ public static class GameCheck
 
         // TamrielMerge's own SKSE plugins. They write their logs beside themselves (Data\SKSE\Plugins, or Mod Organizer
         // 2's overwrite folder when the game runs through it), not in Documents.
-        foreach (var name in new[] { "TamrielMergeEra.log", "TamrielMergeGraphics.log" })
+        foreach (var name in new[] { "TamrielMergeEra.log", "TamrielMergeSeamless.log" })
         {
             string? f = PluginLog(name, skyrimData);
             if (f is null || File.GetLastWriteTime(f) < since.AddMinutes(-1)) continue;
             var lines = File.ReadAllLines(f);
             var bad = lines.Where(l => Regex.IsMatch(l, "error|fail|not found|unsupported|OFF:|doesn't line up|took over", RegexOptions.IgnoreCase)).ToList();
             if (bad.Count > 0) { r.AppendLine($"{name}:"); foreach (var l in bad.Take(20)) r.AppendLine($"  {l.Trim()}"); }
-            if (name == "TamrielMergeGraphics.log") GraphicsSummary(lines, f, r);
         }
 
         string report = r.ToString();

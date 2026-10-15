@@ -58,9 +58,9 @@
     <None Include="..\..\tools\scene3d\blend_scene.py" Link="tools\scene3d\blend_scene.py" CopyToOutputDirectory="PreserveNewest" />
     <!-- The model viewer's texture pictures and PBR tool. -->
     <None Include="..\..\tools\textures\pbr.py" Link="tools\textures\pbr.py" CopyToOutputDirectory="PreserveNewest" />
-    <!-- The SKSE plugins the conversion installs (AltStartBuilder.CopyEraPlugin); NVIDIA's DLSS runtime comes from setup. -->
+    <!-- The SKSE plugins the conversion installs (AltStartBuilder.CopyEraPlugin). -->
     <None Include="..\..\tools\skse\TamrielMergeEra\TamrielMergeEra.dll" Link="tools\skse\TamrielMergeEra\TamrielMergeEra.dll" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\tools\skse\TamrielMergeGraphics\TamrielMergeGraphics.dll" Link="tools\skse\TamrielMergeGraphics\TamrielMergeGraphics.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\skse\TamrielMergeSeamless\TamrielMergeSeamless.dll" Link="tools\skse\TamrielMergeSeamless\TamrielMergeSeamless.dll" CopyToOutputDirectory="PreserveNewest" />
     <!-- The games' textures upscaled (upscale-textures, run by convert). -->
     <None Include="..\..\tools\upscale\upscale.py" Link="tools\upscale\upscale.py" CopyToOutputDirectory="PreserveNewest" />
     <!-- The model viewer's turntable previews. -->

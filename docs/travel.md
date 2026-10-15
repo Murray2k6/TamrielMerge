@@ -66,11 +66,13 @@ passage 25 per 24 sea pixels and one. Only the Iliac Bay has Daggerfall's climat
 - **Vvardenfell**: the converted Morrowind.esm's town map markers, by the region of their cells. 95 towns, 15 regions.
 - **Stros M'Kai**: its converter makes no town map markers; not in travel yet (a small island in four worldspaces).
 
-## The physics box (TamrielMergeGraphics)
+## The physics box (TamrielMergeSeamless)
 
 Daggerfall's overland is one worldspace of 1000 x 500 cells (so travel is seamless). Skyrim's physics ends 64 cells
 from a worldspace's centre (its Havok broad phase box: 262,144 units, an hkVector4 in the executable's read-only data);
-the SKSE plugin finds it by value at load and makes it `[World] iPhysicsCells` (512) cells.
+the SKSE plugin TamrielMergeSeamless (tools/skse/TamrielMergeSeamless; that change and nothing else) finds it by value
+at load and makes it `[World] iPhysicsCells` cells (512; TamrielMergeSeamless.ini beside it). It was part of the
+graphics plugin until that was removed from the tool (user, 2026-10-15).
 
 ## Needs checking in game (not run here)
 

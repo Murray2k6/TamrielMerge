@@ -431,6 +431,10 @@ static class Program
                     if (plugins.Contains(Skyrim.Render.MenuArchive.PluginName) || File.Exists(Path.Combine(dir, Skyrim.Render.MenuArchive.PluginName)))
                         if (Skyrim.Render.MenuArchive.RemoveLoose(dir) is { Count: > 0 } removed)
                             Console.WriteLine($"Main menu: {removed.Count} older loose menu files removed from {dir} (they hid the new menu's archive)");
+                // The graphics plugin and its DLSS runtime, left by earlier conversions: no longer part of the tool.
+                foreach (var dir in new[] { finalDir }.Concat(opts.ContainsKey("install") ? [skyrimData] : Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase))
+                    if (Skyrim.AltStartBuilder.RemoveGraphicsPlugin(dir) is { Count: > 0 } gone)
+                        Console.WriteLine($"Graphics plugin removed from {dir}: {string.Join(", ", gone)}");
                 var creatureStep = Begin("Creatures");
                 // Procedural creatures (--procedural-creatures): ordinary creatures from all the converted games, spawning
                 // and respawning by habitat in every world (--respawn-scale multiplies the games' respawn times).

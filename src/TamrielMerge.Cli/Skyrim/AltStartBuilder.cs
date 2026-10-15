@@ -300,18 +300,18 @@ public static class AltStartBuilder
 
     /// <summary>
     /// The converter's SKSE plugins (tools/skse) into outDir\SKSE\Plugins: TamrielMergeEra.dll makes the game's dates
-    /// show the era of the time travelled to (Skyrim prints "4E" whatever the year); TamrielMergeGraphics.dll adds
-    /// Starfield's kind of graphics options (DLSS, ray-traced lighting) with an in-game settings menu (F10), with
-    /// NVIDIA's DLSS runtime beside it, and widens Skyrim's physics box to 512 cells from a worldspace's centre, which
-    /// Daggerfall's overland (one worldspace of 1000 x 500 cells) needs: without it physics ends 64 cells out (actors
-    /// sink, doors stick). The era and graphics parts are optional; SKSE is needed anyway (the Tamriel menu).
+    /// show the era of the time travelled to (Skyrim prints "4E" whatever the year); TamrielMergeSeamless.dll widens
+    /// Skyrim's physics box to 512 cells from a worldspace's centre, which Daggerfall's overland (one worldspace of
+    /// 1000 x 500 cells) needs: without it physics ends 64 cells out (actors sink, doors stick). SKSE is needed anyway
+    /// (the Tamriel menu). The graphics plugin (DLSS, ray tracing) was removed from the tool on 2026-10-15 (user).
     /// </summary>
     public static void CopyEraPlugin(string outDir)
     {
+        RemoveGraphicsPlugin(outDir);
         (string Folder, string[] Files)[] plugins =
         [
             ("TamrielMergeEra", ["TamrielMergeEra.dll"]),
-            ("TamrielMergeGraphics", ["TamrielMergeGraphics.dll", "nvngx_dlss.dll"]),
+            ("TamrielMergeSeamless", ["TamrielMergeSeamless.dll"]),
         ];
         string target = Path.Combine(outDir, "SKSE", "Plugins");
         foreach (var (folder, files) in plugins)
@@ -322,17 +322,29 @@ public static class AltStartBuilder
                 Directory.CreateDirectory(target);
                 foreach (var f in files)
                 {
-                    // NVIDIA's runtime is where setup put it when it isn't beside the plugin (the app ships the plugin).
                     string from = Path.Combine(src, f);
-                    if (!File.Exists(from) && f == "nvngx_dlss.dll") from = Setup.Dependencies.DlssRuntime;
-                    if (!File.Exists(from)) continue;
-                    // Helper DLLs (NVIDIA's runtime) in the plugin's own folder, so SKSE doesn't take them for plugins.
-                    string dest = f == files[0] ? target : Path.Combine(target, folder);
-                    Directory.CreateDirectory(dest);
-                    File.Copy(from, Path.Combine(dest, f), overwrite: true);
+                    if (File.Exists(from)) File.Copy(from, Path.Combine(target, f), overwrite: true);
                 }
                 break;
             }
+    }
+
+    /// <summary>
+    /// The graphics plugin's files where an earlier conversion put them (the plugin, NVIDIA's DLSS runtime in its folder,
+    /// its settings and logs): removed with it from the tool (user, 2026-10-15: "remove dlss and the plugin"). In
+    /// <paramref name="dataDir"/> (an output folder, or Skyrim's Data on --install); returns what was removed.
+    /// </summary>
+    public static List<string> RemoveGraphicsPlugin(string dataDir)
+    {
+        string plugins = Path.Combine(dataDir, "SKSE", "Plugins");
+        var removed = new List<string>();
+        if (!Directory.Exists(plugins)) return removed;
+        foreach (var f in Directory.GetFiles(plugins, "TamrielMergeGraphics*"))
+            try { File.Delete(f); removed.Add(Path.GetFileName(f)); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        string folder = Path.Combine(plugins, "TamrielMergeGraphics");
+        if (Directory.Exists(folder))
+            try { Directory.Delete(folder, true); removed.Add("TamrielMergeGraphics\\"); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        return removed;
     }
 
     /// <summary>
