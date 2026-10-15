@@ -169,6 +169,7 @@ public static class DaggerfallPluginBuilder
             GuildsQuest = guilds?.Quest,
             Guilds = guilds?.Built ?? [],
             IliacBay = iliacBay.FormKey,
+            SoundDir = outDir,
             Weapons = [.. mod.Weapons.Where(w => w.EditorID is { } e && (e.StartsWith("DFWeapIron") || e.StartsWith("DFWeapSteel"))).Select(w => w.FormKey)],
             Armor = [.. mod.Armors.Where(a => a.EditorID is { } e && (e.StartsWith("DFArmorLeather") || e.StartsWith("DFArmorChain") || e.StartsWith("DFArmorIron") || e.StartsWith("DFArmorSteel"))).Select(a => a.FormKey)],
             Books = [.. mod.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey)],

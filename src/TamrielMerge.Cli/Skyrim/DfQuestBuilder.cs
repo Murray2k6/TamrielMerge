@@ -198,6 +198,14 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         if (Vanilla<IQuestGetter>("PlayerVampireQuest") is { } vq) props.Add(Obj("VampireQuest", vq.FormKey));
         if (Vanilla<ISpellGetter>("WerewolfChange") is { } wp) props.Add(Obj("WerewolfPower", wp.FormKey));
         if (sound is not null) props.Add(Obj("QuestSound", sound.FormKey));
+        // The sounds quests play ("play sound N": DAGGER.SND's record N), as Daggerfall's own sounds.
+        var soundIds = quests.SelectMany(q => q.Ops).Where(o => o.Code is 0x3C or 0x54 && o.ArgCount > 1).Select(o => o.Args[1].Int).Distinct().Order().ToList();
+        var madeSounds = QuestSounds(soundIds);
+        if (madeSounds.Count > 0)
+        {
+            props.Add(Ints("DfSoundIds", madeSounds.Select(m => m.Id)));
+            props.Add(Objs("DfSounds", madeSounds.Select(m => m.Marker)));
+        }
         Machine.Aliases.Add(new QuestAlias { ID = 0, Name = "Player", ForcedReference = new FormLinkNullable<IPlacedGetter>(PlayerRef) });
         Machine.NextAliasID = 1;
         Machine.VirtualMachineAdapter = new QuestAdapter
@@ -220,6 +228,33 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             + (items.Missing.Count > 0 ? $"; items without a stand-in: {string.Join(", ", items.Missing)}" : "")
             + (Problems.Count > 0 ? $"; problems: {string.Join("; ", Problems.Take(5))}" : ""));
     }
+
+    /// <summary>Daggerfall's sounds the quests play, from DAGGER.SND by record id: each a WAV under
+    /// Sound\fx\TamrielMerge\Daggerfall in <see cref="SoundDir"/> with a sound descriptor (a copy of a vanilla quest
+    /// sound's settings) and a sound marker for Papyrus. None without SoundDir or DAGGER.SND.</summary>
+    List<(int Id, FormKey Marker)> QuestSounds(IEnumerable<int> ids)
+    {
+        var made = new List<(int, FormKey)>();
+        if (SoundDir is null || DfSound.Load(arena2) is not { } snd) return made;
+        var template = Vanilla<ISoundDescriptorGetter>("QSTTG01UrnSmashSD");
+        if (template is null) return made;
+        foreach (int id in ids)
+        {
+            string rel = Path.Combine("fx", "TamrielMerge", "Daggerfall", $"dfsnd{id:D3}.wav");
+            if (id < 0 || !snd.WriteWav((uint)id, Path.Combine(SoundDir, "Sound", rel))) { Problems.Add($"sound {id}: not in DAGGER.SND"); continue; }
+            var descriptor = mod.SoundDescriptors.DuplicateInAsNewRecord(template);
+            descriptor.EditorID = $"DFQuestSound{id:D3}SD";
+            descriptor.SoundFiles.Clear();
+            descriptor.SoundFiles.Add(new Mutagen.Bethesda.Plugins.Assets.AssetLink<Mutagen.Bethesda.Skyrim.Assets.SkyrimSoundAssetType>(rel));
+            var marker = new SoundMarker(mod) { EditorID = $"DFQuestSound{id:D3}", ObjectBounds = new ObjectBounds(), SoundDescriptor = descriptor.ToNullableLink<ISoundDescriptorGetter>() };
+            mod.SoundMarkers.Add(marker);
+            made.Add((id, marker.FormKey));
+        }
+        return made;
+    }
+
+    /// <summary>The folder the plugin's loose files go in (its Sound folder is made here), for the quests' sounds.</summary>
+    public string? SoundDir { get; init; }
 
     static int MinReq(string name)
     {

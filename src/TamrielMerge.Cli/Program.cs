@@ -1429,7 +1429,7 @@ static class Program
                 DfQuestGlobals.AddAll(mod);
                 var builder = new DfQuestBuilder(mod, arena2, masters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
                 {
-                    Foe = id => creatures.Spawn(id), Spells = spells.Spells,
+                    Foe = id => creatures.Spawn(id), Spells = spells.Spells, SoundDir = Path.GetDirectoryName(outPath),
                 };
                 builder.Build();
                 foreach (var p in builder.Problems) Console.WriteLine("  " + p);
@@ -1606,7 +1606,7 @@ static class Program
                     DfQuestGlobals.AddAll(mod);
                     var qb = new DfQuestBuilder(mod, arena2, questMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
                     {
-                        Foe = id => townCreatures.Spawn(id), GuildsQuest = guilds.Quest, Guilds = guilds.Built,
+                        Foe = id => townCreatures.Spawn(id), GuildsQuest = guilds.Quest, Guilds = guilds.Built, SoundDir = outDir,
                     };
                     qb.Build();
                     var questTowns = picked.Zip(built).Select(p => new QuestSites.Town(p.First, p.Second)).ToList();

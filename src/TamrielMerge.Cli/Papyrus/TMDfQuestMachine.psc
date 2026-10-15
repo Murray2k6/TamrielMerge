@@ -55,6 +55,9 @@ String[] Property BuildingLabels Auto
 String[] Property Gods Auto
 String[] Property Oaths Auto
 Sound Property QuestSound Auto
+Sound[] Property DfSounds Auto
+Int[] Property DfSoundIds Auto
+{Daggerfall's sounds the quests play, by DAGGER.SND record id.}
 Int Property MinutesPerPixel = 90 Auto
 {Cautious travel time per map pixel, for clocks that count the way there.}
 Int Property CommonersFaction = 0 Auto
@@ -842,8 +845,15 @@ Function PlayVideo(Int n)
   Game.PlayBink("TamrielMerge_DfAnim" + n + ".bik", True)
 EndFunction
 
+; "play sound N": Daggerfall's own sound with record id N in DAGGER.SND (the converter's DfSounds), else a stand-in.
 Function PlayDfSound(Int n)
-  If QuestSound
+  Int k = -1
+  If DfSoundIds
+    k = DfSoundIds.Find(n)
+  EndIf
+  If k >= 0 && DfSounds[k]
+    DfSounds[k].Play(PlayerRef)
+  ElseIf QuestSound
     QuestSound.Play(PlayerRef)
   EndIf
 EndFunction

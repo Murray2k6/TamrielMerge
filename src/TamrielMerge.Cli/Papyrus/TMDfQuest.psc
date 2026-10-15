@@ -688,7 +688,11 @@ Bool Function RunAction(Int i)
       spawnOp[slot] = i
       spawnNext[slot] = Utility.GetCurrentGameTime() + Arg(i, 2) / 1440.0
       If code == 0x54
-        spawnLeft[slot] = -1
+        ; "play sound N every M minutes K times" (Daggerfall Unity PlaySound: 0 times is for ever).
+        spawnLeft[slot] = Arg(i, 3)
+        If spawnLeft[slot] <= 0
+          spawnLeft[slot] = -1
+        EndIf
       Else
         spawnLeft[slot] = Arg(i, 4)
       EndIf
