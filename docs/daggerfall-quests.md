@@ -56,10 +56,78 @@ Unity leaves it out, so it is skipped. `df-quest-check --places` lists where eve
   Unity's ChangeReputation: allies +half, enemies -half, knightly orders via the generic order, otherwise the whole tree
   from the root (the faction and roots fully, the rest half), gods also the generic temple; -100..100.
 - DFQuestMachine (TMDfQuestMachine): the catalogue (letter, membership, minimum rank or level, one-time), the
-  "Do you have any work for me?" topic, generic people (Breton and Redguard faces) with Daggerfall names, item lists per
-  item group, Daggerfall's spells, cures and diseases, the holding cell for quest items and name tags.
+  "Do you have any work for me?" topic, the people quests make, item lists per item group, Daggerfall's spells, cures
+  and diseases, its sounds, the covens' summoning, the escorts, the holding cell for quest items and name tags.
+- Quest people are made as the town people are (TownPeople, Daggerfall Unity StaticNPC): the person's faction's race
+  (FACTION.TXT, TMDfReputation.Races), else the region's Breton or Redguard; a vanilla face of that race and sex
+  (`DFQuestPerson000`..: 9 races x 2 sexes x 6 dresses x 2 faces); dressed for their trade (the building type: barkeep,
+  smith, merchant, robes, noble) or else their faction's social group; a Daggerfall name of that race.
+- Sounds: "play sound N" is DAGGER.SND's record with id N (Daggerfall Unity PlaySound: SoundReader.GetSoundIndex):
+  `DfSound` writes each sound the quests use (19, 386) as a 16-bit 44.1 kHz WAV under `Sound\fx\TamrielMerge\Daggerfall`
+  with a descriptor and marker (`DFQuestSound<id>`); "every M minutes K times" stops after K (0: for ever).
+- Videos: "play video N" plays `TamrielMerge_DfAnim<N>.bik`, which the videos step makes from ANIM000N.VID
+  (docs/videos.md).
+- Building names: Daggerfall's own (`DfBuildingNames`, as Daggerfall Unity's FormulaHelper.GenerateBuildingName): the
+  town's MAPS.BSA building records of named types handed out in order to its blocks' buildings, each name drawn from
+  its record's seed (TavernsB then TavernsA, a shop type's StoresB then StoresA with %cn / %ef, "The Bank of <region>",
+  the guild's or the temple order's name, the three castles from TEXT.RSC). TownBuilder puts it on the street door
+  (TMDfStreetDoor.BuildingName), the quest sites list it (BName) and `_place_` in a message names the building by it
+  ("The Dancing Griffin" rather than "the tavern"). Houses keep "a house" (Daggerfall names them only in quests).
+- "add face" / "drop face": Daggerfall Unity shows the face of someone travelling with the player; here the person
+  follows the player (DFQuestMachine's aliases Escort0-2, Skyrim's PlayerFollowerPackage) until dropped or the quest
+  ends. "add foe face" makes the foes follow as before.
 - `TownTalk` and the builder make the same DFFaction<id>, DFReact<id> and DFSocialGroup<group> records (by EditorID), so
   the town parts share Daggerfall.esm's.
+
+## Witches' covens
+
+The 14 covens (MAPS.BSA location type Coven 13: one exterior block each, WITCAA00-13.RMB, no buildings and no dungeon)
+are built in "Daggerfall Towns.esm" as the towns are (DaggerfallTowns.All includes them; each its own small worldspace
+entered from its spot on the overland). Their witches are the block's flats from TEXTURE.179 ("Witches Coven"), each in
+its coven's faction (419 the Glenmoril Witches ... 432 the Witches of Alcaire, FACTION.TXT type 8). The quest sites
+register each coven as a town (TMDfQuestMachine.FixedSite prefers the built coven to Daggerfall.esm's map-only entry), so
+the quests that send the player to one ($CUREWER, R0C30Y25, R0C40Y23, R0C4XY23, R0C60Y24) mark and reach it.
+
+Talking to a witch (Daggerfall Unity DaggerfallWitchesCovenPopupWindow): "Do you have any work for me?" offers the
+covens' quests (Q, by level), and "Summon a Daedra Prince." runs TMDfQuestMachine.SummonDaedra
+(DaggerfallQuestPopupWindow, MIT):
+
+- who answers: the Glenmoril Witches always summon Hircine; any other coven a prince picked at random for the day (1-15,
+  never Hircine); anyone else only the prince whose day it is (TEXT.RSC 480 otherwise). The days (Daggerfall's day of the
+  year, month x 30 + day): Clavicus Vile 1, Meridia 13, Sheogorath 32, Sanguine 46, Hermaeus Mora 65, Azura 81, Peryite
+  99, Namira 129, Hircine 155, Vaernima 190, Nocturnal 248, Malacath 278, Mephala 283, Boethiah 302, Mehrunes Dagon 320,
+  Molag Bal 350;
+- the cost: 200000 - 1000 x the summoner's regard (481 asks, with the cost; 454 when the player is short);
+- Sheogorath comes instead 5% of the time (15% in a thunderstorm: the Iliac Bay's storm weathers, DFStormWeathers);
+- the chance: 30 + the player's regard with the prince, +30 on the prince's weather (rain for Sanguine, Peryite,
+  Boethiah, Nocturnal; a storm for Sheogorath) or always for the others; failing (484) at a coven brings 1-3 Daedra
+  (Daedra Lord, Seducer, Daedroth, Fire or Frost Daedra);
+- a prince summoned before only speaks (482); the first time the prince's video plays
+  (`TamrielMerge_DfDaedra<NAME>.bik`) and they offer their quest (Hircine X0C00Y00, Clavicus Vile V0C00Y00, Mehrunes
+  Dagon Y0C00Y00, Molag Bal 20C00Y00, Sanguine 70C00Y00, Peryite 50C00Y00, Malacath 80C0XY00, Hermaeus Mora W0C00Y00,
+  Sheogorath 60C00Y00, Boethiah U0C00Y00, Namira 30C00Y00, Meridia 10C00Y00, Vaernima 90C00Y00, Nocturnal 40C00Y00,
+  Mephala Z0C00Y00, Azura T0C00Y00); refusing brings 3-5 Daedra.
+
+The Mages Guild's and temples' summoning services (Daggerfall Unity Services 66, 456...) are not offered yet.
+
+## Legal standing (TMDfLaw)
+
+"legal repute" changes the player's standing in the region of the town they were last in (-100..100). TMDfLaw (a second
+script on DFQuestMachine) reads it as Daggerfall Unity's PlayerEntity and DaggerfallCourtWindow do:
+
+- below -10, each game minute in that region's town streets has a 5% chance (10% once banished from it) that 2-5 of the
+  City Watch come for the player for criminal conspiracy (one group at a time; never indoors or in dungeons);
+- when the first reaches the player: come quietly or fight (they attack);
+- the court (TEXT.RSC 8050-8064): below 0, banishment unless a -rep and a -rep/2 chance (75 at most) both fail; else a
+  penalty of 5 x rep + 500 (500 - 5 x rep below 0) within 10-1500, a point per 40 of it a 40 gold fine or 3 days in
+  prison at random. Pleading guilty halves both; pleading not guilty, debating (Etiquette) or lying (Streetwise) frees
+  the player with rep + (skill + Personality) / 2 percent (5-95; Skyrim's Speech for Personality, the skills
+  docs/daggerfall-senses.md's), else rep + d100 under 25 doubles the sentence, over 75 halves it. A fine beyond the
+  player's gold is served at 40 gold a day; the days in prison pass (GameHour);
+- every 112 days each region's standing moves 1 toward 0.
+
+Daggerfall's towns have no crimes Skyrim records (their people have no crime faction), so only the quests and the drift
+change the standing; the Thieves Guild's and Dark Brotherhood's court rescues are not done.
 
 ## Run time
 
@@ -96,21 +164,24 @@ Unity leaves it out, so it is skipped. `df-quest-check --places` lists where eve
 - `df-quest-build [--out FILE] [--scripts]`: a scratch plugin with only the quest records (no sites), checking every
   TMDf script property against the Papyrus sources; `--scripts` compiles the scripts beside it.
 - `df-town-test --towns ... --quests`: one or more towns with the quests and their quest sites (Daggerfall: 45 sites,
-  29 with a spawn marker, 36 with an item marker, Castle Daggerfall with 4 individuals).
+  29 with a spawn marker, 36 with an item marker, Castle Daggerfall with 4 individuals), the buildings' names, and for
+  covens (`--towns "Glenmorial Coven,Coven of the Tide"`) how many witches are in a coven faction and that the
+  summoning topic answers all 14 covens.
+- `locations --list Coven`: the covens with their location ids, blocks and buildings; `df-flat-census --archives 346,178
+  --list`: every flat of some archives in the blocks (the castle courts' people).
 
 ## Not done yet / approximations
 
 - Untested in game. Arrays over 128 entries come from script properties (catalogue, factions, sites); Papyrus allows
   that for properties, but it wants checking in game, as does the name-tag text replacement.
-- Witches' covens aren't built (no plugin builds non-town exteriors), so the five quests set at covens ($CUREWER,
-  R0C30Y25, R0C40Y23, R0C4XY23, R0C60Y24) can start and mark the coven but can't be finished there.
-- Daedra quests (1-9, T-Z) are converted but not offered: Daggerfall gives them through the covens' summoning service.
-- Quest videos (0x32) play TamrielMerge_DfAnim<n>.bik, which the videos step doesn't make yet; quest sounds (0x3C, 0x54)
-  play one stand-in sound; "add face" is a notification; "mute npc" and the questor role have nothing to act on in
-  Skyrim's dialogue; prompts and messages are message boxes (not voiced).
+- The covens' summoning, the court and the escorts are untested in game. A coven's summoning only from its witches:
+  the Mages Guild's and temples' summoning services aren't offered.
+- "mute npc" and the questor role have nothing to act on in Skyrim's dialogue; prompts and messages are message boxes
+  (not voiced).
 - Clocks to a place use 90 minutes per map pixel of the longer axis, x2.5, at least a day, instead of Daggerfall Unity's
-  travel calculator; quest people are generic Breton/Redguard bodies; building names are generic ("the tavern").
-- Legal reputation is kept per region but nothing reads it yet.
+  travel calculator. Houses have no names of their own ("a house"); a town's streets as a quest place have no spawn
+  marker of their own (people and items placed "at" a town go to its map marker).
+- Daggerfall's quest sounds are made only for the ids the converted quests use; the %rt macro in shop names is "King".
 
 ## Research notes (Daggerfall Unity)
 

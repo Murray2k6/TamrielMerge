@@ -4855,11 +4855,15 @@ static class Program
                 // A target not in Plugins.txt (a scratch plugin in a --data folder of its own) is checked after its masters.
                 order.AddRange(targets.Where(t => !order.Contains(t, StringComparer.OrdinalIgnoreCase) && File.Exists(Path.Combine(data, t))));
                 // Only the masters each target needs, plus the target, in load order.
-                foreach (var target in targets)
+                foreach (var targetSpec in targets)
                 {
-                    var masters = Setup.Parts.MastersOf(data, target);
-                    var mods = order.Where(f => masters.Contains(f, StringComparer.OrdinalIgnoreCase) || f.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(data, f), SkyrimRelease.SkyrimSE)).ToList();
+                    // A full path: a scratch plugin elsewhere, checked against its masters in the data folder.
+                    string target = Path.GetFileName(targetSpec);
+                    string targetDir = Path.IsPathRooted(targetSpec) ? Path.GetDirectoryName(targetSpec)! : data;
+                    var masters = Setup.Parts.MastersOf(targetDir, target);
+                    var mods = order.Where(f => masters.Contains(f, StringComparer.OrdinalIgnoreCase) && !f.Equals(target, StringComparison.OrdinalIgnoreCase))
+                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(data, f), SkyrimRelease.SkyrimSE))
+                        .Append(SkyrimMod.CreateFromBinaryOverlay(Path.Combine(targetDir, target), SkyrimRelease.SkyrimSE)).ToList();
                     try
                     {
                         var cache = mods.ToImmutableLinkCache();
