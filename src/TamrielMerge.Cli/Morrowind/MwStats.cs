@@ -122,12 +122,22 @@ public sealed class MwStats
     public Dictionary<string, int[]> Birthsigns()
     {
         var signs = new Dictionary<string, int[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (var sign in world.Objects.Values.Where(r => r.Type == "BSGN"))
+        // From the plugins themselves: a birthsign's ID can be a spell's too ("Lady's Favor"), and the world's objects
+        // keep one record per ID.
+        var records = new Dictionary<string, Tes3Record>(StringComparer.OrdinalIgnoreCase);
+        var spells = new Dictionary<string, Tes3Record>(StringComparer.OrdinalIgnoreCase);
+        foreach (var plugin in world.Plugins)
+            foreach (var r in plugin.Records.Where(r => r.Type is "BSGN" or "SPEL" && r.Id.Length > 0))
+            {
+                var into = r.Type == "BSGN" ? records : spells;
+                if (r.Deleted) into.Remove(r.Id); else into[r.Id] = r;
+            }
+        foreach (var sign in records.Values)
         {
             var v = new int[8];
             foreach (var spellId in sign.All("NPCS").Select(f => f.Text))
             {
-                if (!world.Objects.TryGetValue(spellId, out var spell) || spell.Type != "SPEL") continue;
+                if (!spells.TryGetValue(spellId, out var spell)) continue;
                 // SPDT type 1: an ability (always on); powers and spells don't change the attributes.
                 if (spell.Get("SPDT") is not { } spdt || spdt.Int(0) != 1) continue;
                 foreach (var e in spell.All("ENAM"))

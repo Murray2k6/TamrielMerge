@@ -239,8 +239,8 @@ public sealed class MwScriptWorld : MwPapyrus.IWorld
 
     public string? Setting(string name) => world.Settings.TryGetValue(name, out var r) ? r.Str("STRV") : null;
 
-    /// <summary>Whether a creature carries the script.</summary>
-    public bool OnCreature(string scriptId) => Carriers.TryGetValue(scriptId, out var c) && c.Any(r => r.Type == "CREA");
+    /// <summary>Whether only creatures carry the script (activating one can open its inventory; a person talks).</summary>
+    public bool OnCreature(string scriptId) => Carriers.TryGetValue(scriptId, out var c) && c.Count > 0 && c.All(r => r.Type == "CREA");
 
     /// <summary>Whether only people and creatures carry the script.</summary>
     public bool OnActor(string scriptId) => Carriers.TryGetValue(scriptId, out var c) && c.Count > 0 && c.All(r => r.Type is "NPC_" or "CREA");

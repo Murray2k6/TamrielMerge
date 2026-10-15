@@ -1,4 +1,4 @@
-using Mutagen.Bethesda.Plugins;
+﻿using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Skyrim;
 using TamrielMerge.Daggerfall;
 using TamrielMerge.Skyrim;
@@ -3321,6 +3321,17 @@ static class Program
                 builder.BuildDialogue();
                 Console.WriteLine($"  cells and dialogue built ({sw.Elapsed.TotalSeconds:F0}s)");
                 int n = builder.AttachScripts(precompiled: Path.GetFullPath(opts.GetValueOrDefault("scripts", "out/mwscripts/Scripts")));
+                // --write: the test's plugin (only these cells, the dialogue and the scripts' records) into --out, for plugin-check.
+                if (opts.ContainsKey("write"))
+                {
+                    TamrielMerge.Skyrim.TopicSubtypes.Fill(builder.Mod);
+                    var masterOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                    builder.Mod.WriteToBinary(Path.Combine(outDir, Morrowind.MwPluginBuilder.PluginName), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                    {
+                        MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(masterOrder),
+                    });
+                    Console.WriteLine($"  wrote {Path.Combine(outDir, Morrowind.MwPluginBuilder.PluginName)}");
+                }
                 Console.WriteLine($"  {n} compiled scripts, {builder.ScriptsAttached} attached, {builder.ResultScriptsAttached} dialogue results, {builder.PropertiesFilled} properties filled ({builder.PropertiesUnfilled} without a record) ({sw.Elapsed.TotalSeconds:F0}s)");
                 var m = builder.Mod;
                 foreach (var rec in m.EnumerateMajorRecords().OfType<Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter>().Take(int.MaxValue))
@@ -3332,6 +3343,22 @@ static class Program
                 }
                 foreach (var npc in m.Npcs)
                     Console.WriteLine($"  npc {npc.EditorID}: {string.Join(", ", npc.VirtualMachineAdapter?.Scripts.Select(s => $"{s.Name} ({s.Properties.Count})") ?? [])} template flags {npc.Configuration.TemplateFlags}");
+                // The records the scripts' state needs: the state quest's tables, journal indexes and objectives, Companion Share.
+                foreach (var q in m.Quests.Where(q => q.EditorID is "MWScriptState"))
+                    foreach (var s in q.VirtualMachineAdapter?.Scripts ?? [])
+                        Console.WriteLine($"  state {q.EditorID}: {s.Name} " + string.Join(", ", s.Properties.Select(p => p switch
+                        {
+                            Mutagen.Bethesda.Skyrim.ScriptObjectListProperty l => $"{p.Name}[{l.Objects.Count}]",
+                            Mutagen.Bethesda.Skyrim.ScriptIntListProperty il => $"{p.Name}[{il.Data.Count}] ({string.Join(" ", il.Data.Take(104))})",
+                            _ => p.Name,
+                        })));
+                Console.WriteLine($"  state: journal index globals {m.Globals.Count(g => g.EditorID?.StartsWith("MWJournalIndex") == true)}, player stat globals {m.Globals.Count(g => g.EditorID?.StartsWith("MWPlayer") == true)}, " +
+                    $"journal objectives {m.Quests.Sum(q => q.EditorID?.StartsWith("MWQ") == true ? q.Objectives.Count : 0)}, companion share {m.DialogTopics.Any(t => t.EditorID == "MWCompanionShare")}, " +
+                    $"carriers with MwBaseStats {m.Npcs.Count(n => n.VirtualMachineAdapter?.Scripts.Any(s => s.Properties.Any(p => p.Name == "MwBaseStats")) == true)}");
+                foreach (var actor in m.Npcs)
+                    foreach (var s in actor.VirtualMachineAdapter?.Scripts ?? [])
+                        if (s.Properties.OfType<Mutagen.Bethesda.Skyrim.ScriptIntListProperty>().FirstOrDefault(p => p.Name == "MwBaseStats") is { } stats)
+                            Console.WriteLine($"  state {actor.EditorID} {s.Name} MwBaseStats: {string.Join(" ", stats.Data)}");
                 foreach (var p in builder.Problems.Where(p => p.StartsWith("script")).Distinct().Take(30)) Console.WriteLine($"  problem: {p}");
                 return 0;
             }
@@ -4765,7 +4792,9 @@ static class Program
                 var loadOrder = File.ReadAllLines(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Skyrim Special Edition", "Plugins.txt"))
                     .Where(l => l.StartsWith('*')).Select(l => l[1..].Trim()).ToList();
                 var order = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Concat(loadOrder)
-                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => File.Exists(Path.Combine(data, f))).ToList();
+                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => File.Exists(Path.Combine(data, f)) || File.Exists(Path.Combine(skyrimData, f))).ToList();
+                // A plugin in --data, else Skyrim's (a scratch folder holds only the plugin to check; its masters are the game's).
+                string PluginPath(string f) => File.Exists(Path.Combine(data, f)) ? Path.Combine(data, f) : Path.Combine(skyrimData, f);
                 var targets = opts["plugins"].Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                 // A target not in Plugins.txt (a scratch plugin in a --data folder of its own) is checked after its masters.
                 order.AddRange(targets.Where(t => !order.Contains(t, StringComparer.OrdinalIgnoreCase) && File.Exists(Path.Combine(data, t))));
@@ -4774,7 +4803,7 @@ static class Program
                 {
                     var masters = Setup.Parts.MastersOf(data, target);
                     var mods = order.Where(f => masters.Contains(f, StringComparer.OrdinalIgnoreCase) || f.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(data, f), SkyrimRelease.SkyrimSE)).ToList();
+                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(PluginPath(f), SkyrimRelease.SkyrimSE)).ToList();
                     try
                     {
                         var cache = mods.ToImmutableLinkCache();

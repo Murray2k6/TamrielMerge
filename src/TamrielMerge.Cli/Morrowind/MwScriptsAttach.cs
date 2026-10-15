@@ -608,7 +608,11 @@ public sealed partial class MwPluginBuilder
         {
             // "The Lady" is Skyrim's doomLadyAbility, the Lady Stone's.
             string word = name.Split(' ', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "";
-            if (skyrimEsm!.Spells.FirstOrDefault(sp => sp.EditorID is { } e && e.Equals("doom" + word + "Ability", StringComparison.OrdinalIgnoreCase)) is not { } stone) continue;
+            if (skyrimEsm!.Spells.FirstOrDefault(sp => sp.EditorID is { } e && e.Equals("doom" + word + "Ability", StringComparison.OrdinalIgnoreCase)) is not { } stone)
+            {
+                Problems.Add($"script state: birthsign {name} has no standing stone (doom{word}Ability)");
+                continue;
+            }
             signs.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(stone.FormKey) });
             signStats.AddRange(values);
         }
