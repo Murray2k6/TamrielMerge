@@ -116,10 +116,27 @@ static class Program
                     Console.WriteLine($"{game} ({install.Store}): converting...");
                     try
                     {
-                        if (Main(stepArgs) == 0 && File.Exists(Path.Combine(outDir, plugin))) plugins.Add(plugin);
+                        if (Child(stepArgs) == 0 && File.Exists(Path.Combine(outDir, plugin))) plugins.Add(plugin);
                         else failed.Add(game.ToString());
                     }
                     catch (Exception e) { Console.WriteLine($"{game}: failed: {e.Message}"); failed.Add(game.ToString()); }
+                }
+                // A step in a process of its own, its progress passed on within this step's share and the rest of its
+                // output as it is. 2026-10-15: Daggerfall's build run in this process left it holding 30 GB (the land and
+                // its navmesh), so the town parts after it saw 3 GB free and ran one at a time, five hours instead of one.
+                int Child(string[] args)
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, RedirectStandardOutput = true };
+                    foreach (var a in args) psi.ArgumentList.Add(a);
+                    using var p = System.Diagnostics.Process.Start(psi)!;
+                    while (p.StandardOutput.ReadLine() is { } line)
+                    {
+                        var m = System.Text.RegularExpressions.Regex.Match(line, @"^PROGRESS (\d+(?:\.\d+)?) (.*)$");
+                        if (m.Success) Progress.Report(double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture), m.Groups[2].Value);
+                        else Console.WriteLine(line);
+                    }
+                    p.WaitForExit();
+                    return p.ExitCode;
                 }
                 // Models for the Daggerfall sprites Skyrim has none of (seagulls, palms, cacti...), made from the sprites
                 // themselves before Daggerfall is built (which then uses them); --skip Models keeps the vanilla stand-ins.

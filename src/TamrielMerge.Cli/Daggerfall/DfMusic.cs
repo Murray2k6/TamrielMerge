@@ -51,7 +51,9 @@ public static class DfMusic
 
     public sealed record Tools(string WildMidi, string FluidSynth, string SoundFont, string XwmaEncode);
 
-    /// <summary>Renders every playlist song to outDir/NAME.xwm (skipping ones already rendered). Returns name -> seconds.</summary>
+    /// <summary>Renders every playlist song to outDir/NAME.xwm (skipping ones already rendered). Returns name -> seconds.
+    /// A rendered song is kept in workDir too, so a build into a new folder copies it instead of rendering it again
+    /// (2026-10-15: 72 songs, one after another, were 5 minutes of a conversion); the rest are rendered side by side.</summary>
     public static Dictionary<string, double> RenderAll(string arena2, Tools tools, string outDir, string workDir, bool uncut = true, string? only = null)
     {
         outDir = Path.GetFullPath(outDir);
@@ -59,26 +61,34 @@ public static class DfMusic
         Directory.CreateDirectory(outDir);
         Directory.CreateDirectory(workDir);
         var bsa = new DfBsa(Path.Combine(arena2, "MIDI.BSA"));
-        var lengths = new Dictionary<string, double>();
-        foreach (var name in AllPlaylists(uncut).SelectMany(p => p.Value).Distinct().Order().Where(n => only is null || n == only))
+        var lengths = new System.Collections.Concurrent.ConcurrentDictionary<string, double>();
+        var names = AllPlaylists(uncut).SelectMany(p => p.Value).Distinct().Order().Where(n => only is null || n == only).ToList();
+        var records = names.ToDictionary(n => n, n => bsa.Record(n + ".HMI"));
+        Parallel.ForEach(names, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) }, name =>
         {
-            string xwm = Path.Combine(outDir, name + ".xwm");
+            string xwm = Path.Combine(outDir, name + ".xwm"), kept = Path.Combine(workDir, name + ".xwm");
             string lenFile = Path.Combine(workDir, name + ".seconds");
-            if (File.Exists(xwm) && File.Exists(lenFile)) { lengths[name] = double.Parse(File.ReadAllText(lenFile)); continue; }
+            if (File.Exists(lenFile) && (File.Exists(xwm) || File.Exists(kept)))
+            {
+                if (!File.Exists(xwm)) File.Copy(kept, xwm);
+                lengths[name] = double.Parse(File.ReadAllText(lenFile), System.Globalization.CultureInfo.InvariantCulture);
+                return;
+            }
 
             string hmi = Path.Combine(workDir, name + ".hmi"), mid = Path.Combine(workDir, name + ".mid"), fixedMid = Path.Combine(workDir, name + ".loop.mid"), wav = Path.Combine(workDir, name + ".wav");
-            File.WriteAllBytes(hmi, bsa.Record(name + ".HMI"));
+            File.WriteAllBytes(hmi, records[name]);
             Run(tools.WildMidi, workDir, $"--tomidi={mid}", hmi);
             double seconds = Midi.RepairAndLoop(mid, fixedMid, minSeconds: 150);
             Run(tools.FluidSynth, workDir, "-ni", "-q", "-g", "0.6", "-r", "44100", "-R", "1", "-C", "1", "-F", wav, tools.SoundFont, fixedMid);
             Wav.FadeAndNormalise(wav, fadeSeconds: 6, seconds + 4);
             Run(tools.XwmaEncode, workDir, "-b", "192000", wav, xwm);
             File.Delete(wav);
+            File.Copy(xwm, kept, overwrite: true);
             File.WriteAllText(lenFile, seconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
             lengths[name] = seconds;
             Console.WriteLine($"  rendered {name}: {seconds:F0}s");
-        }
-        return lengths;
+        });
+        return new Dictionary<string, double>(lengths);
     }
 
     static void Run(string exe, string workDir, params string[] args)
