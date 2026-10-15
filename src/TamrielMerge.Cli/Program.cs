@@ -2545,15 +2545,15 @@ static class Program
                     using var disc = new Redguard.RgCdImage(Path.Combine(GameInstalls.DataDir(Game.Redguard)!, "REDGUARD.bin"));
                     foreach (var movie in Redguard.RgMovies.Load(GameInstalls.DataDir(Game.Redguard)!).Where(m => m.Number > 0))
                     {
-                        string mw = Path.Combine(work, $"redguard-movie{movie.Number}");
-                        Directory.CreateDirectory(mw);
-                        string file = Path.Combine(mw, movie.File);
+                        string movieWork = Path.Combine(work, $"redguard-movie{movie.Number}");
+                        Directory.CreateDirectory(movieWork);
+                        string file = Path.Combine(movieWork, movie.File);
                         if (!File.Exists(file))
                         {
                             if (disc.Read(movie.File) is not { } bytes) { Console.WriteLine($"Redguard: {movie.File} not on the CD"); continue; }
                             File.WriteAllBytes(file, bytes);
                         }
-                        string subs = Path.Combine(mw, "lines.json");
+                        string subs = Path.Combine(movieWork, "lines.json");
                         File.WriteAllText(subs, Redguard.RgMovies.SubtitlesJson(movie));
                         var extra = new List<string> { "--prescale", "640x480", "--subtitles", subs };
                         if (opts.ContainsKey("no-upscale")) extra.Add("--no-upscale");
