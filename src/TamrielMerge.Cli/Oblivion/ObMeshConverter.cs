@@ -77,6 +77,10 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
     {
         /// <summary>The model's particle emitters (flames, smoke, mist), which Skyrim gets as vanilla effects placed there.</summary>
         public List<Skyrim.EffectStandIns.Emitter> Emitters { get; init; } = [];
+        /// <summary>The animations the converted model plays by name (PlayGamebryoAnimation; a door's Open and
+        /// Close), with their lengths in seconds.</summary>
+        public List<(string Name, float Length)> Sequences { get; init; } = [];
+        public bool Plays(string sequence) => Sequences.Any(s => s.Name.Equals(sequence, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>Output path; <paramref name="moving"/> variants (keyframed collision, for swinging doors) get "_moving".</summary>
@@ -99,6 +103,10 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         public bool TwoSided;
         public float Glossiness = 10, Alpha = 1;
         public V3 Emissive;
+        /// <summary>In an animated model: the source node the shape hangs from (its vertices are in that node's
+        /// space) and the source shape's block, and its vertices in model space (bounds).</summary>
+        public uint Parent = uint.MaxValue, Source = uint.MaxValue;
+        public List<V3>? ModelVerts;
     }
 
     /// <param name="itemMass">A loose item: dynamic physics (a convex box around the model with this mass).</param>
@@ -117,12 +125,17 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
                 pts.Count > 0 ? pts.Aggregate(new V3(float.MaxValue), V3.Min) : V3.Zero,
                 pts.Count > 0 ? pts.Aggregate(new V3(float.MinValue), V3.Max) : V3.Zero, false, []);
         }
+        if (Ob10Nif.IsUnreadableByNifly(bytes, out string why))
+            return ConvertOldEffect(model, source, bytes, modOutDir, moving, itemMass, why);
         string tmp = Path.Combine(Path.GetTempPath(), $"tm_ob_{Guid.NewGuid():N}.nif");
         File.WriteAllBytes(tmp, bytes);
         var pieces = new List<Piece>();
         bool hasHavok, animated;
-        List<V3[]>? havokTris = null;
+        List<(uint Target, V3[] Tri)>? havokTris = null;
         var emitters = new List<Skyrim.EffectStandIns.Emitter>();
+        string rel = OutputPath(model, moving, itemMass);
+        var solid = new List<(V3[] Pts, V3 N)>();
+        List<(string Name, float Length)>? sequences = null;
         try
         {
             using var nif = new NifFile();
@@ -132,6 +145,8 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             hasHavok = types.Any(t => t == "bhkCollisionObject");
             if (hasHavok) havokTris = HavokTriangles(nif);
             animated = types.Any(t => t.EndsWith("Controller"));
+            // Moving parts (secret walls, gates, levers, drawbridges): the node tree is kept with the animation.
+            var anim = itemMass is null ? ReadAnimation(nif, bytes) : null;
             try { emitters = Emitters(nif); }
             catch (Exception) { /* particle data nifly can't follow: no stand-ins */ }
             foreach (var shape in nif.GetShapes())
@@ -155,13 +170,19 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
                 var verts = nif.GetVertsForShape(shape)?.ToList() ?? [];
                 if (verts.Count == 0) continue;
                 var normals = nif.GetNormalsForShape(shape)?.ToList() ?? [];
+                // An animated model's shapes stay in their node's space (the node moves); a still one's are baked into
+                // model space.
+                var local = anim is null ? chain : chain.Take(1).ToList();
                 var p = new Piece
                 {
                     Name = shape.name.get() is { Length: > 0 } n ? n : $"Shape{pieces.Count}",
-                    Verts = verts.Select(v => { var g = v; foreach (var t in chain) g = t.ApplyTransform(g); return new V3(g.x, g.y, g.z); }).ToList(),
+                    Verts = verts.Select(v => { var g = v; foreach (var t in local) g = t.ApplyTransform(g); return new V3(g.x, g.y, g.z); }).ToList(),
                     Normals = normals.Count == verts.Count
-                        ? normals.Select(v => { var g = v; foreach (var t in chain) g = t.ApplyTransformToDir(g); var r = new V3(g.x, g.y, g.z); return r.LengthSquared() > 0 ? V3.Normalize(r) : V3.UnitZ; }).ToList()
+                        ? normals.Select(v => { var g = v; foreach (var t in local) g = t.ApplyTransformToDir(g); var r = new V3(g.x, g.y, g.z); return r.LengthSquared() > 0 ? V3.Normalize(r) : V3.UnitZ; }).ToList()
                         : [],
+                    Parent = anim is null ? uint.MaxValue : hdr.GetBlockID(nif.GetParentNode(shape)),
+                    Source = hdr.GetBlockID(shape),
+                    ModelVerts = anim is null ? null : verts.Select(v => { var g = v; foreach (var t in chain) g = t.ApplyTransform(g); return new V3(g.x, g.y, g.z); }).ToList(),
                     Uvs = nif.GetUvsForShape(shape)?.Select(t => new System.Numerics.Vector2(t.u, t.v)).ToList() ?? [],
                     Colors = nif.GetColorsForShape(shape)?.Select(c => new System.Numerics.Vector4(c.r, c.g, c.b, c.a)).ToList() ?? [],
                     Tris = tris.Select(t => (t.p1, t.p2, t.p3)).ToList(),
@@ -179,32 +200,37 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
                 if (p.Uvs.Count != p.Verts.Count) p.Uvs = Enumerable.Repeat(System.Numerics.Vector2.Zero, p.Verts.Count).ToList();
                 pieces.Add(p);
             }
+
+            // Collision, in model space (navmesh, a still model's collision) and, for an animated model, by the node
+            // it is on in that node's space.
+            var byNode = new Dictionary<uint, List<(V3[] Pts, V3 N)>>();
+            static (V3[], V3)? Face(V3[] t, float min) { var cr = V3.Cross(t[1] - t[0], t[2] - t[0]); return cr.LengthSquared() > min ? (t, V3.Normalize(cr)) : null; }
+            if (havokTris is not null)
+                foreach (var (target, t) in havokTris)
+                {
+                    var world = t.Select(v => ToModel(nif, target, v)).ToArray();
+                    if (Face(world, 1e-4f) is { } f) solid.Add(f);
+                    if (anim is not null && Face(t, 1e-4f) is { } lf) (byNode.TryGetValue(target, out var l) ? l : byNode[target] = []).Add(lf);
+                }
+            else if (hasHavok)
+                foreach (var p in pieces)
+                    foreach (var (a, b, c) in p.Tris)
+                    {
+                        var verts = p.ModelVerts ?? p.Verts;
+                        if (Face([verts[a], verts[b], verts[c]], 1e-6f) is { } f) solid.Add(f);
+                        if (anim is not null && Face([p.Verts[a], p.Verts[b], p.Verts[c]], 1e-6f) is { } lf) (byNode.TryGetValue(p.Parent, out var l) ? l : byNode[p.Parent] = []).Add(lf);
+                    }
+
+            if (anim is not null) { WriteAnimated(nif, anim, pieces, byNode, Path.Combine(modOutDir, rel), moving); sequences = anim.Played; }
         }
         finally { File.Delete(tmp); }
 
-        var solid = new List<(V3[] Pts, V3 N)>();
-        if (havokTris is not null)
-            foreach (var t in havokTris)
-            {
-                var cr = V3.Cross(t[1] - t[0], t[2] - t[0]);
-                if (cr.LengthSquared() > 1e-4f) solid.Add((t, V3.Normalize(cr)));
-            }
-        else if (hasHavok)
-            foreach (var p in pieces)
-                foreach (var (a, b, c) in p.Tris)
-                {
-                    var pts = new[] { p.Verts[a], p.Verts[b], p.Verts[c] };
-                    var cr = V3.Cross(pts[1] - pts[0], pts[2] - pts[0]);
-                    if (cr.LengthSquared() > 1e-6f) solid.Add((pts, V3.Normalize(cr)));
-                }
-
-        string rel = OutputPath(model, moving, itemMass);
-        Write(pieces, solid, Path.Combine(modOutDir, rel), moving, itemMass);
-        var all = pieces.SelectMany(p => p.Verts).ToList();
+        if (sequences is null) Write(pieces, solid, Path.Combine(modOutDir, rel), moving, itemMass);
+        var all = pieces.SelectMany(p => p.ModelVerts ?? p.Verts).ToList();
         return new Result(rel, pieces.Count, solid.Count,
             all.Count > 0 ? all.Aggregate(new V3(float.MaxValue), V3.Min) : V3.Zero,
             all.Count > 0 ? all.Aggregate(new V3(float.MinValue), V3.Max) : V3.Zero, animated, solid.Select(t => t.Pts).ToList())
-        { Emitters = emitters };
+        { Emitters = emitters, Sequences = sequences ?? [] };
     }
 
     /// <summary>
@@ -242,42 +268,42 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
     const float HavokScale = 7f;
 
     /// <summary>
-    /// The model's own collision as triangles in model space: every solid collision object's rigid body (with its
-    /// translation and, for bhkRigidBodyT, rotation) on its target node, its shape tree walked through MOPP, list and
-    /// transform shapes down to triangle strips (read through a temporary NiTriStrips, as nifly reads geometry through
-    /// shapes), packed triangles, boxes, spheres, capsules and convex hulls. Phantoms (triggers) are skipped. Null when
-    /// a shape kind isn't handled, so the caller falls back to the visible geometry.
+    /// The model's own collision as triangles in the space of the node each is on: every solid collision object's
+    /// rigid body (with its translation and, for bhkRigidBodyT, rotation) on its target node, its shape tree walked
+    /// through MOPP, list and transform shapes down to triangle strips (read through a temporary NiTriStrips, as nifly
+    /// reads geometry through shapes), packed triangles, boxes, spheres, capsules and convex hulls. Phantoms (triggers)
+    /// are skipped. Null when a shape kind isn't handled, so the caller falls back to the visible geometry.
+    /// <see cref="ToModel"/> takes a triangle into model space.
     /// </summary>
-    static List<V3[]>? HavokTriangles(NifFile nif)
+    static List<(uint Target, V3[] Tri)>? HavokTriangles(NifFile nif)
     {
         var hdr = nif.GetHeader();
-        var tris = new List<V3[]>();
-        var pending = new List<(uint Data, Func<V3, V3> Xf, V3 Scale)>();
+        var tris = new List<(uint, V3[])>();
+        var pending = new List<(uint Data, Func<V3, V3> Xf, V3 Scale, uint Target)>();
         bool ok = true;
         uint count = hdr.GetNumBlocks();
         for (uint i = 0; i < count; i++)
         {
             if (hdr.GetBlockTypeStringById(i) != "bhkCollisionObject") continue;
             if (hdr.GetBlockById(i) is not bhkCollisionObject col) continue;
-            var target = hdr.GetBlockById(col.targetRef.index) as NiNode;
-            var chain = new List<MatTransform>();
-            for (NiNode? n = target; n is not null; n = nif.GetParentNode(n)) chain.Add(n.transform);
             if (hdr.GetBlockById(col.bodyRef.index) is not bhkRigidBody body) { ok = false; continue; }
             bool hasT = hdr.GetBlockTypeStringById(col.bodyRef.index) == "bhkRigidBodyT";
             var q = new System.Numerics.Quaternion(body.rotation.x, body.rotation.y, body.rotation.z, body.rotation.w);
             if (q.LengthSquared() < 1e-6f) q = System.Numerics.Quaternion.Identity;
             var offset = new V3(body.translation.x, body.translation.y, body.translation.z) * HavokScale;
-            V3 ToModel(V3 p)
-            {
-                if (hasT) p = V3.Transform(p, q) + offset;
-                var g = new nifly.Vector3(p.X, p.Y, p.Z);
-                foreach (var t in chain) g = t.ApplyTransform(g);
-                return new V3(g.x, g.y, g.z);
-            }
-            if (!Shape(nif, hdr, body.shapeRef.index, ToModel, tris, pending)) ok = false;
+            V3 ToNode(V3 p) => hasT ? V3.Transform(p, q) + offset : p;
+            if (!Shape(nif, hdr, body.shapeRef.index, ToNode, col.targetRef.index, tris, pending)) ok = false;
         }
         if (ok && pending.Count > 0) ok = ReadStrips(nif, pending, tris);
         return ok ? tris : null;
+    }
+
+    /// <summary>A point in a node's space (a collision target) in model space.</summary>
+    static V3 ToModel(NifFile nif, uint node, V3 p)
+    {
+        var g = new nifly.Vector3(p.X, p.Y, p.Z);
+        for (NiNode? n = nif.GetHeader().GetBlockById(node) as NiNode; n is not null; n = nif.GetParentNode(n)) g = n.transform.ApplyTransform(g);
+        return new V3(g.x, g.y, g.z);
     }
 
     /// <summary>
@@ -285,7 +311,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
     /// triangles through a link built when the file loads; so a temporary NiTriStrips per strips block is attached to
     /// the root, the model saved and reloaded, and the temporary shapes read there.
     /// </summary>
-    static bool ReadStrips(NifFile nif, List<(uint Data, Func<V3, V3> Xf, V3 Scale)> pending, List<V3[]> output)
+    static bool ReadStrips(NifFile nif, List<(uint Data, Func<V3, V3> Xf, V3 Scale, uint Target)> pending, List<(uint, V3[])> output)
     {
         var hdr = nif.GetHeader();
         var root = nif.GetRootNode();
@@ -308,19 +334,19 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             for (int k = 0; k < pending.Count; k++)
             {
                 if (!shapes.TryGetValue($"TMProbe{k}", out var shape)) return false;
-                var (_, xf, sc) = pending[k];
+                var (_, xf, sc, target) = pending[k];
                 var verts = reloaded.GetVertsForShape(shape)?.Select(v => xf(new V3(v.x * sc.X, v.y * sc.Y, v.z * sc.Z))).ToList() ?? [];
                 using var t = new vectorTriangle();
                 shape.GetTriangles(t);
                 foreach (var tri in t)
-                    if (tri.p1 < verts.Count && tri.p2 < verts.Count && tri.p3 < verts.Count) output.Add([verts[tri.p1], verts[tri.p2], verts[tri.p3]]);
+                    if (tri.p1 < verts.Count && tri.p2 < verts.Count && tri.p3 < verts.Count) output.Add((target, [verts[tri.p1], verts[tri.p2], verts[tri.p3]]));
             }
             return true;
         }
         finally { File.Delete(tmp); }
     }
 
-    static bool Shape(NifFile nif, NiHeader hdr, uint id, Func<V3, V3> xf, List<V3[]> output, List<(uint Data, Func<V3, V3> Xf, V3 Scale)> pending)
+    static bool Shape(NifFile nif, NiHeader hdr, uint id, Func<V3, V3> xf, uint target, List<(uint, V3[])> output, List<(uint Data, Func<V3, V3> Xf, V3 Scale, uint Target)> pending)
     {
         if (id == 0xFFFFFFFF || id >= hdr.GetNumBlocks()) return true;
         string type = hdr.GetBlockTypeStringById(id);
@@ -330,17 +356,17 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             var c = new V3[8];
             for (int k = 0; k < 8; k++) c[k] = xf(new V3((k & 1) != 0 ? hi.X : lo.X, (k & 2) != 0 ? hi.Y : lo.Y, (k & 4) != 0 ? hi.Z : lo.Z));
             int[][] faces = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]];
-            foreach (var f in faces) { output.Add([c[f[0]], c[f[1]], c[f[2]]]); output.Add([c[f[0]], c[f[2]], c[f[3]]]); }
+            foreach (var f in faces) { output.Add((target, [c[f[0]], c[f[1]], c[f[2]]])); output.Add((target, [c[f[0]], c[f[2]], c[f[3]]])); }
         }
         switch (type)
         {
             case "bhkMoppBvTreeShape":
-                return Shape(nif, hdr, ((bhkMoppBvTreeShape)block).shapeRef.index, xf, output, pending);
+                return Shape(nif, hdr, ((bhkMoppBvTreeShape)block).shapeRef.index, xf, target, output, pending);
             case "bhkListShape":
             {
                 var list = (bhkListShape)block;
                 bool all = true;
-                for (uint k = 0; k < list.subShapeRefs.GetSize(); k++) all &= Shape(nif, hdr, list.subShapeRefs.GetBlockRef(k), xf, output, pending);
+                for (uint k = 0; k < list.subShapeRefs.GetSize(); k++) all &= Shape(nif, hdr, list.subShapeRefs.GetBlockRef(k), xf, target, output, pending);
                 return all;
             }
             case "bhkTransformShape" or "bhkConvexTransformShape":
@@ -352,7 +378,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
                     var r = m.opMult(new nifly.Vector3(p.X / HavokScale, p.Y / HavokScale, p.Z / HavokScale));
                     return xf(new V3(r.x, r.y, r.z) * HavokScale);
                 }
-                return Shape(nif, hdr, t.shapeRef.index, Child, output, pending);
+                return Shape(nif, hdr, t.shapeRef.index, Child, target, output, pending);
             }
             case "bhkBoxShape":
             {
@@ -391,16 +417,16 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
                 var triangles = data.triData.Count > 0 ? data.triData.Select(t => t.tri).ToList() : data.triNormData.Select(t => t.tri).ToList();
                 foreach (var t in triangles)
                     if (t.p1 < verts.Count && t.p2 < verts.Count && t.p3 < verts.Count)
-                        output.Add([verts[t.p1], verts[t.p2], verts[t.p3]]);
+                        output.Add((target, [verts[t.p1], verts[t.p2], verts[t.p3]]));
                 return true;
             }
             case "bhkPackedNiTriStripsShape":
-                return Shape(nif, hdr, ((bhkPackedNiTriStripsShape)block).dataRef.index, xf, output, pending);
+                return Shape(nif, hdr, ((bhkPackedNiTriStripsShape)block).dataRef.index, xf, target, output, pending);
             case "bhkNiTriStripsShape":
             {
                 var s = (bhkNiTriStripsShape)block;
                 var sc = new V3(s.scale.x == 0 ? 1 : s.scale.x, s.scale.y == 0 ? 1 : s.scale.y, s.scale.z == 0 ? 1 : s.scale.z);
-                for (uint k = 0; k < s.partRefs.GetSize(); k++) pending.Add((s.partRefs.GetBlockRef(k), xf, sc));   // read later (ReadStrips)
+                for (uint k = 0; k < s.partRefs.GetSize(); k++) pending.Add((s.partRefs.GetBlockRef(k), xf, sc, target));   // read later (ReadStrips)
                 return true;
             }
             default:
@@ -420,9 +446,33 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         hdr.ReplaceBlock(hdr.GetBlockID(nif.GetRootNode()), fade);
         var root = nif.GetRootNode();
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var p in pieces)
+        foreach (var p in pieces) AddPiece(nif, p, names);
+        if (itemMass is { } mass)
         {
-            if (p.Verts.Count > 65535) continue;
+            var pts = pieces.SelectMany(p => p.Verts).ToList();
+            if (pts.Count > 0)
+            {
+                BlockMeshBuilder.AddDynamicCollision(nif, root, pts.Aggregate(new V3(float.MaxValue), V3.Min), pts.Aggregate(new V3(float.MinValue), V3.Max), mass, BlockMeshBuilder.WoodMaterial);
+                BlockMeshBuilder.AddBsxFlags(nif, root, 194);
+            }
+        }
+        else
+        {
+            if (solid.Count > 0)
+                BlockMeshBuilder.AddCollision(nif, root, Stairs(solid.Select(s => (s.Pts, s.N, new BlockMeshBuilder.Tex("", "", false))).ToList(), moving), moving);
+            BlockMeshBuilder.AddBsxFlags(nif, root);
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
+        if (nif.Save(outPath) != 0) throw new IOException($"nifly failed to save {outPath}");
+    }
+
+    /// <summary>A piece as a Skyrim shape on the root (lighting shader, textures, colours, alpha); null when it has
+    /// too many vertices for one.</summary>
+    NiShape? AddPiece(NifFile nif, Piece p, HashSet<string> names)
+    {
+        var hdr = nif.GetHeader();
+        {
+            if (p.Verts.Count > 65535) return null;
             using var verts = new vectorVector3();
             using var uvs = new vectorVector2();
             using var norms = new vectorVector3();
@@ -468,23 +518,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
                 s.emissiveColor = glow is null ? new nifly.Vector3(0, 0, 0) : emissive ? new nifly.Vector3(p.Emissive.X, p.Emissive.Y, p.Emissive.Z) : new nifly.Vector3(1, 1, 1);
                 s.emissiveMultiple = glow is null ? 0 : 1;
             });
+            return shape;
         }
-        if (itemMass is { } mass)
-        {
-            var pts = pieces.SelectMany(p => p.Verts).ToList();
-            if (pts.Count > 0)
-            {
-                BlockMeshBuilder.AddDynamicCollision(nif, root, pts.Aggregate(new V3(float.MaxValue), V3.Min), pts.Aggregate(new V3(float.MinValue), V3.Max), mass, BlockMeshBuilder.WoodMaterial);
-                BlockMeshBuilder.AddBsxFlags(nif, root, 194);
-            }
-        }
-        else
-        {
-            if (solid.Count > 0)
-                BlockMeshBuilder.AddCollision(nif, root, Stairs(solid.Select(s => (s.Pts, s.N, new BlockMeshBuilder.Tex("", "", false))).ToList(), moving), moving);
-            BlockMeshBuilder.AddBsxFlags(nif, root);
-        }
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
-        if (nif.Save(outPath) != 0) throw new IOException($"nifly failed to save {outPath}");
     }
 }

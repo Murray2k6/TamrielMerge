@@ -748,7 +748,9 @@ public static class BlockMeshBuilder
     /// Each polygon becomes a thin convex slab extruded behind its face. Groups of up to 200 slabs share a
     /// bhkListShape under a fixed bhkRigidBody on a child NiNode (vanilla statics use layer 1, motion fixed).
     /// </summary>
-    internal static int AddCollision(NifFile nif, NiNode root, List<(Vector3[] Pts, Vector3 N, Tex Tex)> polys, bool moving, uint? materialOverride = null)
+    /// <param name="onTarget">The first body goes on <paramref name="root"/> itself (a moving part's node, as vanilla
+    /// animated doors carry theirs), the rest on child nodes.</param>
+    internal static int AddCollision(NifFile nif, NiNode root, List<(Vector3[] Pts, Vector3 N, Tex Tex)> polys, bool moving, uint? materialOverride = null, bool onTarget = false)
     {
         var hdr = nif.GetHeader();
         int total = 0, chunk = 0;
@@ -802,7 +804,7 @@ public static class BlockMeshBuilder
             body.numShapeKeysInContactPointProps = 3;
             uint bodyId = hdr.AddBlock(body);
 
-            var node = nif.AddNode($"Collision{chunk++}", new MatTransform(), root);
+            var node = onTarget && chunk++ == 0 && root.collisionRef.index == uint.MaxValue ? root : nif.AddNode($"Collision{chunk++}", new MatTransform(), root);
             var col = Owned(new bhkCollisionObject { flags = (ushort)(moving ? 137 : 129) });
             col.bodyRef.index = bodyId;
             col.targetRef.index = hdr.GetBlockID(node);
