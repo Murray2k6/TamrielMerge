@@ -1991,7 +1991,7 @@ Int Function S_UnShowBitmap(Int a)
   Return 0
 EndFunction
 
-; A full-screen picture (the island map's pieces, the mirror's visions): picture number a (the translator's, from
+; A full-screen picture (the observatory telescope's star fields, the mages' mirror's visions): picture number a (the translator's, from
 ; the image's file name) shown as a page.
 Float Function S_ViewGXA(Int a, Int b, Int c)
   RG.ShowPicture(a)

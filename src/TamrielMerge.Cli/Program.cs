@@ -4807,7 +4807,7 @@ static class Program
                 var loadOrder = File.ReadAllLines(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Skyrim Special Edition", "Plugins.txt"))
                     .Where(l => l.StartsWith('*')).Select(l => l[1..].Trim()).ToList();
                 var order = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Concat(loadOrder)
-                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => File.Exists(Path.Combine(data, f))).ToList();
+                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => File.Exists(Path.Combine(data, f)) || File.Exists(Path.Combine(skyrimData, f))).ToList();
                 var targets = opts["plugins"].Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                 // A target not in Plugins.txt (a scratch plugin in a --data folder of its own) is checked after its masters.
                 order.AddRange(targets.Where(t => !order.Contains(t, StringComparer.OrdinalIgnoreCase) && File.Exists(Path.Combine(data, t))));
@@ -4816,7 +4816,7 @@ static class Program
                 {
                     var masters = Setup.Parts.MastersOf(data, target);
                     var mods = order.Where(f => masters.Contains(f, StringComparer.OrdinalIgnoreCase) || f.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(data, f), SkyrimRelease.SkyrimSE)).ToList();
+                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(File.Exists(Path.Combine(data, f)) ? data : skyrimData, f), SkyrimRelease.SkyrimSE)).ToList();
                     try
                     {
                         var cache = mods.ToImmutableLinkCache();

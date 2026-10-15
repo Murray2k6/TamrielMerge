@@ -15,7 +15,7 @@ namespace TamrielMerge.Redguard;
 /// TMRgMove carries the player up when they jump at one;</item>
 /// <item>ropes (MPRP, never placed before): hanging links of Redguard's own rope or chain model; a rope with somewhere to
 /// land is an activator (TMRgRope) that swings the player across, its landings found in the collision;</item>
-/// <item>screen pictures (ViewGXA's .GXA images: the island map's pieces, the mages' mirror) as notes showing the
+/// <item>screen pictures (ViewGXA's .GXA images: the observatory telescope's views of the stars, the mages' mirror) as notes showing the
 /// image (RGPictures), the animation groups' idles (RGIdles, RGPlayerIdles), and Gerrick's parrot (Redguard's own
 /// model on its perch, its talk on an unseen actor).</item>
 /// </list>
@@ -140,9 +140,10 @@ public sealed partial class RgPluginBuilder
     const float LedgeMin = 72, LedgeMax = 240;
 
     /// <summary>
-    /// The ledges of a place: along each walkable triangle's edges (every 48 units), where the walkable surface stops
+    /// The ledges of a place: along each walkable triangle's edges (every 96 units), where the walkable surface stops
     /// (nothing walkable within 40 of its height just beyond) and walkable ground lies 72-240 below a little further
-    /// out, a marker at the top, facing onto it from below. One per 48-unit cell.
+    /// out, and the top is wide enough to stand on (walkable 36 in from the edge), a marker at the top, facing onto it from
+    /// below. One per 96-unit cell.
     /// </summary>
     void PlaceLedges(Scene scene)
     {
@@ -162,7 +163,7 @@ public sealed partial class RgPluginBuilder
                 along /= len;
                 var n = new Vector2(along.Y, -along.X);
                 if (Vector2.Dot(n, new Vector2((a.X + b.X) / 2 - c.X, (a.Y + b.Y) / 2 - c.Y)) < 0) n = -n;
-                int steps = Math.Max(1, (int)(len / 48));
+                int steps = Math.Max(1, (int)(len / 96));
                 for (int k = 0; k < steps; k++)
                 {
                     float f = (k + 0.5f) / steps;
@@ -172,8 +173,10 @@ public sealed partial class RgPluginBuilder
                     // Ground below, out from the edge, too far down to jump up from.
                     if (s.Below(p.X + n.X * 48, p.Y + n.Y * 48, p.Z - LedgeMin, p.Z - LedgeMax) is not float low) continue;
                     if (s.Below(p.X + n.X * 48, p.Y + n.Y * 48, p.Z + 40, p.Z - LedgeMin + 1) is not null) continue;
+                    // Room to stand on top (not a wall's narrow top or a rail).
+                    if (s.Below(p.X - n.X * 36, p.Y - n.Y * 36, p.Z + 16, p.Z - 16) is null) continue;
                     var top = new Vector3(p.X - n.X * 14, p.Y - n.Y * 14, p.Z);
-                    if (!seen.Add(((int)MathF.Floor(top.X / 48), (int)MathF.Floor(top.Y / 48), (int)MathF.Floor(top.Z / 48)))) continue;
+                    if (!seen.Add(((int)MathF.Floor(top.X / 96), (int)MathF.Floor(top.Y / 96), (int)MathF.Floor(top.Z / 64)))) continue;
                     CellFor(scene, top).Temporary.Add(new PlacedObject(mod)
                     {
                         Base = new FormLinkNullable<IPlaceableObjectGetter>(LedgeBase().FormKey),
@@ -354,7 +357,7 @@ public sealed partial class RgPluginBuilder
                 Morrowind.MwTextures.WriteBcDds(dds, px, w, h, false);
                 var book = mod.Books.DuplicateInAsNewRecord(template);
                 book.EditorID = "RGPicture" + Sanitize(stem);
-                book.Name = stem.StartsWith("stmap") ? "Map of Stros M'Kai" : stem.StartsWith("mirror") ? "The Mirror's Vision" : stem;
+                book.Name = stem.StartsWith("stmap") ? "Through the Telescope" : stem.StartsWith("mirror") ? "The Mirror's Vision" : stem;
                 book.BookText = $"<p align='center'><img src='img://Textures/TamrielMerge/rg/pictures/{stem}.png' width='440' height='{440 * h / Math.Max(1, w)}'></p>";
                 book.Flags |= Book.Flag.CantBeTaken;
                 book.Teaches = new BookTeachesNothing();
