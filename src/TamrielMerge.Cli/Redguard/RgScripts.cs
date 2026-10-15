@@ -756,8 +756,9 @@ public sealed partial class RgPluginBuilder
         if (stale.Count > 0)
         {
             // The changed ones together in a folder of their own, compiled as a batch; what a batch drops (the compiler
-            // can when memory runs short) once more one at a time.
-            string batch = Path.Combine(Path.GetTempPath(), "TamrielMergeRgScripts");
+            // can when memory runs short) once more one at a time. The folder is this process's own: two builds at once
+            // (an rg-build beside a conversion) shared one and deleted each other's batch.
+            string batch = Path.Combine(Path.GetTempPath(), $"TamrielMergeRgScripts_{Environment.ProcessId}");
             if (Directory.Exists(batch)) Directory.Delete(batch, true);
             Directory.CreateDirectory(batch);
             foreach (var n in stale)
