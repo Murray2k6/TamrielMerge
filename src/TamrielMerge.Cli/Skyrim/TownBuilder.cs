@@ -232,12 +232,18 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
 
     public int SharedInteriors => sharedInteriors.Count;
 
+    DfText? dfText;
+    /// <summary>TEXT.RSC (the castles' names).</summary>
+    DfText DfTextFile => dfText ??= DfText.Load(arena2);
+
     public Built Build(DfLocation loc, ISkyrimModGetter skyrim, Worldspace overland, P3Float overlandSpot)
     {
         var style = TownTextures.StyleOf(map.ClimateAt(loc.PixelX, loc.PixelY));
         bool redguard = loc.Region < DfFactions.RegionIsRedguard.Length && DfFactions.RegionIsRedguard[loc.Region];
         string id = LocationPlacer.Sanitize(loc.Name) + loc.Region;
         int townIndex = townCount++;
+        // Daggerfall's names for the named buildings (DfBuildingNames), on their street doors for the quests.
+        var namedBuildings = DfBuildingNames.Assign(loc, n => Block(n));
         int W = loc.BlockWidth, H = loc.BlockHeight;
         // Town space (Daggerfall units) to Skyrim: scaled, centred on the worldspace origin.
         var offset = new Vector2(-W * DfTownBlock.Side * BlockMeshBuilder.Scale / 2, -H * DfTownBlock.Side * BlockMeshBuilder.Scale / 2);
@@ -435,6 +441,9 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                         entry.Properties.Add(new ScriptIntProperty { Name = "BuildingType", Data = (int)b.Data.Type });
                         entry.Properties.Add(new ScriptIntProperty { Name = "LockValue", Data = b.Data.Quality / 2 });
                         entry.Properties.Add(new ScriptObjectProperty { Name = "BreakIns", Object = BreakIns.ToLink<ISkyrimMajorRecordGetter>() });
+                        if (People is { } namer && namedBuildings.TryGetValue((bx, by, b.Index), out var nb)
+                            && DfBuildingNames.Name(nb.Seed, b.Data.Type, nb.Faction, loc.Name, loc.Region, namer.Factions, namer.Names, DfTextFile) is { } buildingName)
+                            entry.Properties.Add(new ScriptStringProperty { Name = "BuildingName", Data = buildingName });
                         if (names.Count > 0)
                         {
                             var occ = new ScriptObjectListProperty { Name = "Occupants" };

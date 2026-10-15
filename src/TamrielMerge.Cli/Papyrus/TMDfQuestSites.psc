@@ -21,6 +21,8 @@ ObjectReference[] Property BDoor Auto
 ObjectReference[] Property BArrival Auto
 ObjectReference[] Property BSpawn Auto
 ObjectReference[] Property BItem Auto
+String[] Property BName Auto
+{Daggerfall's name for the building ("The Dancing Griffin"; empty for houses).}
 String[] Property DName Auto
 Int[] Property DRegion Auto
 Int[] Property DLocId Auto

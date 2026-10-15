@@ -1619,6 +1619,8 @@ static class Program
                         int Filled(string n) => p.FirstOrDefault(x => x.Name == n) is ScriptObjectListProperty o ? o.Objects.Count(x => !x.Object.IsNull) : 0;
                         Console.WriteLine($"quest sites {s.EditorID}: {Len("TownName")} towns, {Len("BType")} buildings ({Filled("BArrival")} with arrival, {Filled("BSpawn")} with a spawn marker, {Filled("BItem")} item marker), "
                             + $"{Len("DName")} dungeons ({Filled("DSpawn")} with a spawn marker), {Len("IFaction")} individuals");
+                        if (p.FirstOrDefault(x => x.Name == "BName") is ScriptStringListProperty bn && bn.Data.Any(n => n.Length > 0))
+                            Console.WriteLine($"  building names: {bn.Data.Count(n => n.Length > 0)}, e.g. {string.Join("; ", bn.Data.Where(n => n.Length > 0).Distinct().Take(12))}");
                     }
                     Console.WriteLine($"quest markers: {dungeons.QuestMarkers.Values.Sum(m => m.Count)} in {dungeons.QuestMarkers.Count} cells");
                     // Covens: their witches in a coven faction that "Summon a Daedra Prince." answers to.

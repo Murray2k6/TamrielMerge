@@ -849,6 +849,10 @@ String Function SiteText(Int site, Int mode)
     Return src.TownName[k]
   EndIf
   If mode == 1
+    ; Daggerfall's own name for the building (Daggerfall Unity BuildingNames), else what kind it is.
+    If src.BName && k < src.BName.Length && src.BName[k] != ""
+      Return src.BName[k]
+    EndIf
     Return BuildingLabels[src.BType[k]]
   EndIf
   Return src.TownName[src.BTown[k]]

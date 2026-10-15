@@ -22,6 +22,7 @@ namespace TamrielMerge.Skyrim;
 public sealed class TownPeople(SkyrimMod mod, VanillaActors vanilla, DfFactions factions, DfNames names)
 {
     public DfFactions Factions => factions;
+    public DfNames Names => names;
     static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
     static readonly FormKey StayPackage = Sk(0x025BFC), SandboxSmall = Sk(0x09361E), SandboxMedium = Sk(0x01B217);
 
