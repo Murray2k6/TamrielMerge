@@ -58,3 +58,55 @@ public sealed class RgRtx
         return true;
     }
 }
+
+/// <summary>
+/// Redguard's sound effects bank (sound\MAIN.SFX): "FXHD" (big-endian length: a 32-byte description and the effect
+/// count), then "FXDT" (big-endian length) holding the effects one after another, each a 27-byte header as an RTX
+/// line's audio (bits flag at 4: 1 for 16-bit, sample rate at 8, data length at 0x16) and its PCM. Scripts play them
+/// by index (Sound(n), FlatSound(n), AmbientSound(n)).
+/// </summary>
+public sealed class RgSfx
+{
+    public sealed record Effect(int Type, int Bits, int SampleRate, int Offset, int Length);
+
+    public List<Effect> Effects { get; } = [];
+    readonly byte[] data;
+
+    RgSfx(byte[] data) { this.data = data; }
+
+    public static RgSfx? Load(string path)
+    {
+        if (!File.Exists(path)) return null;
+        var b = File.ReadAllBytes(path);
+        int BE(int o) => b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3];
+        if (b.Length < 16 || System.Text.Encoding.ASCII.GetString(b, 0, 4) != "FXHD") return null;
+        int p = 8 + BE(4);
+        if (p + 8 > b.Length || System.Text.Encoding.ASCII.GetString(b, p, 4) != "FXDT") return null;
+        int end = Math.Min(b.Length, p + 8 + BE(p + 4));
+        p += 8;
+        var sfx = new RgSfx(b);
+        while (p + 27 <= end)
+        {
+            int len = BitConverter.ToInt32(b, p + 0x16);
+            if (len < 0 || p + 27 + len > end) break;
+            sfx.Effects.Add(new Effect(BitConverter.ToInt32(b, p), BitConverter.ToInt32(b, p + 4) == 1 ? 16 : 8, BitConverter.ToInt32(b, p + 8), p + 27, len));
+            p += 27 + len;
+        }
+        return sfx;
+    }
+
+    /// <summary>An effect as a .wav (its own PCM), or false for an empty one.</summary>
+    public bool WriteWav(int index, string path)
+    {
+        if (index < 0 || index >= Effects.Count) return false;
+        var e = Effects[index];
+        if (e.Length <= 0 || e.SampleRate <= 0) return false;
+        using var w = new BinaryWriter(File.Create(path));
+        int bytesPerSample = e.Bits / 8;
+        w.Write("RIFF"u8); w.Write(36 + e.Length); w.Write("WAVE"u8);
+        w.Write("fmt "u8); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(e.SampleRate); w.Write(e.SampleRate * bytesPerSample);
+        w.Write((short)bytesPerSample); w.Write((short)e.Bits);
+        w.Write("data"u8); w.Write(e.Length); w.Write(data, e.Offset, e.Length);
+        return true;
+    }
+}

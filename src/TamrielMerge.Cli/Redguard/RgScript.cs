@@ -27,11 +27,19 @@ public sealed class RgScript
     /// <summary>A global flag (SOUP386.DEF [flags] order).</summary>
     public sealed record Flag(int Index) : Value;
     public sealed record Local(int Index) : Value;
-    public sealed record FnValue(int Function, Value[] Args) : Value;
+    /// <summary>A function's value; Target is another object's (an object task: "Me", "Player", "Camera" or "string:N",
+    /// the script string naming the object's script), null for this object's own.</summary>
+    public sealed record FnValue(int Function, Value[] Args) : Value { public string? Target { get; init; } }
     public sealed record Other(string What) : Value;
 
     public abstract record Stmt(int Address);
-    public sealed record CallStmt(int Address, int Function, Value[] Args) : Stmt(Address);
+    /// <summary>A call: Kind 0 task (the script waits for it), 1 multitask (runs alongside), 2 function; Target as
+    /// <see cref="FnValue"/>'s.</summary>
+    public sealed record CallStmt(int Address, int Function, Value[] Args) : Stmt(Address)
+    {
+        public int Kind { get; init; } = 2;
+        public string? Target { get; init; }
+    }
     /// <summary>if (lhs cmp rhs [and/or ...]) { body }; cmp: 0 =, 1 !=, 2 &lt;, 3 &gt;, 4 &lt;=, 5 &gt;=.</summary>
     public sealed record IfStmt(int Address, List<(Value Lhs, int Cmp, Value Rhs, int Conj)> Conditions, List<Stmt> Body) : Stmt(Address);
     /// <summary>target = values combined with operators (1 +, 2 -, 3 /, 4 *, ...; 10 ++, 11 --).</summary>
@@ -46,6 +54,15 @@ public sealed class RgScript
     public Dictionary<string, List<string>> Strings { get; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Each actor's local variables' starting values (RAVA, from RAHD's count at 117 and byte offset at 125).</summary>
     public Dictionary<string, int[]> Locals { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Each actor's main thread start (RAHD 85); when not 0, the code before it is a second thread run from
+    /// the start each frame up to "endint" (Redguard's interrupt: what an actor answers to whatever it is doing).</summary>
+    public Dictionary<string, int> Entry { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Each actor's compiled script, strings and starting variables, hashed: the same script in several scenes
+    /// (the item and effect scripts every scene carries) hashes the same.</summary>
+    public Dictionary<string, string> Hash { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Each actor's extra locations (RALC: RAHD count at 97, byte offset at 105; 12-byte x/y/z offsets from the
+    /// object's position, z the other way round), which MoveToLocation(n) names from 1 (0 is the object's start).</summary>
+    public Dictionary<string, List<System.Numerics.Vector3>> LocationOffsets { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>SOUP function names by id (id 0 is the null function).</summary>
     public static List<string> FunctionNames(string soupDef)
@@ -92,6 +109,7 @@ public sealed class RgScript
         scene.Sections.TryGetValue("RAST", out var rast);
         scene.Sections.TryGetValue("RASB", out var rasb);
         scene.Sections.TryGetValue("RAVA", out var rava);
+        scene.Sections.TryGetValue("RALC", out var ralc);
         int count = BitConverter.ToInt32(rgm, rahd.Offset);
         int pos = -1;
         for (int i = 0; i < count; i++)
@@ -117,6 +135,23 @@ public sealed class RgScript
             for (int k = 0; k < locals.Length && rava.Length > 0 && varOffset + k * 4 + 4 <= rava.Length; k++)
                 locals[k] = BitConverter.ToInt32(rgm, rava.Offset + varOffset + k * 4);
             s.Locals.TryAdd(name, locals);
+            s.Entry.TryAdd(name, BitConverter.ToInt32(rgm, r + 85));
+            int numLocs = BitConverter.ToInt32(rgm, r + 97), locOffset = BitConverter.ToInt32(rgm, r + 105);
+            var offsets = new List<System.Numerics.Vector3>();
+            for (int k = 0; k < Math.Clamp(numLocs, 0, 256) && ralc.Length > 0 && locOffset + k * 12 + 12 <= ralc.Length; k++)
+            {
+                int o = ralc.Offset + locOffset + k * 12;
+                offsets.Add(new System.Numerics.Vector3(BitConverter.ToInt32(rgm, o), BitConverter.ToInt32(rgm, o + 4), -BitConverter.ToInt32(rgm, o + 8)));
+            }
+            s.LocationOffsets.TryAdd(name, offsets);
+            if (length > 0 && pos + length <= rasc.Length)
+            {
+                var sha = System.Security.Cryptography.SHA1.Create();
+                var text = System.Text.Encoding.UTF8.GetBytes(string.Join("", strings) + "|" + string.Join(",", locals) + "|" + BitConverter.ToInt32(rgm, r + 85));
+                sha.TransformBlock(rgm, rasc.Offset + pos, length, null, 0);
+                sha.TransformFinalBlock(text, 0, text.Length);
+                s.Hash.TryAdd(name, Convert.ToHexString(sha.Hash!)[..16]);
+            }
             if (length > 0 && pos + length <= rasc.Length)
             {
                 var walker = new Walker(rgm, rasc.Offset + pos, rasc.Offset + pos + length, name, s.Calls);
@@ -155,7 +190,7 @@ public sealed class RgScript
             int type = U8();
             switch (type)
             {
-                case 0: case 1: case 2: { var (fn, args) = TaskCall(); return new CallStmt(at, fn, args); }
+                case 0: case 1: case 2: { var (fn, args) = TaskCall(); return new CallStmt(at, fn, args) { Kind = type }; }
                 case 3: return If(at);
                 case 4: return new JumpStmt(at, "goto", I32());
                 case 5: return new JumpStmt(at, "end", I32());
@@ -169,9 +204,10 @@ public sealed class RgScript
                 case 15: case 16: { var o = ObjectRef(); return new AssignStmt(at, o, [(new Num(1), type == 15 ? 10 : 11)]); }
                 case 25: case 26:
                 {
-                    ObjectName();
+                    string target = ObjectName();
+                    int kind = b[p];
                     var v = Value(Mode.Reference);
-                    return v is FnValue f ? new CallStmt(at, f.Function, f.Args) : new OtherStmt(at, "object task");
+                    return v is FnValue f ? new CallStmt(at, f.Function, f.Args) { Kind = kind is 0 or 1 ? kind : 2, Target = target } : new OtherStmt(at, "object task");
                 }
                 case 30: { U8(); var body = new List<Stmt>(); Block(p + 4, body); return new OtherStmt(at, "scriptrv"); }
                 case 7: case 22: I32(); return new OtherStmt(at, "number");
@@ -229,9 +265,12 @@ public sealed class RgScript
                 case 21: return new Other($"string{I32()}");
                 case 23: return new Other($"anchor{U8()}");
                 case 25: case 26:
-                    ObjectName();
-                    if (mode == Mode.Main) return Value(Mode.Reference);
-                    { var (fn, args) = TaskCall(); return new FnValue(fn, args); }
+                {
+                    string target = ObjectName();
+                    if (mode == Mode.Main) return Value(Mode.Reference) is FnValue fm ? fm with { Target = target } : new Other("object task");
+                    var (fn, args) = TaskCall();
+                    return new FnValue(fn, args) { Target = target };
+                }
                 default:
                     if (type is 4 or 5 or 17 or 27) I32();
                     return new Other($"type{type}");
@@ -259,7 +298,8 @@ public sealed class RgScript
         {
             int kind = U8();
             if (kind is 0 or 1 or 2) { U8(); return kind switch { 0 => "Me", 1 => "Player", _ => "Camera" }; }
-            if (kind is 4 or 10) return $"obj{kind}:{U8()}";
+            if (kind is 4) return $"string:{U8()}";
+            if (kind is 10) return $"obj{kind}:{U8()}";
             return $"obj{kind}";
         }
 

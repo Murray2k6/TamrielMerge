@@ -1116,6 +1116,101 @@ static class Program
                 if (opts.TryGetValue("out", out var outFile)) File.WriteAllLines(outFile, lines); else foreach (var l in lines) Console.WriteLine(l);
                 return 0;
             }
+            case "rg-script-coverage":
+            {
+                // Redguard's scripts translated to Papyrus (RgPapyrus) without building the plugin: every scene's every
+                // object program (as the audit counts them), what each statement became, and with --compile the
+                // generated sources compiled (into --out, default out/rgscripts) against TMRgSoup. --functions lists
+                // every SOUP function with its counts; --scene/--actor print one translated script.
+                string rg = GameInstalls.DataDir(Game.Redguard) ?? throw new DirectoryNotFoundException("Redguard isn't installed through Steam or GOG");
+                string def = Path.Combine(rg, "soup386", "SOUP386.DEF");
+                var fn = Redguard.RgScript.FunctionNames(def);
+                var (tasks, refs) = Redguard.RgPapyrus.DefInfo(def);
+                var lib = Redguard.RgPapyrus.LoadLibrary(Path.Combine(AppContext.BaseDirectory, "Papyrus", "TMRgSoup.psc"));
+                var translator = new Redguard.RgPapyrus(fn, tasks, refs, lib);
+                var ini = Redguard.RgWorldIni.Load(Path.Combine(rg, "WORLD.INI"));
+                var used = ini.Maps.Values.Select(m => m.Scene.ToUpperInvariant()).ToHashSet();
+                string outDir = opts.GetValueOrDefault("out", "out/rgscripts");
+                string srcDir = Path.Combine(outDir, "Source"), pexDir = Path.Combine(outDir, "Scripts");
+                if (opts.ContainsKey("compile")) { if (Directory.Exists(srcDir)) Directory.Delete(srcDir, true); Directory.CreateDirectory(srcDir); }
+                var counts = new Dictionary<Redguard.RgPapyrus.Category, int>();
+                var byFunction = new Dictionary<string, Dictionary<Redguard.RgPapyrus.Category, int>>();
+                int total = 0, unusedScene = 0, programs = 0;
+                var written = new Dictionary<string, string>();
+                var ctx = new Redguard.RgPluginBuilder.CoverageContext();
+                foreach (var file in Directory.GetFiles(Path.Combine(rg, "maps"), "*.RGM").Order())
+                {
+                    string sceneName = Path.GetFileNameWithoutExtension(file).ToUpperInvariant();
+                    var bytes = File.ReadAllBytes(file);
+                    var sceneData = Redguard.RgScene.Load(bytes)!;
+                    var script = Redguard.RgScript.Load(bytes, sceneData);
+                    foreach (var (actor, program) in script.Programs)
+                    {
+                        bool talks = Redguard.RgPluginBuilder.IsTalker(script, actor, fn);
+                        var locals = script.Locals.GetValueOrDefault(actor) ?? [];
+                        var output = translator.Translate("TMRg" + new string((sceneName + "_" + actor).Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray()),
+                            $"Redguard {sceneName} {actor}", program, script.Entry.GetValueOrDefault(actor), locals, script.Strings.GetValueOrDefault(actor) ?? [], ctx, talks,
+                            talks ? Enumerable.Range(0, locals.Length).ToHashSet() : []);
+                        if (!used.Contains(sceneName)) { unusedScene += output.Statements; continue; }
+                        programs++;
+                        total += output.Statements;
+                        foreach (var (c, n) in output.Counts) counts[c] = counts.GetValueOrDefault(c) + n;
+                        foreach (var (f, d) in output.ByFunction)
+                        {
+                            var into = byFunction.TryGetValue(f, out var x) ? x : byFunction[f] = [];
+                            foreach (var (c, n) in d) into[c] = into.GetValueOrDefault(c) + n;
+                        }
+                        string hash = script.Hash.GetValueOrDefault(actor, sceneName + actor) + talks;
+                        if (opts.ContainsKey("compile") && !written.ContainsKey(hash)) { written[hash] = output.ScriptName; File.WriteAllText(Path.Combine(srcDir, output.ScriptName + ".psc"), output.Source); }
+                        if (opts.GetValueOrDefault("scene", "").Equals(sceneName, StringComparison.OrdinalIgnoreCase) && opts.GetValueOrDefault("actor", "").Equals(actor, StringComparison.OrdinalIgnoreCase))
+                            Console.WriteLine(output.Source);
+                    }
+                }
+                Console.WriteLine($"Redguard scripts: {programs} programs in {used.Count} scenes, {total} statements (HIDEOUT.RGM, which WORLD.INI never loads: {unusedScene} more, not converted)");
+                foreach (var c in Enum.GetValues<Redguard.RgPapyrus.Category>())
+                    Console.WriteLine($"  {c,-12} {counts.GetValueOrDefault(c),6}  {100.0 * counts.GetValueOrDefault(c) / Math.Max(1, total),6:F2}%");
+                Console.WriteLine($"  translated   {counts.Values.Sum(),6}  {100.0 * counts.Values.Sum() / Math.Max(1, total),6:F2}% (every statement is in the generated Papyrus; the categories say what it does there)");
+                var functions = byFunction.OrderByDescending(kv => kv.Value.Values.Sum()).ToList();
+                if (opts.ContainsKey("functions"))
+                    foreach (var (f, d) in functions)
+                        Console.WriteLine($"    {f,-24} {string.Join("  ", d.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key} {kv.Value}"))}");
+                else
+                {
+                    foreach (var cat in new[] { Redguard.RgPapyrus.Category.Approximate, Redguard.RgPapyrus.Category.NoEffect })
+                        Console.WriteLine($"  {cat}: {string.Join(", ", functions.Where(kv => kv.Value.ContainsKey(cat)).OrderByDescending(kv => kv.Value[cat]).Take(24).Select(kv => $"{kv.Key} {kv.Value[cat]}"))}");
+                }
+                if (opts.ContainsKey("compile"))
+                {
+                    string game = Path.GetDirectoryName(Path.GetFullPath(skyrimData.TrimEnd('\\', '/')))!;
+                    string compiler = Path.Combine(game, "Papyrus Compiler", "PapyrusCompiler.exe");
+                    if (!File.Exists(compiler)) { Console.WriteLine("  no Creation Kit Papyrus compiler: not compiled"); return 0; }
+                    if (Directory.Exists(pexDir)) Directory.Delete(pexDir, true);
+                    Directory.CreateDirectory(pexDir);
+                    string shipped = Path.Combine(AppContext.BaseDirectory, "Papyrus");
+                    var psi = new System.Diagnostics.ProcessStartInfo(compiler) { WorkingDirectory = Path.GetFullPath(srcDir), RedirectStandardOutput = true, RedirectStandardError = true };
+                    foreach (var a in new[] { Path.GetFullPath(srcDir), "-all", "-q", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(srcDir)};{shipped};{Path.Combine(skyrimData, "Scripts", "Source")};{Path.Combine(skyrimData, "Source", "Scripts")}", $"-o={Path.GetFullPath(pexDir)}" })
+                        psi.ArgumentList.Add(a);
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    using var p = System.Diagnostics.Process.Start(psi)!;
+                    var err = p.StandardError.ReadToEndAsync();
+                    string log = p.StandardOutput.ReadToEnd() + err.Result;
+                    p.WaitForExit();
+                    int ok = written.Values.Count(n => File.Exists(Path.Combine(pexDir, n + ".pex")));
+                    Console.WriteLine($"  compiled {ok} of {written.Count} distinct scripts in {sw.Elapsed.TotalSeconds:F0}s");
+                    foreach (var line in log.Split('\n').Where(l => l.Contains("): ")).Take(int.Parse(opts.GetValueOrDefault("errors", "30")))) Console.WriteLine("    " + line.Trim());
+                }
+                return 0;
+            }
+            case "rg-items":
+            {
+                // Dev aid: Redguard's items (ITEM.INI) with their RTX names and descriptions, type, use script and models.
+                string rg = GameInstalls.DataDir(Game.Redguard)!;
+                var rtx = Redguard.RgRtx.Load(Path.Combine(rg, "ENGLISH.RTX"));
+                string T(string tag) => tag.Length == 4 && rtx?.Entries.TryGetValue(tag, out var e) == true ? e.Text : tag;
+                foreach (var d in Redguard.RgPluginBuilder.LoadItemDefs(rg))
+                    Console.WriteLine($"{d.Id,3} t{d.Type} hide{d.Get("hide")} max{d.Get("player_max"),-6} {T(d.Get("name")),-28} use={d.UseScript,-9} game={d.GameModel,-22} inv={d.InventoryModel,-22} hand={d.Get("hand_object_file")}  | {T(d.Get("description"))}");
+                return 0;
+            }
             case "rg-dialogue-stats":
             {
                 // Dev aid: per scene, the actors that hold conversations (a PlayerLineUp and a menu), their menu items and

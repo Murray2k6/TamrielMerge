@@ -631,6 +631,8 @@ public sealed partial class RgPluginBuilder
             switch (type)
             {
                 case 1 when o.Model.Length > 0:
+                    // A scripted prop (lever, door, pickup...): an activator carrying its script.
+                    if (ScriptOf(scene, o.Script) is not null && !o.Model.StartsWith("BOAT", StringComparison.OrdinalIgnoreCase)) { if (PlaceScriptedProp(scene, i, o) is not null) { Props++; break; } }
                     if (Pickup(o.Script) is { } pickup) { PlaceItem(scene, pickup.Item, pickup.Count, at); break; }
                     if (PlaceShip(scene, o)) break;
                     if (StaticFor(scene, o.Model) is not { } s) break;
@@ -646,7 +648,7 @@ public sealed partial class RgPluginBuilder
                     // Torches and lamps (NTTORCH, NTLIGHT): a flame and a warm light.
                     if (o.Script.Contains("TORCH", StringComparison.OrdinalIgnoreCase) && Skyrim.EffectStandIns.For(Skyrim.EffectStandIns.Kind.Flame, 16) is { } flame)
                         PlaceEffect(scene, flame.Effect, flame.Scale, at);
-                    PlaceLight(scene, 0xFFB060, 400, at);
+                    objectLights[(scene.Name, i)] = PlaceLight(scene, 0xFFB060, 400, at);
                     break;
             }
         }
@@ -690,7 +692,7 @@ public sealed partial class RgPluginBuilder
 
     readonly Dictionary<(uint, int), Light> lights = [];
 
-    void PlaceLight(Scene scene, uint rgb, int radius, Vector3 at)
+    PlacedObject PlaceLight(Scene scene, uint rgb, int radius, Vector3 at)
     {
         radius = (radius + 31) / 64 * 64;
         if (!lights.TryGetValue((rgb, radius), out var light))
@@ -714,12 +716,14 @@ public sealed partial class RgPluginBuilder
             mod.Lights.Add(light);
             lights[(rgb, radius)] = light;
         }
-        CellFor(scene, at).Temporary.Add(new PlacedObject(mod)
+        var placed = new PlacedObject(mod)
         {
             Base = new FormLinkNullable<IPlaceableObjectGetter>(light.FormKey),
             Placement = new Placement { Position = new P3Float(at.X, at.Y, at.Z), Rotation = new P3Float(0, 0, 0) },
-        });
+        };
+        CellFor(scene, at).Temporary.Add(placed);
         LightCount++;
+        return placed;
     }
 
     // ---- doors ----
@@ -875,6 +879,10 @@ public sealed partial class RgPluginBuilder
         LoadScenes();
         BuildWarps(log);
         log?.Invoke($"{scenes.Count} scenes: {string.Join(", ", scenes.Values.Select(s => s.Name + (s.Terrain is null ? "" : " (terrain)")))}");
+        LoadText();
+        BuildItems();
+        log?.Invoke($"items: {ItemCount} ({useEffects.Count} usable)");
+        TranslateScripts(log);
         foreach (var scene in scenes.Values)
         {
             if (scene.Terrain is not null || scene.Name == OpeningScene) CreateWorldspace(scene); else CreateInterior(scene);
@@ -882,6 +890,7 @@ public sealed partial class RgPluginBuilder
         }
         // People in their homes first: interiors and the island before the scenes they only visit.
         foreach (var scene in scenes.Values.OrderBy(s => s.Name == "ISLAND" ? 1 : s.Terrain is null ? 0 : 2)) PlaceActors(scene);
+        foreach (var scene in scenes.Values) PlaceScriptMarkers(scene);
         log?.Invoke($"placed {Statics} statics, {Props} props, {LightCount} lights, {Effects} effects, {ActorCount} actors; {statics.Count} models");
 
         // The start: where the opening cutscene (START.RGM) sends Cyrus — Stros M'Kai's docks.
@@ -913,6 +922,7 @@ public sealed partial class RgPluginBuilder
         }
         BuildDoors();
         log?.Invoke($"doors: {DoorsLinked} linked, {DoorsOneWay} one-way");
+        AttachScripts(log);
         foreach (var scene in scenes.Values.Where(s => s.World is not null)) AddWorldCells(scene);
         foreach (var scene in scenes.Values) BuildNavmeshes(scene);
         int links = navmeshes?.LinkExteriorEdges() ?? 0;
