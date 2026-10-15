@@ -211,6 +211,39 @@ public static class AltStartBuilder
                 ObjectList("KitStormcloak", kitStormcloak),
             ],
         });
+        // The guide for a new character (user, 2026-10-15: "i need a tutorial popup on where stuff is after character
+        // creation", "we can start in any world", "its based on what games the user owns"): TMTutorial shows its pages
+        // when the race menu first closes, the games' pages only for the games installed, and hands over this book.
+        var owned = Enumerable.Range(0, 4).Where(i => File.Exists(Path.Combine(outDir, StoryPlugins[i]))).Append(4).ToList();
+        var guidePages = GuidePages();
+        var gamePages = GuideGamePages();
+        // A plain book of Skyrim's own for its look (the first common book with a model and inventory art).
+        var vanillaBook = skyrim.Books.FirstOrDefault(bk => bk.EditorID?.StartsWith("Book", StringComparison.Ordinal) == true && bk.Model is not null && !bk.InventoryArt.IsNull);
+        var guide = new Book(mod)
+        {
+            EditorID = "TMGuideBook",
+            Name = "TamrielMerge Guide",
+            Model = vanillaBook?.Model is { } vm0 ? new Model { File = vm0.File.DataRelativePath.Path } : null,
+            InventoryArt = vanillaBook?.InventoryArt.FormKeyNullable is { } art ? art.ToNullableLink<IStaticGetter>() : new FormLinkNullable<IStaticGetter>(),
+            Value = 0,
+            Weight = 0,
+            BookText = GuideBookText(guidePages, gamePages, owned, worlds),
+            ObjectBounds = new ObjectBounds { First = new P3Int16(-8, -11, 0), Second = new P3Int16(8, 11, 3) },
+        };
+        mod.Books.Add(guide);
+        vm.Scripts.Add(new ScriptEntry
+        {
+            Name = "TMTutorial",
+            Properties =
+            [
+                new ScriptStringListProperty { Name = "Pages", Data = [.. guidePages] },
+                new ScriptStringListProperty { Name = "GamePages", Data = [.. gamePages] },
+                new ScriptStringListProperty { Name = "GameNames", Data = [.. worlds] },
+                new ScriptStringListProperty { Name = "KeyNames", Data = [.. KeyNames()] },
+                ObjectProp("Guide", guide.FormKey),
+            ],
+        });
+
         var normalStart = vm.Fragments.Single(f => f.Stage == 0 && f.StageIndex == 0);
         if (normalStart.ScriptName != VanillaFragmentScript || normalStart.FragmentName != "Fragment_2")
             throw new InvalidOperationException($"MQ101 stage 0 entry 0 is {normalStart.ScriptName}.{normalStart.FragmentName}, expected vanilla Fragment_2");
@@ -221,6 +254,55 @@ public static class AltStartBuilder
         TopicSubtypes.Fill(mod);
         mod.WriteToBinary(Path.Combine(outDir, PluginName));
         Console.WriteLine($"Wrote {Path.Combine(Path.GetFullPath(outDir), PluginName)}");
+    }
+
+    static readonly string[] StoryPlugins = ["Daggerfall.esm", "Redguard.esm", "Morrowind.esm", "Oblivion.esm", "Skyrim.esm"];
+
+    /// <summary>The guide's general pages (TMTutorial: %KEY% the Tamriel Menu control's key, %GAMES% the games installed).</summary>
+    static string[] GuidePages() =>
+    [
+        "Welcome to TamrielMerge.\n\nYour games: %GAMES%. Each is a time and place in Tamriel's history, and one character can live in all of them.\n\nThis guide is also in your inventory as a book: TamrielMerge Guide.",
+        "The Tamriel menu: press %KEY% (Tamriel Menu in Settings > Controls), or cast the Tamriel power (Magic > Powers).\n\nFactions: every game's guilds and factions, and your rank in each.\nCoin: every game's money, and what you carry.\nTravel: the towns of every world you have reached, travelled to as Daggerfall travels: days on the road, inns or camping, ships and horses, encounters on the way.\nSkills: the games' skills Skyrim lacks, rising with use, with their perks.\nPassives: the standing stones' web, from your birthsign, a point each level.",
+        "Moving between the games\n\nTravel Through Time (Magic > Powers): go to another time you have been to; you come back where and when you left it. A time not begun yet starts at its beginning.\n\nWhen a game's story ends you are asked whether to go on to the next; the Begin the Next Story power does it later.\n\nEach time keeps its own date and its own coin; money changers in its towns exchange coin.",
+    ];
+
+    /// <summary>Each game's page (by story), shown only when its plugin is installed.</summary>
+    static string[] GuideGamePages() =>
+    [
+        "Daggerfall: the Iliac Bay, 3E 405\n\nOne seamless land, far bigger than Skyrim: the Tamriel menu's Travel tab crosses it in days. Ask townsfolk for work to be given Daggerfall's quests; guilds promote you as your reputation with them grows. Enemies notice you as in Daggerfall, by sight and by hearing: sneak to stay unseen. You cannot rest, wait or travel with enemies nearby.",
+        "Redguard: Stros M'Kai, 2E 864\n\nThe island of Cyrus's story. Talk to everyone: conversations open the way on. Locks and puzzles that take an item ask which of yours to use. Ropes and ledges are climbed and swung from as in Redguard.",
+        "Morrowind: Vvardenfell, 3E 427\n\nYour journal's entries are kept as quest objectives. Morrowind's own spells work as there: Mark and Recall, and the Divine and Almsivi Interventions. Companions share their goods through the Companion Share topic.",
+        "Oblivion: Cyrodiil, 3E 433\n\nLocks open with Oblivion's lockpicking. The Oblivion gates, the guilds and the Arena are as they were; crimes are seen and paid for as in Oblivion.",
+        "Skyrim: 4E 201\n\nSkyrim's own story, as it is. Its gold, its guilds and its towns sit beside the other games' in the Tamriel menu.",
+    ];
+
+    /// <summary>The guide as a book: the general pages, then the pages of the games converted here.</summary>
+    static string GuideBookText(string[] pages, string[] gamePages, List<int> owned, string[] worlds)
+    {
+        string Html(string text) => string.Join("", text.Split("\n\n").Select(par => $"<p>{System.Net.WebUtility.HtmlEncode(par).Replace("\n", "<br>")}</p>"));
+        var sb = new System.Text.StringBuilder("<p align=\"center\"><font size=\"30\">TamrielMerge Guide</font></p>");
+        foreach (var page in pages)
+            sb.Append(Html(page.Replace("%KEY%", "U (or the key set for Tamriel Menu)").Replace("%GAMES%", string.Join(", ", owned.Select(i => worlds[i])))));
+        foreach (int i in owned) sb.Append("[pagebreak]").Append(Html(gamePages[i]));
+        return sb.ToString();
+    }
+
+    /// <summary>DirectX scan codes' names (index = code), for the guide's "press ..." (SKSE's Input.GetMappedKey).</summary>
+    static string[] KeyNames()
+    {
+        var names = new string[282];
+        Array.Fill(names, "");
+        string[] row1 = ["", "Esc", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "Backspace", "Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "[", "]", "Enter", "Left Ctrl",
+            "A", "S", "D", "F", "G", "H", "J", "K", "L", ";", "'", "`", "Left Shift", "\\", "Z", "X", "C", "V", "B", "N", "M", ",", ".", "/", "Right Shift", "Num *", "Left Alt", "Space", "Caps Lock",
+            "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "Num Lock", "Scroll Lock", "Num 7", "Num 8", "Num 9", "Num -", "Num 4", "Num 5", "Num 6", "Num +", "Num 1", "Num 2", "Num 3", "Num 0", "Num ."];
+        for (int i = 0; i < row1.Length; i++) names[i] = row1[i];
+        names[0x57] = "F11"; names[0x58] = "F12"; names[0x9C] = "Num Enter"; names[0x9D] = "Right Ctrl"; names[0xB5] = "Num /";
+        names[0xB8] = "Right Alt"; names[0xC7] = "Home"; names[0xC8] = "Up"; names[0xC9] = "Page Up"; names[0xCB] = "Left"; names[0xCD] = "Right";
+        names[0xCF] = "End"; names[0xD0] = "Down"; names[0xD1] = "Page Down"; names[0xD2] = "Insert"; names[0xD3] = "Delete";
+        // SKSE's mouse codes: 256 left button, 257 right, 258 middle, 259.. the side buttons, 264/265 the wheel.
+        names[256] = "Left Mouse"; names[257] = "Right Mouse"; names[258] = "Middle Mouse"; names[259] = "Mouse 4"; names[260] = "Mouse 5";
+        names[261] = "Mouse 6"; names[262] = "Mouse 7"; names[263] = "Mouse 8"; names[264] = "Wheel Up"; names[265] = "Wheel Down";
+        return names;
     }
 
     /// <summary>Each story's coin, in story order (TMStoryOrder's money): Daggerfall's gold pieces, Redguard's gold,
