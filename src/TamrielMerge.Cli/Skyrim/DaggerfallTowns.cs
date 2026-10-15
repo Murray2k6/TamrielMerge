@@ -86,7 +86,7 @@ public static class DaggerfallTowns
         creatures.Build();
         var people = new TownPeople(mod, new VanillaActors(skyrimData), DfFactions.Load(arena2), DfNames.Load(arena2));
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer)
-        { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
+        { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, BackgroundInteriors = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
         var townBuilder = new TownBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), map, dungeons)
         {
             People = people,
@@ -112,6 +112,7 @@ public static class DaggerfallTowns
             catch (Exception e) { failed++; Console.WriteLine($"  {town.Name} ({town.RegionName}): {e.Message}"); }
         }
         Console.WriteLine($"Batch {batch}/{batches}: {built.Count} towns ({towns.Sum(t => t.ExteriorBlocks.Length)} blocks), {failed} failed, {townBuilder.SharedInteriors} shared interiors");
+        dungeons.FinishInteriors();
         double laidOut = clock.Elapsed.TotalSeconds;
         if (built.Count > 0)
         {

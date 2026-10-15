@@ -68,7 +68,7 @@ public static class DaggerfallPluginBuilder
         var people = new TownPeople(mod, new VanillaActors(skyrimData), DfFactions.Load(arena2), DfNames.Load(arena2));
         // Daggerfall's quest global variables (dungeon set-global actions and the quests), at fixed numbers.
         DfQuestGlobals.AddAll(mod);
-        var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer) { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, FixedPropKeys = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
+        var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer) { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, FixedPropKeys = true, BackgroundInteriors = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
         var hold = locations.First(l => l.Name == "Privateer's Hold" && l.DungeonBlocks.Count > 0);
         var holdCell = dungeons.Build(hold, world, LocationPlacer.WorldPosition(field, hold.PixelX + 0.5, hold.PixelY + 0.5));
         Console.WriteLine($"Dungeon: {hold.Name} -> {holdCell.Cell.EditorID}, {holdCell.Cell.Temporary.Count} refs, navmesh {holdCell.Navmesh.Triangles} triangles / {holdCell.Navmesh.Vertices} vertices, {holdCell.Navmesh.DoorTriangles} door links");
@@ -107,6 +107,7 @@ public static class DaggerfallPluginBuilder
             var named = townBuilder.Placed.Where(p => p.Faction?.Type == DfFactionType.Individual).Select(p => p.Name).Distinct().ToList();
             Console.WriteLine($"  people: {townBuilder.Placed.Count}; named: {string.Join(", ", named.Take(20))}; e.g. {string.Join(", ", townBuilder.Placed.Take(8).Select(p => $"{p.Name} ({p.Building})"))}");
         }
+        dungeons.FinishInteriors();
         TownGuilds? guilds = null;
         var everyone = townBuilder.Placed.Concat(dungeons.PlacedPeople).ToList();
         if (townWorlds.Count > 0)

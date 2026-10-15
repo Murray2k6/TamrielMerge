@@ -315,8 +315,11 @@ public sealed partial class DungeonCellBuilder
         Navmesh.NavmeshBuilder.Result? nav = null;
         // Scripted exits (shared interiors) aren't load doors: only real load doors get navmesh door links.
         var loadDoors = exits.Select(e => e.Item1).Where(d => exitPlaceAs is null);
-        try { nav = navmeshes.BuildInterior(cell, walkable, loadDoors, keep, people.Select(p => ToSkyrim(p.Position))); }
-        catch (Exception e) { counts["navmesh failed: " + e.Message] = 1; }
+        if (BackgroundInteriors)
+            pendingInteriors.Add((navmeshes.BeginInterior(cell, walkable, loadDoors, keep, people.Select(p => ToSkyrim(p.Position)).ToList(), null, background: true), counts));
+        else
+            try { nav = navmeshes.BuildInterior(cell, walkable, loadDoors, keep, people.Select(p => ToSkyrim(p.Position))); }
+            catch (Exception e) { counts["navmesh failed: " + e.Message] = 1; }
         AddInteriorCell(cell);
         return new BuiltInterior(cell, exits, nav, counts, people);
     }

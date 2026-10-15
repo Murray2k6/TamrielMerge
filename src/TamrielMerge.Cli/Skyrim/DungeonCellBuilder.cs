@@ -182,6 +182,24 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     /// </summary>
     public bool BackgroundNavmesh { get; init; }
 
+    /// <summary>
+    /// Town buildings' interior navmeshes made on worker threads while the next buildings are laid out; the caller then
+    /// calls <see cref="FinishInteriors"/> before linking or writing anything. 2026-10-15: made one after another on the
+    /// layout's own thread, they were over half of a town part's time.
+    /// </summary>
+    public bool BackgroundInteriors { get; init; }
+    readonly List<(Navmesh.NavmeshBuilder.PendingInterior Work, Dictionary<string, int> Counts)> pendingInteriors = [];
+
+    /// <summary>Finishes the interior navmeshes begun in the background, in the order they were begun (the navmesh map
+    /// lists them that way); one that fails is left out and counted in its building's fixtures.</summary>
+    public void FinishInteriors()
+    {
+        foreach (var (work, counts) in pendingInteriors)
+            try { work.Finish(); }
+            catch (Exception e) { counts["navmesh failed: " + e.Message] = 1; }
+        pendingInteriors.Clear();
+    }
+
     /// <summary>The overland's ground height at a world position, for where the player is set down outside (in front of
     /// the door, 160 units on: on a slope the ground there is higher than the door's, and the player arrived under it).</summary>
     public Func<float, float, float>? GroundAt { get; init; }
