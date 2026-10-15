@@ -559,7 +559,10 @@ public sealed partial class MwPluginBuilder
     FormList? EffectList(string effect)
     {
         string name = effect.StartsWith("sEffect", StringComparison.OrdinalIgnoreCase) ? effect[7..] : effect;
-        FinishMagic();
+        // Every spell converted, so every effect exists to be listed (not FinishMagic: it places the Mark/Recall anchor
+        // and the Intervention spots, and called once per effect it put the same anchor in the start cell again each
+        // time: "Two records with the same FormKey", 2026-10-15).
+        foreach (var rec in world.Objects.Values.Where(o => o.Type == "SPEL").ToList()) MwSpell(rec.Id);
         var list = new FormList(mod) { EditorID = "MWEffects" + Sanitize(name) };
         foreach (var m in mod.MagicEffects.Where(m => m.EditorID?.StartsWith("MWEffect" + name, StringComparison.OrdinalIgnoreCase) == true))
             list.Items.Add(m.ToLink<ISkyrimMajorRecordGetter>());

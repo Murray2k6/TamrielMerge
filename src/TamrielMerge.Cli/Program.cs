@@ -331,6 +331,13 @@ static class Program
                 {
                     if (!found.TryGetValue(g.Game, out var install)) Console.WriteLine($"{g.Game}: not installed through Steam or GOG, skipped");
                     else if (skip.Contains(g.Game.ToString())) Console.WriteLine($"{g.Game}: skipped (--skip)");
+                    // Resumed: a game the stopped run finished is kept from the build folder, which only this series of
+                    // runs wrote (a new conversion clears it). 2026-10-15: one game's failure had the others built again.
+                    else if (resume && outDir != finalDir && File.Exists(Path.Combine(outDir, g.Plugin)))
+                    {
+                        Console.WriteLine($"{g.Game}: {g.Plugin} kept from the stopped run (--resume)");
+                        plugins.Add(g.Plugin);
+                    }
                     else { Console.WriteLine($"{g.Game} ({install.Store}): converting..."); toBuild.Add(g); }
                 }
                 using (toBuild.Count > 0 ? Begin(toBuild[^1].Game.ToString()) : null)

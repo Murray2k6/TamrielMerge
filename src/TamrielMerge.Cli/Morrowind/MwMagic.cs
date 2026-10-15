@@ -224,9 +224,13 @@ public sealed partial class MwPluginBuilder
     /// other interiors if need be) to it, so Intervention cast inside knows where in the world the caster is; the
     /// Mark/Recall anchor placed in the starting cell.
     /// </summary>
+    bool magicFinished;
+
     void FinishMagic()
     {
-        if (magic is null) return;
+        // Once: it places records (the anchor, a WorldSpot in each interior).
+        if (magic is null || magicFinished) return;
+        magicFinished = true;
         if (magic.RecallAnchor is { } anchor && interiorsByName.Values.FirstOrDefault() is { } anyCell)
         {
             var home = Start is { } st && interiorsByName.TryGetValue(st.Cell, out var startCell) ? startCell : anyCell;
