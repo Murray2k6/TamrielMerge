@@ -33,9 +33,9 @@ beyond UESP's guesses: 0x04 is "give pc" with the quest-complete message (succes
 item", 0x24 "take from pc", 0x23 "start task" (cycle), 0x3F/0x40 add/drop foe face, 0x45 cast spell on foe, 0x47
 "clicked and at least N gold otherwise do", 0x51 "create npc" / "create npc at", 0x53 "transfer pc inside".
 
-`df-quest-check`: 230 of 232 quests have every operation supported, 5653 of 5655 operations (99.96%). The gap is 0x11
-(two uses, A0C10Y05 and B0C00Y13, in the start-up: a place and two numbers); UESP has no meaning for it and Daggerfall
-Unity leaves it out, so it is skipped. `df-quest-check --places` lists where every fixed place resolves.
+`df-quest-check`: all 232 quests have every operation supported (5655 operations). 0x11 (two uses, A0C10Y05 and
+B0C00Y13, in the start-up: a place and two numbers), which UESP has no meaning for and Daggerfall Unity leaves out, marks
+the place on the map as reveal does. `df-quest-check --places` lists where every fixed place resolves.
 
 ## Records (DfQuestBuilder, in Daggerfall.esm)
 
