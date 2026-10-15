@@ -8011,6 +8011,15 @@ static class Program
                     if (proc.ExitCode != 0) Console.WriteLine($"Sprite models: the model maker stopped ({proc.ExitCode}); what it finished is kept.");
                 }
                 // Every model held to its sprite: the outline check (and a contact sheet, models.png, to look them over).
+                // Not again when no model changed since the last check (2026-10-15: it took 10 minutes a conversion with
+                // nothing new made).
+                string scores = Path.Combine(dir, "fidelity.txt");
+                var meshes = Directory.Exists(Path.Combine(dir, "models")) ? Directory.GetFiles(Path.Combine(dir, "models"), "mesh.obj", SearchOption.AllDirectories) : [];
+                if (File.Exists(scores) && meshes.Length > 0 && meshes.Max(File.GetLastWriteTimeUtc) <= File.GetLastWriteTimeUtc(scores))
+                {
+                    Console.WriteLine($"Sprite models: {meshes.Length} checked already ({scores})");
+                    return 0;
+                }
                 var check = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
                 foreach (var a in new[] { Path.Combine(Path.GetDirectoryName(script)!, "check.py"), Path.Combine(dir, "models"), Path.Combine(dir, "sprites.txt") })
                     check.ArgumentList.Add(a);
