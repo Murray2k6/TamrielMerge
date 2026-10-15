@@ -1122,17 +1122,31 @@ static class Program
                 var fn = Redguard.RgScript.FunctionNames(def);
                 var flags = Redguard.RgScript.FlagNames(def);
                 var rtx = Redguard.RgRtx.Load(Path.Combine(rg, "ENGLISH.RTX"));
-                var bytes = File.ReadAllBytes(Path.Combine(rg, "maps", opts.GetValueOrDefault("scene", "ISLAND") + ".RGM"));
+                // --dump DIR: every scene's every program, as DIR\SCENE\ACTOR.txt.
+                string? dumpDir = opts.GetValueOrDefault("dump");
+                foreach (var sceneFile in dumpDir is null ? [Path.Combine(rg, "maps", opts.GetValueOrDefault("scene", "ISLAND") + ".RGM")] : Directory.GetFiles(Path.Combine(rg, "maps"), "*.RGM").Order().ToArray())
+                {
+                var bytes = File.ReadAllBytes(sceneFile);
                 var sceneData = Redguard.RgScene.Load(bytes)!;
                 var script = Redguard.RgScript.Load(bytes, sceneData);
-                if (!opts.ContainsKey("actor"))
+                if (dumpDir is not null)
+                {
+                    string dir = Path.Combine(dumpDir, Path.GetFileNameWithoutExtension(sceneFile).ToUpperInvariant());
+                    Directory.CreateDirectory(dir);
+                    File.WriteAllLines(Path.Combine(dir, "_objects.txt"), sceneData.Objects.Select((o, i) => $"{i} {sceneData.ObjectTypes[i]} {o.Script,-10} {o.Model,-10} at {o.Position}")
+                        .Concat(sceneData.Markers.Select((m, i) => $"marker {i} at {m}")));
+                    File.WriteAllLines(Path.Combine(dir, "_attrs.txt"), script.Attributes.Select(kv => $"{kv.Key,-10} {string.Join(" ", kv.Value.Select((v, i) => (v, i)).Where(t => t.v != 0).Select(t => $"{t.i}={t.v}"))}"));
+                }
+                foreach (var actorName in dumpDir is null ? [opts.GetValueOrDefault("actor", "")] : script.Programs.Keys.ToArray())
+                {
+                if (dumpDir is null && !opts.ContainsKey("actor"))
                 {
                     // No actor named: the scene's objects (type, script, model) to pick from.
                     for (int i = 0; i < sceneData.Objects.Count; i++)
                         Console.WriteLine($"{sceneData.ObjectTypes[i]} {sceneData.Objects[i].Script,-10} {sceneData.Objects[i].Model,-10} at {sceneData.Objects[i].Position}");
                     return 0;
                 }
-                var strings = script.Strings.GetValueOrDefault(opts["actor"]) ?? [];
+                var strings = script.Strings.GetValueOrDefault(actorName) ?? [];
                 string Tag(int v) { var t = BitConverter.GetBytes(v); return t.All(c => c >= 32 && c < 127) ? System.Text.Encoding.Latin1.GetString(t) : ""; }
                 string V(Redguard.RgScript.Value v) => v switch
                 {
@@ -1169,8 +1183,16 @@ static class Program
                         }
                     }
                 }
-                Print(script.Programs.GetValueOrDefault(opts["actor"]) ?? [], 0);
-                if (opts.TryGetValue("out", out var outFile)) File.WriteAllLines(outFile, lines); else foreach (var l in lines) Console.WriteLine(l);
+                Print(script.Programs.GetValueOrDefault(actorName) ?? [], 0);
+                if (dumpDir is not null)
+                {
+                    string dir = Path.Combine(dumpDir, Path.GetFileNameWithoutExtension(sceneFile).ToUpperInvariant());
+                    Directory.CreateDirectory(dir);
+                    File.WriteAllLines(Path.Combine(dir, string.Concat(actorName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)) + ".txt"), lines);
+                }
+                else if (opts.TryGetValue("out", out var outFile)) File.WriteAllLines(outFile, lines); else foreach (var l in lines) Console.WriteLine(l);
+                }
+                }
                 return 0;
             }
             case "rg-script-coverage":
@@ -1194,7 +1216,7 @@ static class Program
                 var byFunction = new Dictionary<string, Dictionary<Redguard.RgPapyrus.Category, int>>();
                 int total = 0, unusedScene = 0, programs = 0;
                 var written = new Dictionary<string, string>();
-                var ctx = new Redguard.RgPluginBuilder.CoverageContext();
+                var ctx = new Redguard.RgPluginBuilder.CoverageContext(rg);
                 foreach (var file in Directory.GetFiles(Path.Combine(rg, "maps"), "*.RGM").Order())
                 {
                     string sceneName = Path.GetFileNameWithoutExtension(file).ToUpperInvariant();
@@ -1204,6 +1226,7 @@ static class Program
                     foreach (var (actor, program) in script.Programs)
                     {
                         bool talks = Redguard.RgPluginBuilder.IsTalker(script, actor, fn);
+                        ctx.Actor = actor;
                         var locals = script.Locals.GetValueOrDefault(actor) ?? [];
                         var output = translator.Translate("TMRg" + new string((sceneName + "_" + actor).Where(c => char.IsLetterOrDigit(c) || c == '_').ToArray()),
                             $"Redguard {sceneName} {actor}", program, script.Entry.GetValueOrDefault(actor), locals, script.Strings.GetValueOrDefault(actor) ?? [], ctx, talks,

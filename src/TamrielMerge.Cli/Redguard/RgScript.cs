@@ -63,6 +63,9 @@ public sealed class RgScript
     /// <summary>Each actor's extra locations (RALC: RAHD count at 97, byte offset at 105; 12-byte x/y/z offsets from the
     /// object's position, z the other way round), which MoveToLocation(n) names from 1 (0 is the object's start).</summary>
     public Dictionary<string, List<System.Numerics.Vector3>> LocationOffsets { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Each actor's starting attributes (RAAT: 256 bytes per RAHD record, by SOUP386.DEF's attr_* number:
+    /// 29 its synchronisation group, 44 its panic group (standing animation), 48 its camera target height, ...).</summary>
+    public Dictionary<string, byte[]> Attributes { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>SOUP function names by id (id 0 is the null function).</summary>
     public static List<string> FunctionNames(string soupDef)
@@ -110,6 +113,7 @@ public sealed class RgScript
         scene.Sections.TryGetValue("RASB", out var rasb);
         scene.Sections.TryGetValue("RAVA", out var rava);
         scene.Sections.TryGetValue("RALC", out var ralc);
+        scene.Sections.TryGetValue("RAAT", out var raat);
         int count = BitConverter.ToInt32(rgm, rahd.Offset);
         int pos = -1;
         for (int i = 0; i < count; i++)
@@ -144,6 +148,7 @@ public sealed class RgScript
                 offsets.Add(new System.Numerics.Vector3(BitConverter.ToInt32(rgm, o), BitConverter.ToInt32(rgm, o + 4), -BitConverter.ToInt32(rgm, o + 8)));
             }
             s.LocationOffsets.TryAdd(name, offsets);
+            if (raat.Length >= (i + 1) * 256) s.Attributes.TryAdd(name, rgm[(raat.Offset + i * 256)..(raat.Offset + (i + 1) * 256)]);
             if (length > 0 && pos + length <= rasc.Length)
             {
                 var sha = System.Security.Cryptography.SHA1.Create();

@@ -38,12 +38,27 @@ when its RG.MenuShow global is 1.}
 ObjectReference Property MyLight Auto
 Bool Property ActsOnPlayer = False Auto
 {Redguard's player scripts (item use scripts, COMMON): "me" is Cyrus.}
+Int[] Property AttrInit Auto
+{The object's starting attributes Skyrim uses (RAAT), as pairs of attribute number and value.}
+Int Property SyncGroup = -1 Auto
+{The synchronisation group (its scene's attr_group) as a barrier number on RG, -1 for none.}
+Int Property SyncMembers = 0 Auto
+{How many objects of that group take part (SyncWithGroup waits for them all).}
+Bool Property Hangable = False Auto
+{The player can hang from it (its script tests PlayerHanging): activating it from below (TMRgMove).}
 
 ObjectReference Property Who Auto Hidden
 
 Int pc0 = -2
 Int pc1 = 0
 Int _pc = 0
+Int _cur = 0
+Bool _retry = False
+Int[] attrs
+Bool syncWaiting = False
+Int syncGen = 0
+Float syncSince = 0.0
+ObjectReference walkMarker
 Int thread = 0
 Float due0 = 0.0
 Float due1 = 0.0
@@ -96,6 +111,16 @@ Function Setup()
   pc1 = 0
   stack0 = new Int[16]
   stack1 = new Int[16]
+  attrs = new Int[128]
+  If AttrInit
+    Int k = 0
+    While k + 1 < AttrInit.Length
+      If AttrInit[k] >= 0 && AttrInit[k] < 128
+        attrs[AttrInit[k]] = AttrInit[k + 1]
+      EndIf
+      k += 2
+    EndWhile
+  EndIf
 EndFunction
 
 Event OnLoad()
@@ -128,6 +153,10 @@ Event OnActivate(ObjectReference akActionRef)
   EndIf
   Actor me = (Self as ObjectReference) as Actor
   If Talks && me && !me.IsDead()
+    Return
+  EndIf
+  ; Something to hang from, above the player: grabbing it (again: letting go).
+  If Hangable && RG.Mover && RG.Mover.HangFrom(Self)
     Return
   EndIf
   activated = True
@@ -199,6 +228,7 @@ Function RunThread()
   Int steps = 0
   While _pc >= 0 && _yield == 0.0 && steps < 300 && !killed
     Who = Home()
+    _cur = _pc
     Dispatch(_pc)
     steps += 1
   EndWhile
@@ -231,12 +261,26 @@ Function EndTo(Int b)
   _yield = 0.01
 EndFunction
 
-; After a task of the given time, block b.
+; After a task of the given time, block b (or, for a task still waiting (Retry), this block again after that time).
 Function Task(Float seconds, Int b)
   _pc = b
+  If _retry
+    _retry = False
+    _pc = _cur
+    If seconds < 0.05
+      seconds = 0.05
+    EndIf
+  EndIf
   If seconds > 0.0
     _yield = seconds
   EndIf
+EndFunction
+
+; A task that isn't done yet (a group not all there): its block runs again after the poll time (the translator gives
+; such tasks a block of their own).
+Float Function Retry(Float poll)
+  _retry = True
+  Return poll
 EndFunction
 
 ; A multitask: runs alongside; WaitOnTasks waits for it.
@@ -363,17 +407,19 @@ Bool Function Real(ObjectReference r)
 EndFunction
 
 ; Redguard's object fields (SOUP386.DEF [refs]) the scripts read and write: 1-3 pos.vx/vy/vz (Redguard's x east, y
-; down, z north), 4-6 angle.vx/vy/vz (2048ths), 7 hide, 8 dead, 9 torch_timer; others read 0.
+; down, z north, in 256ths of a unit), 4-6 angle.vx/vy/vz (2048ths), 7 hide, 8 dead, 9 torch_timer; others read 0.
+; Positions are the stretched world's (RgWarp): what scripts copy from one object to another stays consistent, and
+; the translator stretches the places scripts name by number (SetPos).
 Int Function GetField(ObjectReference r, Int field)
   If !r
     Return 0
   EndIf
   If field == 1
-    Return ((r.GetPositionX() + 32768.0) * 1.0) as Int
+    Return ((r.GetPositionX() + 32768.0) * 256.0) as Int
   ElseIf field == 2
-    Return (-r.GetPositionZ()) as Int
+    Return (-r.GetPositionZ() * 256.0) as Int
   ElseIf field == 3
-    Return (r.GetPositionY() + 32768.0) as Int
+    Return ((r.GetPositionY() + 32768.0) * 256.0) as Int
   ElseIf field == 4
     Return (r.GetAngleX() * 2048.0 / 360.0) as Int
   ElseIf field == 5
@@ -399,12 +445,18 @@ Function SetField(ObjectReference r, Int field, Int v)
   If !r
     Return
   EndIf
-  If field == 1
-    r.SetPosition(v - 32768.0, r.GetPositionY(), r.GetPositionZ())
-  ElseIf field == 2
-    r.SetPosition(r.GetPositionX(), r.GetPositionY(), -v)
-  ElseIf field == 3
-    r.SetPosition(r.GetPositionX(), v - 32768.0, r.GetPositionZ())
+  If field >= 1 && field <= 3
+    Float px = r.GetPositionX()
+    Float py = r.GetPositionY()
+    Float pz = r.GetPositionZ()
+    If field == 1
+      px = v / 256.0 - 32768.0
+    ElseIf field == 2
+      pz = -v / 256.0
+    Else
+      py = v / 256.0 - 32768.0
+    EndIf
+    SetPos(r, px, py, pz)
   ElseIf field == 4
     r.SetAngle(v * 360.0 / 2048.0, r.GetAngleY(), r.GetAngleZ())
   ElseIf field == 5
@@ -423,6 +475,30 @@ Function SetField(ObjectReference r, Int field, Int v)
       a.Kill()
     EndIf
   EndIf
+EndFunction
+
+; An object put somewhere by a script (its pos fields set). Cyrus moved far while a cutscene holds him is the canah's
+; flight (and the like): Skyrim's player is flown there along the way the script sets, over the next few seconds.
+Function SetPos(ObjectReference r, Float tx, Float ty, Float tz)
+  If !r
+    Return
+  EndIf
+  Actor p = Game.GetPlayer()
+  If r == p
+    Float dx = tx - p.GetPositionX()
+    Float dy = ty - p.GetPositionY()
+    Float dz = tz - p.GetPositionZ()
+    If (RG.LockedOut() || RG.Flying()) && dx * dx + dy * dy + dz * dz > 512.0 * 512.0
+      RG.FlyTo(tx, ty, tz, 2.5)
+      Return
+    EndIf
+  EndIf
+  r.SetPosition(tx, ty, tz)
+EndFunction
+
+; SetPos from Redguard's numbers (pos.vx/vy/vz, 256ths) where the translator couldn't stretch them.
+Function SetPosRg(ObjectReference r, Int rx, Int ry, Int rz)
+  SetPos(r, rx / 256.0 - 32768.0, rz / 256.0 - 32768.0, -ry / 256.0)
 EndFunction
 
 ; ---- rotation (Skyrim's angles: model to world is RotX(-x) RotY(-y) RotZ(-z), row vectors) ----
@@ -559,7 +635,11 @@ Float Function MoveTo3(Float tx, Float ty, Float tz, Float seconds)
   Actor a = Who as Actor
   Float dist = Math.sqrt((tx - Who.GetPositionX()) * (tx - Who.GetPositionX()) + (ty - Who.GetPositionY()) * (ty - Who.GetPositionY()) + (tz - Who.GetPositionZ()) * (tz - Who.GetPositionZ()))
   If a
-    ; People keep to Skyrim's AI (they aren't slid about); the time is kept.
+    ; People walk there (Skyrim's pathing, at the pace the time asks) and stand exactly where the script put them.
+    If a != Game.GetPlayer()
+      WalkTo(a, tx, ty, tz, seconds)
+      Return 0.0
+    EndIf
     Return seconds
   EndIf
   If seconds <= 0.05 || dist < 0.5
@@ -568,6 +648,35 @@ Float Function MoveTo3(Float tx, Float ty, Float tz, Float seconds)
   EndIf
   Who.TranslateTo(tx, ty, tz, Who.GetAngleX(), Who.GetAngleY(), Who.GetAngleZ(), dist / seconds, 0.0)
   Return seconds
+EndFunction
+
+; A person walking to a point: pathing to a marker put there, at a walk or a run as the time asks (Redguard gives a
+; move its time); stopped short of it (no navmesh through a moving part), the rest by a short slide, so scripted
+; positions that later puzzles depend on are reached.
+Function WalkTo(Actor a, Float tx, Float ty, Float tz, Float seconds)
+  If !walkMarker
+    walkMarker = a.PlaceAtMe(Game.GetFormFromFile(0x0000003B, "Skyrim.esm"), 1, True, False)
+  EndIf
+  walkMarker.SetPosition(tx, ty, tz)
+  Float dist = a.GetDistance(walkMarker)
+  If dist < 16.0
+    Return
+  EndIf
+  Float pace = 0.0
+  If seconds > 0.05
+    ; Skyrim's people walk about 90 units a second and run about 300.
+    pace = (dist / seconds - 90.0) / 210.0
+  EndIf
+  If pace < 0.0
+    pace = 0.0
+  ElseIf pace > 1.0
+    pace = 1.0
+  EndIf
+  a.PathToReference(walkMarker, pace)
+  If a.GetDistance(walkMarker) > 48.0 && a.GetDistance(walkMarker) < dist + 64.0
+    ; Stuck on the way (no navmesh through a moving part): the rest by a short slide.
+    a.TranslateTo(tx, ty, tz, a.GetAngleX(), a.GetAngleY(), a.GetAngleZ(), 150.0, 0.0)
+  EndIf
 EndFunction
 
 ; A Redguard vector (fine units, axis 0 x east, 1 y down, 2 z north) along a local axis of Who in world terms.
@@ -862,9 +971,25 @@ Float Function S_PlayerFaceTalk(Int a)
   Return S_PlayerFaceObj()
 EndFunction
 
-; The player lined up for an action at this object (Redguard walks Cyrus to a spot): turned to face it.
-Float Function S_PlayerLineUp(Int x, Int z, Int angle)
-  Return S_PlayerFaceObj()
+; The player lined up for an action at this object: Redguard walks Cyrus to a spot at a distance (c, 256ths) on a
+; side (a, 2048ths of a turn from its front) of it, facing it; here he steps there (when it's near) and turns to it.
+Float Function S_PlayerLineUp(Int a, Int b, Int c)
+  Actor p = Game.GetPlayer()
+  If c <= 0 || Who == p
+    Return S_PlayerFaceObj()
+  EndIf
+  Float h = Who.GetAngleZ() + a * 360.0 / 2048.0
+  Float tx = Who.GetPositionX() + Math.sin(h) * c / 256.0
+  Float ty = Who.GetPositionY() + Math.cos(h) * c / 256.0
+  Float dx = tx - p.GetPositionX()
+  Float dy = ty - p.GetPositionY()
+  Float d = Math.sqrt(dx * dx + dy * dy)
+  If d < 16.0 || d > 256.0
+    Return S_PlayerFaceObj()
+  EndIf
+  Float face = h + 180.0
+  p.TranslateTo(tx, ty, p.GetPositionZ() + 2.0, 0.0, 0.0, face, 180.0, 360.0)
+  Return d / 180.0 + 0.1
 EndFunction
 
 Float Function S_PlayerPickupLineUp(Int x, Int z, Int angle)
@@ -875,8 +1000,20 @@ Float Function S_PlayerParallelLineUp(Int x, Int z, Int angle)
   Return S_PlayerFaceObj()
 EndFunction
 
+; A teleporter: Cyrus put at an offset from this object (256ths: x east, y down, z north), facing d (2048ths).
 Int Function S_MovePlayerAboveMe(Int a, Int b, Int c, Int d)
+  Actor p = Game.GetPlayer()
+  p.SetPosition(Who.GetPositionX() + a / 256.0, Who.GetPositionY() + c / 256.0, Who.GetPositionZ() - b / 256.0)
+  p.SetAngle(0.0, 0.0, -d * 360.0 / 2048.0)
   Return 0
+EndFunction
+
+; The player inside a rectangle the translator stretched into Skyrim's world (x, y bounds).
+Int Function S_InRectangleSk(Int x1, Int y1, Int x2, Int y2)
+  Actor p = Game.GetPlayer()
+  Float px = p.GetPositionX()
+  Float py = p.GetPositionY()
+  Return B(px >= x1 && px <= x2 && py >= y1 && py <= y2)
 EndFunction
 
 Int Function S_MoveAboveMe()
@@ -958,20 +1095,141 @@ Int Function S_DisableHook()
   Return 0
 EndFunction
 
-; Redguard's object attributes (SOUP386.DEF attr_*): health, strength, armor and invulnerability carry over to
-; Skyrim's actor values; the others (movement, animation and collision tuning) have no Skyrim counterpart.
+; Redguard's object attributes (SOUP386.DEF attr_*, 0-126): every one is kept on the object (GetAttribute reads it
+; back) and these act in Skyrim: 2 strength, 3 health, 4 armor and 120 invulnerable as actor values; 29 group (the
+; barrier SyncWithGroup waits at); 44 panic group, the idle an actor stands in (Skyrim's idle for it); 47-49 the
+; camera's target offset (how high a shot looks at the object); 58 aggression. The rest tune Redguard's own movement,
+; animation and collision.
+Int[] Function AttrsOf(ObjectReference r)
+  TMRgSoup other = r as TMRgSoup
+  If r != Self && other
+    Return other.Attributes()
+  EndIf
+  If !attrs
+    Setup()
+  EndIf
+  Return attrs
+EndFunction
+
+Int[] Function Attributes()
+  Setup()
+  Return attrs
+EndFunction
+
 Int Function S_SetAttribute(Int attr, Int v)
+  If attr < 0 || attr >= 128
+    Return 0
+  EndIf
+  Int[] at = AttrsOf(Who)
+  If at
+    at[attr] = v
+  EndIf
   Actor a = Who as Actor
   If !a
     Return 0
   EndIf
-  If attr == 3 && v > 0 && a != Game.GetPlayer()
-    a.SetActorValue("Health", v)
+  If attr == 2
+    S_setStrength(v)
+  ElseIf attr == 3 && v > 0 && a != Game.GetPlayer()
+    S_setHealth(v)
   ElseIf attr == 4
     a.SetActorValue("DamageResist", v)
-  ElseIf attr == 123
+  ElseIf attr == 44
+    StandIdle(a, v)
+  ElseIf attr == 58 && a != Game.GetPlayer()
+    If v > 0
+      a.SetActorValue("Aggression", 1)
+    Else
+      a.SetActorValue("Aggression", 0)
+    EndIf
+  ElseIf attr == 120
     a.SetGhost(v != 0)
   EndIf
+  Return 0
+EndFunction
+
+Int Function S_GetAttribute(Int attr)
+  Int[] at = AttrsOf(Who)
+  If !at || attr < 0 || attr >= 128
+    Return 0
+  EndIf
+  Return at[attr]
+EndFunction
+
+Int Function S_GetMyAttr(Int attr)
+  Return S_GetAttribute(attr)
+EndFunction
+
+Int Function S_SetMyAttr(Int attr, Int v)
+  Return S_SetAttribute(attr, v)
+EndFunction
+
+; How high above an object's origin its camera target is (attr_camera_target_offset_y, Redguard's up; people's
+; heads by default).
+Float Function LookHeight(ObjectReference r)
+  Int[] at = AttrsOf(r)
+  Float h = 0.0
+  If at
+    h = at[48]
+  EndIf
+  If h == 0.0 && (r as Actor)
+    h = 110.0
+  EndIf
+  Return h
+EndFunction
+
+; An actor's standing animation (its panic group): Skyrim's idle for it, or back to plain standing.
+Function StandIdle(Actor a, Int anim)
+  If !a || a.IsDead() || a.IsInCombat()
+    Return
+  EndIf
+  Idle i = RG.IdleFor(anim, a == Game.GetPlayer())
+  If i
+    a.PlayIdle(i)
+  ElseIf anim == 0 && RG.IdleStop
+    a.PlayIdle(RG.IdleStop)
+  EndIf
+EndFunction
+
+; ---- group synchronisation ----
+
+; SyncWithGroup: the group's members wait for one another at each sync point (Redguard's machines turning together),
+; a barrier on RG; one that waits more than 10 seconds for a member that isn't running (unloaded, gone) lets them go.
+Float Function S_SyncWithGroup(Int point)
+  If SyncGroup < 0 || SyncMembers <= 1
+    Return 0.0
+  EndIf
+  If !syncWaiting
+    Int g = RG.SyncArrive(SyncGroup, SyncMembers)
+    If g < 0
+      Return 0.0
+    EndIf
+    syncWaiting = True
+    syncGen = g
+    syncSince = Utility.GetCurrentRealTime()
+    Return Retry(0.05)
+  EndIf
+  If RG.SyncGeneration(SyncGroup) != syncGen
+    syncWaiting = False
+    Return 0.0
+  EndIf
+  If Utility.GetCurrentRealTime() - syncSince > 10.0
+    RG.SyncReset(SyncGroup)
+    syncWaiting = False
+    Return 0.0
+  EndIf
+  Return Retry(0.05)
+EndFunction
+
+Float Function S_SyncWithUser(Int point)
+  Return S_SyncWithGroup(point)
+EndFunction
+
+Int Function S_ResetGroupSync()
+  If SyncGroup >= 0
+    RG.SyncReset(SyncGroup)
+  EndIf
+  syncWaiting = False
   Return 0
 EndFunction
 
@@ -1223,8 +1481,10 @@ Int Function S_PlayerCollideStatic()
   Return S_PlayerCollide()
 EndFunction
 
+; Cyrus hanging from this object (TMRgMove holds him under it).
 Int Function S_PlayerHanging()
-  Return 0
+  ObjectReference h = RG.HangingOn()
+  Return B(h && h == Who)
 EndFunction
 
 Int Function S_PlayerOnScape()
@@ -1391,9 +1651,27 @@ Int Function S_ItemUsed(Int n, Int count)
   Return 0
 EndFunction
 
-; Holding an item for an animation (Redguard draws it in Cyrus's hand): Skyrim's animations have no hand item.
+; Holding an item for an animation (Redguard draws it in Cyrus's hand): a weapon or torch Skyrim equips, item 0 (an
+; empty hand) takes it back; potions and the rest show as Skyrim's own use shows them (TMRgState.HandItem).
 Int Function S_HandItem(Int n)
+  Actor a = Who as Actor
+  If !a
+    Return 0
+  EndIf
+  If n <= 0
+    RG.HandItem(a, None)
+  Else
+    RG.HandItem(a, ItemForm(n))
+  EndIf
   Return 0
+EndFunction
+
+Int Function S_DisplayHandItem(Int n, Int a, Int b, Int c)
+  Return S_HandItem(n)
+EndFunction
+
+Int Function S_DisplayHiltItem(Int n, Int a, Int b, Int c)
+  Return S_HandItem(n)
 EndFunction
 
 Int Function S_SelectItem(Int n)
@@ -1534,8 +1812,16 @@ Int Function S_StopAllSounds()
 EndFunction
 
 ; A line (RTX): said by Who when it is an actor with a voiced topic, else its recording played there (Cyrus's at the
-; player) with the text shown. Returns its length.
-Float Function Line(Int i, String text, Float seconds, Bool cyrus)
+; player) with the text shown, and a gesture of the line's animation groups when Skyrim has an idle for one. Returns
+; its length.
+Float Function Line(Int i, String text, Float seconds, Bool cyrus, Int gesture)
+  If gesture >= 0
+    If cyrus
+      PlayGroup(Game.GetPlayer(), gesture)
+    Else
+      PlayGroup(Who as Actor, gesture)
+    EndIf
+  EndIf
   Form f = None
   If i >= 0 && i < RG.Lines.GetSize()
     f = RG.Lines.GetAt(i)
@@ -1566,9 +1852,92 @@ EndFunction
 
 ; ---- the screen, the camera and animation ----
 
-; Redguard's camera moves (show*, look*): the player's own camera stays; the time they take is kept.
+; Redguard's camera moves (show*, look*) as Skyrim's camera allows (it can't be placed): a shot of an object turns the
+; player's view to it, at its camera target height; a shot of Cyrus from somewhere is Skyrim's third-person camera
+; on him; showPlayer, XResetCamera and the cutscene's end give the camera back. The time they take is kept.
 Float Function S_Camera()
   Return 0.0
+EndFunction
+
+Float Function ShotOfWho()
+  If Who == Game.GetPlayer()
+    RG.ShotOfCyrus()
+  Else
+    RG.ShotOf(Who, LookHeight(Who))
+  EndIf
+  Return 0.0
+EndFunction
+
+Float Function S_showObj(Int x, Int y, Int z)
+  Return ShotOfWho()
+EndFunction
+
+Float Function S_showObjLoc(Int x, Int y, Int z)
+  Return ShotOfWho()
+EndFunction
+
+Float Function S_showObjPan(Int x, Int y, Int z, Int t)
+  Return ShotOfWho()
+EndFunction
+
+Float Function S_showObjPanLoc(Int x, Int y, Int z, Int t)
+  Return ShotOfWho()
+EndFunction
+
+Float Function S_showObjRot(Int a, Int b, Int c, Int d, Int e, Int f, Int g, Int h)
+  Return ShotOfWho()
+EndFunction
+
+Float Function S_lookObj(Int a)
+  Return ShotOfWho()
+EndFunction
+
+Float Function S_showCyrus(Int x, Int y, Int z)
+  RG.ShotOfCyrus()
+  Return 0.0
+EndFunction
+
+Float Function S_showCyrusLoc(Int x, Int y, Int z)
+  RG.ShotOfCyrus()
+  Return 0.0
+EndFunction
+
+Float Function S_showCyrusPan(Int x, Int y, Int z, Int t)
+  RG.ShotOfCyrus()
+  Return 0.0
+EndFunction
+
+Float Function S_showCyrusPanLoc(Int x, Int y, Int z, Int t)
+  RG.ShotOfCyrus()
+  Return 0.0
+EndFunction
+
+Float Function S_lookCyrus(Int a)
+  RG.ShotOfCyrus()
+  Return 0.0
+EndFunction
+
+Float Function S_showPlayer()
+  RG.EndShot()
+  Return 0.0
+EndFunction
+
+Float Function S_showPlayerPan(Int t)
+  RG.EndShot()
+  Return 0.0
+EndFunction
+
+Int Function S_XResetCamera()
+  RG.EndShot()
+  Return 0
+EndFunction
+
+Int Function S_updatePlayerViewAttrib()
+  Return 0
+EndFunction
+
+Int Function S_cameraController()
+  Return 0
 EndFunction
 
 Int Function S_lockoutPlayer(Int on)
@@ -1576,18 +1945,31 @@ Int Function S_lockoutPlayer(Int on)
   Return 0
 EndFunction
 
-; Animations: Redguard's own animation numbers have no Skyrim counterpart; the time they hold the script is kept by
-; the frame waits that follow them (12 frames a second).
+; Animations: Redguard's animation groups that Skyrim has an idle for play it (picking up, levers, talking, drinking,
+; standing); the time they hold the script is kept by the frame waits that follow them (12 frames a second).
 Float Function S_PushAnimation(Int anim, Int count)
+  PlayGroup(Who as Actor, anim)
   Return 0.0
 EndFunction
 
 Float Function S_PushControlAnimation(Int anim, Int count)
+  PlayGroup(Who as Actor, anim)
   Return 0.0
 EndFunction
 
 Int Function S_PlayAnimation(Int anim, Int count)
+  PlayGroup(Who as Actor, anim)
   Return 0
+EndFunction
+
+Function PlayGroup(Actor a, Int anim)
+  If !a || a.IsDead() || a.IsInCombat()
+    Return
+  EndIf
+  Idle i = RG.IdleFor(anim, a == Game.GetPlayer())
+  If i
+    a.PlayIdle(i)
+  EndIf
 EndFunction
 
 Float Function S_WaitAnimFrame(Int anim, Int frame)
@@ -1598,19 +1980,28 @@ Float Function S_WaitPlayerAnimFrame(Int anim, Int frame)
   Return frame / 12.0
 EndFunction
 
+; COMMON's potion status icons: a line when one comes or goes.
 Int Function S_ShowBitmap(Int a, Int b)
+  RG.Status(a, True)
   Return 0
 EndFunction
 
 Int Function S_UnShowBitmap(Int a)
+  RG.Status(a, False)
   Return 0
 EndFunction
 
+; A full-screen picture (the island map's pieces, the mirror's visions): picture number a (the translator's, from
+; the image's file name) shown as a page.
 Float Function S_ViewGXA(Int a, Int b, Int c)
+  RG.ShowPicture(a)
   Return 0.0
 EndFunction
 
+; A movie (MENU.INI movie_name[n]) played as Skyrim plays Bink: Redguard queued it for the next map change, which
+; follows the call at once in every script that does.
 Int Function S_QueueMovie(Int n)
+  RG.PlayMovie(n)
   Return 0
 EndFunction
 
@@ -1694,6 +2085,8 @@ Int Function S_AddLog(Int stage)
 EndFunction
 
 Int Function S_WonGame()
+  ; The ending (MENU.INI movie 4, WIN.SMK), as Redguard played it on winning.
+  RG.PlayMovie(4)
   TMStoryOrder story = Game.GetFormFromFile(0x0003372B, "Skyrim.esm") as TMStoryOrder
   If story
     story.StoryCompleted(1)
