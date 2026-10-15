@@ -4657,7 +4657,7 @@ static class Program
                 DateTime since = opts.TryGetValue("since", out var s0) ? DateTime.Parse(s0, System.Globalization.CultureInfo.CurrentCulture) : DateTime.Now.AddHours(-1);
                 if (opts.ContainsKey("launch") && Skyrim.GameCheck.Launch(skyrimData, Console.WriteLine) is { } run) since = run.Started;
                 string workspace = Directory.GetCurrentDirectory();
-                Console.Write(Skyrim.GameCheck.Scan(since, workspace));
+                Console.Write(Skyrim.GameCheck.Scan(since, workspace, skyrimData));
                 return 0;
             }
             case "df-senses-check":
