@@ -30,6 +30,8 @@ public sealed class MwScriptWorld : MwPapyrus.IWorld
     readonly Dictionary<string, string> factionsByName = new(StringComparer.OrdinalIgnoreCase);
     readonly HashSet<string> regionNames = new(StringComparer.OrdinalIgnoreCase);
     public MwDialogue? Dialogue { get; }
+    /// <summary>Morrowind's attributes of the game's people and creatures (GetStrength...).</summary>
+    public MwStats Stats { get; }
 
     public MwScriptWorld(MwWorld world, MwDialogue? dialogue, Tes3Data? data = null)
     {
@@ -89,6 +91,9 @@ public sealed class MwScriptWorld : MwPapyrus.IWorld
                 }
             }
         }
+        // Morrowind's dialogue offers Companion Share to whoever's companion local is 1 (TamrielMerge's topic tests it).
+        if (variables.Values.Any(v => v.ContainsKey("companion"))) dialogueLocals.Add("companion");
+        Stats = new MwStats(world);
         // Scripts on people declaring each local (a result script's speaker locals).
         foreach (var (id, vars) in variables)
             if (Carriers.TryGetValue(id, out var carriers) && carriers.Any(c => c.Type is "NPC_" or "CREA"))
@@ -155,27 +160,87 @@ public sealed class MwScriptWorld : MwPapyrus.IWorld
 
     readonly Dictionary<string, float> soundSeconds = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>A sound's length from its WAV header (data size over bytes per second); 2 seconds when unknown.</summary>
+    /// <summary>A sound's length from its file (a WAV's header, an MP3's frames); 2 seconds when unknown.</summary>
     public float SoundSeconds(string soundId)
     {
         if (soundSeconds.TryGetValue(soundId, out var s)) return s;
         float seconds = 2;
         if (data is not null && world.Objects.TryGetValue(soundId, out var rec) && rec.Str("FNAM") is { Length: > 0 } file && data.Read(@"sound\" + file) is { Length: > 44 } bytes
-            && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F')
-        {
-            int byteRate = 0, size = 0;
-            for (int p = 12; p + 8 <= bytes.Length;)
-            {
-                string chunk = System.Text.Encoding.ASCII.GetString(bytes, p, 4);
-                int len = BitConverter.ToInt32(bytes, p + 4);
-                if (chunk == "fmt " && p + 16 <= bytes.Length) byteRate = BitConverter.ToInt32(bytes, p + 16);
-                if (chunk == "data") { size = len; break; }
-                p += 8 + len + (len & 1);
-            }
-            if (byteRate > 0 && size > 0) seconds = Math.Clamp((float)size / byteRate, 0.1f, 600f);
-        }
+            && AudioSeconds(bytes) is { } length)
+            seconds = Math.Clamp(length, 0.1f, 600f);
         return soundSeconds[soundId] = seconds;
     }
+
+    public int[]? BaseStats(string id) => Stats.Of(id);
+
+    readonly Dictionary<string, float> voiceSeconds = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A Say recording's length (Morrowind's voices are MP3s, whatever extension the script names); 3 seconds
+    /// when the file isn't there.</summary>
+    public float VoiceSeconds(string file)
+    {
+        if (voiceSeconds.TryGetValue(file, out var s)) return s;
+        string path = @"sound\" + file.Replace('/', '\\').TrimStart('\\');
+        byte[]? bytes = data?.Read(path) ?? data?.Read(Path.ChangeExtension(path, ".mp3")) ?? data?.Read(Path.ChangeExtension(path, ".wav"));
+        float seconds = bytes is null ? 3f : AudioSeconds(bytes) ?? 3f;
+        return voiceSeconds[file] = seconds;
+    }
+
+    /// <summary>A WAV's or MP3's length in seconds: the WAV's data over its byte rate; the MP3's frames' samples over
+    /// their rate (each frame header read in turn, after an ID3 tag).</summary>
+    public static float? AudioSeconds(byte[] b)
+    {
+        if (b.Length > 44 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F')
+        {
+            int byteRate = 0;
+            for (int p = 12; p + 8 <= b.Length;)
+            {
+                string chunk = System.Text.Encoding.ASCII.GetString(b, p, 4);
+                int len = BitConverter.ToInt32(b, p + 4);
+                if (chunk == "fmt " && p + 16 <= b.Length) byteRate = BitConverter.ToInt32(b, p + 16);
+                if (chunk == "data") return byteRate > 0 ? (float)len / byteRate : null;
+                if (len < 0) break;
+                p += 8 + len + (len & 1);
+            }
+            return null;
+        }
+        int pos = 0;
+        if (b.Length > 10 && b[0] == 'I' && b[1] == 'D' && b[2] == '3')
+            pos = 10 + (b[6] << 21 | b[7] << 14 | b[8] << 7 | b[9]);
+        int[] v1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+        int[] v2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+        int[][] rates = [[11025, 12000, 8000], [0, 0, 0], [22050, 24000, 16000], [44100, 48000, 32000]];
+        double total = 0;
+        int frames = 0;
+        while (pos + 4 <= b.Length)
+        {
+            if (b[pos] != 0xFF || (b[pos + 1] & 0xE0) != 0xE0) { pos++; continue; }
+            int version = (b[pos + 1] >> 3) & 3, layer = (b[pos + 1] >> 1) & 3;
+            int bitrateIndex = b[pos + 2] >> 4, rateIndex = (b[pos + 2] >> 2) & 3, padding = (b[pos + 2] >> 1) & 1;
+            if (version == 1 || layer != 1 || bitrateIndex is 0 or 15 || rateIndex == 3) { pos++; continue; }   // Layer III only
+            int rate = rates[version][rateIndex];
+            int bitrate = (version == 3 ? v1 : v2)[bitrateIndex] * 1000;
+            int samples = version == 3 ? 1152 : 576;
+            int length = samples / 8 * bitrate / rate + padding;
+            if (length <= 4) { pos++; continue; }
+            total += (double)samples / rate;
+            frames++;
+            pos += length;
+        }
+        return frames > 0 ? (float)total : null;
+    }
+
+    public string? MusicFile(string file)
+    {
+        if (file.Length == 0 || data is null) return null;
+        string path = @"music\" + file.Replace('/', '\\').TrimStart('\\');
+        return data.Exists(path) ? path : null;
+    }
+
+    public string? Setting(string name) => world.Settings.TryGetValue(name, out var r) ? r.Str("STRV") : null;
+
+    /// <summary>Whether only creatures carry the script (activating one can open its inventory; a person talks).</summary>
+    public bool OnCreature(string scriptId) => Carriers.TryGetValue(scriptId, out var c) && c.Count > 0 && c.All(r => r.Type == "CREA");
 
     /// <summary>Whether only people and creatures carry the script.</summary>
     public bool OnActor(string scriptId) => Carriers.TryGetValue(scriptId, out var c) && c.Count > 0 && c.All(r => r.Type is "NPC_" or "CREA");
@@ -189,6 +254,7 @@ public sealed class MwScriptWorld : MwPapyrus.IWorld
     {
         string? script = info.Actor is { } a ? ScriptOf(a) : null;
         string? faction = info.Faction ?? (info.Actor is { } b && world.Objects.TryGetValue(b, out var npc) ? npc.Str("ANAM") is { Length: > 0 } f ? f : null : null);
-        return new MwPapyrus.Context(OnActor: true, Speakers: info.Actor is { } s && TypeOf(s) == "NPC_" ? [s] : [], SpeakerScript: script, SpeakerFaction: faction);
+        return new MwPapyrus.Context(OnActor: true, Speakers: info.Actor is { } s && TypeOf(s) == "NPC_" ? [s] : [], SpeakerScript: script, SpeakerFaction: faction,
+            SpeakerId: info.Actor is { } id && TypeOf(id) is "NPC_" or "CREA" ? id : null);
     }
 }

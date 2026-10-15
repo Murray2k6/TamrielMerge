@@ -121,12 +121,50 @@ public sealed partial class MwPapyrus
             sb.AppendLine("EndEvent");
             sb.AppendLine();
         }
-        if (activate)
+        // Morrowind opens a companion creature's inventory when the player activates it while its companion local is 1
+        // (people offer Companion Share in their dialogue, TamrielMerge's topic).
+        bool share = ctx.OnCreature && locals.ContainsKey("companion");
+        if (activate || share)
         {
             sb.AppendLine("Event OnActivate(ObjectReference akActionRef)");
-            sb.AppendLine("  __activated = True");
-            sb.AppendLine("  __actionRef = akActionRef");
-            sb.AppendLine("  MwTick()");
+            if (share)
+            {
+                sb.AppendLine($"  If akActionRef == PlayerRef && {Var("companion")} == 1{(activate ? " && !__blocking" : "")}");
+                sb.AppendLine("    ((Self as ObjectReference) as Actor).OpenInventory(True)");
+                sb.AppendLine("  EndIf");
+            }
+            if (activate)
+            {
+                sb.AppendLine("  __activated = True");
+                sb.AppendLine("  __actionRef = akActionRef");
+                sb.AppendLine("  MwTick()");
+            }
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+        }
+        // minimumProfit: Morrowind's companion share counts what the player takes from a hired companion (minus) and
+        // gives them (plus); the companion's script ends the contract when it falls below 0.
+        if (ctx.OnActor && locals.ContainsKey("minimumProfit"))
+        {
+            string profit = Var("minimumProfit");
+            string warning = Escape(world.Setting("sCompanionWarningMessage") ?? "");
+            sb.AppendLine("Event OnItemAdded(Form akBaseItem, Int aiItemCount, ObjectReference akItemReference, ObjectReference akSourceContainer)");
+            sb.AppendLine("  If akSourceContainer == PlayerRef && UI.IsMenuOpen(\"ContainerMenu\")");
+            sb.AppendLine($"    {profit} = {profit} + akBaseItem.GetGoldValue() * aiItemCount");
+            sb.AppendLine("  EndIf");
+            sb.AppendLine("EndEvent");
+            sb.AppendLine();
+            sb.AppendLine("Event OnItemRemoved(Form akBaseItem, Int aiItemCount, ObjectReference akItemReference, ObjectReference akDestContainer)");
+            sb.AppendLine("  If akDestContainer == PlayerRef && UI.IsMenuOpen(\"ContainerMenu\")");
+            sb.AppendLine($"    Bool was = {profit} >= 0");
+            sb.AppendLine($"    {profit} = {profit} - akBaseItem.GetGoldValue() * aiItemCount");
+            if (warning.Length > 0)
+            {
+                sb.AppendLine($"    If was && {profit} < 0");
+                sb.AppendLine($"      Debug.Notification(\"{warning}\")");
+                sb.AppendLine("    EndIf");
+            }
+            sb.AppendLine("  EndIf");
             sb.AppendLine("EndEvent");
             sb.AppendLine();
         }
@@ -207,13 +245,22 @@ public sealed partial class MwPapyrus
             sb.AppendLine("EndEvent");
             sb.AppendLine();
         }
-        if (uses.Contains("onpchitme"))
+        if (uses.Contains("onpchitme") || uses.Contains("hitonme"))
         {
             sb.AppendLine("Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile, Bool abPowerAttack, Bool abSneakAttack, Bool abBashAttack, Bool abHitBlocked)");
-            sb.AppendLine("  If akAggressor == PlayerRef");
-            sb.AppendLine("    __pcHit = True");
-            sb.AppendLine("    MwTick()");
-            sb.AppendLine("  EndIf");
+            if (uses.Contains("hitonme"))
+            {
+                // HitOnMe weapon: the weapon (or spell) that hit last, and whether the hit landed (HitAttemptOnMe: any).
+                sb.AppendLine("  __hitBy = akSource");
+                sb.AppendLine("  __hitLanded = !abHitBlocked");
+            }
+            if (uses.Contains("onpchitme"))
+            {
+                sb.AppendLine("  If akAggressor == PlayerRef");
+                sb.AppendLine("    __pcHit = True");
+                sb.AppendLine("    MwTick()");
+                sb.AppendLine("  EndIf");
+            }
             sb.AppendLine("EndEvent");
             sb.AppendLine();
         }
@@ -226,6 +273,8 @@ public sealed partial class MwPapyrus
         // sleep starts, and whatever they place is there on waking.
         sb.AppendLine("Event OnSleepStart(Float afSleepStartTime, Float afDesiredSleepEndTime)");
         sb.AppendLine("  __pcSleep = True");
+        sb.AppendLine("  __sleepStart = afSleepStartTime");
+        sb.AppendLine("  __sleepEnd = afDesiredSleepEndTime");
         if (global)
         {
             sb.AppendLine("  If TMMwScript.InMorrowind() && IsRunning()");
@@ -255,7 +304,18 @@ public sealed partial class MwPapyrus
         if (uses.Contains("onpcdrop")) Lines("Bool __pcDropped");
         if (uses.Contains("onpcequip")) Lines("Bool __pcEquipped");
         if (uses.Contains("onpchitme")) Lines("Bool __pcHit");
-        if (uses.Contains("pcsleep")) Lines("Bool __pcSleep");
+        if (uses.Contains("pcsleep")) Lines("Bool __pcSleep", "Float __sleepStart", "Float __sleepEnd");
+        if (uses.Contains("hitonme"))
+            Lines("Form __hitBy", "Bool __hitLanded", "",
+                "; HitOnMe / HitAttemptOnMe: hit by that weapon (any attempt, blocked too) since the script last asked.",
+                "Bool Function MwHitOnMe(Form akWeapon, Bool abAttempt)",
+                "  If !__hitBy || __hitBy != akWeapon || !abAttempt && !__hitLanded", "    Return False", "  EndIf",
+                "  __hitBy = None", "  Return True", "EndFunction");
+        if (uses.Contains("basestats"))
+            Lines("", "; The Morrowind record's attributes and skills of the carrier (filled per record), -1 where not known.",
+                "Int Function MwBaseStat(Int aiStat)",
+                "  If MwBaseStats && aiStat < MwBaseStats.Length", "    Return MwBaseStats[aiStat]", "  EndIf",
+                "  Return -1", "EndFunction");
         if (kind == Kind.Object && (ctx.IsItem || uses.Contains("onpcadd") || uses.Contains("onpcdrop") || locals.ContainsKey("OnPCAdd") || locals.ContainsKey("OnPCDrop"))) Lines("Bool __carried");
         if (uses.Contains("startpos")) Lines("Bool __startSet", "Float __sx", "Float __sy", "Float __sz", "Float __sax", "Float __say", "Float __saz");
         foreach (var s in loopSounds.Order(StringComparer.Ordinal)) Lines($"Int __loop_{s}");
@@ -280,7 +340,7 @@ public sealed partial class MwPapyrus
             Lines("", $"Bool Function {fn}()", $"  Bool was = {flag}", $"  {flag} = False", "  Return was", "EndFunction");
         }
         if (uses.Contains("say"))
-            Lines("", "; Say: Skyrim doesn't report when a line ends, so its length is reckoned from its text.",
+            Lines("", "; Say: Skyrim doesn't report when a line ends: SayDone after the recording's length.",
                 "Function MwSaid(Float afSeconds)", "  __sayUntil = Utility.GetCurrentRealTime() + afSeconds", "EndFunction");
         if (uses.Contains("sound"))
             Lines("", "; GetSoundPlaying: a sound plays for its file's length after PlaySound.",

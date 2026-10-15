@@ -3,8 +3,10 @@ ScriptName TMMwAI extends Quest
 AITravel and AIEscort walk the actor to the place (PathToReference, on a thread of its own so the calling script goes
 on, as Morrowind's does) and hold it there; AIFollow follows the player (Skyrim's follow package, through an alias) or
 keeps close to another actor; AIWander lets it wander about where it stands (sandbox aliases); AIActivate walks to a
-thing and uses it. GetAIPackageDone is true once a travel, escort or activation arrives; GetCurrentAIPackage gives
-Morrowind's numbers (0 wander, 1 travel, 2 escort, 3 follow, 4 activate, -1 none).}
+thing and uses it. Durations are Morrowind's: AIWander, AIFollow and AIEscort run that many game hours (0: until told
+otherwise), and AIFollow with a place ends when the actor gets there; then the actor stands where it is. GetAIPackageDone
+is true once a travel, escort or activation arrives or a package's time is up; GetCurrentAIPackage gives Morrowind's
+numbers (0 wander, 1 travel, 2 escort, 3 follow, 4 activate, -1 none).}
 
 ReferenceAlias[] Property FollowSlots Auto
 {Aliases with Skyrim's DefaultFollowPlayer package.}
@@ -30,6 +32,11 @@ ObjectReference[] destinations
 Int[] tokens
 Int[] pending
 Int pendingCount
+Float[] untils
+Float[] goalX
+Float[] goalY
+Float[] goalZ
+Bool[] hasGoal
 
 Function Setup()
   If !actors
@@ -39,6 +46,13 @@ Function Setup()
     destinations = new ObjectReference[64]
     tokens = new Int[64]
     pending = new Int[64]
+  EndIf
+  If !untils
+    untils = new Float[64]
+    goalX = new Float[64]
+    goalY = new Float[64]
+    goalZ = new Float[64]
+    hasGoal = new Bool[64]
   EndIf
 EndFunction
 
@@ -64,6 +78,8 @@ Int Function SlotOf(Actor a, Bool abMake)
   actors[i] = a
   packages[i] = -1
   arrived[i] = False
+  untils[i] = 0.0
+  hasGoal[i] = False
   Return i
 EndFunction
 
@@ -105,8 +121,18 @@ Function Put(ReferenceAlias[] slots, Actor a)
   a.EvaluatePackage()
 EndFunction
 
-; AIWander range: wander about where it stands (range 0: stand there).
-Function Wander(Actor a, Float afRange)
+; A package's game hours: it ends that long from now (0: it doesn't end by itself).
+Function Lasts(Int i, Float afHours)
+  untils[i] = 0.0
+  hasGoal[i] = False
+  If afHours > 0.0
+    untils[i] = Utility.GetCurrentGameTime() + afHours / 24.0
+    Watch()
+  EndIf
+EndFunction
+
+; AIWander range duration: wander about where it stands (range 0: stand there), for that many hours.
+Function Wander(Actor a, Float afRange, Float afHours = 0.0)
   If !a
     Return
   EndIf
@@ -115,6 +141,7 @@ Function Wander(Actor a, Float afRange)
   Release(a)
   packages[i] = PackageWander
   arrived[i] = False
+  Lasts(i, afHours)
   If afRange <= 0.0
     Put(HoldSlots, a)
   ElseIf afRange <= 512.0
@@ -129,12 +156,17 @@ Function Travel(Actor a, Float x, Float y, Float z)
   Go(a, None, x, y, z, PackageTravel)
 EndFunction
 
-; AIEscort target duration x y z: lead the way there.
+; AIEscort target duration x y z: lead the way there (for that many hours at most).
 Function Escort(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Float z)
   Go(a, akTarget, x, y, z, PackageEscort)
+  Int i = SlotOf(a, False)
+  If i >= 0
+    Lasts(i, afDuration)
+  EndIf
 EndFunction
 
-; AIFollow target duration x y z: follow the player (or keep close to another actor) until told otherwise.
+; AIFollow target duration x y z: follow the player (or keep close to another actor) for that many hours, or until the
+; follower is at x y z (when given); with neither, until told otherwise.
 Function Follow(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Float z)
   If !a || !akTarget
     Return
@@ -144,6 +176,14 @@ Function Follow(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Flo
   Release(a)
   packages[i] = PackageFollow
   arrived[i] = False
+  Lasts(i, afDuration)
+  If x != 0.0 || y != 0.0 || z != 0.0
+    goalX[i] = x
+    goalY[i] = y
+    goalZ[i] = z
+    hasGoal[i] = True
+    Watch()
+  EndIf
   If akTarget == Game.GetPlayer()
     Put(FollowSlots, a)
   Else
@@ -161,6 +201,7 @@ Function ActivateRef(Actor a, ObjectReference akTarget)
   Release(a)
   packages[i] = PackageActivate
   arrived[i] = False
+  Lasts(i, 0.0)
   destinations[i] = akTarget
   Queue(i)
 EndFunction
@@ -174,6 +215,7 @@ Function Go(Actor a, Actor akLeader, Float x, Float y, Float z, Int aiPackage)
   Release(a)
   packages[i] = aiPackage
   arrived[i] = False
+  Lasts(i, 0.0)
   ; The destination: a marker of this slot's, moved there (placed beside the actor, so in its world).
   ObjectReference marker = destinations[i]
   If !marker || marker as Actor || !(marker.GetBaseObject() == XMarker)
@@ -193,9 +235,55 @@ Function Queue(Int aiSlot)
   RegisterForSingleUpdate(0.01)
 EndFunction
 
+; The timer that ends packages whose hours are up (and follows that reach their place): every two seconds while any runs.
+Bool watching
+
+Function Watch()
+  watching = True
+  If pendingCount <= 0
+    RegisterForSingleUpdate(2.0)
+  EndIf
+EndFunction
+
+; A package whose time is up, or whose follower is at its place: done, and the actor stands where it is.
+Function CheckTimes()
+  Setup()
+  Float now = Utility.GetCurrentGameTime()
+  Bool any = False
+  Int i = 0
+  While i < actors.Length
+    Actor a = actors[i]
+    If a && (untils[i] > 0.0 || hasGoal[i])
+      Bool over = untils[i] > 0.0 && now >= untils[i]
+      If !over && hasGoal[i] && a.Is3DLoaded()
+        Float dx = a.GetPositionX() - goalX[i]
+        Float dy = a.GetPositionY() - goalY[i]
+        Float dz = a.GetPositionZ() - goalZ[i]
+        over = dx * dx + dy * dy + dz * dz < 10000.0
+      EndIf
+      If over
+        untils[i] = 0.0
+        hasGoal[i] = False
+        tokens[i] = tokens[i] + 1   ; a walk under way doesn't hold the actor afterwards
+        arrived[i] = True
+        Release(a)
+        Put(HoldSlots, a)
+      Else
+        any = True
+      EndIf
+    EndIf
+    i += 1
+  EndWhile
+  watching = any
+EndFunction
+
 ; Each queued walk on a thread of its own: the next update takes the next one while this one walks.
 Event OnUpdate()
   If pendingCount <= 0
+    CheckTimes()
+    If watching
+      RegisterForSingleUpdate(2.0)
+    EndIf
     Return
   EndIf
   Int i = pending[0]
@@ -207,6 +295,8 @@ Event OnUpdate()
   pendingCount -= 1
   If pendingCount > 0
     RegisterForSingleUpdate(0.01)
+  ElseIf watching
+    RegisterForSingleUpdate(2.0)
   EndIf
   Actor a = actors[i]
   ObjectReference target = destinations[i]
@@ -227,6 +317,7 @@ Event OnUpdate()
     a.MoveTo(target)
   EndIf
   arrived[i] = True
+  untils[i] = 0.0
   If packages[i] == PackageActivate
     target.Activate(a)
   EndIf
