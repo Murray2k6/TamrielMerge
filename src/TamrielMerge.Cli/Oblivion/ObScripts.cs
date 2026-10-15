@@ -248,15 +248,30 @@ public sealed partial class ObPluginBuilder
         if (!File.Exists(compiler) || !File.Exists(Path.Combine(vanilla, "ObjectReference.psc")))
             return (null, "no Papyrus compiler or Skyrim script sources (install the Creation Kit)");
         Directory.CreateDirectory(outDir);
-        var psi = new ProcessStartInfo(compiler)
-        {
-            ArgumentList = { Path.GetFullPath(sourceDir), "-all", "-q", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(sourceDir)};{helpers};{skse};{vanilla}", $"-o={Path.GetFullPath(outDir)}" },
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        string log = Run(psi);
         bool Fresh(string n) => File.Exists(Path.Combine(outDir, n + ".pex")) && File.GetLastWriteTimeUtc(Path.Combine(outDir, n + ".pex")) >= File.GetLastWriteTimeUtc(Path.Combine(sourceDir, n + ".psc"));
-        var names = Directory.GetFiles(sourceDir, "*.psc").Select(f => Path.GetFileNameWithoutExtension(f)!).ToList();
+        var names = Directory.GetFiles(sourceDir, "*.psc").Select(f => Path.GetFileNameWithoutExtension(f)!).Order(StringComparer.OrdinalIgnoreCase).ToList();
+        // In batches of 400, up to four at once, each in a folder of its own (the whole folder in one run was one
+        // compiler on one core); the folder stays an import, so the scripts still see each other.
+        string imports = $"-i={Path.GetFullPath(sourceDir)};{helpers};{skse};{vanilla}";
+        const int batch = 400;
+        var chunks = Enumerable.Range(0, (names.Count + batch - 1) / batch)
+            .Select(i => (Index: i, Names: names.Skip(i * batch).Take(batch).Where(n => !Fresh(n)).ToList())).Where(c => c.Names.Count > 0).ToList();
+        var logs = new System.Collections.Concurrent.ConcurrentBag<string>();
+        Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 4, 1, 4) }, c =>
+        {
+            string chunkDir = Path.GetFullPath(sourceDir).TrimEnd('\\', '/') + "_batch" + c.Index;
+            if (Directory.Exists(chunkDir)) Directory.Delete(chunkDir, true);
+            Directory.CreateDirectory(chunkDir);
+            foreach (var n in c.Names) File.Copy(Path.Combine(sourceDir, n + ".psc"), Path.Combine(chunkDir, n + ".psc"));
+            logs.Add(Run(new ProcessStartInfo(compiler)
+            {
+                ArgumentList = { chunkDir, "-all", "-q", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={Path.GetFullPath(outDir)}" },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            }));
+            Directory.Delete(chunkDir, true);
+        });
+        string log = string.Concat(logs);
         // The compiler works in batches and can drop a whole batch when memory runs short: those are compiled again
         // one at a time (real errors fail again and stay in the log).
         foreach (var n in names.Where(n => !Fresh(n)))
