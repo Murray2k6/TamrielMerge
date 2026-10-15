@@ -222,9 +222,31 @@ static class Program
                     // beside a copy of Daggerfall.esm, so parts never write the same file at once; when one ends its files
                     // are moved into the build folder. The parts' form IDs are their own ranges, so the joined plugin is the
                     // same however many ran together.
-                    int atOnce = opts.TryGetValue("parts-at-once", out var pa) ? Math.Max(1, int.Parse(pa))
-                        : Math.Clamp((int)((Util.Machine.FreeRamGb() - 6) / 3), 1, Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4)));
-                    if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, {atOnce} at a time");
+                    // At most a share of the cores (or --parts-at-once N); each part starts when the memory is free for it,
+                    // judged as it starts, not once at the beginning (2026-10-15: measured while the app was being rebuilt, the
+                    // last town parts ran 3 at a time all through), and half a minute after the one before, so its memory
+                    // shows before the next is judged and the parts' peaks don't come together.
+                    bool fixedCount = opts.TryGetValue("parts-at-once", out var pa);
+                    int atOnce = fixedCount ? Math.Max(1, int.Parse(pa!)) : Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4));
+                    if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, up to {atOnce} at a time as the memory allows");
+                    int running = 0, mostAtOnce = 0;
+                    var lastStart = DateTime.MinValue;
+                    var startGate = new object();
+                    void WaitForRoom()
+                    {
+                        while (true)
+                        {
+                            lock (startGate)
+                                if (running == 0 || fixedCount || (DateTime.Now - lastStart > TimeSpan.FromSeconds(30) && Util.Machine.FreeRamGb() >= 4 + 3))
+                                {
+                                    running++;
+                                    mostAtOnce = Math.Max(mostAtOnce, running);
+                                    lastStart = DateTime.Now;
+                                    return;
+                                }
+                            Thread.Sleep(2000);
+                        }
+                    }
                     // What every part would make the same: the overland's heights (made once here, read in place by
                     // all), and the town meshes (the first part to make one leaves a copy for the rest).
                     string sharedDir = Path.Combine(outDir, "_parts", "_shared");
@@ -256,7 +278,9 @@ static class Program
                         // budget collected 200 times every 5 seconds (part 9: 2.2 minutes, with it 1.8; half a gigabyte more).
                         psi.Environment["DOTNET_GCgen0size"] = "0x10000000";
                         int code;
-                        using (var p = System.Diagnostics.Process.Start(psi)!) { p.WaitForExit(); code = p.ExitCode; }
+                        WaitForRoom();
+                        try { using var p = System.Diagnostics.Process.Start(psi)!; p.WaitForExit(); code = p.ExitCode; }
+                        finally { lock (startGate) running--; }
                         bool ok = code == 0 && File.Exists(Path.Combine(work, Path.GetFileName(partPath(k))));
                         lock (gate)
                         {
@@ -267,6 +291,7 @@ static class Program
                             Progress.Report(finished / (double)Math.Max(1, pending.Count), $"{plugin}: {finished} of {pending.Count} parts built");
                         }
                     });
+                    if (pending.Count > 0) Console.WriteLine($"{plugin}: at most {mostAtOnce} parts ran at once");
                     try { if (Directory.Exists(Path.Combine(outDir, "_parts"))) Directory.Delete(Path.Combine(outDir, "_parts"), true); } catch (IOException) { }
                     done.AddRange(built.Order().Select(partPath));
                     done.Sort((x, y) => PartNumber(x).CompareTo(PartNumber(y)));
