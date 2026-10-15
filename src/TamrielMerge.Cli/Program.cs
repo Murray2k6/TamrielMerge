@@ -214,8 +214,8 @@ static class Program
                     // layout left most of the cores idle): as many as the free memory holds, at most a share of the cores,
                     // or --parts-at-once N. A town part lays its towns out on one core; a dungeon part makes up to 8
                     // navmeshes at once (a quarter of the cores). Measured 2026-10-14 (town part 9): 5.7 GB each with
-                    // heights of its own, 3.4 GB with the shared heights and the GC told to keep memory low
-                    // (DOTNET_GCConserveMemory, 0.2 min faster too); the old 3 GB budget ran six parts in 32 GB, into the
+                    // heights of its own, 3.4 GB with the shared heights
+                    // (and 4.1 GB with the larger first generation the parts now get); the old 3 GB budget ran six parts in 32 GB, into the
                     // page file, and a part took twice as long. Through a town part's run its memory goes between 1.7 and 3.3
                     // GB, the peaks brief (a big town's navmeshes) and not at once in every part: budget 3 GB a part, plus
                     // the shared heights' 2 GB, plus 4 GB for everything else. Each part is built in a folder of its own
@@ -252,7 +252,9 @@ static class Program
                         psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";   // the parent reports the parts
                         psi.Environment["TAMRIELMERGE_HEIGHTS"] = heights;
                         psi.Environment["TAMRIELMERGE_TOWN_MESHES"] = Path.Combine(sharedDir, "meshes");
-                        psi.Environment["DOTNET_GCConserveMemory"] = "7";
+                        // A first generation of 256 MB: a town part makes 500 MB of short-lived objects a second, and the default
+                        // budget collected 200 times every 5 seconds (part 9: 2.2 minutes, with it 1.8; half a gigabyte more).
+                        psi.Environment["DOTNET_GCgen0size"] = "0x10000000";
                         int code;
                         using (var p = System.Diagnostics.Process.Start(psi)!) { p.WaitForExit(); code = p.ExitCode; }
                         bool ok = code == 0 && File.Exists(Path.Combine(work, Path.GetFileName(partPath(k))));

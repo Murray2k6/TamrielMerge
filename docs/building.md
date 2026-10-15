@@ -60,7 +60,7 @@ User, 2026-10-14: "should be a 1 hour conversion" (the run of 10-13/14 took abou
 - What every part made the same is made once and shared (`_parts\_shared`): the overland's heights (2 GB; each part
   spent 22 s making its own copy, and held it in memory), which the parts read in place from one file
   (`HeightField.Shared`, `TAMRIELMERGE_HEIGHTS`), and the town block and building meshes, which the first part to make
-  one leaves for the rest (`TAMRIELMERGE_TOWN_MESHES`). The parts' GC keeps memory low (`DOTNET_GCConserveMemory=7`).
+  one leaves for the rest (`TAMRIELMERGE_TOWN_MESHES`). The parts get a 256 MB first GC generation (`DOTNET_GCgen0size`).
   Town part 9 on its own, 2026-10-14: 4.8 min and 5.7 GB before, 3.6 min and 3.4 GB after (setup 28 s to 8 s). The old
   3 GB budget had run six 5.7 GB parts in 32 GB, into the page file: parts took 6.5-8.4 min in the 19-hour run.
 - Town parts place Daggerfall.esm's own sprite models and grass instead of importing all 604 models and writing their
@@ -77,6 +77,11 @@ User, 2026-10-14: "should be a 1 hour conversion" (the run of 10-13/14 took abou
   hills; now 3.5 minutes, 14 million triangles (38 a cell), a mean of 18 units off the ground, no cracks
   (`df-navmesh-test`). The whole Daggerfall build (Daggerfall.esm 2.7 min, land 4.9, navmesh 3.5) takes 11 minutes.
   Daggerfall Land.esm is then 2.01 GB: Mutagen can't read a plugin over 2 GB, so a finer navmesh needs the land split.
+- Garbage collection: the mesh code kept every polygon's texture coordinates in a ConditionalWeakTable, collision and
+  navmesh polygons too, and every collection walked its millions of handles: a town part was paused 73% of its time.
+  The coordinates now go in a table each thread empties as it writes its meshes, and the parts get a 256 MB first
+  generation (they make 500 MB of short-lived objects a second). Town part 9 alone, with the mesh cache: 3.3 minutes,
+  then 2.2, then 1.8 (peak 4.1 GB).
 - The Morrowind and Oblivion scripts compile in batches of 400, up to four at once (Morrowind's 4,930 took 17 minutes
   one batch at a time); a Morrowind script the same as the last build's isn't compiled again.
 - Not counted in the hour: remastering the intro videos and rendering the menu on the processor (hours; they reuse what

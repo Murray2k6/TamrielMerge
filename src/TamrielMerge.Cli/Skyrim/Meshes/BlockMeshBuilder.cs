@@ -410,11 +410,18 @@ public static class BlockMeshBuilder
     /// <summary>Picks the Skyrim texture for a Daggerfall surface (archive, record, normal in Daggerfall's frame, Y up).</summary>
     internal delegate Tex Picker(int archive, int record, Vector3 normalUp);
 
-    /// <summary>Each placed polygon's texture coordinates in Daggerfall texels (DfPolygon.Uvs), by its points array.</summary>
-    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Vector3[], Vector2[]> TexelUvs = new();
+    /// <summary>
+    /// Each placed polygon's texture coordinates in Daggerfall texels (DfPolygon.Uvs), by its points array, from when
+    /// its polygons are made until <see cref="Write"/> writes them (on the same thread), which takes them out. It was a
+    /// ConditionalWeakTable holding every polygon made, the collision and navmesh ones too: millions of dependent handles
+    /// that every garbage collection walked, and the town parts spent 73% of their time paused (2026-10-15).
+    /// </summary>
+    [ThreadStatic] static Dictionary<Vector3[], Vector2[]>? texelUvs;
+    static Dictionary<Vector3[], Vector2[]> TexelUvs => texelUvs ??= new(ReferenceEqualityComparer.Instance);
 
-    /// <summary>Texture coordinates (Daggerfall texels) for a polygon built elsewhere (a town's ground tiles).</summary>
-    internal static void SetTexelUvs(Vector3[] pts, Vector2[] uvs) => TexelUvs.AddOrUpdate(pts, uvs);
+    /// <summary>Texture coordinates (Daggerfall texels) for a polygon built elsewhere (a town's ground tiles), to be
+    /// written on this thread.</summary>
+    internal static void SetTexelUvs(Vector3[] pts, Vector2[] uvs) => TexelUvs[pts] = uvs;
 
     public static Result Build(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models, string outPath) => Build(block, models, outPath, null);
 
@@ -459,7 +466,7 @@ public static class BlockMeshBuilder
 
     internal static Result Build(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models, string outPath, Picker? picker)
     {
-        var polys = Polygons(block, models, picker);
+        var polys = Polygons(block, models, picker, texels: true);
         return Write(polys, outPath, moving: false);
     }
 
@@ -477,7 +484,7 @@ public static class BlockMeshBuilder
         foreach (var p in model.Polygons.Where(p => p.Points.Length >= 3))
         {
             var pts = p.Points.Select(v => place is null ? ToSkyrim(v) : place(ToSkyrim(v))).ToArray();
-            if (p.Uvs is not null) TexelUvs.AddOrUpdate(pts, p.Uvs);
+            if (p.Uvs is not null) TexelUvs[pts] = p.Uvs;
             var n = NormalToSkyrim(p.Normal);
             polys.Add((pts, turn is null ? n : Vector3.Normalize(turn(n)), PickTexture(p.TextureArchive, p.TextureRecord, p.Normal), true));
         }
@@ -490,7 +497,7 @@ public static class BlockMeshBuilder
         foreach (var p in model.Polygons.Where(p => p.Points.Length >= 3))
         {
             var pts = p.Points.Select(ToSkyrim).ToArray();
-            if (p.Uvs is not null) TexelUvs.AddOrUpdate(pts, p.Uvs);
+            if (p.Uvs is not null) TexelUvs[pts] = p.Uvs;
             polys.Add((pts, NormalToSkyrim(p.Normal), PickTexture(p.TextureArchive, p.TextureRecord, p.Normal), true));
         }
         return Write(polys, outPath, moving: true);
@@ -521,7 +528,9 @@ public static class BlockMeshBuilder
     }
 
     /// <summary>The block's static polygons in block space (Skyrim units).</summary>
-    static List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)> Polygons(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models, Picker? picker = null)
+    /// <param name="texels">Keep each polygon's Daggerfall texture coordinates for <see cref="Write"/> (only for polygons
+    /// that are written: collision and navmeshes don't need them).</param>
+    static List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)> Polygons(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models, Picker? picker = null, bool texels = false)
     {
         picker ??= PickTexture;
         var polys = new List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)>();
@@ -534,7 +543,7 @@ public static class BlockMeshBuilder
                 if (p.Points.Length < 3) continue;
                 var n = Vector3.Normalize(Vector3.TransformNormal(p.Normal, m));
                 var pts = p.Points.Select(v => ToSkyrim(Vector3.Transform(v, m))).ToArray();
-                if (p.Uvs is not null) TexelUvs.AddOrUpdate(pts, p.Uvs);
+                if (texels && p.Uvs is not null) TexelUvs[pts] = p.Uvs;
                 polys.Add((pts, NormalToSkyrim(n), picker(p.TextureArchive, p.TextureRecord, n), !IsTapestry(o.ModelId)));
             }
         }
@@ -543,6 +552,12 @@ public static class BlockMeshBuilder
     }
 
     static Result Write(List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)> polys, string outPath, bool moving)
+    {
+        try { return WriteMesh(polys, outPath, moving); }
+        finally { if (texelUvs is { Count: > 0 } t) foreach (var p in polys) t.Remove(p.Pts); }
+    }
+
+    static Result WriteMesh(List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)> polys, string outPath, bool moving)
     {
         using var nif = new NifFile();
         nif.Create(NiVersion.getSSE());
