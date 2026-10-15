@@ -111,7 +111,7 @@ public static class DaggerfallTowns
             }
             catch (Exception e) { failed++; Console.WriteLine($"  {town.Name} ({town.RegionName}): {e.Message}"); }
         }
-        Console.WriteLine($"Batch {batch}/{batches}: {built.Count} towns ({towns.Sum(t => t.ExteriorBlocks.Length)} blocks), {failed} failed, {townBuilder.SharedInteriors} shared interiors");
+        Console.WriteLine($"Batch {batch}/{batches}: {built.Count} towns ({towns.Sum(t => t.ExteriorBlocks.Length)} blocks), {failed} failed, {townBuilder.SharedInteriors} shared interiors, {dungeons.Navmeshes.ExteriorReused} street navmeshes reused");
         dungeons.FinishInteriors();
         double laidOut = clock.Elapsed.TotalSeconds;
         if (built.Count > 0)

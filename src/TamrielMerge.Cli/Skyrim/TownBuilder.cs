@@ -513,7 +513,8 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
 
         // Streets navmeshed over the ground and the buildings' collision.
         var problems = new List<string>();
-        var (navs, navTris) = cells.Navmeshes.BuildExteriorCells(ws, cellsByGrid, (x, y) => solids.TryGetValue((x, y), out var l) ? l : [], _ => null, edgeDoors, problems);
+        // Cells of the same blocks (in this town or another of the part) share Recast's work (reuse).
+        var (navs, navTris) = cells.Navmeshes.BuildExteriorCells(ws, cellsByGrid, (x, y) => solids.TryGetValue((x, y), out var l) ? l : [], _ => null, edgeDoors, problems, reuse: true);
         fixtures[$"street navmeshes ({navTris} triangles)"] = navs;
         foreach (var p in problems.Take(5)) fixtures["navmesh problem: " + p] = 1;
         return new Built(ws, entrance, buildings, interiors, doors, unlinked, fixtures, townLocation, doorsByType, loc.Region);

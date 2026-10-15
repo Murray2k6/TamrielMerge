@@ -4843,22 +4843,25 @@ static class Program
             case "plugin-compare":
             {
                 // Dev aid: two plugins' records by type, and their navmeshes' and land's contents, compared (--a, --b).
-                (Dictionary<string, int> Types, long Nav, long Land) Read(string path)
+                (Dictionary<string, int> Types, long Nav, long Land, long NavTris, long NavVerts) Read(string path)
                 {
                     using var m = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
                     var types = m.EnumerateMajorRecords().GroupBy(r => r.Registration.Name).ToDictionary(g => g.Key, g => g.Count());
-                    long nav = 0, land = 0;
+                    long nav = 0, land = 0, navTris = 0, navVerts = 0;
                     foreach (var r in m.EnumerateMajorRecords())
                         if (r is INavigationMeshGetter n && n.Data is { } d)
+                        {
+                            navTris += d.Triangles.Count; navVerts += d.Vertices.Count;
                             nav += d.Vertices.Count * 31 + d.Triangles.Count * 7 + d.Vertices.Sum(v => (long)(v.X * 3 + v.Y * 5 + v.Z * 7)) + d.Triangles.Sum(t => (long)t.Vertices.X + t.Vertices.Y * 3 + t.Vertices.Z * 5);
+                        }
                         else if (r is ILandscapeGetter l && l.VertexHeightMap is { } h)
                             land += (long)(h.Offset * 10) + h.HeightMap.Sum(x => (long)x.Value);
-                    return (types, nav, land);
+                    return (types, nav, land, navTris, navVerts);
                 }
                 var a = Read(opts["a"]); var b = Read(opts["b"]);
                 foreach (var t in a.Types.Keys.Union(b.Types.Keys).Order())
                     if (a.Types.GetValueOrDefault(t) != b.Types.GetValueOrDefault(t)) Console.WriteLine($"  {t}: {a.Types.GetValueOrDefault(t)} vs {b.Types.GetValueOrDefault(t)}");
-                Console.WriteLine($"records {a.Types.Values.Sum()} vs {b.Types.Values.Sum()}; navmesh {a.Nav} vs {b.Nav}; land {a.Land} vs {b.Land}");
+                Console.WriteLine($"records {a.Types.Values.Sum()} vs {b.Types.Values.Sum()}; navmesh {a.Nav} vs {b.Nav} ({a.NavTris:N0} vs {b.NavTris:N0} triangles, {a.NavVerts:N0} vs {b.NavVerts:N0} vertices); land {a.Land} vs {b.Land}");
                 return a.Types.Values.Sum() == b.Types.Values.Sum() && a.Nav == b.Nav && a.Land == b.Land ? 0 : 2;
             }
             case "plugin-compress":
