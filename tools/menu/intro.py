@@ -337,10 +337,33 @@ def write_stamp(folder, stamp):
     json.dump(stamp, open(os.path.join(folder, "stamp.json"), "w"), indent=1)
 
 
+def folder_hash(folder, skip=("blend", "stamp.json")):
+    """A hash of everything in an exported scene's folder (its scene.json, land, lighting, meshes and textures; not
+    the prepared blend/ folder or the stamp), in name order."""
+    import hashlib
+    h = hashlib.sha1()
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if os.path.relpath(os.path.join(root, d), folder) not in skip)
+        for f in sorted(files):
+            rel = os.path.relpath(os.path.join(root, f), folder)
+            if rel in skip:
+                continue
+            h.update(rel.replace("\\", "/").encode())
+            with open(os.path.join(root, f), "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+    return h.hexdigest()
+
+
 def scene_stamp(s):
+    """What a shot's scene holds (the hash of its exported files, recorded by export), for prep and render: a scene
+    exported again the same (a new conversion, a rebuilt tool, nothing seen changed) keeps its prepared textures and
+    its frames (2026-10-15, user: the flyby "needs to be less time": every conversion re-rendered every shot, about an
+    hour, because the plugins' size and time had changed)."""
     p = os.path.join(SCENES, s["scene"], "stamp.json")
     try:
-        return json.load(open(p))
+        st = json.load(open(p))
+        return st.get("content") or st
     except (OSError, ValueError):
         return None
 
@@ -380,14 +403,20 @@ def export(cli, plugins, names, data=None):
         stamp = {"plugins": [[os.path.basename(f), os.path.getsize(f), int(os.path.getmtime(f))] for f in files],
                  "converter": int(os.path.getmtime(cli)) if os.path.exists(cli) else 0, "export": e}
         selected.append(s["name"])
-        if os.path.exists(os.path.join(dest, "scene.json")) and stamp_matches(dest, stamp):
-            continue
+        if os.path.exists(os.path.join(dest, "scene.json")):
+            try:
+                old = json.load(open(os.path.join(dest, "stamp.json")))
+            except (OSError, ValueError):
+                old = {}
+            if {k: v for k, v in old.items() if k != "content"} == stamp and old.get("content"):
+                continue
         if os.path.isdir(dest):
             shutil.rmtree(dest)
         cmd = [cli, "scene-export", "--plugins", ",".join(files), "--world", e["world"], "--centre", f"{e['centre'][0]},{e['centre'][1]}",
                "--radius", str(e["radius"]), "--out", dest] + (["--data", data] if data else []) \
             + (["--land-radius", str(e["land_radius"])] if "land_radius" in e else [])
         subprocess.run(cmd, check=True)
+        stamp["content"] = folder_hash(dest)
         write_stamp(dest, stamp)
     os.makedirs(SCENES, exist_ok=True)
     json.dump(selected, open(os.path.join(SCENES, "selected.json"), "w"))

@@ -336,3 +336,11 @@ portable 5.2.2 into tools\blender (5.1's EEVEE drew enclosed streets black; Blen
     every Imperial City district) is drawn on the parent's in the game, and its own land records are unused leftovers at
     other heights. The scene exporter took them for 12 of the city's cells (up to 880 units off); it now leaves out
     the land of such a worldspace. `scene-worlds` lists each world's land count and its parent's flags.
+
+- **Less time** (user, 2026-10-15: the flyby "needs to be less time and the tool needs the fixes"): a shot's scene is
+  exported again when its plugins or the converter change, and prepared and rendered again only when what it exported
+  changed (a hash of the scene's folder in its stamp.json): every conversion makes the plugins anew, so every shot had
+  been rendered again, about an hour on the graphics card (Whiterun 20 min, the Imperial City 17, Vivec 6.5, Stros
+  M'Kai 5.5). The older loose menu files are removed from the output (and from Data with --install) whenever a menu
+  archive is there, not only on a run that made the menu: a conversion without --gpu had left the 10-10 hand install's
+  loose flyby in Data, and the game went on showing it over the archive.

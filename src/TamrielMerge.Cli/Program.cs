@@ -392,9 +392,11 @@ static class Program
                         try { if (Main(outDir == finalDir ? ["lod", "--dir", outDir, "--only", "objects,trees"] : ["lod", "--dir", outDir, "--only", "objects,trees", "--assets", finalDir]) != 0) failed.Add("distant objects and trees"); }
                         catch (Exception e) { Console.WriteLine($"Distant LOD: failed: {e.Message}"); failed.Add("distant objects and trees"); }
                 if (outDir != finalDir) using (Begin("Moving the build")) Settle(all: true);
-                // An older menu's loose files where the archive now goes override it: removed (MenuArchive.RemoveLoose).
-                if (plugins.Contains(Skyrim.Render.MenuArchive.PluginName))
-                    foreach (var dir in new[] { finalDir }.Concat(opts.ContainsKey("install") ? [skyrimData] : Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase))
+                // An older menu's loose files where the archive now goes override it: removed (MenuArchive.RemoveLoose),
+                // whether this run made the menu or one from before is there (2026-10-15: a conversion without --gpu left
+                // the 10-10 loose flyby in Data, and the menu kept showing it).
+                foreach (var dir in new[] { finalDir }.Concat(opts.ContainsKey("install") ? [skyrimData] : Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase))
+                    if (plugins.Contains(Skyrim.Render.MenuArchive.PluginName) || File.Exists(Path.Combine(dir, Skyrim.Render.MenuArchive.PluginName)))
                         if (Skyrim.Render.MenuArchive.RemoveLoose(dir) is { Count: > 0 } removed)
                             Console.WriteLine($"Main menu: {removed.Count} older loose menu files removed from {dir} (they hid the new menu's archive)");
                 var creatureStep = Begin("Creatures");
