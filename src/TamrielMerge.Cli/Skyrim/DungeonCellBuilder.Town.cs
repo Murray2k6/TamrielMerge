@@ -56,14 +56,47 @@ public sealed partial class DungeonCellBuilder
     public sealed record BuiltInterior(Cell Cell, List<(PlacedObject Door, DfTownLayout.DoorSurface Surface)> Exits, Navmesh.NavmeshBuilder.Result? Navmesh, Dictionary<string, int> Fixtures, List<DfRdbObject> People);
 
     readonly Dictionary<string, (Static Static, BlockMeshBuilder.Result Mesh)> townStatics = new();
+    static readonly System.Text.Json.JsonSerializerOptions SharedJson = new() { IncludeFields = true };
 
     /// <summary>A town block's or building's static (one NIF per layout and style), built on first use.</summary>
     internal Static TownStatic(DfDungeonBlock block, string key, BlockMeshBuilder.Picker picker)
     {
         if (townStatics.TryGetValue(key, out var hit)) return hit.Static;
         string rel = Path.Combine("TamrielMerge", "Towns", key + ".nif");
-        BlockMeshBuilder.Export = textureExport;
-        var r = BlockMeshBuilder.Build(block, models, Path.Combine(modOutDir, "Meshes", rel), picker);
+        string outPath = Path.Combine(modOutDir, "Meshes", rel);
+        // Another part of the same conversion made this mesh already (the shared interiors and town blocks are in many
+        // parts; making them was a quarter of a part's time, 2026-10-14): its copy, and its size from beside it.
+        string? shared = Environment.GetEnvironmentVariable("TAMRIELMERGE_TOWN_MESHES") is { Length: > 0 } cache ? Path.Combine(cache, rel) : null;
+        BlockMeshBuilder.Result? r = null;
+        if (shared is not null && File.Exists(shared + ".json") && File.Exists(shared))
+            try
+            {
+                r = System.Text.Json.JsonSerializer.Deserialize<BlockMeshBuilder.Result>(File.ReadAllText(shared + ".json"), SharedJson);
+                if (r is not null)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+                    File.Copy(shared, outPath, overwrite: true);
+                    r = r with { Path = outPath };
+                }
+            }
+            catch (Exception e) when (e is IOException or System.Text.Json.JsonException) { r = null; }
+        if (r is null)
+        {
+            BlockMeshBuilder.Export = textureExport;
+            r = BlockMeshBuilder.Build(block, models, outPath, picker);
+            if (shared is not null)
+                try
+                {
+                    // The mesh first, then its size: a part finding the size finds the whole mesh.
+                    Directory.CreateDirectory(Path.GetDirectoryName(shared)!);
+                    string tmp = shared + ".tmp" + Environment.ProcessId;
+                    File.Copy(outPath, tmp, overwrite: true);
+                    File.Move(tmp, shared, overwrite: true);
+                    File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(r, SharedJson));
+                    File.Move(tmp, shared + ".json", overwrite: true);
+                }
+                catch (IOException) { }
+        }
         var stat = new Static(mod)
         {
             EditorID = "DFTown" + LocationPlacer.Sanitize(key),
@@ -197,6 +230,13 @@ public sealed partial class DungeonCellBuilder
         {
             var pos = ToSkyrim(o.Position);
             if (o.Type == DfRdbObjectType.Flat && o.RecordOffset < 0) { people.Add(o); Count("person"); continue; }
+            if (o.Type == DfRdbObjectType.Flat && o.TextureArchive == EditorFlatArchive && o.TextureRecord is QuestSpawnRecord or QuestItemRecord)
+            {
+                float floor = SurfaceY(floorPolys, o.Position.X, o.Position.Z, o.Position.Y + 16, above: false) ?? o.Position.Y;
+                AddQuestMarker(cell, new P3Float(pos.X, pos.Y, floor * BlockMeshBuilder.Scale + 8), o.TextureRecord == QuestItemRecord);
+                Count("quest marker");
+                continue;
+            }
             if (LightFixturePlacer.IsLight(o))
             {
                 foreach (var f in fixtures.Fixtures(o, o.Position))

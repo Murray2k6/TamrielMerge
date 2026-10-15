@@ -195,14 +195,33 @@ static class Program
                     }
                     // Several parts at once (user, 2026-10-14: "should be a 1 hour conversion"; one at a time, a part's town
                     // layout left most of the cores idle): as many as the free memory holds, at most a share of the cores,
-                    // or --parts-at-once N. A town part lays its towns out on one core and peaked at 1.9 GB (budget 3 GB,
-                    // half the cores); a dungeon part makes up to 8 navmeshes at once (budget 5 GB, a quarter of the cores). Each part is built in a folder of its own
+                    // or --parts-at-once N. A town part lays its towns out on one core; a dungeon part makes up to 8
+                    // navmeshes at once (a quarter of the cores). Measured 2026-10-14 (town part 9): 5.7 GB each with
+                    // heights of its own, 3.4 GB with the shared heights and the GC told to keep memory low
+                    // (DOTNET_GCConserveMemory, 0.2 min faster too); the old 3 GB budget ran six parts in 32 GB, into the
+                    // page file, and a part took twice as long. Through a town part's run its memory goes between 1.7 and 3.3
+                    // GB, the peaks brief (a big town's navmeshes) and not at once in every part: budget 3 GB a part, plus
+                    // the shared heights' 2 GB, plus 4 GB for everything else. Each part is built in a folder of its own
                     // beside a copy of Daggerfall.esm, so parts never write the same file at once; when one ends its files
                     // are moved into the build folder. The parts' form IDs are their own ranges, so the joined plugin is the
                     // same however many ran together.
                     int atOnce = opts.TryGetValue("parts-at-once", out var pa) ? Math.Max(1, int.Parse(pa))
-                        : Math.Clamp((int)((Util.Machine.FreeRamGb() - 4) / (command == "df-towns" ? 3 : 5)), 1, Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4)));
+                        : Math.Clamp((int)((Util.Machine.FreeRamGb() - 6) / 3), 1, Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4)));
                     if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, {atOnce} at a time");
+                    // What every part would make the same: the overland's heights (made once here, read in place by
+                    // all), and the town meshes (the first part to make one leaves a copy for the rest).
+                    string sharedDir = Path.Combine(outDir, "_parts", "_shared");
+                    string heights = Path.Combine(sharedDir, "heights.bin");
+                    // Made again when older than the converter (a resumed run after an update).
+                    if (pending.Count > 0 && (!File.Exists(heights) || File.GetLastWriteTimeUtc(heights) < File.GetLastWriteTimeUtc(Environment.ProcessPath!)))
+                    {
+                        if (Directory.Exists(Path.Combine(sharedDir, "meshes"))) Directory.Delete(Path.Combine(sharedDir, "meshes"), true);
+                        Directory.CreateDirectory(sharedDir);
+                        var clock = System.Diagnostics.Stopwatch.StartNew();
+                        Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom([])).Save(heights);
+                        GC.Collect();
+                        Console.WriteLine($"Heights for the parts: {new FileInfo(heights).Length / 1048576} MB in {clock.Elapsed.TotalSeconds:F0} s");
+                    }
                     var built = new System.Collections.Concurrent.ConcurrentBag<int>();
                     var gate = new object();
                     int finished = 0;
@@ -214,6 +233,9 @@ static class Program
                         var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
                         foreach (var a in new[] { command, "--plugin", Path.Combine(work, "Daggerfall.esm"), "--batch", k.ToString(), "--batches", parts.ToString() }) psi.ArgumentList.Add(a);
                         psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";   // the parent reports the parts
+                        psi.Environment["TAMRIELMERGE_HEIGHTS"] = heights;
+                        psi.Environment["TAMRIELMERGE_TOWN_MESHES"] = Path.Combine(sharedDir, "meshes");
+                        psi.Environment["DOTNET_GCConserveMemory"] = "7";
                         int code;
                         using (var p = System.Diagnostics.Process.Start(psi)!) { p.WaitForExit(); code = p.ExitCode; }
                         bool ok = code == 0 && File.Exists(Path.Combine(work, Path.GetFileName(partPath(k))));
@@ -1317,6 +1339,99 @@ static class Program
                 Console.WriteLine($"{loc}: {buildings} building records, {doors} door surfaces -> {Path.GetFullPath(outPath)}");
                 return 0;
             }
+            case "df-quest-dump":
+            {
+                // Daggerfall quests decoded into readable commands, close to Daggerfall Unity's text quests (--quest NAME[,NAME];
+                // --raw: the QBN records as stored; --names DIR: a folder of Daggerfall Unity's text quests, only to borrow their
+                // symbol names when comparing; --messages: the QRC text too).
+                foreach (var name in opts["quest"].Split(','))
+                {
+                    var q = DfQuest.Load(arena2, name.ToUpperInvariant());
+                    var names = DfQuestDump.NamesFrom(opts.GetValueOrDefault("names"), q.Name);
+                    Console.Write(opts.ContainsKey("raw") ? DfQuestDump.Raw(q, names) : DfQuestDump.Readable(q, names));
+                    if (opts.ContainsKey("messages"))
+                        foreach (var (id, variants) in q.Messages.OrderBy(m => m.Key))
+                            foreach (var v in variants) Console.WriteLine($"\nMessage {id}:\n{v}");
+                }
+                return 0;
+            }
+            case "df-quest-build":
+            {
+                // A scratch plugin with only Daggerfall's quest records (the machine, reputation, every quest, Privateer's
+                // Hold's... no sites), to check the quest build without a whole Daggerfall build (--out, default
+                // out/quest-test/DFQuestTest.esp; --scripts also compiles the Papyrus scripts into that folder).
+                string outPath = Path.GetFullPath(opts.GetValueOrDefault("out", "out/quest-test/DFQuestTest.esp"));
+                Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+                var mod = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(outPath)), SkyrimRelease.SkyrimSE);
+                var masters = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }
+                    .Select(m => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, m), SkyrimRelease.SkyrimSE)).ToList();
+                var creatures = new CreatureBuilder(mod, skyrimData);
+                creatures.Build();
+                var spells = new SpellBuilder(mod, masters[0], DoorPlacer.BaseDoors);
+                spells.Build(DfSpells.Load(arena2), new PlacedObject(mod));
+                DfQuestGlobals.AddAll(mod);
+                var builder = new DfQuestBuilder(mod, arena2, masters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
+                {
+                    Foe = id => creatures.Spawn(id), Spells = spells.Spells,
+                };
+                builder.Build();
+                foreach (var p in builder.Problems) Console.WriteLine("  " + p);
+                var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                TopicSubtypes.Fill(mod);
+                mod.WriteToBinary(outPath, new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
+                });
+                Console.WriteLine($"Wrote {outPath}: {mod.Quests.Count} quests, {mod.Messages.Count} messages, {mod.DialogTopics.Count} topics, {mod.EnumerateMajorRecords().Count()} records");
+                Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
+                if (opts.ContainsKey("scripts"))
+                    AltStartBuilder.CompileScripts(skyrimData, Path.Combine(AppContext.BaseDirectory, "Papyrus"), Path.GetDirectoryName(outPath)!);
+                return 0;
+            }
+            case "df-quest-markers":
+            {
+                // How many locations' map markers the town and dungeon parts find in a built Daggerfall.esm (--master PATH),
+                // for their quest sites (QuestSites.MasterMarkers).
+                using var master = SkyrimMod.CreateFromBinaryOverlay(opts["master"], SkyrimRelease.SkyrimSE);
+                var lookup = QuestSites.MasterMarkers(master, arena2);
+                var all = DfLocations.LoadAll(arena2);
+                int found = all.Count(l => lookup(l) is not null);
+                Console.WriteLine($"map markers found for {found} of {all.Count} locations; missing e.g. {string.Join(", ", all.Where(l => lookup(l) is null).Take(5).Select(l => l.Name))}");
+                return 0;
+            }
+            case "df-quest-check":
+            {
+                // Coverage of Daggerfall's quests: per quest, how many of its operations the quest machine supports, and why
+                // the rest aren't (like ob-script-inventory).
+                var allQuests = DfQuest.LoadAll(arena2);
+                Console.Write(DfQuestDump.Check(allQuests));
+                if (opts.ContainsKey("simulate"))
+                {
+                    // --simulate: the quest machine's pass rules with nothing happening; quests that would end on their own.
+                    var startRep = DfFactions.Load(arena2).ById.ToDictionary(f => f.Key, f => f.Value.Rep);
+                    int endedAlone = 0;
+                    foreach (var q in allQuests)
+                    {
+                        var (ran, ended) = DfQuestDump.SimulateStart(q, startRep);
+                        if (ended) endedAlone++;
+                        if (ended || opts.GetValueOrDefault("simulate") == q.Name)
+                            Console.WriteLine($"{q.Name}: {(ended ? "ENDS ON ITS OWN" : "waits")} after {ran.Count} actions: {string.Join(", ", ran)}");
+                    }
+                    Console.WriteLine($"simulated start-up: {allQuests.Count - endedAlone} quests wait for the player, {endedAlone} end on their own");
+                }
+                if (opts.ContainsKey("places"))
+                {
+                    // --places: every fixed place and the Daggerfall location it resolves to.
+                    var locs = DfLocations.LoadAll(arena2);
+                    foreach (var q in allQuests)
+                        foreach (var p in q.Places.Where(p => p.Scope == 0))
+                        {
+                            var (id, dungeon, loc) = DfQuestBuilder.ResolveFixed(locs, p.P1, p.P2);
+                            Console.WriteLine($"{q.Name} place {p.Index}: 0x{p.P1:X4} 0x{(ushort)p.P2:X4} -> {(loc is null ? "NOT FOUND" : $"{loc.Name} ({loc.RegionName}, {loc.Type}) {(dungeon ? "dungeon" : "streets")}")}");
+                        }
+                }
+                return 0;
+            }
             case "df-text":
             {
                 // TEXT.RSC records (--ids 7205,7250-7259), each variant on its own line.
@@ -1426,6 +1541,31 @@ static class Program
                 guilds.Build(talk, townBuilder.TalkQuest, townBuilder.Placed, townBuilder.BreakIns);
                 Console.WriteLine($"guilds: {guilds.Members} with people here ({string.Join(", ", mod.Factions.Where(f => f.EditorID?.StartsWith("DFGuild") == true).Select(f => f.EditorID![7..]))}), {guilds.Trainers} trainers, {guilds.Responses} responses");
                 if (clutter.Missing.Count > 0) Console.WriteLine($"clutter forms not found: {string.Join(", ", clutter.Missing)}");
+                if (opts.ContainsKey("quests"))
+                {
+                    // --quests: Daggerfall's quests and these towns' quest sites too (DfQuestBuilder, QuestSites).
+                    var questMasters = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }
+                        .Select(m => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, m), SkyrimRelease.SkyrimSE)).ToList();
+                    DfQuestGlobals.AddAll(mod);
+                    var qb = new DfQuestBuilder(mod, arena2, questMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
+                    {
+                        Foe = id => townCreatures.Spawn(id), GuildsQuest = guilds.Quest, Guilds = guilds.Built,
+                    };
+                    qb.Build();
+                    var questTowns = picked.Zip(built).Select(p => new QuestSites.Town(p.First, p.Second)).ToList();
+                    var sites = QuestSites.Build(mod, "Test", qb.Machine!.FormKey, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,
+                        QuestSites.Individuals(mod, townBuilder.Placed.Concat(dungeons.PlacedPeople)), _ => null);
+                    foreach (var s in sites)
+                    {
+                        var p = s.VirtualMachineAdapter!.Scripts[0].Properties;
+                        int Len(string n) => p.FirstOrDefault(x => x.Name == n) switch { ScriptIntListProperty i => i.Data.Count, ScriptObjectListProperty o => o.Objects.Count, ScriptStringListProperty t => t.Data.Count, _ => 0 };
+                        int Filled(string n) => p.FirstOrDefault(x => x.Name == n) is ScriptObjectListProperty o ? o.Objects.Count(x => !x.Object.IsNull) : 0;
+                        Console.WriteLine($"quest sites {s.EditorID}: {Len("TownName")} towns, {Len("BType")} buildings ({Filled("BArrival")} with arrival, {Filled("BSpawn")} with a spawn marker, {Filled("BItem")} item marker), "
+                            + $"{Len("DName")} dungeons ({Filled("DSpawn")} with a spawn marker), {Len("IFaction")} individuals");
+                    }
+                    Console.WriteLine($"quest markers: {dungeons.QuestMarkers.Values.Sum(m => m.Count)} in {dungeons.QuestMarkers.Count} cells");
+                    Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
+                }
                 var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
                 TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
                 mod.WriteToBinary(Path.Combine(outDir, "DaggerfallTownTest.esp"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
@@ -1433,6 +1573,15 @@ static class Program
                     MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
                 });
                 Console.WriteLine($"Wrote {Path.Combine(outDir, "DaggerfallTownTest.esp")} ({new FileInfo(Path.Combine(outDir, "DaggerfallTownTest.esp")).Length / 1048576.0:F1} MB) in {sw.Elapsed.TotalSeconds:F0}s");
+                return 0;
+            }
+            case "df-heights":
+            {
+                // Dev aid: the overland heights file the conversion gives its town and dungeon parts (TAMRIELMERGE_HEIGHTS).
+                string path = Path.GetFullPath(opts.GetValueOrDefault("out", "heights.bin"));
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom(opts)).Save(path);
+                Console.WriteLine($"Wrote {path} ({new FileInfo(path).Length / 1048576} MB) in {sw.Elapsed.TotalSeconds:F0} s");
                 return 0;
             }
             case "df-towns":
@@ -2526,6 +2675,7 @@ static class Program
                 {
                     var world = new Oblivion.ObScriptWorld(mods);
                     var table = Oblivion.ObFunctions.Load(dir);
+                    world.Functions = table;
                     var missing = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     var perPlugin = new Dictionary<string, (int Scripts, int Statements, int Translated)>(StringComparer.OrdinalIgnoreCase);
                     var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("id", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -2552,6 +2702,16 @@ static class Program
                     report.Add("Missing most:");
                     report.AddRange(missing.OrderByDescending(kv => kv.Value).Select(kv => $"  {kv.Value,6} {kv.Key}"));
                     File.WriteAllLines(Path.Combine(outDir, "coverage.txt"), report);
+                    // What carries each script (carriers.txt): the record types naming it, and scripts nothing carries.
+                    var carriers = new List<string>();
+                    foreach (var (key, sc) in world.Scripts.OrderBy(kv => kv.Value.EditorID))
+                    {
+                        if (sc.Fields.SourceCode is null || sc.EditorID is not { } cid || !rx.IsMatch(cid)) continue;
+                        string ckind = world.QuestScripts.Contains(key) ? "Quest" : sc.Fields.MetadataSummary.Type.ToString();
+                        var list = world.Carriers.GetValueOrDefault(key) ?? [];
+                        carriers.Add($"{cid} ({ckind}): {(list.Count == 0 ? "NOTHING" : string.Join(", ", list.GroupBy(c => c.Type).Select(g => $"{g.Key} x{g.Count()} [{string.Join(" ", g.Take(3).Select(c => c.EditorID))}]")))}");
+                    }
+                    File.WriteAllLines(Path.Combine(outDir, "carriers.txt"), carriers);
                     foreach (var line in report.Take(int.Parse(opts.GetValueOrDefault("top", "40")) + perPlugin.Count + 2)) Console.WriteLine(line);
                 }
                 finally { foreach (var m in mods) m.Dispose(); }
@@ -2562,6 +2722,29 @@ static class Program
                     foreach (var l in output.Split('\n').Select(l => l.TrimEnd()).Where(l => l.Contains("): ")).Take(int.Parse(opts.GetValueOrDefault("errors", "40")))) Console.WriteLine(l);
                     Console.WriteLine(compiled is null ? output : $"{compiled.Count} of {Directory.GetFiles(srcDir, "*.psc").Length} scripts compiled");
                 }
+                return 0;
+            }
+            case "ob-script-attach-test":
+            {
+                // Dev aid: Oblivion's scripts attached without the world (minutes, not hours): translated, compiled and
+                // attached to the quests, magic, actors and items they need, plus a few interiors (--cells a,b), into a
+                // plugin in --out; reports what carries scripts and what the attaching couldn't do.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed through Steam or GOG");
+                string outDir = Path.GetFullPath(opts["out"]);
+                using var builder = new Oblivion.ObPluginBuilder(new Oblivion.ObData(dataDir, Mods.ModCatalog.Selected(Game.Oblivion, dataDir, [])), outDir) { SkyrimData = skyrimData };
+                builder.PrepareScripts();
+                foreach (var id in opts.GetValueOrDefault("cells", "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+                    if (builder.FindInterior(id) is { } cell) builder.BuildInterior(cell);
+                builder.ConvertAllMagic();
+                builder.BuildDialogue();
+                int compiled = builder.AttachScripts();
+                builder.Write();
+                var m = builder.Mod;
+                Console.WriteLine($"{compiled} scripts compiled, {builder.ScriptsAttached} attached, {builder.PropertiesFilled} properties filled; {builder.PackagesMade} packages, {builder.SoundsMade} sounds");
+                var carriers = m.EnumerateMajorRecords().Select(r => (r, vm: r.GetType().GetProperty("VirtualMachineAdapter")?.GetValue(r) as Mutagen.Bethesda.Skyrim.IAVirtualMachineAdapterGetter))
+                    .Where(x => x.vm is not null && x.vm.Scripts.Any(sc => sc.Name.StartsWith("OB_") || sc.Name.StartsWith("TMOb"))).ToList();
+                foreach (var g in carriers.GroupBy(x => x.r.GetType().Name).OrderByDescending(g => g.Count())) Console.WriteLine($"  {g.Count(),6} {g.Key}");
+                foreach (var p in builder.Problems.Where(p => p.StartsWith("script")).Distinct().Take(int.Parse(opts.GetValueOrDefault("problems", "40")))) Console.WriteLine($"  problem: {p}");
                 return 0;
             }
             case "obse-opcode-check":
@@ -2697,6 +2880,14 @@ static class Program
                 Console.WriteLine($"Loaded {string.Join(", ", world.Plugins.Select(p => p.FileName))}: {world.Objects.Count} objects, {world.Interiors.Count} interiors, {world.Exteriors.Count} exterior cells ({sw.Elapsed.TotalSeconds:F0}s)");
                 var builder = new Morrowind.MwPluginBuilder(world, Morrowind.Tes3Data.Open(dataFiles, mwPlugins), outDir);
                 builder.SkyrimData = skyrimData;
+                // Scripts are translated first: the references they name are placed persistent, scripted activators are
+                // activators. --no-scripts leaves them out (and the dialogue's results to TMMwInfo's fixed set).
+                bool mwScripts = !opts.ContainsKey("no-scripts");
+                if (mwScripts)
+                {
+                    builder.PrepareScripts();
+                    Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%) ({sw.Elapsed.TotalSeconds:F0}s)");
+                }
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cells", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 int cells = 0, refs = 0;
                 foreach (var cell in world.Interiors.Values.Where(c => rx.IsMatch(c.Name)))
@@ -2728,6 +2919,11 @@ static class Program
                 {
                     builder.BuildDialogue();
                     Console.WriteLine($"  dialogue: {builder.DialogueTopics} topics, {builder.DialogueResponses} responses ({builder.DialogueLines} lines), {builder.JournalQuests} journal quests ({sw.Elapsed.TotalSeconds:F0}s)");
+                }
+                if (mwScripts)
+                {
+                    int compiled = builder.AttachScripts(msg => Console.WriteLine($"  scripts: {msg} ({sw.Elapsed.TotalSeconds:F0}s)"));
+                    Console.WriteLine($"  scripts: {compiled} compiled, {builder.ScriptsAttached} attached, {builder.ResultScriptsAttached} dialogue results, {builder.PropertiesFilled} properties filled ({builder.PropertiesUnfilled} without a record) ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
                 Console.WriteLine(builder.Start is { } st
                     ? $"  start: {st.Cell} at {st.Position}, {st.Degrees} degrees -> {builder.StartMarker.FormKey}{(builder.StartMarker.Placement is { } placed ? $" on the floor at {placed.Position}" : " (cell not built: marker unplaced)")}"
@@ -3014,6 +3210,72 @@ static class Program
                 foreach (var p in problems.Take(40)) Console.WriteLine($"  problem: {p}");
                 if (problems.Count > 40) Console.WriteLine($"  ... {problems.Count - 40} more problems (all in {Path.Combine(outDir, "problems.txt")})");
                 Console.WriteLine($"Wrote {Path.GetFullPath(Path.Combine(outDir, Oblivion.ObPluginBuilder.PluginName))} in {sw.Elapsed.TotalSeconds:F0}s");
+                return 0;
+            }
+            case "mw-script-translate":
+            {
+                // Morrowind's scripts (the converter's plugins: --plugins a,b,... or the mod selection) translated into
+                // Papyrus in --out (default out/mwscripts): object scripts (MW_), global scripts (MWG_) and dialogue result
+                // scripts (MWR_) in Source, and coverage.txt — per plugin the share of statements translated and what's
+                // missing most. --compile compiles them against Skyrim's, SKSE's and TamrielMerge's sources (compile.txt);
+                // --id <regex> limits it to matching script IDs ("results" for the dialogue's).
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind) ?? throw new DirectoryNotFoundException("Morrowind isn't installed through Steam or GOG");
+                var mwPlugins = opts.TryGetValue("plugins", out var mwList) ? mwList.Split(',').Select(x => x.Trim()).ToList() : Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []);
+                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/mwscripts"));
+                string srcDir = Path.Combine(outDir, "Source");
+                if (Directory.Exists(srcDir)) Directory.Delete(srcDir, true);
+                Directory.CreateDirectory(srcDir);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var world = Morrowind.MwWorld.Load(dataFiles, mwPlugins);
+                var scriptWorld = new Morrowind.MwScriptWorld(world, Morrowind.MwDialogue.Load(world.Plugins), Morrowind.Tes3Data.Open(dataFiles, mwPlugins));
+                var only = opts.TryGetValue("id", out var idRx) ? new System.Text.RegularExpressions.Regex(idRx, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+                var set = Morrowind.MwScriptSet.Translate(scriptWorld, only);
+                Morrowind.MwPluginBuilder.WriteScriptSources(set.All, srcDir);
+                var report = set.Report();
+                report.Insert(0, $"Plugins: {string.Join(", ", world.Plugins.Select(p => p.FileName))}; {scriptWorld.Scripts.Count} scripts, {scriptWorld.StartScripts.Count} start scripts ({string.Join(", ", scriptWorld.StartScripts)}), {scriptWorld.GlobalScripts.Count} run as global scripts");
+                File.WriteAllLines(Path.Combine(outDir, "coverage.txt"), report);
+                foreach (var line in set.Report(int.Parse(opts.GetValueOrDefault("top", "30"))).Take(80)) Console.WriteLine(line);
+                Console.WriteLine($"Translated in {sw.Elapsed.TotalSeconds:F0}s into {srcDir}");
+                if (opts.ContainsKey("compile"))
+                {
+                    var (compiled, output) = Morrowind.MwPluginBuilder.CompilePapyrus(skyrimData, srcDir, Path.Combine(outDir, "Scripts"), m => Console.WriteLine($"  {m} ({sw.Elapsed.TotalSeconds:F0}s)"));
+                    File.WriteAllText(Path.Combine(outDir, "compile.txt"), output);
+                    var errors = output.Split('\n').Select(l => l.TrimEnd()).Where(l => l.Contains("): ")).ToList();
+                    foreach (var l in errors.Take(int.Parse(opts.GetValueOrDefault("errors", "40")))) Console.WriteLine(l);
+                    Console.WriteLine(compiled is null ? output : $"{compiled.Count} of {Directory.GetFiles(srcDir, "*.psc").Length} scripts compiled, {errors.Count} error lines ({sw.Elapsed.TotalSeconds:F0}s)");
+                }
+                return 0;
+            }
+            case "mw-script-attach-test":
+            {
+                // Dev aid: the plugin builder's script steps on a few interiors (--cells regex, default the prison ship and
+                // the census office) with the dialogue, using scripts compiled already by mw-script-translate (--scripts,
+                // default out/mwscripts/Scripts), into --out (default out/mwscripts-attach); lists what was attached.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/mwscripts-attach"));
+                var mwPlugins = Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var world = Morrowind.MwWorld.Load(dataFiles, mwPlugins);
+                var builder = new Morrowind.MwPluginBuilder(world, Morrowind.Tes3Data.Open(dataFiles, mwPlugins), outDir) { SkyrimData = skyrimData };
+                builder.PrepareScripts();
+                Console.WriteLine($"  scripts: {builder.ScriptCount} translated ({sw.Elapsed.TotalSeconds:F0}s)");
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cells", "^Imperial Prison Ship$|^Seyda Neen, Census and Excise Office$"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var cell in world.Interiors.Values.Where(c => rx.IsMatch(c.Name))) builder.BuildInterior(cell);
+                builder.BuildDialogue();
+                Console.WriteLine($"  cells and dialogue built ({sw.Elapsed.TotalSeconds:F0}s)");
+                int n = builder.AttachScripts(precompiled: Path.GetFullPath(opts.GetValueOrDefault("scripts", "out/mwscripts/Scripts")));
+                Console.WriteLine($"  {n} compiled scripts, {builder.ScriptsAttached} attached, {builder.ResultScriptsAttached} dialogue results, {builder.PropertiesFilled} properties filled ({builder.PropertiesUnfilled} without a record) ({sw.Elapsed.TotalSeconds:F0}s)");
+                var m = builder.Mod;
+                foreach (var rec in m.EnumerateMajorRecords().OfType<Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter>().Take(int.MaxValue))
+                {
+                    var vm = rec.GetType().GetProperty("VirtualMachineAdapter")?.GetValue(rec) as Mutagen.Bethesda.Skyrim.IAVirtualMachineAdapterGetter;
+                    if (vm is null || !vm.Scripts.Any(s => s.Name.StartsWith("MW", StringComparison.Ordinal) && !s.Name.StartsWith("MWR_"))) continue;
+                    foreach (var s in vm.Scripts.Where(s => s.Name.StartsWith("MW")))
+                        Console.WriteLine($"  {rec.EditorID ?? rec.FormKey.ToString()}: {s.Name} ({s.Properties.Count} properties: {string.Join(", ", s.Properties.Take(6).Select(p => p.Name))})");
+                }
+                foreach (var npc in m.Npcs)
+                    Console.WriteLine($"  npc {npc.EditorID}: {string.Join(", ", npc.VirtualMachineAdapter?.Scripts.Select(s => $"{s.Name} ({s.Properties.Count})") ?? [])} template flags {npc.Configuration.TemplateFlags}");
+                foreach (var p in builder.Problems.Where(p => p.StartsWith("script")).Distinct().Take(30)) Console.WriteLine($"  problem: {p}");
                 return 0;
             }
             case "mw-script-grep":

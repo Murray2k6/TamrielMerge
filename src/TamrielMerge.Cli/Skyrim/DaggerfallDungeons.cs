@@ -48,7 +48,7 @@ public static class DaggerfallDungeons
         // Entrance doors are placed on the whole Iliac Bay in global coordinates (a scratch worldspace), then moved into
         // the overland tiles they stand in: overrides of Daggerfall.esm's tiles, for their persistent cells only.
         var map0 = DfWorldMap.Load(arena2);
-        var field = Terrain.HeightField.Generate(map0, terrain);
+        var field = Terrain.HeightField.Shared(map0, terrain);
         var (world, moveIntoTiles) = new Terrain.OverlandTiles(field).OverrideTiles(mod, master);
         var iliacBay = master.Locations.FirstOrDefault(l => l.EditorID == "DFLocIliacBay")?.FormKey;
 
@@ -66,6 +66,7 @@ public static class DaggerfallDungeons
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(System.IO.Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), props)
         {
             Spells = spells, Creatures = creatures, MasterStatics = statics, BackgroundNavmesh = true,
+            QuestGlobal = n => DfQuestGlobals.For(mod, n, master),
             GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y),
             Clutter = new ClutterPlacer(skyrim, props, master.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey)),
         };
@@ -107,6 +108,12 @@ public static class DaggerfallDungeons
         double layout = waitStart - setup, finishWait = clock.Elapsed.TotalSeconds - waitStart;
 
         moveIntoTiles();
+        // This part's dungeons as quest sites for Daggerfall.esm's quest machine (TMDfQuestSites registers them in game).
+        if (master.Quests.FirstOrDefault(q => q.EditorID == "DFQuestMachine")?.FormKey is { } machine)
+        {
+            var sites = QuestSites.Build(mod, $"D{batch}", machine, [], dungeons.BuiltDungeons, dungeons.QuestMarkers, [], QuestSites.MasterMarkers(master, arena2));
+            Console.WriteLine($"Quest sites: {dungeons.BuiltDungeons.Count} dungeons in {sites.Count} site quests");
+        }
 
         var catalog = new CreatureCatalog { Game = "Daggerfall", Plugin = PluginName, ExteriorRespawnHours = 0, InteriorRespawnHours = 0 };
         foreach (var (placed, cell, habitat) in dungeons.CreatureSpots)

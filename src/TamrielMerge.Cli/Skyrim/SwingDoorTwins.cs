@@ -36,6 +36,8 @@ public static class SwingDoorTwins
                     twinBase = mod.Activators.DuplicateInAsNewRecord(doorBase);
                     twinBase.EditorID = doorBase.EditorID + "Open";
                     twinBase.ActivateTextOverride = "Close";
+                    // The twin only swings back: the door's converted script (Morrowind's, Oblivion's) stays on the door.
+                    twinBase.VirtualMachineAdapter?.Scripts.RemoveAll(s => s.Name != Script);
                     twinBases[doorBase.FormKey] = twinBase;
                 }
                 if (cell.Temporary.Remove(door)) persistent.Persistent.Add(door);

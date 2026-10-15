@@ -28,8 +28,11 @@ Event OnLoad()
   EndIf
 EndEvent
 
+Bool Property Deferred = False Auto Hidden
+{A Morrowind script's OnActivate decides when it opens (TMMwScript.TakeActivation; its Activate calls LetIn).}
+
 Event OnActivate(ObjectReference akActionRef)
-  If !Swing && LetIn(akActionRef)
+  If !Swing && !Deferred && LetIn(akActionRef)
     Activate(akActionRef, True)
   EndIf
 EndEvent

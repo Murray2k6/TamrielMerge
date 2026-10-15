@@ -52,21 +52,18 @@ public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
     Faction GroupFaction(int g)
     {
         if (groups[g] is { } f) return f;
-        f = new Faction(mod) { EditorID = $"DFSocialGroup{(DfSocialGroup)g}", Name = ((DfSocialGroup)g).ToString(), Ranks = [new Rank { Number = 0 }] };
-        mod.Factions.Add(f);
-        return groups[g] = f;
+        // Shared with the quest machine (DfQuestBuilder makes the same records by EditorID).
+        return groups[g] = DfQuestBuilder.GroupFaction(mod, g);
     }
 
     Faction DfFaction(DfFaction f)
     {
         if (dfFactions.TryGetValue(f.Id, out var hit)) return hit;
-        hit = new Faction(mod) { EditorID = $"DFFaction{f.Id}", Name = f.Name, Ranks = [new Rank { Number = 0 }] };
-        mod.Factions.Add(hit);
-        // The player starts with each faction's reputation from FACTION.TXT and 0 with every social group.
-        var g = new GlobalFloat(mod) { EditorID = $"DFReact{f.Id}", Data = f.Rep };
-        mod.Globals.Add(g);
+        // The player starts with each faction's reputation from FACTION.TXT and 0 with every social group. Shared with the
+        // quest machine's reputation (DfQuestBuilder makes the same records by EditorID).
+        var (faction, g) = DfQuestBuilder.FactionRecords(mod, f);
         reactions[f.Id] = g;
-        return dfFactions[f.Id] = hit;
+        return dfFactions[f.Id] = faction;
     }
 
     /// <summary>The Skyrim faction townsfolk of a Daggerfall faction belong to, if any were enlisted.</summary>

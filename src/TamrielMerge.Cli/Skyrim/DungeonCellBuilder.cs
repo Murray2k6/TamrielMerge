@@ -96,8 +96,33 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     public ClutterPlacer? Clutter { get; init; }
     /// <summary>Daggerfall's monsters. Without it the enemy markers are left empty.</summary>
     public CreatureBuilder? Creatures { get; init; }
+    /// <summary>Daggerfall's quest global variables by index (set-global actions); without it they are found or made in this plugin.</summary>
+    public Func<int, FormKey>? QuestGlobal { get; init; }
 
     const int RandomEnemyRecord = 15, FixedEnemyRecord = 16, NoEnemy = 99, RandomTreasureRecord = 19;
+    /// <summary>Daggerfall's quest markers (Daggerfall Unity QuestMarker): 199.11 where quest people and foes are put,
+    /// 199.18 where quest items are.</summary>
+    const int QuestSpawnRecord = 11, QuestItemRecord = 18;
+
+    /// <summary>Each built dungeon's and building interior's quest markers (persistent XMarkers, item markers flagged),
+    /// for the quest machine's sites (QuestSites).</summary>
+    public Dictionary<Cell, List<(PlacedObject Marker, bool Item)>> QuestMarkers { get; } = new(ReferenceEqualityComparer.Instance);
+    /// <summary>Every dungeon built, for the quest machine's sites (QuestSites).</summary>
+    public List<(DfLocation Location, Built Built)> BuiltDungeons { get; } = [];
+
+    /// <summary>A quest marker flat as a persistent XMarker in the cell, remembered in <see cref="QuestMarkers"/>.</summary>
+    void AddQuestMarker(Cell cell, P3Float at, bool item)
+    {
+        var marker = new PlacedObject(mod)
+        {
+            Base = XMarkerHeading.ToNullableLink<IPlaceableObjectGetter>(),
+            Placement = new Placement { Position = at, Rotation = new P3Float(0, 0, 0) },
+            SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)PersistentFlag,
+        };
+        cell.Persistent.Add(marker);
+        if (!QuestMarkers.TryGetValue(cell, out var list)) QuestMarkers[cell] = list = [];
+        list.Add((marker, item));
+    }
 
     DfText? text;
     readonly Dictionary<int, Message> riddles = new();
@@ -207,7 +232,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         var fixtures = new LightFixturePlacer(arena2, dungeon.Polygons(models));
         var fixtureCounts = new Dictionary<string, int>();
         var placedProps = new List<PlacedObject>();
-        var actions = new ActionObjectBuilder(mod, models, modOutDir, Spells) { Text = text ??= DfText.Load(arena2), Riddles = riddles };
+        var actions = new ActionObjectBuilder(mod, models, modOutDir, Spells) { Text = text ??= DfText.Load(arena2), Riddles = riddles, QuestGlobal = QuestGlobal };
         var floorPolys = dungeon.Polygons(models).Where(q => q.Normal.Y > 0.7f).ToList();
         var ceilingPolys = dungeon.Polygons(models).Where(q => q.Normal.Y < -0.7f).ToList();
         var clutterObstacles = new List<PlacedObject>();
@@ -238,6 +263,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
             {
                 var o = block.Objects[index];
                 var pos = ToSkyrim(origin + o.Position);
+                PlacedNpc? personRef = null;   // a person standing for a flat, which a dialogue action (29) talks through
                 if (o.Type == DfRdbObjectType.Light)
                 {
                     cell.Temporary.Add(new PlacedObject(mod)
@@ -262,6 +288,12 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                         if (Environment.GetEnvironmentVariable("TM_DEBUG_LIGHTS") == "1")
                             Console.WriteLine($"    210.{o.TextureRecord} -> {f.Kind} {fixtures.Describe(origin + o.Position)}");
                     }
+                }
+                else if (o.Type == DfRdbObjectType.Flat && o.TextureArchive == EditorFlatArchive && o.TextureRecord is QuestSpawnRecord or QuestItemRecord)
+                {
+                    var c = origin + o.Position;
+                    float floor = SurfaceY(floorPolys, c.X, c.Z, c.Y + 16, above: false) ?? c.Y;
+                    AddQuestMarker(cell, new P3Float(pos.X, pos.Y, floor * BlockMeshBuilder.Scale + 8), o.TextureRecord == QuestItemRecord);
                 }
                 else if (o.Type == DfRdbObjectType.Flat && o.TextureArchive == EditorFlatArchive && o.TextureRecord is RandomEnemyRecord or FixedEnemyRecord
                     && Creatures is { } creatures)
@@ -318,12 +350,13 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                     var c = origin + o.Position;
                     float floor = SurfaceY(floorPolys, c.X, c.Z, c.Y + 16, above: false) ?? c.Y;
                     var at = new P3Float(pos.X, pos.Y, floor * BlockMeshBuilder.Scale + 4);
-                    cell.Persistent.Add(new PlacedNpc(mod)
+                    personRef = new PlacedNpc(mod)
                     {
                         Base = person.Npc.ToNullableLink<INpcGetter>(),
                         Placement = new Placement { Position = at, Rotation = new P3Float(0, 0, (uint)HashCode.Combine(o.RecordOffset, block.Name) % 360 * MathF.PI / 180) },
                         SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)PersistentFlag,
-                    });
+                    };
+                    cell.Persistent.Add(personRef);
                     PlacedPeople.Add(person);
                     spawnPoints.Add(at);
                     fixtureCounts["person: " + person.Name] = fixtureCounts.GetValueOrDefault("person: " + person.Name) + 1;
@@ -383,6 +416,12 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                     placedProps.Add(r);
                     fixtureCounts[prop.Kind] = fixtureCounts.GetValueOrDefault(prop.Kind) + 1;
                 }
+                else if (ActionObjectBuilder.IsMovingDoor(o) && models.ContainsKey(o.ModelId))
+                {
+                    // A door that slides (secret doors, portcullises): its own model, moving as action objects do.
+                    actions.Place(cell, o, index, origin);
+                    fixtureCounts["sliding door"] = fixtureCounts.GetValueOrDefault("sliding door") + 1;
+                }
                 else if (o.Type == DfRdbObjectType.Model && BlockMeshBuilder.IsDoor(o) && models.TryGetValue(o.ModelId, out var doorModel))
                 {
                     var door = DoorPlacer.Place(mod, o, origin, doorModel);
@@ -412,6 +451,10 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                     exitPos = Vector3.Transform(new Vector3(centre.X, 0, centre.Z), m);
                     exitFacing = Vector3.Normalize(Vector3.TransformNormal(panel.Normal, m));
                 }
+                // A flat with an action (whatever shows it: a light, clutter, a person, nothing for editor flats) also
+                // gets its action, as an invisible activator the player or a chain triggers.
+                if (ActionObjectBuilder.IsActionFlat(o) && actions.PlaceFlat(cell, o, index, origin, personRef) is not null)
+                    fixtureCounts[$"action flat (action {o.Action!.Flags})"] = fixtureCounts.GetValueOrDefault($"action flat (action {o.Action!.Flags})") + 1;
             }
             int links = actions.LinkChains(cell, block, origin);
             if (links > 0) fixtureCounts["action chain links"] = fixtureCounts.GetValueOrDefault("action chain links") + links;
@@ -492,7 +535,9 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         if (!BackgroundNavmesh) nav.Finish();
 
         AddInteriorCell(cell);
-        return new Built(cell, newGameMarker, interiorDoor, exteriorDoor, nav, fixtureCounts);
+        var result = new Built(cell, newGameMarker, interiorDoor, exteriorDoor, nav, fixtureCounts);
+        BuiltDungeons.Add((location, result));
+        return result;
     }
 
     (Vector3 Min, Vector3 Max) PropBounds(PlacedObject r)

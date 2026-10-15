@@ -68,7 +68,7 @@ public static class DaggerfallTowns
         PluginMerger.PreparePart(mod, batch, batches);
 
         var map = DfWorldMap.Load(arena2);
-        var field = Terrain.HeightField.Generate(map, terrain);
+        var field = Terrain.HeightField.Shared(map, terrain);
         var (world, moveIntoTiles) = new Terrain.OverlandTiles(field).OverrideTiles(mod, master);
         var iliacBay = master.Locations.First(l => l.EditorID == "DFLocIliacBay").FormKey;
 
@@ -98,6 +98,7 @@ public static class DaggerfallTowns
         var towns = Slice(All(arena2, master), batch, batches);
         double setup = clock.Elapsed.TotalSeconds;
         var built = new List<TownBuilder.Built>();
+        var questTowns = new List<QuestSites.Town>();
         int failed = 0;
         foreach (var town in towns)
         {
@@ -105,6 +106,7 @@ public static class DaggerfallTowns
             {
                 var t = townBuilder.Build(town, skyrim, world, LocationPlacer.WorldPosition(field, town.PixelX + 0.5, town.PixelY + 0.5));
                 built.Add(t);
+                questTowns.Add(new QuestSites.Town(town, t));
                 t.World.Music = world.Music;
             }
             catch (Exception e) { failed++; Console.WriteLine($"  {town.Name} ({town.RegionName}): {e.Message}"); }
@@ -128,6 +130,14 @@ public static class DaggerfallTowns
                     script.Properties.Add(new ScriptObjectProperty { Name = "Accounts", Object = masterTalk.FormKey.ToLink<ISkyrimMajorRecordGetter>() });
         }
         foreach (var t in built) t.Location.ParentLocation.SetTo(iliacBay);
+        // This part's quest sites (its towns' buildings and dungeons, the individuals in them) for Daggerfall.esm's quest
+        // machine (TMDfQuestSites registers them in game).
+        if (master.Quests.FirstOrDefault(q => q.EditorID == "DFQuestMachine")?.FormKey is { } machine)
+        {
+            var sites = QuestSites.Build(mod, $"T{batch}", machine, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,
+                QuestSites.Individuals(mod, townBuilder.Placed.Concat(dungeons.PlacedPeople)), QuestSites.MasterMarkers(master, arena2));
+            Console.WriteLine($"Quest sites: {questTowns.Count} towns, {dungeons.BuiltDungeons.Count} town dungeons in {sites.Count} site quests");
+        }
         foreach (var cell in mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
             if (cell.Location.IsNull) cell.Location.SetTo(iliacBay);
         moveIntoTiles();

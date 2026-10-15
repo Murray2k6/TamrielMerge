@@ -66,6 +66,8 @@ public static class DaggerfallPluginBuilder
         Console.WriteLine($"Creatures: {mod.Npcs.Count} actors, {mod.LeveledNpcs.Count} encounter lists; stand-in bodies for {string.Join(", ", creatures.StandIns)}");
         // Daggerfall's people (town interiors and streets, and the residents of town dungeons such as castles).
         var people = new TownPeople(mod, new VanillaActors(skyrimData), DfFactions.Load(arena2), DfNames.Load(arena2));
+        // Daggerfall's quest global variables (dungeon set-global actions and the quests), at fixed numbers.
+        DfQuestGlobals.AddAll(mod);
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer) { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, FixedPropKeys = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
         var hold = locations.First(l => l.Name == "Privateer's Hold" && l.DungeonBlocks.Count > 0);
         var holdCell = dungeons.Build(hold, world, LocationPlacer.WorldPosition(field, hold.PixelX + 0.5, hold.PixelY + 0.5));
@@ -93,28 +95,31 @@ public static class DaggerfallPluginBuilder
         };
         var townWorlds = new List<Worldspace>();
         var builtTowns = new List<TownBuilder.Built>();
+        var questTowns = new List<QuestSites.Town>();
         foreach (var town in SelectTowns(locations, towns))
         {
             var t = townBuilder.Build(town, skyrim, world, LocationPlacer.WorldPosition(field, town.PixelX + 0.5, town.PixelY + 0.5));
             townWorlds.Add(t.World);
             builtTowns.Add(t);
+            questTowns.Add(new QuestSites.Town(town, t));
             Console.WriteLine($"Town: {town.Name} ({town.RegionName}) -> {t.World.EditorID}: {t.Buildings} buildings, {t.Interiors} interiors, {t.Doors} street doors ({t.Unlinked} without a way in)");
             Console.WriteLine($"  placed: {string.Join(", ", t.Fixtures.OrderByDescending(f => f.Value).Take(25).Select(f => $"{f.Key} {f.Value}"))}");
             var named = townBuilder.Placed.Where(p => p.Faction?.Type == DfFactionType.Individual).Select(p => p.Name).Distinct().ToList();
             Console.WriteLine($"  people: {townBuilder.Placed.Count}; named: {string.Join(", ", named.Take(20))}; e.g. {string.Join(", ", townBuilder.Placed.Take(8).Select(p => $"{p.Name} ({p.Building})"))}");
         }
+        TownGuilds? guilds = null;
+        var everyone = townBuilder.Placed.Concat(dungeons.PlacedPeople).ToList();
         if (townWorlds.Count > 0)
         {
             Console.WriteLine($"Town navmesh edge links: {dungeons.Navmeshes.LinkExteriorEdges()}");
             // Conversations: factions, greetings by reaction, "Where is...".
-            var everyone = townBuilder.Placed.Concat(dungeons.PlacedPeople).ToList();
             var talk = new TownTalk(mod, DfText.Load(arena2), townBuilder.People!.Factions);
             talk.Enlist(everyone);
             talk.Build(builtTowns, townBuilder.TalkQuest, townBuilder.Shops?.Shopkeepers, townBuilder.Shops?.TavernKeepers, townBuilder.Shops?.Bankers);
             Console.WriteLine($"Talk: {talk.Responses} responses for {townBuilder.Placed.Count} townsfolk and {dungeons.PlacedPeople.Count} people in town dungeons");
             townBuilder.AttachDaytime();
             // Guilds, temples and knightly orders: joining, ranks, training, healing.
-            var guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2), townBuilder.People!.Factions);
+            guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2), townBuilder.People!.Factions);
             guilds.Build(talk, townBuilder.TalkQuest, everyone, townBuilder.BreakIns);
             Console.WriteLine($"Guilds: {guilds.Members} guilds with members in town, {guilds.Trainers} trainers, {guilds.Responses} responses");
         }
@@ -138,6 +143,7 @@ public static class DaggerfallPluginBuilder
         // Daggerfall's holidays, on the town conversation quest (when there are towns).
         if (townWorlds.Count > 0)
         {
+            var festival = MerchantsFestivalPerk(mod, iliacBay);
             townBuilder.TalkQuest.VirtualMachineAdapter ??= new QuestAdapter();
             townBuilder.TalkQuest.VirtualMachineAdapter.Scripts.Add(new ScriptEntry
             {
@@ -145,11 +151,31 @@ public static class DaggerfallPluginBuilder
                 Properties =
                 [
                     new ScriptObjectProperty { Name = "IliacBay", Object = iliacBay.ToLink<ISkyrimMajorRecordGetter>() },
+                    new ScriptObjectProperty { Name = "FestivalPrices", Object = festival.ToLink<ISkyrimMajorRecordGetter>() },
                     new ScriptObjectProperty { Name = "GameMonth", Object = new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x36).ToLink<ISkyrimMajorRecordGetter>() },
                     new ScriptObjectProperty { Name = "GameDay", Object = new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x37).ToLink<ISkyrimMajorRecordGetter>() },
                 ],
             });
         }
+        // Daggerfall's quests (DfQuestBuilder: the machine, reputation, all 232 quests from ARENA2) and the quest sites of
+        // what this plugin built (Privateer's Hold, its towns and their dungeons); the town and dungeon plugins add theirs.
+        var questBuilder = new DfQuestBuilder(mod, arena2, itemMasters, DfFactions.Load(arena2), DfNames.Load(arena2), new VanillaActors(skyrimData))
+        {
+            Foe = id => creatures.Spawn(id),
+            Spells = spells.Spells,
+            GuildsQuest = guilds?.Quest,
+            Guilds = guilds?.Built ?? [],
+            IliacBay = iliacBay.FormKey,
+            Weapons = [.. mod.Weapons.Where(w => w.EditorID is { } e && (e.StartsWith("DFWeapIron") || e.StartsWith("DFWeapSteel"))).Select(w => w.FormKey)],
+            Armor = [.. mod.Armors.Where(a => a.EditorID is { } e && (e.StartsWith("DFArmorLeather") || e.StartsWith("DFArmorChain") || e.StartsWith("DFArmorIron") || e.StartsWith("DFArmorSteel"))).Select(a => a.FormKey)],
+            Books = [.. mod.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey)],
+        };
+        questBuilder.Build();
+        var markerOf = markers.GroupBy(m => (m.Location.Region, m.Location.Index)).ToDictionary(g => g.Key, g => g.First().Marker.FormKey);
+        questTowns.AddRange(questBuilder.ExteriorOnly.Select(l => new QuestSites.Town(l, null)));
+        var questSites = QuestSites.Build(mod, "Main", questBuilder.Machine!.FormKey, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,
+            QuestSites.Individuals(mod, everyone), l => markerOf.TryGetValue((l.Region, l.Index), out var mk) ? mk : null);
+        Console.WriteLine($"Quest sites: {questTowns.Count} towns, {dungeons.BuiltDungeons.Count} dungeons, {dungeons.QuestMarkers.Values.Sum(m => m.Count)} quest markers in {questSites.Count} site quests");
         AtmosphereBuilder.ApplyToDungeon(holdCell.Cell, music.Dungeon);
         // Everything on the overland is placed: split it into its tiles.
         var tiles = layout.Split(mod, world);
@@ -457,5 +483,42 @@ public static class DaggerfallPluginBuilder
             sb.Append($"<p align=\"{align}\">{WebUtility.HtmlEncode(paras[i].Text)}</p>\n\n");
         }
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// Merchants' Festival (10 Sun's Height): the shops of the Iliac Bay sell at half price. A hidden perk the player is
+    /// given (TMDfHolidays) halves buying prices only (Mod Buy Prices), on that day and in the Iliac Bay: its conditions
+    /// read Skyrim's date and the player's location, so nothing needs re-applying after a saved game is loaded and the
+    /// prices the player sells at are untouched. Fixed number (0xDF0100): made late in Daggerfall.esm's running order it
+    /// would renumber what follows.
+    /// </summary>
+    static Perk MerchantsFestivalPerk(SkyrimMod mod, Location iliacBay)
+    {
+        var perk = new Perk(new FormKey(mod.ModKey, 0xDF0100), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = "DFMerchantsFestivalPerk",
+            Name = "Merchants' Festival",
+            Playable = false,
+            Hidden = true,
+            NumRanks = 1,
+        };
+        var month = new GetGlobalValueConditionData(); month.Global = new FormLinkOrIndex<IGlobalGetter>(month, new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x36));
+        var day = new GetGlobalValueConditionData(); day.Global = new FormLinkOrIndex<IGlobalGetter>(day, new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x37));
+        var where = new GetInCurrentLocConditionData(); where.Location = new FormLinkOrIndex<ILocationGetter>(where, iliacBay.FormKey);
+        var owner = new PerkCondition { RunOnTabIndex = 0 };
+        owner.Conditions.Add(new ConditionFloat { CompareOperator = CompareOperator.EqualTo, ComparisonValue = 6, Data = month });   // Sun's Height
+        owner.Conditions.Add(new ConditionFloat { CompareOperator = CompareOperator.EqualTo, ComparisonValue = 10, Data = day });
+        owner.Conditions.Add(new ConditionFloat { CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1, Data = where });
+        var half = new PerkEntryPointModifyValue
+        {
+            EntryPoint = APerkEntryPointEffect.EntryType.ModBuyPrices,
+            PerkConditionTabCount = 3,
+            Modification = PerkEntryPointModifyValue.ModificationType.Multiply,
+            Value = 0.5f,
+        };
+        half.Conditions.Add(owner);
+        perk.Effects.Add(half);
+        mod.Perks.Add(perk);
+        return perk;
     }
 }

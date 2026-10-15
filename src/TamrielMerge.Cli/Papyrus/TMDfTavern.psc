@@ -1,7 +1,8 @@
 ScriptName TMDfTavern extends Quest
 {Daggerfall's tavern rooms (Daggerfall Unity FormulaHelper.CalculateRoomCost): 7 gold a night, and a stay that takes in
 Heart's Day (16 Sun's Dawn, day 46 of Daggerfall's 30-day-month year) gets that night free. Renting makes the beds
-in the tavern the player's (SKSE finds them in the cell) until the stay is over; they go back to the tavern then.}
+in the tavern the player's (SKSE finds them in the cell) until the stay is over; they go back to their owners then
+(the tavern's faction or a person).}
 
 Message Property RentChoice Auto
 {1 night / 3 nights / a week / never mind.}
@@ -12,6 +13,7 @@ Potion Property Ale Auto
 
 ObjectReference[] rented
 Faction[] owners
+ActorBase[] actorOwners
 Int count = 0
 
 Int Function Cost(Int nights)
@@ -49,6 +51,7 @@ Function Rent(Actor keeper)
   GiveBack()
   rented = new ObjectReference[32]
   owners = new Faction[32]
+  actorOwners = new ActorBase[32]
   count = 0
   Cell here = keeper.GetParentCell()
   Int n = here.GetNumRefs(40)
@@ -59,6 +62,7 @@ Function Rent(Actor keeper)
     If r && (r.GetBaseObject() == Bed || r.GetBaseObject().GetName() == Bed.GetName())
       rented[count] = r
       owners[count] = r.GetFactionOwner()
+      actorOwners[count] = r.GetActorOwner()
       r.SetActorOwner(player.GetActorBase())
       count += 1
     EndIf
@@ -94,11 +98,18 @@ Event OnUpdateGameTime()
   GiveBack()
 EndEvent
 
+; The beds go back to whoever had them: a faction, a person (a bed in someone's own room), or no one.
 Function GiveBack()
   Int i = 0
   While i < count
     If rented[i]
-      rented[i].SetFactionOwner(owners[i])
+      If owners[i]
+        rented[i].SetFactionOwner(owners[i])
+      ElseIf actorOwners && actorOwners[i]
+        rented[i].SetActorOwner(actorOwners[i])
+      Else
+        rented[i].SetFactionOwner(None)
+      EndIf
     EndIf
     i += 1
   EndWhile

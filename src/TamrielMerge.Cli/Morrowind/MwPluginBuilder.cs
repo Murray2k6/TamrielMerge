@@ -186,6 +186,8 @@ public sealed partial class MwPluginBuilder
                 mod.Doors.Add(door);
                 return bases[id] = door;
             }
+            // A scripted activator can carry its script (statics can't).
+            if (ScriptedActivator(rec, edid, mesh) is { } scripted) return bases[id] = scripted;
             var stat = new Static(mod) { EditorID = edid, ObjectBounds = Bounds(mesh), Model = new Model { File = SkyrimModelPath(mesh.Path) } };
             mod.Statics.Add(stat);
             result = stat;
@@ -314,7 +316,7 @@ public sealed partial class MwPluginBuilder
                     Placement = new Placement { Position = new P3Float(r.Position.X, r.Position.Y, r.Position.Z), Rotation = new P3Float(r.Rotation.X, r.Rotation.Y, r.Rotation.Z) },
                     Scale = r.Scale == 1 ? null : r.Scale,
                 };
-                cell.Temporary.Add(placedActor);
+                if (!PlaceForScripts(r, placedActor, cell)) cell.Temporary.Add(placedActor);
                 NoteActor(placedActor, r, source.Name);
                 continue;
             }
@@ -332,9 +334,11 @@ public sealed partial class MwPluginBuilder
                 placed.SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
                 cell.Persistent.Add(placed);
                 doors.Add((r, placed, source.Name));
+                NoteDoorForScripts(r, placed);
             }
-            else cell.Temporary.Add(placed);
+            else if (!PlaceForScripts(r, placed, cell)) cell.Temporary.Add(placed);
         }
+        AddAnchor(source.Name, cell);
         CellSolids[source.Name] = solid;
         BuildNavmesh(cell, solid);
         if (Start is { } start && string.Equals(start.Cell, source.Name, StringComparison.OrdinalIgnoreCase))
@@ -432,8 +436,8 @@ public sealed partial class MwPluginBuilder
         var polygons = solid.Select(t => (t, Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])))).Where(p => !float.IsNaN(p.Item2.X))
             .Select(p => (p.t, p.Item2.Z < 0 ? -p.Item2 : p.Item2)).ToList();   // collision winding is either way; walkable faces point up
         // Every persistent placed object here except the start marker is a load door (linked to its partner later).
-        var loadDoors = cell.Persistent.OfType<PlacedObject>().Where(d => d != StartMarker).Cast<IPlacedObjectGetter>().ToList();
-        var actorsHere = cell.Temporary.OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
+        var loadDoors = cell.Persistent.OfType<PlacedObject>().Where(d => d != StartMarker && !scriptPersistent.Contains(d)).Cast<IPlacedObjectGetter>().ToList();
+        var actorsHere = cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
         try
         {
             var r = navmeshes.BuildInterior(cell, polygons, loadDoors, keepAround: StartMarker.Placement is { } sp && cell.Persistent.Contains(StartMarker) ? sp.Position : null, keepAlso: actorsHere);
@@ -526,15 +530,18 @@ public sealed partial class MwPluginBuilder
             top.Persistent.Add(marker);
             centres.Items.Add(marker.ToLink<ISkyrimMajorRecordGetter>());
             // A map marker for fast travel: on the map once found (Skyrim discovers markers as you come near).
-            top.Persistent.Add(new PlacedObject(mod)
+            var mapMarker = new PlacedObject(mod)
             {
                 EditorID = "MWMapMarker" + Sanitize(town.Key),
                 Base = new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x10).ToNullableLink<IPlaceableObjectGetter>(),   // MapMarker
                 Placement = new Placement { Position = marker.Placement.Position, Rotation = new P3Float(0, 0, 0) },
                 SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400,
                 MapMarker = new MapMarker { Name = town.Key, Type = town.Count() >= 4 ? MapMarker.MarkerType.City : MapMarker.MarkerType.Settlement },
-            });
+            };
+            top.Persistent.Add(mapMarker);
+            townMapMarkers[town.Key] = mapMarker;   // ShowMap's places
         }
+        AddAnchor("", top);
         if (centres.Items.Count > 0) mod.FormLists.Add(centres);
         // Each reference's collision by the Skyrim cell it is placed in, for the exterior navmeshes.
         var solids = new Dictionary<(int X, int Y), List<(Tes3Ref Ref, MwMeshConverter.Result Mesh)>>();
@@ -559,7 +566,8 @@ public sealed partial class MwPluginBuilder
                         Placement = new Placement { Position = new P3Float(r.Position.X, r.Position.Y, r.Position.Z), Rotation = new P3Float(r.Rotation.X, r.Rotation.Y, r.Rotation.Z) },
                         Scale = r.Scale == 1 ? null : r.Scale,
                     };
-                    CellAt(((int)MathF.Floor(r.Position.X / MwTerrain.SkyCellUnits), (int)MathF.Floor(r.Position.Y / MwTerrain.SkyCellUnits))).Temporary.Add(placedActor);
+                    if (!PlaceForScripts(r, placedActor, top))
+                        CellAt(((int)MathF.Floor(r.Position.X / MwTerrain.SkyCellUnits), (int)MathF.Floor(r.Position.Y / MwTerrain.SkyCellUnits))).Temporary.Add(placedActor);
                     NoteActor(placedActor, r, null);
                     continue;
                 }
@@ -576,8 +584,10 @@ public sealed partial class MwPluginBuilder
                     placed.SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
                     top.Persistent.Add(placed);
                     doors.Add((r, placed, Exterior));
+                    NoteDoorForScripts(r, placed);
                 }
-                else CellAt(((int)MathF.Floor(r.Position.X / MwTerrain.SkyCellUnits), (int)MathF.Floor(r.Position.Y / MwTerrain.SkyCellUnits))).Temporary.Add(placed);
+                else if (!PlaceForScripts(r, placed, top))
+                    CellAt(((int)MathF.Floor(r.Position.X / MwTerrain.SkyCellUnits), (int)MathF.Floor(r.Position.Y / MwTerrain.SkyCellUnits))).Temporary.Add(placed);
             }
 
         int minX = cells.Keys.Min(k => k.X), maxX = cells.Keys.Max(k => k.X), minY = cells.Keys.Min(k => k.Y), maxY = cells.Keys.Max(k => k.Y);
@@ -626,6 +636,7 @@ public sealed partial class MwPluginBuilder
             sub.Items.Add(cell);
         }
         mod.Worldspaces.Add(ws);
+        exteriorCells = cells;   // GetPCCell's exterior cells
         AddRegions(skyrim, ws, cells);
 
         // Navmeshes outdoors: Morrowind's sea level is 0.
@@ -633,7 +644,7 @@ public sealed partial class MwPluginBuilder
         var (navCount, navTriangles) = navmeshes.BuildExteriorCells(ws, cells,
             (x, y) => solids.TryGetValue((x, y), out var list) ? list.SelectMany(s => s.Mesh.Solid.Select(t => t.Select(v => ToWorld(v, s.Ref)).ToArray())) : [],
             c => c.Flags.HasFlag(Cell.Flag.HasWater) ? 0f : null,
-            top.Persistent.OfType<PlacedObject>().Cast<IPlacedObjectGetter>().ToList(), Problems);
+            top.Persistent.OfType<PlacedObject>().Where(p => !scriptPersistent.Contains(p)).Cast<IPlacedObjectGetter>().ToList(), Problems);
         ExteriorNavmeshes += navCount;
         NavmeshTriangles += navTriangles;
         ExteriorEdgeLinks = navmeshes.LinkExteriorEdges();

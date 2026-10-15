@@ -278,7 +278,7 @@ public sealed class OverlandTiles
     {
         string outDir = Path.GetDirectoryName(Path.GetFullPath(mainPlugin))!;
         using var master = SkyrimMod.CreateFromBinaryOverlay(mainPlugin, SkyrimRelease.SkyrimSE);
-        float peak = f.Heights.Max();
+        float peak = f.Peak();
         var written = new List<string>();
         var masters = PluginMerger.Masters(Path.GetFileName(mainPlugin));
         // Daggerfall's own ground (TerrainBuilder.AddDaggerfallTextures), made in the first part built.
