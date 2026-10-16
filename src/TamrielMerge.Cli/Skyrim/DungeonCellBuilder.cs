@@ -419,6 +419,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                     };
                     cell.Temporary.Add(loot);
                     clutterObstacles.Add(loot);
+                    surfaceCandles.Add(loot);   // onto the Skyrim table or crate standing for the one it lay on, as candles are
                     fixtureCounts["random treasure"] = fixtureCounts.GetValueOrDefault("random treasure") + 1;
                 }
                 else if (o.Type == DfRdbObjectType.Flat && o.TextureArchive == EditorFlatArchive && placement.IsStart)
@@ -553,9 +554,10 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         }
         int settled = SettleProps(placedProps, walkable);
         if (settled > 0) fixtureCounts["props settled onto supports"] = settled;
-        // Candles that stood on Daggerfall's tables and shelves, onto the Skyrim ones in their place (other heights).
+        // Candles and treasure that lay on Daggerfall's tables, shelves and crates, onto the Skyrim ones in their place
+        // (other heights; 2026-10-16: 682 knapsacks floated up to 200 units).
         int candles = SettleProps(surfaceCandles, walkable, placedProps);
-        if (candles > 0) fixtureCounts["candles settled onto tables"] = candles;
+        if (candles > 0) fixtureCounts["candles and treasure settled onto tables"] = candles;
         // Props are obstacles for pathing: add each one's box so the navmesh goes around it.
         foreach (var r in placedProps) walkable.AddRange(PropBox(r));
         // Standing clutter big enough to walk around (columns, carts, statues) is an obstacle too.
