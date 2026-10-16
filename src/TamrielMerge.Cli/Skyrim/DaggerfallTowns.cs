@@ -70,7 +70,9 @@ public static class DaggerfallTowns
 
         var map = DfWorldMap.Load(arena2);
         var field = Terrain.HeightField.Shared(map, terrain);
-        var (world, moveIntoTiles) = new Terrain.OverlandTiles(field).OverrideTiles(mod, master);
+        var tiles = new Terrain.OverlandTiles(field);
+        var (world, moveIntoTiles) = tiles.OverrideTiles(mod, master);
+        var tileWorlds = master.Worldspaces.Where(w => w.EditorID is not null).ToDictionary(w => w.EditorID!, w => w.FormKey);
         var iliacBay = master.Locations.First(l => l.EditorID == "DFLocIliacBay").FormKey;
 
         // What the towns use, made here as Daggerfall.esm makes it, then swapped for Daggerfall.esm's own records.
@@ -94,6 +96,12 @@ public static class DaggerfallTowns
             Clutter = clutter,
             Creatures = creatures,
             Shops = new TownShops(mod, skyrim) { SpellTomes = [.. spells.Tomes.Values], DaggerfallSmith = DfItems.Lists(master) },
+            // Each town shows the map of Daggerfall.esm's overland tile it stands on.
+            MapOf = spot =>
+            {
+                int t = tiles.TileAt(spot);
+                return (tileWorlds[tiles.EditorId(t)], tiles.ToLocal(spot, t));
+            },
         };
 
         var towns = Slice(All(arena2, master), batch, batches);

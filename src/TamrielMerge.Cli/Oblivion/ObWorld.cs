@@ -431,7 +431,8 @@ public sealed partial class ObPluginBuilder
             var ws = new Worldspace(mod)
             {
                 EditorID = "OB" + Sanitize(src.EditorID ?? key.ID.ToString("X6")),
-                Name = src.Name,
+                // Oblivion's Tamriel has no name; Skyrim's map shows the world's.
+                Name = string.IsNullOrEmpty(src.Name) && src.EditorID == "Tamriel" ? "Cyrodiil" : src.Name,
                 Climate = tamriel.Climate.AsNullable(),
                 Water = tamriel.Water.AsNullable(),
                 LodWater = tamriel.LodWater.AsNullable(),

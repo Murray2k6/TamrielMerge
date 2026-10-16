@@ -243,6 +243,11 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
     /// <summary>TEXT.RSC (the castles' names).</summary>
     DfText DfTextFile => dfText ??= DfText.Load(arena2);
 
+    /// <summary>The overland worldspace whose map a town shows and the town's spot on it, for a spot on the overland
+    /// given to <see cref="Build"/>; unset, the overland given and that spot (a plugin built on Daggerfall.esm places on
+    /// a scratch overland and sets this to the master's tile).</summary>
+    public Func<P3Float, (FormKey World, P3Float Spot)>? MapOf { get; set; }
+
     public Built Build(DfLocation loc, ISkyrimModGetter skyrim, Worldspace overland, P3Float overlandSpot)
     {
         var style = TownTextures.StyleOf(map.ClimateAt(loc.PixelX, loc.PixelY));
@@ -258,6 +263,7 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
 
         int halfX = (int)MathF.Ceiling(W * DfTownBlock.Side * BlockMeshBuilder.Scale / 2 / 4096), halfY = (int)MathF.Ceiling(H * DfTownBlock.Side * BlockMeshBuilder.Scale / 2 / 4096);
         int minX = -halfX - Margin, maxX = halfX + Margin - 1, minY = -halfY - Margin, maxY = halfY + Margin - 1;
+        var mapOf = MapOf?.Invoke(overlandSpot) ?? (overland.FormKey, overlandSpot);
         var ws = new Worldspace(mod)
         {
             EditorID = "DFT" + id,
@@ -271,15 +277,14 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
             LandDefaults = new WorldspaceLandDefaults { DefaultLandHeight = -16000, DefaultWaterHeight = -16000 },
             ObjectBoundsMin = new P2Float(minX, minY),
             ObjectBoundsMax = new P2Float(maxX + 1, maxY + 1),
+            // The map is the overland's, in 3D, with the player where the town stands on it: the overland as parent
+            // for its map data only (as vanilla Blackreach and Markarth take Tamriel's), the town's origin (its centre)
+            // put at its spot on the overland (ONAM: parent = town / scale + offset).
+            Parent = new WorldspaceParent { Worldspace = mapOf.World.ToLink<IWorldspaceGetter>(), Flags = WorldspaceParent.Flag.UseMapData },
             WorldMapOffsetScale = 1,
+            WorldMapCellOffset = mapOf.Spot,
             DistantLodMultiplier = 1,
             Music = overland.Music,
-            MapData = new WorldspaceMap
-            {
-                NorthwestCellCoords = new P2Int16((short)minX, (short)maxY),
-                SoutheastCellCoords = new P2Int16((short)maxX, (short)minY),
-                CameraMinHeight = 50000, CameraMaxHeight = 80000, CameraInitialPitch = 50,
-            },
             TopCell = new Cell(mod) { Persistent = [], Temporary = [] },
         };
         mod.Worldspaces.Add(ws);

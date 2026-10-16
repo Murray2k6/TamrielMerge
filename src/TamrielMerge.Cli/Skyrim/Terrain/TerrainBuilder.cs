@@ -165,7 +165,9 @@ public static class TerrainBuilder
                 NorthwestCellCoords = new P2Int16((short)f.MinCellX, (short)(f.MinCellY + f.CellsY - 1)),
                 SoutheastCellCoords = new P2Int16((short)(f.MinCellX + f.CellsX - 1), (short)f.MinCellY),
                 CameraMinHeight = tamriel.MapData?.CameraMinHeight ?? 50000,
-                CameraMaxHeight = tamriel.MapData?.CameraMaxHeight ?? 80000,
+                // Vanilla's heights suit Skyrim's map, about 120 cells across; a wider map lets the camera rise in
+                // proportion (Iliac Bay, 1000 cells: up to 3 times as high) so a region, not a corner, is in view.
+                CameraMaxHeight = (tamriel.MapData?.CameraMaxHeight ?? 80000) * Math.Clamp(Math.Max(f.CellsX, f.CellsY) / 120f, 1f, 3f),
                 CameraInitialPitch = tamriel.MapData?.CameraInitialPitch ?? 50,
             },
             TopCell = new Cell(mod)

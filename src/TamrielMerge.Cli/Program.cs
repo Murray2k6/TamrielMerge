@@ -4801,6 +4801,31 @@ static class Program
                 }
                 return 0;
             }
+            case "world-map-info":
+            {
+                // Dev aid: what the 3D world map reads from each worldspace (MNAM, ONAM, NAMA, flags, parent, LOD files):
+                // vanilla Tamriel and Solstheim, then the worldspaces of --plugins a;b (a path, or a name in --data / Skyrim's Data).
+                string dataDir = opts.GetValueOrDefault("data", skyrimData);
+                var names = new List<string> { Path.Combine(skyrimData, "Skyrim.esm"), Path.Combine(skyrimData, "Dragonborn.esm") };
+                names.AddRange(opts.GetValueOrDefault("plugins", "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(p => Path.IsPathRooted(p) ? p : Path.Combine(dataDir, p)));
+                foreach (var file in names.Where(File.Exists))
+                {
+                    using var m = SkyrimMod.CreateFromBinaryOverlay(file, SkyrimRelease.SkyrimSE);
+                    bool vanilla = file.StartsWith(skyrimData, StringComparison.OrdinalIgnoreCase) && Path.GetFileName(file) is "Skyrim.esm" or "Dragonborn.esm";
+                    foreach (var ws in m.Worldspaces.Where(w => !vanilla || opts.ContainsKey("all") || w.EditorID is "Tamriel" or "DLC2SolstheimWorld"))
+                    {
+                        var md = ws.MapData;
+                        string lod = Path.Combine(Path.GetDirectoryName(file)!, "lodsettings", (ws.EditorID ?? "").ToLowerInvariant() + ".lod");
+                        string terrain = Path.Combine(Path.GetDirectoryName(file)!, "meshes", "terrain", (ws.EditorID ?? "").ToLowerInvariant());
+                        int Btr(int level) => Directory.Exists(terrain) ? Directory.EnumerateFiles(terrain, $"*.{level}.*.btr").Count() : 0;
+                        Console.WriteLine($"{Path.GetFileName(file)} {ws.EditorID} \"{ws.Name?.String}\" flags={ws.Flags} parent={ws.Parent?.Worldspace.FormKey}/{ws.Parent?.Flags}");
+                        Console.WriteLine($"  MNAM usable={md?.UsableDimensions} NW={md?.NorthwestCellCoords} SE={md?.SoutheastCellCoords} camera {md?.CameraMinHeight}..{md?.CameraMaxHeight} pitch {md?.CameraInitialPitch}");
+                        Console.WriteLine($"  ONAM scale={ws.WorldMapOffsetScale} offset={ws.WorldMapCellOffset} NAMA={ws.DistantLodMultiplier} bounds={ws.ObjectBoundsMin}..{ws.ObjectBoundsMax} map image={ws.MapImage} cloud={ws.CloudModel?.File}");
+                        Console.WriteLine($"  lodsettings {(File.Exists(lod) ? new FileInfo(lod).Length + " bytes" : "none here")}; terrain btr 4/8/16/32: {Btr(4)}/{Btr(8)}/{Btr(16)}/{Btr(32)}");
+                    }
+                }
+                return 0;
+            }
             case "probe-markers":
             {
                 // Dev aid: Mutagen's map marker shape plus how vanilla Skyrim stores a few markers.

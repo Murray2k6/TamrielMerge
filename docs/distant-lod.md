@@ -46,3 +46,23 @@ solid-state drive when `--out` is on a hard disk (docs/building.md).
 Checked offline (2026-10-13) on Redguard's five worldspaces: Stros M'Kai got 119 land chunks and 28 object chunks from
 754 objects and trees in 1.7 minutes. The chunks read back with Skyrim's layout and segments, and a preview showed the
 town in place. It hasn't been seen in the game yet.
+
+## The world map
+
+Skyrim's map menu draws the current worldspace's land LOD in 3D, within its map data (MNAM: the area the camera may
+pan over, its lowest and highest height, its pitch). User, 2026-10-16: "we need a world map when we open the map menu
+in 3d like in skyrim". Every converted exterior has land LOD and its own map data, with these exceptions:
+
+- **Daggerfall's towns** are worldspaces of their own: no land, in the town's own coordinates. Vanilla's cities show
+  Tamriel's map. Most share Tamriel's coordinates; Blackreach does not, and takes Tamriel's map data with a scale and
+  offset (ONAM 2.5, -8192, 73728, -20480). The same is done for Daggerfall's towns: the overland tile they stand on is
+  their parent for its map data only, and their ONAM offset is the town's spot on that tile, scale 1, so the map shows
+  the Iliac Bay with the player where the town is.
+- **The Iliac Bay** is 1000 x 500 cells, against Skyrim's map of about 120 cells across. Its highest camera is raised
+  in proportion, at most 3 times vanilla's (240,000 units), so a zoomed-out map shows a region of the bay.
+- Oblivion's cities already take Oblivion's Tamriel's map data, as in Oblivion. That world, which has no name of its
+  own, is named Cyrodiil.
+
+`world-map-info [--data DIR] [--plugins a.esm;b.esm] [--all]` lists what the map reads from each worldspace (MNAM,
+ONAM, parent, flags, the land LOD chunks there), next to vanilla Tamriel and Solstheim (`--all`: every vanilla world).
+This hasn't been seen in the game yet.
