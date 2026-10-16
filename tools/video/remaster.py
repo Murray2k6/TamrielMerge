@@ -169,21 +169,34 @@ def upscale(src_dir, up_dir, size, device="cuda", model_path=MODEL, threads=0):
 
 
 def resize(src_dir, up_dir, size):
-    """--plain: each frame only resized (bicubic) to size; a repeated frame reuses the last result."""
-    import io
+    """--plain: each frame only resized (bicubic) to size, on every core (2026-10-16: one at a time it went at four
+    frames a second, 25 minutes for Redguard's movie 2); a frame repeating the one before reuses its result."""
+    import hashlib, shutil
+    from concurrent.futures import ThreadPoolExecutor
     os.makedirs(up_dir, exist_ok=True)
     frames = sorted(glob.glob(os.path.join(src_dir, "frame*.png")))
-    prev_bytes, prev_dst = None, None
+    # Runs of the same frame (Smacker and FLC hold a picture for several frames): each frame's first of its run.
+    first, prev_hash, prev = {}, None, None
     for f in frames:
-        dst = os.path.join(up_dir, os.path.basename(f))
-        data = open(f, "rb").read()
+        h = hashlib.sha1(open(f, "rb").read()).digest()
+        if h != prev_hash:
+            prev_hash, prev = h, f
+        first[f] = prev
+    dst_of = lambda f: os.path.join(up_dir, os.path.basename(f))
+
+    def one(f):
+        dst = dst_of(f)
         if not os.path.exists(dst):
-            if data == prev_bytes and prev_dst:
-                with open(prev_dst, "rb") as a, open(dst, "wb") as b:
-                    b.write(a.read())
-            else:
-                Image.open(io.BytesIO(data)).convert("RGB").resize(size, Image.BICUBIC).save(dst, compress_level=1)
-        prev_bytes, prev_dst = data, dst
+            # PIL lets go of the interpreter lock while it resizes and compresses, so threads share the cores.
+            Image.open(f).convert("RGB").resize(size, Image.BICUBIC).save(dst + ".tmp", format="PNG", compress_level=1)
+            os.replace(dst + ".tmp", dst)
+
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        list(pool.map(one, sorted(set(first.values()))))
+    for f in frames:
+        if first[f] != f and not os.path.exists(dst_of(f)):
+            shutil.copyfile(dst_of(first[f]), dst_of(f) + ".tmp")
+            os.replace(dst_of(f) + ".tmp", dst_of(f))
     print(f"{len(frames)} frames resized to {size[0]}x{size[1]}", flush=True)
 
 
