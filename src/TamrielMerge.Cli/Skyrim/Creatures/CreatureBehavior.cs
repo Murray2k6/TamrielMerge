@@ -262,14 +262,16 @@ public sealed class CreatureBehavior
 
         // animationdata\<project>.txt: header (project files), then a block per clip: name, id, speed, crop start, crop
         // end, trigger count, "event:time" lines, blank.
-        // Templates without animation data of their own (Dawnguard's chaurus hunter) work from the clips' annotations.
-        if (!archive.ContainsKey($@"meshes\animationdata\{tProject}.txt"))
+        // A template whose data isn't in files of its own is taken from the game's single files (Dawnguard's chaurus
+        // hunter and Dragonborn's ash hopper are only there: 2026-10-16, built without it the imp, giant scorpion,
+        // giant bat and dragonling had no animation data, so the game drew none of them).
+        if (TemplateData(tProject) is not { } templateData)
         {
             RemoveFromIndex(Path.Combine(meshes, "animationdata", "dirlist.txt"), project + ".txt");
             RemoveFromIndex(Path.Combine(meshes, "animationsetdata", "dirlist.txt"), $@"{project}Data\{project}.txt");
             return written;
         }
-        var lines = Text($@"meshes\animationdata\{tProject}.txt").Replace("\r", "").Split('\n').ToList();
+        var lines = templateData.Data;
         var outLines = new List<string>();
         int p = 0;
         outLines.Add(lines[p++]);                                  // 1
@@ -302,9 +304,9 @@ public sealed class CreatureBehavior
 
         // boundanims\anims_<project>.txt: per clip id: id, duration, translation count, "t x y z" lines, rotation count,
         // "t x y z w" lines, blank. Times scale with the clip.
-        var motion = Text($@"meshes\animationdata\boundanims\anims_{tProject}.txt").Replace("\r", "").Split('\n');
+        var motion = templateData.Motion;
         var outMotion = new List<string>();
-        for (int i = 0; i < motion.Length;)
+        for (int i = 0; i < motion.Count;)
         {
             if (motion[i].Length == 0) { outMotion.Add(""); i++; continue; }
             int clipId = int.Parse(motion[i]);
@@ -320,12 +322,11 @@ public sealed class CreatureBehavior
         written.Add(WriteText(Path.Combine(meshes, "animationdata", "boundanims", $"anims_{project}.txt"), outMotion));
 
         // animationsetdata\<project>Data\: the template's set files, the folder CRC switched to the creature's.
-        string tSetDir = $@"meshes\animationsetdata\{tProject}data\";
         uint theirFolder = 0, ourFolder = Crc($@"{CreatureRig.MeshFolder(id)}\animations");
-        foreach (var (path, file) in archive.Where(kv => kv.Key.StartsWith(tSetDir, StringComparison.OrdinalIgnoreCase)))
+        foreach (var (fileName0, setLines0) in TemplateSets(tProject))
         {
-            var setLines = Encoding.ASCII.GetString(file.GetBytes()).Replace("\r", "").Split('\n').ToList();
-            string fileName = Path.GetFileName(path);
+            var setLines = setLines0.ToList();
+            string fileName = fileName0;
             if (fileName.Equals(tProject + ".txt", StringComparison.OrdinalIgnoreCase)) fileName = project + ".txt";
             else
             {
@@ -344,6 +345,149 @@ public sealed class CreatureBehavior
         written.Add(AddToIndex(Path.Combine(meshes, "animationdata", "dirlist.txt"), @"meshes\animationdata\dirlist.txt", project + ".txt"));
         written.Add(AddToIndex(Path.Combine(meshes, "animationsetdata", "dirlist.txt"), @"meshes\animationsetdata\dirlist.txt", $@"{project}Data\{project}.txt"));
         return written;
+    }
+
+    /// <summary>
+    /// A template project's animation data (animationdata\&lt;project&gt;.txt's lines) and motion (boundanims'): its own
+    /// files when the archives have them, else its part of meshes\animationdatasinglefile.txt (the project count, the
+    /// project names, then per project a counted block of data lines and, when its clip flag (the line after its file
+    /// list) is 1, a counted block of motion lines). Null when it is in neither.
+    /// </summary>
+    (List<string> Data, List<string> Motion)? TemplateData(string tProject)
+    {
+        if (archive.ContainsKey($@"meshes\animationdata\{tProject}.txt"))
+        {
+            var data = Text($@"meshes\animationdata\{tProject}.txt").Replace("\r", "").Split('\n').ToList();
+            string motionPath = $@"meshes\animationdata\boundanims\anims_{tProject}.txt";
+            var motion = archive.ContainsKey(motionPath) ? Text(motionPath).Replace("\r", "").Split('\n').ToList() : [];
+            return (data, motion);
+        }
+        singleData ??= ParseSingleData();
+        return singleData.TryGetValue(tProject, out var single) ? single : null;
+    }
+
+    Dictionary<string, (List<string> Data, List<string> Motion)>? singleData;
+
+    /// <summary>
+    /// Checks the single-file readers against the projects the archives also have as files of their own: (projects
+    /// compared, those whose data, motion and set files read the same, the first differences).
+    /// </summary>
+    public (int Compared, int Same, List<string> Differences) CheckSingleFiles()
+    {
+        singleData ??= ParseSingleData();
+        singleSets ??= ParseSingleSets();
+        int compared = 0, same = 0;
+        var diffs = new List<string>();
+        static List<string> Trim(List<string> x) { var y = x.ToList(); while (y.Count > 0 && y[^1].Length == 0) y.RemoveAt(y.Count - 1); return y; }
+        foreach (var (name, (data, motion)) in singleData)
+        {
+            string dataPath = $@"meshes\animationdata\{name}.txt";
+            if (!archive.ContainsKey(dataPath)) continue;
+            compared++;
+            var ownData = Trim(Text(dataPath).Replace("\r", "").Split('\n').ToList());
+            string motionPath = $@"meshes\animationdata\boundanims\anims_{name}.txt";
+            var ownMotion = archive.ContainsKey(motionPath) ? Trim(Text(motionPath).Replace("\r", "").Split('\n').ToList()) : [];
+            bool ok = ownData.SequenceEqual(Trim(data)) && ownMotion.SequenceEqual(Trim(motion));
+            string setDir = $@"meshes\animationsetdata\{name}data\";
+            if (singleSets.TryGetValue(name, out var sets))
+                foreach (var (setName, setLines) in sets)
+                    if (archive.TryGetValue(setDir + setName, out var f) && Trim(Encoding.ASCII.GetString(f.GetBytes()).Replace("\r", "").Split('\n').ToList()) is var ownSet && !ownSet.SequenceEqual(Trim(setLines)))
+                    {
+                        ok = false;
+                        var mine = Trim(setLines);
+                        int at = 0; while (at < ownSet.Count && at < mine.Count && ownSet[at] == mine[at]) at++;
+                        if (diffs.Count < 8) diffs.Add($"{name}: set {setName}: {ownSet.Count} lines own, {mine.Count} single; first difference at {at}: '{(at < ownSet.Count ? ownSet[at] : "(end)")}' / '{(at < mine.Count ? mine[at] : "(end)")}'");
+                    }
+            if (ok) same++;
+            else if (diffs.Count < 8 && !(ownData.SequenceEqual(Trim(data)) && ownMotion.SequenceEqual(Trim(motion))))
+            {
+                var d = Trim(data);
+                int at = 0; while (at < ownData.Count && at < d.Count && ownData[at] == d[at]) at++;
+                diffs.Add($"{name}: data {ownData.Count} own / {d.Count} single lines, first difference at {at}: '{(at < ownData.Count ? ownData[at] : "(end)")}' / '{(at < d.Count ? d[at] : "(end)")}'; motion same {ownMotion.SequenceEqual(Trim(motion))}");
+            }
+        }
+        return (compared, same, diffs);
+    }
+
+    Dictionary<string, (List<string> Data, List<string> Motion)> ParseSingleData()
+    {
+        var result = new Dictionary<string, (List<string>, List<string>)>(StringComparer.OrdinalIgnoreCase);
+        const string single = @"meshes\animationdatasinglefile.txt";
+        if (!archive.ContainsKey(single)) return result;
+        var l = Text(single).Replace("\r", "").Split('\n');
+        int n = int.Parse(l[0]), p = n + 1;
+        for (int k = 0; k < n && p < l.Length; k++)
+        {
+            string name = Path.GetFileNameWithoutExtension(l[1 + k]);
+            int count = int.Parse(l[p]);
+            var data = l[(p + 1)..(p + 1 + count)].ToList();
+            p += 1 + count;
+            var motion = new List<string>();
+            int files = data.Count > 1 && int.TryParse(data[1], out int f) ? f : 0;
+            if (data.Count > 2 + files && data[2 + files] == "1")
+            {
+                int motionCount = int.Parse(l[p]);
+                motion = l[(p + 1)..(p + 1 + motionCount)].ToList();
+                p += 1 + motionCount;
+            }
+            result[name] = (data, motion);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// A template project's animation set files (name, lines): its own animationsetdata\&lt;project&gt;data\ files, else
+    /// its part of meshes\animationsetdatasinglefile.txt (the project count and names, then per project the count and
+    /// names of its set files, then each set file: "V3", counted triggers, counted conditions of three lines, counted
+    /// attacks (name, a flag, counted clips) and counted animation-file triplets), with the list file
+    /// (&lt;project&gt;.txt: the set files' names) first.
+    /// </summary>
+    IEnumerable<(string Name, List<string> Lines)> TemplateSets(string tProject)
+    {
+        string tSetDir = $@"meshes\animationsetdata\{tProject}data\";
+        var own = archive.Where(kv => kv.Key.StartsWith(tSetDir, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (own.Count > 0)
+        {
+            foreach (var (path, file) in own)
+                yield return (Path.GetFileName(path), Encoding.ASCII.GetString(file.GetBytes()).Replace("\r", "").Split('\n').ToList());
+            yield break;
+        }
+        singleSets ??= ParseSingleSets();
+        if (!singleSets.TryGetValue(tProject, out var sets)) yield break;
+        yield return (tProject + ".txt", sets.Select(s => s.Name).ToList());
+        foreach (var s in sets) yield return s;
+    }
+
+    Dictionary<string, List<(string Name, List<string> Lines)>>? singleSets;
+
+    Dictionary<string, List<(string Name, List<string> Lines)>> ParseSingleSets()
+    {
+        var result = new Dictionary<string, List<(string, List<string>)>>(StringComparer.OrdinalIgnoreCase);
+        const string single = @"meshes\animationsetdatasinglefile.txt";
+        if (!archive.ContainsKey(single)) return result;
+        var l = Text(single).Replace("\r", "").Split('\n');
+        int n = int.Parse(l[0]), p = n + 1;
+        for (int k = 0; k < n && p < l.Length; k++)
+        {
+            string name = Path.GetFileNameWithoutExtension(l[1 + k].Replace('/', '\\').Split('\\')[^1]);
+            int fileCount = int.Parse(l[p++]);
+            var names = l[p..(p + fileCount)].ToList();
+            p += fileCount;
+            var sets = new List<(string, List<string>)>();
+            foreach (var setName in names)
+            {
+                int start = p;
+                p++;                                                        // "V3"
+                int triggers = int.Parse(l[p++]); p += triggers;
+                int conditions = int.Parse(l[p++]); p += conditions * 3;
+                int attacks = int.Parse(l[p++]);
+                for (int a = 0; a < attacks; a++) { p += 2; int clips = int.Parse(l[p++]); p += clips; }
+                int infos = int.Parse(l[p++]); p += infos * 3;
+                sets.Add((setName, l[start..p].ToList()));
+            }
+            result[name] = sets;
+        }
+        return result;
     }
 
     /// <summary>How many clip generators the last <see cref="Write"/> turned to the creature's death.</summary>

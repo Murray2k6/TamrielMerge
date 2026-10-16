@@ -76,9 +76,12 @@ public sealed class LightFixturePlacer
         // Hanging: its top close under a ceiling and well clear of the floor.
         if (ceiling is { } c && c - top < 24 && position.Y - floor > 96)
         {
-            yield return w < 40
+            // The chandelier rises 280 above its origin; under a ceiling lower than that over a head's room (80) it went
+            // through the ceiling (2026-10-16: 198 of 336 checked), so the compact candles hang there instead.
+            bool roomForChandelier = c - floor >= 280 / BlockMeshBuilder.Scale + 80;
+            yield return w < 40 || !roomForChandelier
                 ? new(HangingCandles, new Vector3(position.X, c - 49 / BlockMeshBuilder.Scale, position.Z), 0, "hanging candles")
-                : new(Chandelier, new Vector3(position.X, Math.Max(floor + 80, c - 280 / BlockMeshBuilder.Scale), position.Z), 0, "chandelier");
+                : new(Chandelier, new Vector3(position.X, c - 280 / BlockMeshBuilder.Scale, position.Z), 0, "chandelier");
             yield break;
         }
         // Wall-mounted: a wall face just behind it and clearly off the floor.
@@ -114,9 +117,13 @@ public sealed class LightFixturePlacer
             else yield return new(TableCandle, at, 0, "candle");
             yield break;
         }
-        // Resting on a raised surface such as a table or ledge: sit it at the sprite's base.
-        yield return new(TableCandle, new Vector3(position.X, bottom, position.Z), 0, "candle");
+        // Resting on a raised surface such as a table or ledge: sit it at the sprite's base (DungeonCellBuilder then
+        // settles it onto the Skyrim table or shelf standing in for Daggerfall's).
+        yield return new(TableCandle, new Vector3(position.X, bottom, position.Z), 0, SurfaceCandle);
     }
+
+    /// <summary>The kind of a candle on a raised surface (a table, a shelf, a ledge).</summary>
+    public const string SurfaceCandle = "candle on a surface";
 
     /// <summary>Debug summary of the surroundings used to classify a sprite.</summary>
     public string Describe(Vector3 p) =>

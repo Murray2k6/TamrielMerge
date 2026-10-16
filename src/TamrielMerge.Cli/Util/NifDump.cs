@@ -18,6 +18,7 @@ public static class NifDump
             string detail = type switch
             {
                 "BSXFlags" => $"integer={cache.EditableBlockById<BSXFlags>(i).integerData}",
+                "BSBound" => $"name={cache.EditableBlockById<BSBound>(i).name.get()} center=({cache.EditableBlockById<BSBound>(i).center.x},{cache.EditableBlockById<BSBound>(i).center.y},{cache.EditableBlockById<BSBound>(i).center.z}) halfExtents=({cache.EditableBlockById<BSBound>(i).halfExtents.x},{cache.EditableBlockById<BSBound>(i).halfExtents.y},{cache.EditableBlockById<BSBound>(i).halfExtents.z})",
                 "bhkCollisionObject" => $"flags={cache.EditableBlockById<bhkCollisionObject>(i).flags} target={cache.EditableBlockById<bhkCollisionObject>(i).targetRef.index} body={cache.EditableBlockById<bhkCollisionObject>(i).bodyRef.index}",
                 "bhkRigidBody" or "bhkRigidBodyT" => RigidBody(cache.EditableBlockById<bhkRigidBody>(i)),
                 "bhkMoppBvTreeShape" => "",

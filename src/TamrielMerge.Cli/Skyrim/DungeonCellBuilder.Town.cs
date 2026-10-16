@@ -221,6 +221,7 @@ public sealed partial class DungeonCellBuilder
         var fixtures = new LightFixturePlacer(arena2, polys);
         var counts = new Dictionary<string, int>();
         var placedProps = new List<PlacedObject>();
+        var surfaceCandles = new List<PlacedObject>();
         var obstacles = new List<PlacedObject>();
         var people = new List<DfRdbObject>();
         var rooms = new RoomFacing(polys);
@@ -239,13 +240,18 @@ public sealed partial class DungeonCellBuilder
             }
             if (LightFixturePlacer.IsLight(o))
             {
+                float? lift = null;
                 foreach (var f in fixtures.Fixtures(o, o.Position))
                 {
-                    cell.Temporary.Add(new PlacedObject(mod)
+                    lift ??= FixtureLift(f);
+                    var fp = ToSkyrim(f.PositionDf);
+                    var fixture = new PlacedObject(mod)
                     {
                         Base = f.Base.ToNullableLink<IPlaceableObjectGetter>(),
-                        Placement = new Placement { Position = ToSkyrim(f.PositionDf), Rotation = new P3Float(0, 0, f.HeadingRadians) },
-                    });
+                        Placement = new Placement { Position = new P3Float(fp.X, fp.Y, fp.Z + lift.Value), Rotation = new P3Float(0, 0, f.HeadingRadians) },
+                    };
+                    cell.Temporary.Add(fixture);
+                    if (f.Kind == LightFixturePlacer.SurfaceCandle) surfaceCandles.Add(fixture);
                     Count(f.Kind);
                 }
                 // Each lamp or candle lights the room, a little below the flame.
@@ -306,6 +312,9 @@ public sealed partial class DungeonCellBuilder
         walkable.AddRange(BlockMeshBuilder.ActionSolids(block, models));   // platforms, lifts, raised floors where they rest
         int settled = SettleProps(placedProps, walkable);
         if (settled > 0) counts["props settled"] = settled;
+        // Candles that stood on Daggerfall's tables and shelves, onto the Skyrim ones in their place.
+        int candles = SettleProps(surfaceCandles, walkable, placedProps);
+        if (candles > 0) counts["candles settled onto tables"] = candles;
         foreach (var r in placedProps) walkable.AddRange(PropBox(r));
         foreach (var r in obstacles)
         {

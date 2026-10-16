@@ -230,6 +230,13 @@ public sealed class PropReplacer
         return v.Length() < 1 ? null : Vector2.Normalize(v);
     }
 
+    /// <summary>How far a Skyrim object's mesh reaches below its origin (0 when it doesn't): what an object stood on a
+    /// floor by its origin is raised by, so it stands on the floor rather than in it.</summary>
+    public float DepthBelowOrigin(FormKey key)
+    {
+        lock (skyrimShapes) return MathF.Max(0, -SkyrimShape(key).Min.Z);
+    }
+
     /// <summary>Bounds and backrest direction of a Skyrim object's mesh (read from the game's archives).</summary>
     public (Vector3 Min, Vector3 Max, Vector2 Back) SkyrimShape(FormKey key)
     {
@@ -248,6 +255,11 @@ public sealed class PropReplacer
             // beyond the record's; trust the record's bounds then.
             var meshSize = max - min; var obSize = obMax - obMin;
             if (obSize.X > 1 && obSize.Y > 1 && obSize.Z > 1 && (meshSize.X > obSize.X * 1.5f || meshSize.Y > obSize.Y * 1.5f || meshSize.Z > obSize.Z * 1.5f))
+                (min, max) = (obMin, obMax);
+            // Or the right size in the wrong place (a transform the reader missed: HumanSkullStatic sits 17-32 below
+            // its origin by the record, the mesh read put it at 0-15, and caged skulls hung under their cages).
+            var shift = Vector3.Abs((min + max) / 2 - (obMin + obMax) / 2);
+            if (obSize.X > 1 && obSize.Y > 1 && obSize.Z > 1 && (shift.X > MathF.Max(8, obSize.X / 4) || shift.Y > MathF.Max(8, obSize.Y / 4) || shift.Z > MathF.Max(8, obSize.Z / 4)))
                 (min, max) = (obMin, obMax);
             float threshold = min.Z + (max.Z - min.Z) * 0.7f;
             var high = verts.Where(v => v.Z >= threshold).ToList();

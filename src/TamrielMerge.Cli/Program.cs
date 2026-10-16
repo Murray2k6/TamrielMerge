@@ -2574,6 +2574,23 @@ static class Program
                 Console.WriteLine(string.Join(", ", byRecord.Select(kv => $"{kv.Key.Item1}.{kv.Key.Item2} x{kv.Value}")));
                 return 0;
             }
+            case "df-action-census":
+            {
+                // The actions of the given dungeon models (--models 61032,54000): how many of each (type, axis, magnitude,
+                // duration, tag), across every RDB block.
+                var wantModels = opts.GetValueOrDefault("models", "61032").Split(',').Select(uint.Parse).ToHashSet();
+                var bsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                var tally = new Dictionary<string, int>();
+                foreach (var e in bsa.Entries.Where(e => e.Name.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase)))
+                    foreach (var o in DfDungeonBlock.Load(bsa, e.Name).Objects.Where(o => o.Type == DfRdbObjectType.Model && wantModels.Contains(o.ModelId) && o.Action is not null))
+                    {
+                        var a = o.Action!;
+                        string key = $"model {o.ModelId} type {a.Flags} axis {a.Axis} magnitude {a.Magnitude} duration {a.Duration} tag {o.Tag} next {(a.NextObjectIndex >= 0 ? "yes" : "no")}";
+                        tally[key] = tally.GetValueOrDefault(key) + 1;
+                    }
+                foreach (var (k, n) in tally.OrderByDescending(kv => kv.Value).Take(40)) Console.WriteLine($"  {n,5}  {k}");
+                return 0;
+            }
             case "df-rmb-census":
             {
                 // Parse check of every RMB (town) block in BLOCKS.BSA: totals, building types, people flats by archive,
@@ -4416,7 +4433,29 @@ static class Program
             case "npc-info":
             {
                 // Dev aid: actors (and leveled lists) whose EditorID matches --name, in Skyrim.esm and the SE DLC masters.
+                // With --plugins a;b (paths): as the game loads those after the masters, each match's winning copy with
+                // its template flags, race, skin, abilities, scripts and the race's own abilities.
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("name", "^$"));
+                if (opts.TryGetValue("plugins", out var npcPlugins))
+                {
+                    var loaded = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => Path.Combine(skyrimData, f))
+                        .Concat(npcPlugins.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                        .Select(p => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(p, SkyrimRelease.SkyrimSE)).ToList();
+                    var lc = loaded.ToImmutableLinkCache();
+                    string Ed(FormKey k) => lc.TryResolve<ISkyrimMajorRecordGetter>(k, out var r) ? r.EditorID ?? k.ToString() : k + " (not found)";
+                    foreach (var key in loaded.SelectMany(m => m.Npcs).Where(n => rx.IsMatch(n.EditorID ?? "")).Select(n => n.FormKey).Distinct())
+                    {
+                        var ctx = lc.ResolveContext<INpc, INpcGetter>(key);
+                        var n = ctx.Record;
+                        Console.WriteLine($"{n.EditorID} {key} from {ctx.ModKey}: race {Ed(n.Race.FormKey)}, skin {(n.WornArmor.IsNull ? "-" : Ed(n.WornArmor.FormKey))}, attack race {(n.AttackRace.IsNull ? "-" : Ed(n.AttackRace.FormKey))}, height {n.Height}");
+                        Console.WriteLine($"  template {(n.Template.IsNull ? "-" : Ed(n.Template.FormKey))} flags {n.Configuration.TemplateFlags}; config {n.Configuration.Flags}");
+                        Console.WriteLine($"  abilities: {string.Join(", ", (n.ActorEffect ?? []).Select(s => Ed(s.FormKey)))}");
+                        Console.WriteLine($"  scripts: {string.Join(", ", n.VirtualMachineAdapter?.Scripts.Select(s => s.Name) ?? [])}");
+                        if (lc.TryResolve<IRaceGetter>(n.Race.FormKey, out var race))
+                            Console.WriteLine($"  race abilities: {string.Join(", ", (race.ActorEffect ?? []).Select(s => Ed(s.FormKey)))}; race flags {race.Flags}; size {race.Size}");
+                    }
+                    return 0;
+                }
                 foreach (var master in new[] { "Skyrim.esm", "Dawnguard.esm", "Dragonborn.esm" })
                 {
                     using var m = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, master), SkyrimRelease.SkyrimSE);
@@ -7546,6 +7585,15 @@ static class Program
                 }
                 Console.WriteLine($"{counts.Values.Sum()} objects of {counts.Count} kinds, {npcs} actors; {missing} converted models missing, {broken} unreadable");
                 return 0;
+            }
+            case "creature-animdata-check":
+            {
+                // Dev aid: the readers of the game's animation single files (CreatureBehavior) checked against the projects
+                // that have files of their own too.
+                var (compared, same, diffs) = new Skyrim.Creatures.CreatureBehavior(skyrimData).CheckSingleFiles();
+                Console.WriteLine($"{compared} projects compared, {same} read the same from the single files");
+                foreach (var d in diffs) Console.WriteLine($"  {d}");
+                return same == compared ? 0 : 1;
             }
             case "creature-skeleton-fix":
             {

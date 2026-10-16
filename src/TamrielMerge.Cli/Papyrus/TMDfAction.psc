@@ -49,6 +49,9 @@ Float[] Property StartPose Auto
 {Absolute start pose: X, Y, Z, AngleX, AngleY, AngleZ (degrees), where the converter placed it.}
 Float[] Property EndPose Auto
 {Absolute end pose: X, Y, Z, AngleX, AngleY, AngleZ (degrees).}
+Float[] Property SpinPoses Auto
+{A wheel's turn (Daggerfall's WHE, a full turn that ends where it began): poses a quarter turn apart, six floats
+each, the last its start pose. Each trigger turns it through them in Duration.}
 Float Property Magnitude Auto
 {Hurt 21: the low end of the roll; hurt 22-25: damage per player level; drain magicka: magicka.}
 Int Property Index Auto
@@ -71,6 +74,7 @@ Int Property DoorLock = 0 Auto
 
 Bool atEnd = False
 Bool moving = False
+Int spinStep = -1
 Bool busy = False
 Bool told = False
 Int activations = 0
@@ -147,6 +151,13 @@ EndFunction
 
 Function Perform()
   Actor player = Game.GetPlayer()
+  If ActionType == ActionMove && SpinPoses.Length >= 6
+    ; A wheel: once round, a quarter at a time (each step short enough that it turns forward).
+    spinStep = 0
+    moving = True
+    SpinTo(0)
+    Return
+  EndIf
   If ActionType == ActionMove && EndPose.Length == 6 && StartPose.Length != 6 && !atEnd
     ; Games saved before the converter gave the start pose: it is where the object rests now.
     StartPose = new Float[6]
@@ -285,8 +296,31 @@ Float[] Function Target()
 EndFunction
 
 Event OnTranslationComplete()
+  If spinStep >= 0 && (spinStep + 1) * 6 < SpinPoses.Length
+    spinStep += 1
+    SpinTo(spinStep)
+    Return
+  EndIf
+  spinStep = -1
   moving = False
 EndEvent
+
+; The wheel's step n: its pose, in the step's share of Duration.
+Function SpinTo(Int n)
+  Int i = n * 6
+  Float[] pose = new Float[6]
+  Int k = 0
+  While k < 6
+    pose[k] = SpinPoses[i + k]
+    k += 1
+  EndWhile
+  Float steps = (SpinPoses.Length / 6) as Float
+  Float turnSpeed = MaxTurn(pose) / (Duration / steps)
+  If turnSpeed <= 0.0
+    turnSpeed = 1.0
+  EndIf
+  TranslateTo(pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], 1.0, turnSpeed)
+EndFunction
 
 ; Not loaded (a chain moved it from afar) or blocked: put it where it was going, so its pose and atEnd agree.
 Event OnTranslationFailed()
@@ -304,6 +338,15 @@ Event OnLoad()
 EndEvent
 
 Function Snap()
+  If spinStep >= 0 && SpinPoses.Length >= 6
+    ; A turn cut short: back where it began (its last pose).
+    Int last = SpinPoses.Length - 6
+    SetPosition(SpinPoses[last], SpinPoses[last + 1], SpinPoses[last + 2])
+    SetAngle(SpinPoses[last + 3], SpinPoses[last + 4], SpinPoses[last + 5])
+    spinStep = -1
+    moving = False
+    Return
+  EndIf
   Float[] target = Target()
   If target.Length == 6
     SetPosition(target[0], target[1], target[2])

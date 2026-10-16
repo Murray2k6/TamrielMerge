@@ -69,6 +69,12 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         /// <summary>Seconds the mesh took to make (on whichever thread made it).</summary>
         public double Seconds { get; internal set; }
 
+        /// <summary>Move the cell's actors that don't stand on the finished mesh onto it (<see cref="SnapToMesh"/>).</summary>
+        public bool SnapActors { get; init; }
+
+        /// <summary>Actors moved onto the mesh at Finish.</summary>
+        public int Snapped { get; private set; }
+
         public Result Finish()
         {
             if (result is not null) return result;
@@ -79,8 +85,74 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             navm.Data = g.Data;
             if (Navm is null) Cell.NavigationMeshes.Add(navm);
             Owner.AddInfo(navm, Cell, g.Verts, g.Linked);
+            if (SnapActors) Snapped = SnapToMesh(Cell, g.Verts, g.Data.Triangles);
             return result = new Result(navm, g.Triangles, g.Verts.Count, g.Linked.Count);
         }
+    }
+
+    /// <summary>
+    /// Each actor in the cell not standing on the mesh (over a triangle and within 24 units of it) moved to the nearest
+    /// point on it within 512 units, a fifth of the way in toward that triangle's middle, 4 units up (2026-10-16: 2,742
+    /// of Daggerfall's dungeon creatures stood off their navmesh, 315 inside objects, 133 in walls and 73 in the air at
+    /// their markers; the mesh keeps clear of walls and props, so on it they can move and fight).
+    /// </summary>
+    static int SnapToMesh(Cell cell, List<P3Float> verts, IReadOnlyList<INavmeshTriangleGetter> tris)
+    {
+        if (tris.Count == 0) return 0;
+        static Vector3 V(P3Float p) => new(p.X, p.Y, p.Z);
+        int moved = 0;
+        foreach (var npc in cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>())
+        {
+            if (npc.Placement is not { } pl) continue;
+            var p = V(pl.Position);
+            bool on = false;
+            float best = 512f * 512f;
+            Vector3? at = null;
+            foreach (var t in tris)
+            {
+                Vector3 a = V(verts[t.Vertices.X]), b = V(verts[t.Vertices.Y]), c = V(verts[t.Vertices.Z]);
+                if (HeightOver(a, b, c, p.X, p.Y) is { } h && MathF.Abs(h - p.Z) <= 24) { on = true; break; }
+                var q = ClosestOnTriangle(p, a, b, c);
+                float d = Vector3.DistanceSquared(p, q);
+                if (d < best) { best = d; at = q + ((a + b + c) / 3 - q) * 0.2f; }
+            }
+            if (on || at is not { } to) continue;
+            pl.Position = new P3Float(to.X, to.Y, to.Z + 4);
+            moved++;
+        }
+        return moved;
+    }
+
+    static float? HeightOver(Vector3 a, Vector3 b, Vector3 c, float x, float y)
+    {
+        float den = (b.Y - c.Y) * (a.X - c.X) + (c.X - b.X) * (a.Y - c.Y);
+        if (MathF.Abs(den) < 1e-6f) return null;
+        float w0 = ((b.Y - c.Y) * (x - c.X) + (c.X - b.X) * (y - c.Y)) / den;
+        float w1 = ((c.Y - a.Y) * (x - c.X) + (a.X - c.X) * (y - c.Y)) / den;
+        float w2 = 1 - w0 - w1;
+        return w0 < 0 || w1 < 0 || w2 < 0 ? null : w0 * a.Z + w1 * b.Z + w2 * c.Z;
+    }
+
+    /// <summary>The point of triangle abc nearest p (Ericson, Real-Time Collision Detection 5.1.5).</summary>
+    static Vector3 ClosestOnTriangle(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+    {
+        Vector3 ab = b - a, ac = c - a, ap = p - a;
+        float d1 = Vector3.Dot(ab, ap), d2 = Vector3.Dot(ac, ap);
+        if (d1 <= 0 && d2 <= 0) return a;
+        var bp = p - b;
+        float d3 = Vector3.Dot(ab, bp), d4 = Vector3.Dot(ac, bp);
+        if (d3 >= 0 && d4 <= d3) return b;
+        float vc = d1 * d4 - d3 * d2;
+        if (vc <= 0 && d1 >= 0 && d3 <= 0) return a + ab * (d1 / (d1 - d3));
+        var cp = p - c;
+        float d5 = Vector3.Dot(ab, cp), d6 = Vector3.Dot(ac, cp);
+        if (d6 >= 0 && d5 <= d6) return c;
+        float vb = d5 * d2 - d1 * d6;
+        if (vb <= 0 && d2 >= 0 && d6 <= 0) return a + ac * (d2 / (d2 - d6));
+        float va = d3 * d6 - d5 * d4;
+        if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) return b + (c - b) * ((d4 - d3) / (d4 - d3 + (d5 - d6)));
+        float denom = 1 / (va + vb + vc);
+        return a + ab * (vb * denom) + ac * (vc * denom);
     }
 
     internal sealed record Generated(NavigationMeshData Data, List<P3Float> Verts, List<IPlacedObjectGetter> Linked, int Triangles);
@@ -90,11 +162,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// inputs must not change until it is finished), else when <see cref="PendingInterior.Finish"/> is called.
     /// </summary>
     public PendingInterior BeginInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IEnumerable<P3Float>? keepAlso,
-        Func<P3Float, bool>? underwater, bool background)
+        Func<P3Float, bool>? underwater, bool background, bool snapActors = false)
     {
         var doors = loadDoors.ToList();
         var keep = keepAlso?.ToList();
-        var pending = new PendingInterior { Owner = this, Cell = cell };
+        var pending = new PendingInterior { Owner = this, Cell = cell, SnapActors = snapActors };
         pending.Run = () =>
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();

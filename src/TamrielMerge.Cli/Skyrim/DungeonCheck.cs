@@ -34,8 +34,12 @@ public static class DungeonCheck
     static readonly HashSet<string> Solid = ["Container", "Furniture", "Static", "MoveableStatic"];
     static readonly HashSet<string> FrontPlusY = new(["StatueMara01", "StatueTalos01"], StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Things checked for floating, by base editor ID (the last run's).</summary>
+    static readonly Dictionary<string, int> Checked = new(StringComparer.OrdinalIgnoreCase);
+
     public static List<Problem> Run(string dir, string skyrimData, Action<string> log, int limit = 0, IReadOnlyCollection<string>? onlyCells = null)
     {
+        Checked.Clear();
         var pluginNames = new[] { "Daggerfall.esm", DaggerfallTowns.PluginName, DaggerfallDungeons.PluginName };
         var mods = new List<ISkyrimModDisposableGetter>();
         foreach (var m in new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(m => Path.Combine(skyrimData, m)).Where(File.Exists))
@@ -99,6 +103,9 @@ public static class DungeonCheck
             foreach (var g in problems.GroupBy(p => p.Kind)) counts[g.Key] = g.Count();
             log($"{cells} dungeon cells checked");
             foreach (var (kind, n) in counts.OrderByDescending(kv => kv.Value)) log($"  {kind}: {n}");
+            // The things most often floating, against how many were checked.
+            var floating = problems.Where(p => p.Kind.StartsWith("Floating")).GroupBy(p => p.Base).OrderByDescending(g => g.Count()).Take(12);
+            foreach (var g in floating) log($"    {g.Key}: {g.Count()} of {Checked.GetValueOrDefault(g.Key)} floating");
             return problems;
         }
         finally { foreach (var m in mods) m.Dispose(); }
@@ -161,7 +168,9 @@ public static class DungeonCheck
         float v = Vector3.Dot(d, q) * inv;
         if (v < 0 || u + v > 1) return null;
         float dist = Vector3.Dot(e2, q) * inv;
-        return dist > 0 ? dist : null;
+        // A face the ray starts on counts (a wall torch's origin is on the wall's plane: rays from it met the wall at
+        // distance 0 or a hair behind, and a quarter of the torches read as floating).
+        return dist > -0.5f ? MathF.Max(dist, 0) : null;
     }
 
     static float Ray(Grid g, Vector3 o, Vector3 d, float max)
@@ -288,7 +297,10 @@ public static class DungeonCheck
                 {
                     int type = props.GetValueOrDefault("ActionType") is IScriptIntPropertyGetter ti ? ti.Data : 0;
                     bool isDoor = bases.TryGetValue(r.Base.FormKey, out var rb) && rb.Type == "Door";
-                    if (type == 1 && !isDoor)
+                    // Action sprites don't move (Daggerfall Unity moves the billboard in no time): they pass the trigger on.
+                    bool isFlat = rb?.EditorId.StartsWith("DFActionFlat") == true;
+                    bool spins = props.GetValueOrDefault("SpinPoses") is IScriptFloatListPropertyGetter { Data.Count: >= 6 };
+                    if (type == 1 && !isDoor && !isFlat && !spins)
                     {
                         if (props.GetValueOrDefault("EndPose") is not IScriptFloatListPropertyGetter pose || pose.Data.Count != 6) Flag("Moving part: nowhere to move", "");
                         else
@@ -331,6 +343,8 @@ public static class DungeonCheck
             if (bi is null || !Rests.Contains(bi.Type) || bi.EditorId.StartsWith("DFDunBlk") || bi.EditorId.StartsWith("DFAct") || r is not IPlacedObjectGetter obj) continue;
             float sc = obj.Scale ?? 1;
             if ((bi.Max - bi.Min).Length() < 2 || bi.EditorId.Contains("Marker", StringComparison.OrdinalIgnoreCase) || bi.EditorId.StartsWith("FX", StringComparison.OrdinalIgnoreCase)) continue;   // markers, effects
+            // A prison's evidence chests, hidden 2,000 units under it as Skyrim's are (CrimeFactions).
+            if (bi.EditorId.StartsWith("EvidenceChest", StringComparison.OrdinalIgnoreCase)) continue;
             float bottom = p.Z + bi.Min.Z * sc, top = p.Z + bi.Max.Z * sc;
 
             // Statues: front into the room.
@@ -343,6 +357,13 @@ public static class DungeonCheck
                 if (ahead < 80 && behind > ahead + 64) Add("Statue facing a wall", $"wall {ahead:F0} in front, {behind:F0} behind");
             }
 
+            lock (Checked) Checked[bi.EditorId] = Checked.GetValueOrDefault(bi.EditorId) + 1;
+            // A floor or top between its lowest point and its middle: standing in it, not floating above the one below.
+            if (SupportBelow(p.X, p.Y, (bottom + top) / 2, obj.FormKey) is { } inside && inside - bottom > 12)
+            {
+                Add("Sunk into the floor", $"{inside - bottom:F0} units in");
+                continue;
+            }
             var under = SupportBelow(p.X, p.Y, bottom, obj.FormKey);
             float gap = under is { } u ? bottom - u : float.MaxValue;
             if (gap <= 12) continue;

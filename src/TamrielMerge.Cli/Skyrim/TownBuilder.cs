@@ -696,12 +696,14 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                 && (streetFires ??= new LightFixturePlacer(arena2, [])).Fixtures(o, new Vector3(0, 0, 0)).ToList() is var fire
                 && fire.Count > 0 && fire[0].Kind is "campfire" or "brazier" or "standing brazier")
             {
-                // A fire in the street (a campfire, a brazier) stays a fire; lamp-like sprites are street lamps.
+                // A fire in the street (a campfire, a brazier) stays a fire; lamp-like sprites are street lamps. Raised
+                // by how far the first one's mesh reaches below its origin (a standing brazier's legs: 33).
+                float lift = cells.Props.DepthBelowOrigin(fire[0].Base);
                 foreach (var f in fire)
                     CellAt(grid, ground).Temporary.Add(new PlacedObject(mod)
                     {
                         Base = f.Base.ToNullableLink<IPlaceableObjectGetter>(),
-                        Placement = new Placement { Position = new P3Float(ground.X, ground.Y, (f.PositionDf.Y - fire[0].PositionDf.Y) * BlockMeshBuilder.Scale), Rotation = new P3Float(0, 0, heading) },
+                        Placement = new Placement { Position = new P3Float(ground.X, ground.Y, (f.PositionDf.Y - fire[0].PositionDf.Y) * BlockMeshBuilder.Scale + lift), Rotation = new P3Float(0, 0, heading) },
                     });
                 Count("street " + fire[0].Kind);
             }

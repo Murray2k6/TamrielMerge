@@ -241,15 +241,28 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
         var a = o.Action!;
         bool flat = o.Type == DfRdbObjectType.Flat;
         int type = a.Flags is >= 1 and <= 8 ? 1 : a.Flags; // all translation/rotation variants are "move"
+        // A move that goes nowhere (an axis Daggerfall Unity doesn't know, 10, 11 or 21, or no magnitude) only passes
+        // the trigger on, as there: 0 (2026-10-16: 247 such were checked as moving parts that end where they start).
+        var end = type == 1 && !forDoor && !flat ? EndPose(o, m) : null;
+        var spin = type == 1 && !forDoor && !flat ? SpinPoses(o, m) : null;
+        if (type == 1 && !forDoor && !flat && spin is null && (end is not { } e || Still(e, m))) type = 0;
         var props = new List<ScriptProperty>
         {
             new ScriptIntProperty { Name = "ActionType", Data = type },
             new ScriptIntProperty { Name = "TriggerType", Data = TriggerOf(o) },
         };
-        // Flats don't move here (Daggerfall Unity moves the billboard in no time); hinged doors swing as Skyrim doors.
-        if (type == 1 && !forDoor && !flat && EndPose(o, m) is { } end)
+        // A wheel turns once round on each trigger (Daggerfall Unity turns it and back to where it began).
+        if (spin is not null)
         {
-            var (pos, angles, seconds) = end;
+            var spinList = new ScriptFloatListProperty { Name = "SpinPoses" };
+            spinList.Data.AddRange(spin);
+            props.Add(spinList);
+            props.Add(new ScriptFloatProperty { Name = "Duration", Data = Math.Max(a.Duration / 20f, 0.4f) });
+        }
+        // Flats don't move here (Daggerfall Unity moves the billboard in no time); hinged doors swing as Skyrim doors.
+        else if (type == 1 && end is { } moved)
+        {
+            var (pos, angles, seconds) = moved;
             var (startPos, startAngles) = Pose(m);
             startAngles *= 180 / MathF.PI;
             var first = new ScriptFloatListProperty { Name = "StartPose" };
@@ -343,6 +356,45 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
         end.Translation = m.Translation + translation;
         var (position, angles) = Pose(end);
         return (new Vector3(position.X, position.Y, position.Z), angles * (180 / MathF.PI), seconds);
+    }
+
+    /// <summary>An end pose no different from the start (under a unit, half a degree).</summary>
+    static bool Still((Vector3 Position, Vector3 AnglesDegrees, float Seconds) end, Matrix4x4 m)
+    {
+        var (start, startAngles) = Pose(m);
+        startAngles *= 180 / MathF.PI;
+        static float Wrap(float d) { d %= 360; return d > 180 ? d - 360 : d < -180 ? d + 360 : d; }
+        float moved = Vector3.Distance(end.Position, new Vector3(start.X, start.Y, start.Z));
+        float turned = MathF.Max(MathF.Abs(Wrap(end.AnglesDegrees.X - startAngles.X)), MathF.Max(MathF.Abs(Wrap(end.AnglesDegrees.Y - startAngles.Y)), MathF.Abs(Wrap(end.AnglesDegrees.Z - startAngles.Z))));
+        return moved < 1 && turned < 0.5f;
+    }
+
+    /// <summary>
+    /// A wheel's turn (tag WHE, a rotate action): the poses a quarter turn apart through whole turns (Daggerfall's
+    /// magnitude rounded to whole turns, at least one) about its action axis, the last exactly its start pose, as
+    /// Skyrim positions and angles in degrees (six floats each). Null for anything else.
+    /// </summary>
+    static List<float>? SpinPoses(DfRdbObject o, Matrix4x4 m)
+    {
+        var a = o.Action!;
+        if (o.Tag != "WHE" || a.Flags != 8) return null;
+        float deg = a.Magnitude / DfDungeonBlock.RotationDivisor;
+        var unit = a.Axis switch { 1 => new Vector3(-1, 0, 0), 2 => new(1, 0, 0), 3 => new(0, -1, 0), 4 => new(0, 1, 0), 5 => new(0, 0, -1), 6 => new(0, 0, 1), _ => Vector3.Zero };
+        if (unit == Vector3.Zero || MathF.Abs(deg) < 1) return null;
+        float total = 360 * MathF.Max(1, MathF.Round(MathF.Abs(deg) / 360));
+        int steps = (int)(total / 90);
+        const float rad = MathF.PI / 180;
+        var poses = new List<float>();
+        for (int k = 1; k <= steps; k++)
+        {
+            var r = unit * (total * k / steps);
+            var turned = DfDungeon.UnityRotZ(r.Z * rad) * DfDungeon.UnityRotX(r.X * rad) * DfDungeon.UnityRotY(r.Y * rad) * m;
+            turned.Translation = m.Translation;
+            var (p, angles) = Pose(k == steps ? m : turned);
+            angles *= 180 / MathF.PI;
+            poses.AddRange([p.X, p.Y, p.Z, angles.X, angles.Y, angles.Z]);
+        }
+        return poses;
     }
 
     /// <summary>Daggerfall Unity GetTranslationActionVector (note the mirrored X and Z signs).</summary>

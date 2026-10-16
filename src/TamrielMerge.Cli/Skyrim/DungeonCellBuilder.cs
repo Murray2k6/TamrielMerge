@@ -250,6 +250,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         var fixtures = new LightFixturePlacer(arena2, dungeon.Polygons(models));
         var fixtureCounts = new Dictionary<string, int>();
         var placedProps = new List<PlacedObject>();
+        var surfaceCandles = new List<PlacedObject>();
         var actions = new ActionObjectBuilder(mod, models, modOutDir, Spells) { Text = text ??= DfText.Load(arena2), Riddles = riddles, QuestGlobal = QuestGlobal };
         var floorPolys = dungeon.Polygons(models).Where(q => q.Normal.Y > 0.7f).ToList();
         var ceilingPolys = dungeon.Polygons(models).Where(q => q.Normal.Y < -0.7f).ToList();
@@ -294,13 +295,18 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 }
                 else if (LightFixturePlacer.IsLight(o))
                 {
+                    float? lift = null;
                     foreach (var f in fixtures.Fixtures(o, origin + o.Position))
                     {
-                        cell.Temporary.Add(new PlacedObject(mod)
+                        lift ??= FixtureLift(f);
+                        var fp = ToSkyrim(f.PositionDf);
+                        var fixture = new PlacedObject(mod)
                         {
                             Base = f.Base.ToNullableLink<IPlaceableObjectGetter>(),
-                            Placement = new Placement { Position = ToSkyrim(f.PositionDf), Rotation = new P3Float(0, 0, f.HeadingRadians) },
-                        });
+                            Placement = new Placement { Position = new P3Float(fp.X, fp.Y, fp.Z + lift.Value), Rotation = new P3Float(0, 0, f.HeadingRadians) },
+                        };
+                        cell.Temporary.Add(fixture);
+                        if (f.Kind == LightFixturePlacer.SurfaceCandle) surfaceCandles.Add(fixture);
                         fixtureCounts[f.Kind] = fixtureCounts.GetValueOrDefault(f.Kind) + 1;
                         if (f.Kind == "campfire") campfires.Add(ToSkyrim(f.PositionDf));
                         if (Environment.GetEnvironmentVariable("TM_DEBUG_LIGHTS") == "1")
@@ -547,6 +553,9 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         }
         int settled = SettleProps(placedProps, walkable);
         if (settled > 0) fixtureCounts["props settled onto supports"] = settled;
+        // Candles that stood on Daggerfall's tables and shelves, onto the Skyrim ones in their place (other heights).
+        int candles = SettleProps(surfaceCandles, walkable, placedProps);
+        if (candles > 0) fixtureCounts["candles settled onto tables"] = candles;
         // Props are obstacles for pathing: add each one's box so the navmesh goes around it.
         foreach (var r in placedProps) walkable.AddRange(PropBox(r));
         // Standing clutter big enough to walk around (columns, carts, statues) is an obstacle too.
@@ -556,7 +565,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
             if (MathF.Max(max.X - min.X, max.Y - min.Y) >= 40 && max.Z - min.Z >= 40) walkable.AddRange(PropBox(r));
         }
         var nav = navmeshes.BeginInterior(cell, walkable, [interiorDoor], newGameMarker.Placement!.Position, spawnPoints.Append(start.Placement!.Position),
-            p => Underwater(waterBlocks, p), BackgroundNavmesh);
+            p => Underwater(waterBlocks, p), BackgroundNavmesh, snapActors: true);
         if (!BackgroundNavmesh) nav.Finish();
 
         AddInteriorCell(cell);
@@ -564,6 +573,14 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         BuiltDungeons.Add((location, result));
         return result;
     }
+
+    /// <summary>
+    /// How far a light fixture standing on a floor is raised, with its fire and sound: the depth its mesh reaches below
+    /// its origin (2026-10-16: WHfirebrazier01's legs reach 33 below it, so 88% of the standing braziers stood 33 units
+    /// into the floor). Wall and hanging fixtures are placed by their mounting point, not raised.
+    /// </summary>
+    float FixtureLift(LightFixturePlacer.Placement f) =>
+        f.Kind is "standing brazier" or "brazier" or "tall candelabra" or "candelabra" or "candle" or "campfire" ? props.DepthBelowOrigin(f.Base) : 0;
 
     (Vector3 Min, Vector3 Max) PropBounds(PlacedObject r)
     {
@@ -587,10 +604,12 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     /// stacks crates, and the Skyrim crates differ slightly in height, so stacks would otherwise float or sink.
     /// Supports more than 400 units away are ignored rather than dropping a prop through floors.
     /// </summary>
-    int SettleProps(List<PlacedObject> placed, List<(Vector3[] Points, Vector3 Normal)> walkable)
+    /// <param name="onto">Settled props to rest <paramref name="placed"/> on (candles on tables), else the placed rest on
+    /// each other as they settle.</param>
+    int SettleProps(List<PlacedObject> placed, List<(Vector3[] Points, Vector3 Normal)> walkable, IReadOnlyList<PlacedObject>? onto = null)
     {
         var floors = walkable.Where(p => p.Normal.Z > 0.7f).ToList();
-        var done = new List<PlacedObject>();
+        var done = new List<PlacedObject>(onto ?? []);
         int moved = 0;
         foreach (var r in placed.OrderBy(r => r.Placement!.Position.Z + PropBounds(r).Min.Z))
         {
@@ -612,7 +631,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 r.Placement.Position = new P3Float(p.X, p.Y, p.Z + (sz - bottom));
                 moved++;
             }
-            done.Add(r);
+            if (onto is null) done.Add(r);
         }
         return moved;
     }
