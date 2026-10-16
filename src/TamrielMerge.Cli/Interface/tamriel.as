@@ -10,6 +10,7 @@
 // TravelStatus(text) / TripInfo("name|kind|time|cost|gold|cautious|inn|ship|horse|horse here|speed|note|world|era"); each
 // destination is labelled with its time's era and year ("3E 427").
 
+var built = null; // the build's skills and passive web (ProgressionBuilder.MenuData)
 var root = this;
 var W = 1280;
 var H = 720;
