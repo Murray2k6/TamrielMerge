@@ -268,27 +268,35 @@ static class Program
                     // same however many ran together.
                     // At most a share of the cores (or --parts-at-once N); each part starts when the memory is free for it,
                     // judged as it starts, not once at the beginning (2026-10-15: measured while the app was being rebuilt, the
-                    // last town parts ran 3 at a time all through), and half a minute after the one before, so its memory
-                    // shows before the next is judged and the parts' peaks don't come together.
+                    // last town parts ran 3 at a time all through). A part started in the last 45 seconds may not show its
+                    // memory yet, so each of those counts its budget too (it had been half a minute between any two starts,
+                    // which once the parts took a minute or two held a town part to two a minute: 84 parts, 42 minutes
+                    // at the least; 2026-10-15), and a few seconds go between starts.
                     bool fixedCount = opts.TryGetValue("parts-at-once", out var pa);
                     int atOnce = fixedCount ? Math.Max(1, int.Parse(pa!)) : Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4));
                     if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, up to {atOnce} at a time as the memory allows");
                     int running = 0, mostAtOnce = 0;
                     var lastStart = DateTime.MinValue;
+                    var recentStarts = new List<DateTime>();
                     var startGate = new object();
                     void WaitForRoom()
                     {
                         while (true)
                         {
                             lock (startGate)
-                                if (running == 0 || fixedCount || (DateTime.Now - lastStart > TimeSpan.FromSeconds(30) && Util.Machine.FreeRamGb() >= 4 + 3))
+                            {
+                                var now = DateTime.Now;
+                                recentStarts.RemoveAll(t => now - t > TimeSpan.FromSeconds(45));
+                                if (running == 0 || fixedCount || (now - lastStart > TimeSpan.FromSeconds(5) && Util.Machine.FreeRamGb() >= 4 + 3 * (1 + recentStarts.Count)))
                                 {
                                     running++;
                                     mostAtOnce = Math.Max(mostAtOnce, running);
-                                    lastStart = DateTime.Now;
+                                    lastStart = now;
+                                    recentStarts.Add(now);
                                     return;
                                 }
-                            Thread.Sleep(2000);
+                            }
+                            Thread.Sleep(1000);
                         }
                     }
                     // What every part would make the same: the overland's heights (made once here, read in place by
@@ -420,6 +428,8 @@ static class Program
                 recorded.Dispose();
                 using (Begin("Intro videos"))
                     if (!skip.Contains("Videos")) Main(opts.ContainsKey("gpu") ? ["videos", "--out", finalDir, "--gpu"] : ["videos", "--out", finalDir]);
+                // The menu's render reads the models from the build folder only: Daggerfall's are there or in --out by now.
+                AwaitEarlyMove();
                 var menuStep = Begin("Main menu");
                 // The main menu: the red emblem over a ray-traced intro flying over the conversions (GPU-heavy: --gpu); its music always.
                 if (!skip.Contains("Menu"))
@@ -428,8 +438,6 @@ static class Program
                     if (Main(["menu-music", "--out", outDir]) != 0) failed.Add("main menu music");
                     if (opts.ContainsKey("gpu")) { if (Main(["menu", "--plugins", outDir, "--out", outDir]) != 0) failed.Add("main menu"); }
                     else Console.WriteLine("Main menu: skipped (it renders on the graphics card: add --gpu)");
-                // The menu's render reads the models from the build folder only: Daggerfall's are there or in --out by now.
-                AwaitEarlyMove();
                     // Packed as its own part (TamrielMerge Menu.esp), so the app can switch it off for Skyrim's menu.
                     Main(["menu-pack", "--out", outDir]);
                     if (File.Exists(Path.Combine(outDir, Skyrim.Render.MenuArchive.PluginName))) plugins.Add(Skyrim.Render.MenuArchive.PluginName);
@@ -522,6 +530,7 @@ static class Program
                     catch (Exception e) { Console.WriteLine($"Model replacements: failed: {e.Message}"); failed.Add("model replacements"); }
                 }
 
+                AwaitEarlyMove();
                 storyStep.Dispose();
                 Console.WriteLine();
                 Console.WriteLine($"Converted into {outDir}. Enable these plugins, in this order, after Skyrim's own:");
@@ -530,7 +539,6 @@ static class Program
                 Console.WriteLine("Optional: SKSE + Address Library for SKSE Plugins make the date show the era of the time you're in (SKSE/Plugins/TamrielMergeEra.dll).");
                 if (opts.ContainsKey("install"))
                 using (Begin("Installing"))
-                AwaitEarlyMove();
                 {
                     foreach (var file in Directory.EnumerateFiles(outDir, "*", SearchOption.AllDirectories))
                     {
