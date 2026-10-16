@@ -210,7 +210,7 @@ public static class DungeonCheck
             foreach (var r in refs.OfType<IPlacedObjectGetter>())
                 if (r.Placement is { } q && MathF.Abs(q.Position.X - float.Parse(nx)) < 1200 && MathF.Abs(q.Position.Y - float.Parse(ny)) < 1200)
                     Console.WriteLine($"  near: {(bases.TryGetValue(r.Base.FormKey, out var nb) ? $"{nb.Type} {nb.EditorId} {nb.Model} {nb.Min}..{nb.Max}" : r.Base.FormKey.ToString())} at {q.Position} rot {q.Rotation} scale {r.Scale}");
-        var floors = new Grid(); var ceilings = new Grid(); var walls = new Grid(); var all = new Grid();
+        var floors = new Grid(); var ceilings = new Grid(); var walls = new Grid(); var mounts = new Grid(); var all = new Grid();
         foreach (var b in blocks)
         {
             if (b.Placement is not { } pl || bases[b.Base.FormKey].Model is not { } model) continue;
@@ -222,9 +222,11 @@ public static class DungeonCheck
             {
                 var w = new Tri(Vector3.Transform(t.A, m) + at, Vector3.Transform(t.B, m) + at, Vector3.Transform(t.C, m) + at, Vector3.Normalize(Vector3.TransformNormal(t.N, m)));
                 all.Add(w);
-                // Flat faces are floors below a thing and ceilings above it, whichever way they face.
+                // Flat faces are floors below a thing and ceilings above it, whichever way they face; steep ones (a cove
+                // at a wall's top, 45 degrees) are walls too, for what is fixed to them.
                 if (MathF.Abs(w.N.Z) >= 0.5f) { floors.Add(w); ceilings.Add(w); }
                 else walls.Add(w);
+                if (MathF.Abs(w.N.Z) < 0.75f) mounts.Add(w);
             }
         }
         if (Environment.GetEnvironmentVariable("TM_CHECK_NEAR") is { Length: > 0 } near2 && near2.Split(',') is [var c2, var x2, var y2] && c2 == cellName)
@@ -305,13 +307,13 @@ public static class DungeonCheck
                 if (HeightAt(t, x, y) is { } h && h >= z - 8 && (best is null || h < best)) best = h;
             return best;
         }
-        float WallDistance(Vector3 at, float reach)
+        float WallDistance(Vector3 at, float reach, Grid? grid = null)
         {
             float best = reach;
             for (int k = 0; k < 8; k++)
             {
                 float a = k * MathF.PI / 4;
-                best = MathF.Min(best, Ray(walls, at, new Vector3(MathF.Cos(a), MathF.Sin(a), 0), reach));
+                best = MathF.Min(best, Ray(grid ?? walls, at, new Vector3(MathF.Cos(a), MathF.Sin(a), 0), reach));
             }
             return best;
         }
@@ -369,7 +371,8 @@ public static class DungeonCheck
                 else if (p.Z - support > 32) Add("NPC: standing in the air", $"{p.Z - support:F0} above the floor");
                 var chest = p + new Vector3(0, 0, 48);
                 if (WallDistance(chest, 12) < 12) Add("NPC: in a wall", "");
-                if (boxes.Any(b => chest.Z > b.Bottom + 8 && chest.Z < b.Top - 8 && Inside(b, p.X, p.Y, 6))) Add("NPC: inside an object", "");
+                if (boxes.FirstOrDefault(b => chest.Z > b.Bottom + 8 && chest.Z < b.Top - 8 && Inside(b, p.X, p.Y, 6)) is { } inBox)
+                    Add("NPC: inside an object", refs.FirstOrDefault(x => x.FormKey == inBox.Key) is IPlacedObjectGetter ib && bases.TryGetValue(ib.Base.FormKey, out var ibb) ? ibb.EditorId : "");
                 if (!OnNavmesh(cell, p)) Add("NPC: off the navmesh", "");
                 continue;
             }
@@ -406,7 +409,7 @@ public static class DungeonCheck
             // Hung from a ceiling or fixed to a wall: not floating.
             if (CeilingAbove(p.X, p.Y, top) is { } ceil && ceil - top < 32) continue;
             float reach = MathF.Max(bi.Max.X - bi.Min.X, bi.Max.Y - bi.Min.Y) * sc + 32;
-            if (WallDistance(new Vector3(p.X, p.Y, (bottom + top) / 2), reach) < reach) continue;
+            if (WallDistance(new Vector3(p.X, p.Y, (bottom + top) / 2), reach, mounts) < reach) continue;
             Add(under is null ? "Floating: nothing under it" : "Floating", under is null ? "" : $"{gap:F0} units up");
         }
     }

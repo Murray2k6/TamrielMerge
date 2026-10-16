@@ -251,6 +251,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         var fixtureCounts = new Dictionary<string, int>();
         var placedProps = new List<PlacedObject>();
         var surfaceCandles = new List<PlacedObject>();
+        var campfireRefs = new List<PlacedObject>();
         var actions = new ActionObjectBuilder(mod, models, modOutDir, Spells) { Text = text ??= DfText.Load(arena2), Riddles = riddles, QuestGlobal = QuestGlobal };
         var floorPolys = dungeon.Polygons(models).Where(q => q.Normal.Y > 0.7f).ToList();
         var ceilingPolys = dungeon.Polygons(models).Where(q => q.Normal.Y < -0.7f).ToList();
@@ -307,6 +308,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                         };
                         cell.Temporary.Add(fixture);
                         if (f.Kind == LightFixturePlacer.SurfaceCandle) surfaceCandles.Add(fixture);
+                        if (f.Kind == "campfire") campfireRefs.Add(fixture);
                         fixtureCounts[f.Kind] = fixtureCounts.GetValueOrDefault(f.Kind) + 1;
                         if (f.Kind == "campfire") campfires.Add(ToSkyrim(f.PositionDf));
                         if (Environment.GetEnvironmentVariable("TM_DEBUG_LIGHTS") == "1")
@@ -558,6 +560,8 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         // (other heights; 2026-10-16: 682 knapsacks floated up to 200 units).
         int candles = SettleProps(surfaceCandles, walkable, placedProps);
         if (candles > 0) fixtureCounts["candles and treasure settled onto tables"] = candles;
+        int pushed = PushActorsOut(cell, placedProps.Concat(campfireRefs));
+        if (pushed > 0) fixtureCounts["actors moved out of props"] = pushed;
         // Props are obstacles for pathing: add each one's box so the navmesh goes around it.
         foreach (var r in placedProps) walkable.AddRange(PropBox(r));
         // Standing clutter big enough to walk around (columns, carts, statues) is an obstacle too.
@@ -634,6 +638,37 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 moved++;
             }
             if (onto is null) done.Add(r);
+        }
+        return moved;
+    }
+
+    /// <summary>
+    /// Actors standing inside a prop's box (from its foot to its top, about chest height) moved out past its nearest side,
+    /// 24 units clear (2026-10-16: Daggerfall's enemy markers put 249 creatures inside crates and 182 in campfires; Daggerfall
+    /// Unity's physics pushes them out, Skyrim leaves them stuck). Returns how many moved.
+    /// </summary>
+    int PushActorsOut(Cell cell, IEnumerable<PlacedObject> obstacles)
+    {
+        var boxes = obstacles.Select(PropCorners).Select(c => (Min: c.Aggregate(Vector3.Min), Max: c.Aggregate(Vector3.Max)))
+            .Where(b => b.Max.X - b.Min.X >= 8 && b.Max.Y - b.Min.Y >= 8 && b.Max.Z - b.Min.Z >= 24).ToList();
+        int moved = 0;
+        foreach (var npc in cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>())
+        {
+            if (npc.Placement is not { } pl) continue;
+            var p = pl.Position;
+            float chest = p.Z + 48;
+            foreach (var (min, max) in boxes)
+            {
+                if (p.X <= min.X || p.X >= max.X || p.Y <= min.Y || p.Y >= max.Y || chest <= min.Z || p.Z >= max.Z) continue;
+                // The nearest side.
+                float left = p.X - min.X, right = max.X - p.X, front = p.Y - min.Y, back = max.Y - p.Y;
+                float least = MathF.Min(MathF.Min(left, right), MathF.Min(front, back));
+                p = least == left ? new P3Float(min.X - 24, p.Y, p.Z) : least == right ? new P3Float(max.X + 24, p.Y, p.Z)
+                    : least == front ? new P3Float(p.X, min.Y - 24, p.Z) : new P3Float(p.X, max.Y + 24, p.Z);
+                pl.Position = p;
+                moved++;
+                break;
+            }
         }
         return moved;
     }

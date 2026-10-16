@@ -92,7 +92,10 @@ public sealed class LightFixturePlacer
             var n = wall.Normal;
             bool sconce = w <= 16 && h <= 30;
             float heading = sconce ? MathF.Atan2(n.Z, -n.X) : MathF.Atan2(n.X, n.Z);
-            yield return new(sconce ? WallSconce : WallTorch, wall.Point, heading, sconce ? "wall sconce" : "wall torch");
+            // Mounted at least 20 units under the wall's top: a sprite at the edge put the torch half on the slanted cove
+            // above (2026-10-16: 940 torches, eight a dungeon, with no wall behind their upper half).
+            var mount = wall.Point with { Y = MathF.Min(wall.Point.Y, wall.Top - 20 / BlockMeshBuilder.Scale) };
+            yield return new(sconce ? WallSconce : WallTorch, mount, heading, sconce ? "wall sconce" : "wall torch");
             yield break;
         }
         // Standing on the floor.
@@ -143,10 +146,11 @@ public sealed class LightFixturePlacer
         return best;
     }
 
-    /// <summary>The closest wall face within range whose extent covers the point; Normal points toward the point.</summary>
-    (Vector3 Point, Vector3 Normal)? NearestWall(Vector3 p, float range)
+    /// <summary>The closest wall face within range whose extent covers the point; Normal points toward the point, Top
+    /// is the face's highest point.</summary>
+    (Vector3 Point, Vector3 Normal, float Top)? NearestWall(Vector3 p, float range)
     {
-        (Vector3, Vector3)? best = null; float bestD = range;
+        (Vector3, Vector3, float)? best = null; float bestD = range;
         foreach (var wall in walls)
         {
             var n = Vector3.Normalize(new Vector3(wall.Normal.X, 0, wall.Normal.Z));
@@ -157,7 +161,7 @@ public sealed class LightFixturePlacer
             var max = wall.Points.Aggregate(Vector3.Max) + new Vector3(8);
             if (onPlane.X < min.X || onPlane.X > max.X || onPlane.Y < min.Y || onPlane.Y > max.Y || onPlane.Z < min.Z || onPlane.Z > max.Z) continue;
             bestD = MathF.Abs(d);
-            best = (onPlane, d >= 0 ? n : -n);
+            best = (onPlane, d >= 0 ? n : -n, wall.Points.Max(q => q.Y));
         }
         return best;
     }
