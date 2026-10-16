@@ -158,8 +158,8 @@ public sealed partial class MwPluginBuilder
         npc.ShortName = null;
         npc.VirtualMachineAdapter = null;
         npc.Factions.Clear();
-        // The vanilla look's crime faction too: each game's people answer to their own factions, never Skyrim's.
-        npc.CrimeFaction.Clear();
+        // Not the vanilla look's crime faction: Morrowind's people answer to Morrowind's law (MwLaw), never Skyrim's.
+        UnderLaw(npc, guard: false);
         npc.Items = null;
         npc.DefaultOutfit.Clear();
         npc.SleepingOutfit.Clear();

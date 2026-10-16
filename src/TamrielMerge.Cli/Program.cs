@@ -3141,6 +3141,16 @@ static class Program
                     $"{m.Ingestibles.Count} potions, {m.Ingredients.Count} ingredients, {m.LeveledItems.Count} leveled lists, {m.Npcs.Count} actors, {m.LeveledNpcs.Count} leveled actor lists");
                 builder.Write();
                 Console.WriteLine($"  barks: {builder.BarkCount} recorded lines in {builder.BarkTopicCount} voice topics (Morrowind's own recordings)");
+                // Morrowind's law (MwLaw): its crime faction and jail, who answers to it, the arrest greetings, TMMwLaw's markers.
+                if (m.Factions.FirstOrDefault(f => f.EditorID == "MWCrimeFaction") is { } mwCrime)
+                {
+                    var lawScript = m.Quests.FirstOrDefault(q => q.EditorID == "MWLaw")?.VirtualMachineAdapter?.Scripts.FirstOrDefault();
+                    int lawMarkers = lawScript?.Properties.OfType<ScriptObjectListProperty>().FirstOrDefault(p => p.Name == "Markers")?.Objects.Count ?? 0;
+                    var people = m.Npcs.Where(n => n.CrimeFaction.FormKey == mwCrime.FormKey).ToList();
+                    Console.WriteLine($"  law: {mwCrime.EditorID} (murder {mwCrime.CrimeValues?.Murder}, assault {mwCrime.CrimeValues?.Assault}, trespass {mwCrime.CrimeValues?.Trespass}, pickpocket {mwCrime.CrimeValues?.Pickpocket}, theft x{mwCrime.CrimeValues?.StealMult}); "
+                        + $"jail {(mwCrime.PlayerInventoryContainer.IsNull ? "none" : "set")}; {people.Count} people answer to it, {people.Count(n => n.Factions.Any(r => r.Faction.FormKey == Skyrim.CrimeFactions.IsGuardFaction))} of them guards; "
+                        + $"{builder.ArrestResponses} arrest greetings; TMMwLaw: {lawMarkers} prison markers, {lawScript?.Properties.Count ?? 0} properties");
+                }
                 var problems = builder.Problems.Distinct().ToList();
                 foreach (var p in problems.Take(60)) Console.WriteLine($"  problem: {p}");
                 if (problems.Count > 60) Console.WriteLine($"  ... {problems.Count - 60} more problems");
@@ -3819,6 +3829,15 @@ static class Program
             {
                 // Record counts by type for each Morrowind plugin in the install, and the archives' file counts.
                 string dataFiles = GameInstalls.DataDir(Game.Morrowind) ?? throw new DirectoryNotFoundException("Morrowind isn't installed through Steam or GOG");
+                if (opts.TryGetValue("refs", out var refBase))
+                {
+                    // --refs ID: the cells holding references to that base object (e.g. PrisonMarker), with how many.
+                    var w = Morrowind.MwWorld.Load(dataFiles);
+                    foreach (var c in w.Interiors.Values.Concat(w.Exteriors.Values))
+                        if (c.Refs.Count(r => r.BaseId.Equals(refBase, StringComparison.OrdinalIgnoreCase)) is > 0 and var n)
+                            Console.WriteLine($"  {(c.Name.Length > 0 ? c.Name : "(wilderness)")} [{c.GridX},{c.GridY}]{(w.Interiors.ContainsKey(c.Name) && w.Interiors[c.Name] == c ? " inside" : "")}: {n}");
+                    return 0;
+                }
                 foreach (var file in Directory.GetFiles(dataFiles).Where(f => f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)).OrderBy(f => f.EndsWith(".esp")).ThenBy(f => f))
                 {
                     var plugin = Morrowind.Tes3Plugin.Load(file);

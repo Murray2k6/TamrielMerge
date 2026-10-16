@@ -22,6 +22,8 @@ public static class TopicSubtypes
         [DialogTopic.SubtypeEnum.Steal] = "STEA",
         [DialogTopic.SubtypeEnum.Trespass] = "TRES",
         [DialogTopic.SubtypeEnum.NormalToCombat] = "NOTC",
+        // A guard's arrest (Morrowind's arrest greetings), as DGCrimeForcegreetTopic.
+        [DialogTopic.SubtypeEnum.ForceGreet] = "PFGT",
     };
 
     public static void Fill(ISkyrimMod mod)

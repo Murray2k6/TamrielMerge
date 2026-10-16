@@ -301,7 +301,7 @@ public sealed partial class MwPluginBuilder
         foreach (var r in source.Refs)
         {
             foreach (var fx in Effects(r)) cell.Temporary.Add(fx);
-            if (InterventionMarker(r, cell, source.Name)) continue;
+            if (InterventionMarker(r, cell, source.Name) || PrisonMarker(r, cell, source.Name)) continue;
             if (PlaceableFor(r) is not { } b) continue;
             if (world.Model(r.BaseId) is { Length: > 0 } model && converted.GetValueOrDefault(model) is { } mesh)
             {
@@ -550,7 +550,7 @@ public sealed partial class MwPluginBuilder
             {
                 foreach (var fx in Effects(r))
                     CellAt(((int)MathF.Floor(r.Position.X / MwTerrain.SkyCellUnits), (int)MathF.Floor(r.Position.Y / MwTerrain.SkyCellUnits))).Temporary.Add(fx);
-                if (InterventionMarker(r, top, Exterior)) continue;
+                if (InterventionMarker(r, top, Exterior) || PrisonMarker(r, top, Exterior)) continue;
                 if (PlaceableFor(r) is not { } b) continue;
                 if (b is not Npc && world.Model(r.BaseId) is { Length: > 0 } model && converted.GetValueOrDefault(model) is { Solid.Count: > 0 } mesh)
                 {
@@ -809,6 +809,7 @@ public sealed partial class MwPluginBuilder
         // Every spell exists (for spell merchants and the player's start), not only those someone carries.
         foreach (var rec in world.Objects.Values.Where(o => o.Type == "SPEL").ToList()) MwSpell(rec.Id);
         FinishMagic();
+        FinishLaw();
         FinishLocks();
         SwingDoorTwinCount = Skyrim.SwingDoorTwins.AddAll(mod);
         // Morrowind's recorded barks: after every other record, so those keep their FormIDs.

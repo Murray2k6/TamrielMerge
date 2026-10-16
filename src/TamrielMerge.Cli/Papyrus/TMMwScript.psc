@@ -804,40 +804,12 @@ Function SetCrime(Faction akCrime, Int aiGold) Global
     aiGold = 0
   EndIf
   akCrime.SetCrimeGold(aiGold)
+  If aiGold == 0
+    akCrime.SetCrimeGoldViolent(0)
+  EndIf
 EndFunction
 
-; PayFine: the bounty paid in gold and cleared (and the stolen goods taken, which Skyrim's own arrest does); PayFineThief:
-; the Thieves Guild's way, the same here.
-Function PayFine(Faction akCrime, Actor akPlayer, Bool abTakeStolen) Global
-  If !akCrime
-    Return
-  EndIf
-  Int gold = akCrime.GetCrimeGold()
-  MiscObject coin = Game.GetFormFromFile(0x0F, "Skyrim.esm") as MiscObject
-  If gold > 0 && coin
-    akPlayer.RemoveItem(coin, gold)
-  EndIf
-  akCrime.PlayerPayCrimeGold(abTakeStolen, False)
-  akCrime.SetCrimeGold(0)
-EndFunction
-
-; GoToJail: Skyrim's jail is per hold; here the bounty is served as time: a day per 100 gold passes and it clears.
-Function GoToJail(Faction akCrime, Actor akPlayer) Global
-  If !akCrime
-    Return
-  EndIf
-  Int gold = akCrime.GetCrimeGold()
-  GlobalVariable gameHour = Game.GetFormFromFile(0x38, "Skyrim.esm") as GlobalVariable
-  Int days = gold / 100
-  If days < 1
-    days = 1
-  EndIf
-  Game.FadeOutGame(True, True, 0.5, 2.0)
-  Game.IncrementStat("Days Jailed", days)
-  GlobalVariable daysPassed = Game.GetFormFromFile(0x39, "Skyrim.esm") as GlobalVariable
-  daysPassed.Mod(days)
-  akCrime.SetCrimeGold(0)
-EndFunction
+; PayFine, PayFineThief and GoToJail are Morrowind's law's (TMMwLaw on the quest MWLaw).
 
 ; ---- the journal ----
 

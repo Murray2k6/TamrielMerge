@@ -351,8 +351,8 @@ public sealed partial class MwPluginBuilder
                 mod.Globals.Add(g);
                 return g.FormKey;
             }
-            case "gen" when id == "MWCrimeFaction":
-                return Hidden(new Faction(mod) { EditorID = "MWCrimeFaction", Name = "Morrowind", Flags = Faction.FactionFlag.HiddenFromPC | Faction.FactionFlag.TrackCrime, Ranks = [new Rank { Number = 0 }] });
+            case "gen" when id == "MWCrimeFaction": return MwCrime.FormKey;
+            case "law": return LawQuest().FormKey;
             case "ai": return AiQuest().FormKey;
             case "state": return StateQuest().FormKey;
             case "jindex": return journals.ContainsKey(id) ? JournalIndexGlobal(id).FormKey : null;
