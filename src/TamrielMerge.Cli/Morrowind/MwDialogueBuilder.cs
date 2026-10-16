@@ -116,9 +116,12 @@ public sealed partial class MwPluginBuilder
         if (rec.Get("AIDT") is { Data.Length: >= 12 } aidt && (aidt.Int(8) & 0x400) != 0)
             npc.Factions.Add(new RankPlacement { Faction = (moneyChangers ??= Skyrim.CoinTrade.Tag(mod, "MWMoneyChangers", "Money changers")).ToLink<IFactionGetter>(), Rank = 0 });
         string who = ((rec.Str("CNAM") ?? "") + " " + (rec.Str("ANAM") ?? "")).ToLowerInvariant();
-        // Guards may doze on night watch (TMNightDanger).
+        // Guards may doze on night watch (TMNightDanger), and are the law's: Skyrim's guards of Morrowind's crime faction.
         if (who.Contains("guard"))
+        {
             npc.Factions.Add(new RankPlacement { Faction = Skyrim.TownNights.Guards(mod, "MW").ToLink<IFactionGetter>(), Rank = 0 });
+            UnderLaw(npc, guard: true);
+        }
         if (who.Contains("thief") || who.Contains("thieves") || who.Contains("pauper"))
             npc.Factions.Add(new RankPlacement { Faction = (pickpockets ??= Skyrim.CoinTrade.Tag(mod, Skyrim.CoinTrade.PickpocketsId("MW"), "Pickpockets")).ToLink<IFactionGetter>(), Rank = 0 });
     }
@@ -392,12 +395,61 @@ public sealed partial class MwPluginBuilder
         // Responses for a choice (function 50 = n) go to that choice's child topics; the rest to the topic itself.
         static int? ChoiceOf(MwDialogue.Info i) => i.Conditions.FirstOrDefault(c => c.Kind == '1' && c.Function == "50") is { } c ? (int)c.Value : null;
         var children = new Dictionary<(int Number, string Text), DialogTopic>();
-        foreach (var info in topic.Infos.Where(i => ChoiceOf(i) is null))
+        // A guard's greetings for a wanted player (an alarmed speaker: "You violated the law... Pay Gold, Go to Jail,
+        // Resist Arrest") are the arrest Skyrim's guards force on them (ArrestGreetings), not hellos.
+        foreach (var info in topic.Infos.Where(i => ChoiceOf(i) is null && !(greeting && IsArrest(i))))
             if (Response(info, main, children, topic, branch) is { } r) main.Responses.Add(r);
+        if (greeting) ArrestGreetings(topic);
         if (main.Responses.Count == 0) { if (branch is not null) mod.DialogBranches.Remove(branch); return; }
         mod.DialogTopics.Add(main);
         DialogueTopics++;
     }
+
+    /// <summary>A greeting for an alarmed speaker (function 49 = 1): Morrowind's guards' arrest.</summary>
+    static bool IsArrest(MwDialogue.Info i) => i.Conditions.Any(c => c.Kind == '1' && c.Function == "49" && c.Compare == 0 && (int)c.Value == 1);
+
+    /// <summary>
+    /// Morrowind's arrest greetings as Skyrim's guards' arrest: a force-greet topic starting a blocking branch (as
+    /// Skyrim's DGCrimeForcegreet is), so a guard of Morrowind's law who reaches a wanted player, or whom the player
+    /// talks to while wanted, says them, with their choices (pay, jail, resist) as the branch's topics. Their result
+    /// scripts do the rest (TMMwLaw PayFine and GoToJail).
+    /// </summary>
+    void ArrestGreetings(MwDialogue.Topic topic)
+    {
+        static int? ChoiceOf(MwDialogue.Info i) => i.Conditions.FirstOrDefault(c => c.Kind == '1' && c.Function == "50") is { } c ? (int)c.Value : null;
+        var arrest = topic.Infos.Where(i => ChoiceOf(i) is null && IsArrest(i)).ToList();
+        if (arrest.Count == 0) return;
+        string edid = "MWArrest" + Sanitize(topic.Name);
+        var forceGreet = new DialogTopic(mod)
+        {
+            EditorID = edid,
+            Quest = dialogueQuest!.ToNullableLink<IQuestGetter>(),
+            Priority = 50,
+            Category = DialogTopic.CategoryEnum.Topic,
+            Subtype = DialogTopic.SubtypeEnum.ForceGreet,
+            Responses = [],
+        };
+        var branch = new DialogBranch(mod)
+        {
+            EditorID = edid + "Branch",
+            Quest = dialogueQuest.ToLink<IQuestGetter>(),
+            Category = DialogBranch.CategoryType.Player,
+            Flags = DialogBranch.Flag.Blocking,
+            StartingTopic = forceGreet.ToNullableLink<IDialogTopicGetter>(),
+        };
+        forceGreet.Branch = branch.ToNullableLink<IDialogBranchGetter>();
+        mod.DialogBranches.Add(branch);
+        var children = new Dictionary<(int Number, string Text), DialogTopic>();
+        foreach (var info in arrest)
+            if (Response(info, forceGreet, children, topic, branch) is { } r) forceGreet.Responses.Add(r);
+        if (forceGreet.Responses.Count == 0) { mod.DialogBranches.Remove(branch); return; }
+        mod.DialogTopics.Add(forceGreet);
+        ArrestResponses += forceGreet.Responses.Count;
+        DialogueTopics++;
+    }
+
+    /// <summary>Morrowind's arrest greetings made Skyrim's guards' force-greet.</summary>
+    public int ArrestResponses { get; private set; }
 
     /// <summary>One response, or null when it can never be said here (a filter on something not converted).</summary>
     DialogResponses? Response(MwDialogue.Info info, DialogTopic owner, Dictionary<(int Number, string Text), DialogTopic> children, MwDialogue.Topic topic, DialogBranch? branch)
@@ -734,7 +786,10 @@ public sealed partial class MwPluginBuilder
             case "61": return Cond(new GetLevelConditionData(), op, c.Value);
             case "04": return Cond(new GetActorValuePercentConditionData { ActorValue = ActorValue.Health }, op, c.Value / 100f);
             case "07": return Cond(new GetActorValuePercentConditionData { ActorValue = ActorValue.Health }, op, c.Value / 100f, player: true);
-            case "43": return Cond(new GetCrimeGoldConditionData(), op, c.Value, player: true);
+            // The bounty with the speaker's crime faction (every Morrowind person answers to Morrowind's, MwLaw).
+            case "43": return Cond(new GetCrimeGoldConditionData(), op, c.Value);
+            // Alarmed: a guard pursuing a wanted player is, in Skyrim as in Morrowind.
+            case "49": return Cond(new GetAlarmedConditionData(), op, c.Value);
             case "08": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Magicka }, op, c.Value, player: true);
             case "09": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Stamina }, op, c.Value, player: true);
             default:

@@ -140,7 +140,7 @@ arguments) map to Papyrus and SKSE. Where Skyrim has no counterpart the nearest 
 | GetPCRank, PCJoinFaction, PCRaiseRank, PCLowerRank, PCExpell, PCClearExpelled, RaiseRank, LowerRank | faction ranks and expulsion (a faction may be named by its name: "House Telvanni") |
 | GetPCFacRep, ModPCFacRep, Get/Set/ModReputation | globals (Skyrim keeps no reputation) |
 | Get/Set/ModFactionReaction | Skyrim's enemy / neutral / friend / ally by the sign and size |
-| GetPCCrimeLevel, SetPCCrimeLevel, ModPCCrimeLevel, PayFine, PayFineThief, GoToJail | a crime faction for Morrowind (MWCrimeFaction); jail is the bounty served as days passing |
+| GetPCCrimeLevel, SetPCCrimeLevel, ModPCCrimeLevel, PayFine, PayFineThief, GoToJail, GetPCInJail | Morrowind's crime faction (MWCrimeFaction) and law (TMMwLaw on MWLaw, docs/progression.md "Crime by game and area"): PayFine clears the bounty and confiscates stolen goods, PayFineThief only clears it, GoToJail serves the days at the nearest prison marker |
 | GetPCCell | the player's cell in a list of the cells of that name (interiors starting with it, the exterior cells named so) |
 | CellChanged | the player's cell differs from the script's last look |
 | GetStandingPC, GetCollidingPC, HurtStandingActor, HurtCollidingActor | the player within the object's bounds (on top of it) |

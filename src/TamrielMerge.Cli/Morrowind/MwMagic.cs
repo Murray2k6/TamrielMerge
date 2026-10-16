@@ -239,17 +239,7 @@ public sealed partial class MwPluginBuilder
             home.Persistent.Add(anchor);
         }
         // Breadth-first from the outside: an interior's way out is the first outside door found leading into it.
-        var outside = new Dictionary<string, PlacedObject>(StringComparer.OrdinalIgnoreCase);
-        var queue = new Queue<string>();
-        foreach (var (r, placed, cell) in doors)
-            if (cell == Exterior && r.DoorDestinationCell is { } into && !outside.ContainsKey(into)) { outside[into] = placed; queue.Enqueue(into); }
-        var byCell = doors.GroupBy(d => d.Cell, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
-        while (queue.Count > 0)
-        {
-            string here = queue.Dequeue();
-            foreach (var (r, _, _) in byCell.GetValueOrDefault(here) ?? [])
-                if (r.DoorDestinationCell is { } next && !outside.ContainsKey(next)) { outside[next] = outside[here]; queue.Enqueue(next); }
-        }
+        var outside = OutsideDoors();
         foreach (var (name, cell) in interiorsByName)
         {
             if (!outside.TryGetValue(name, out var door)) continue;

@@ -387,9 +387,11 @@ public sealed partial class MwPapyrus
             case "getpccrimelevel": return R($"{Crime()}.GetCrimeGold()", T.Int);
             case "setpccrimelevel": return R($"TMMwScript.SetCrime({Crime()}, {ArgInt(c, 0)})", T.Void);
             case "modpccrimelevel": return R($"TMMwScript.SetCrime({Crime()}, {Crime()}.GetCrimeGold() + {ArgInt(c, 0)})", T.Void);
-            case "payfine" or "payfinethief": return R($"TMMwScript.PayFine({Crime()}, {PlayerRef()}, {(fn == "payfine" ? "True" : "False")})", T.Void);
-            case "gotojail": return R($"TMMwScript.GoToJail({Crime()}, {PlayerRef()})", T.Void);
-            case "getpcinjail" or "getpctraveling": return R("False", T.Bool);
+            // Morrowind's engine's part (TMMwLaw on MWLaw): PayFine confiscates the stolen goods, PayFineThief doesn't; jail.
+            case "payfine" or "payfinethief": return R($"{Law()}.PayFine({(fn == "payfine" ? "True" : "False")})", T.Void);
+            case "gotojail": return R($"{Law()}.GoToJail()", T.Void);
+            case "getpcinjail": return R($"{Law()}.InJail", T.Bool);
+            case "getpctraveling": return R("False", T.Bool);
 
             // ---- the player and the interface ----
             case "disableplayercontrols": return R("Game.DisablePlayerControls(True, False, False, False, True, False, True)", T.Void);
@@ -523,6 +525,8 @@ public sealed partial class MwPapyrus
     /// <summary>A journal's index, which (unlike a quest's stage) can go back: a global per journal the dialogue reads.</summary>
     string JournalIndex(string journal) => Prop("jindex:" + journal, "GlobalVariable", "ji_" + Clean(journal));
     string Crime() => Generated("gen:MWCrimeFaction", "Faction", "MwCrime");
+    /// <summary>Morrowind's law (TMMwLaw on the quest MWLaw): fines, jail and the dialogue's crime globals.</summary>
+    string Law() => $"({Prop("law", "Quest", "MwLaw")} as TMMwLaw)";
 
     /// <summary>A faction's reputation with the player: a global per faction (Skyrim keeps none).</summary>
     string FactionRep(Call c, int i)

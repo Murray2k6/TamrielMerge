@@ -489,7 +489,7 @@ public sealed partial class RgPluginBuilder
     public int ScriptsIdle { get; private set; }
 
     /// <summary>The scripts the converted ones run on (Papyrus folder; compiled into the output with them).</summary>
-    static readonly string[] Library = ["TMRgSoup", "TMRgState", "TMRgUseItem", "TMRgMove", "TMRgRope"];
+    static readonly string[] Library = ["TMRgSoup", "TMRgState", "TMRgUseItem", "TMRgMove", "TMRgRope", "TMRgLaw"];
 
     static readonly HashSet<string> ControlOnly = new(StringComparer.OrdinalIgnoreCase) { "if", "goto", "end", "gosub", "return", "endint", "pause", "Wait", "WaitOnTasks", "WaitNonMulti" };
 

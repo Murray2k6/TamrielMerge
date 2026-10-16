@@ -118,16 +118,19 @@ script on DFQuestMachine) reads it as Daggerfall Unity's PlayerEntity and Dagger
 - below -10, each game minute in that region's town streets has a 5% chance (10% once banished from it) that 2-5 of the
   City Watch come for the player for criminal conspiracy (one group at a time; never indoors or in dungeons);
 - when the first reaches the player: come quietly or fight (they attack);
-- the court (TEXT.RSC 8050-8064): below 0, banishment unless a -rep and a -rep/2 chance (75 at most) both fail; else a
-  penalty of 5 x rep + 500 (500 - 5 x rep below 0) within 10-1500, a point per 40 of it a 40 gold fine or 3 days in
-  prison at random. Pleading guilty halves both; pleading not guilty, debating (Etiquette) or lying (Streetwise) frees
-  the player with rep + (skill + Personality) / 2 percent (5-95; Skyrim's Speech for Personality, the skills
-  docs/daggerfall-senses.md's), else rep + d100 under 25 doubles the sentence, over 75 halves it. A fine beyond the
-  player's gold is served at 40 gold a day; the days in prison pass (GameHour);
+- crimes the region's people see (each region is a Skyrim crime faction, DfLaw; docs/progression.md "Crime by game and
+  area") bring the Watch at once in town, and lower the standing by the crime's loss when they confront the player;
+- the court, for the crime committed (TEXT.RSC 8050-8064, 550-551): FALL.EXE's penalty table for that crime (per standing
+  point, base, least, most; criminal conspiracy: 5 x rep + 500 within 10-1500), a point per 40 of it a 40 gold fine or 3
+  days in prison at random, a fine beyond the player's gold served at 40 gold a day. A Dark Brotherhood member (assault,
+  murder) or Thieves Guild member (breaking in, trespassing, pickpocketing) may be bribed free (rank against 0-19).
+  Below 0, banishment unless a -rep and a -rep/2 chance (75 at most) both fail: pleading guilty then banishes, else
+  halves the sentence; pleading not guilty, debating (Etiquette) or lying (Streetwise) frees the player with rep + (skill
+  + Personality) / 2 percent (5-95; Skyrim's Speech for Personality, the skills docs/daggerfall-senses.md's), else
+  banishes or finds them guilty, rep + d100 under 25 doubling the fine, over 75 halving it. A sentence served gives back
+  half the crime's loss less one; prison is served in Daggerfall's prison (the days counted down, then passed), and
+  the player is let out at the town's gates four hours later, healed;
 - every 112 days each region's standing moves 1 toward 0.
-
-Daggerfall's towns have no crimes Skyrim records (their people have no crime faction), so only the quests and the drift
-change the standing; the Thieves Guild's and Dark Brotherhood's court rescues are not done.
 
 ## Run time
 

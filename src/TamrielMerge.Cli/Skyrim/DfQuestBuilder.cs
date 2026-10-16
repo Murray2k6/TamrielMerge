@@ -387,6 +387,28 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         };
         if (CityWatch is { } watch) props.Add(Obj("Watch", watch));
         if (mod.Quests.FirstOrDefault(q => q.EditorID == DfSenses.QuestEditorId) is { } senses) props.Add(Obj("Senses", senses.FormKey));
+        // The regions' law (DfLaw): their crime factions, the street doors' crime report, and the court's words for each
+        // crime (Daggerfall Unity asks "Do you wish to surrender to the city guards?", TEXT.RSC 15; the charge is 8050)
+        // and the guilds' bribes (550, 551). At fixed numbers, as DfLaw's records are (DfLaw.MessageKey).
+        Message MsgAt(uint n, string edid, string body, params string[] buttons)
+        {
+            var m = new Message(new FormKey(mod.ModKey, DfLaw.MessageKey + n), SkyrimRelease.SkyrimSE)
+            {
+                EditorID = edid, Description = body, Quest = Machine!.ToNullableLink<IQuestGetter>(), Flags = Message.Flag.MessageBox, MenuButtons = [],
+            };
+            foreach (var b in buttons) m.MenuButtons.Add(new MessageButton { Text = b });
+            mod.Messages.Add(m);
+            return m;
+        }
+        string surrender = text[15].FirstOrDefault() ?? "Do you wish to surrender to the city guards?";
+        props.Add(Objs("RegionCrime", Enumerable.Range(0, DfLaw.Regions).Select(r => DfLaw.Region(mod, r).FormKey)));
+        props.Add(Obj("CrimeReport", DfLaw.CrimeReport(mod).FormKey));
+        props.Add(Objs("ArrestFor", DfLaw.CrimeNames.Select((c, i) =>
+            MsgAt((uint)i, $"DFLawArrest{i + 1}", $"Halt! You are under arrest for {c}. {surrender}", "Yes", "No").FormKey)));
+        props.Add(Objs("AccusedOf", DfLaw.CrimeNames.Select((c, i) =>
+            MsgAt(0x10 + (uint)i, $"DFLawAccused{i + 1}", Fill(8050, ("%cri", c)), "Guilty", "Not guilty").FormKey)));
+        props.Add(Obj("ThievesBribe", MsgAt(0x20, "DFLawThievesBribe", Fill(550)).FormKey));
+        props.Add(Obj("BrotherhoodBribe", MsgAt(0x21, "DFLawBrotherhoodBribe", Fill(551)).FormKey));
         return new ScriptEntry { Name = "TMDfLaw", Properties = [.. props] };
     }
 

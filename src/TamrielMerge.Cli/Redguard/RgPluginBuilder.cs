@@ -929,6 +929,8 @@ public sealed partial class RgPluginBuilder
         BuildDoors();
         log?.Invoke($"doors: {DoorsLinked} linked, {DoorsOneWay} one-way");
         AttachScripts(log);
+        BuildLaw();
+        log?.Invoke($"law: no bounty; {GuardCount} guards mind drawn weapons (RGLaw)");
         foreach (var scene in scenes.Values.Where(s => s.World is not null)) AddWorldCells(scene);
         foreach (var scene in scenes.Values) BuildNavmeshes(scene);
         int links = navmeshes?.LinkExteriorEdges() ?? 0;

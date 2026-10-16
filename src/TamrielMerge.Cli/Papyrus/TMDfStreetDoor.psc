@@ -17,6 +17,10 @@ String Property BuildingName = "" Auto
 {Daggerfall's name for the building ("The Dancing Griffin"), empty for houses; the quests name it so.}
 GlobalVariable Property BreakIns Auto
 {Shops broken into (the Thieves Guild takes notice, TMDfGuilds).}
+GlobalVariable Property CrimeReport Auto
+{A crime seen at the door (Daggerfall's crime number: 1 attempted breaking and entering, 3 breaking and entering), for
+TMDfLaw to send the City Watch: a failed bash is noticed one time in ten, and so is a door bashed open (Daggerfall Unity
+PlayerActivate).}
 Int failedAtSkill = -1
 Float brokenInUntil = 0.0
 
@@ -149,5 +153,15 @@ Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile,
   If Utility.RandomInt(1, 100) <= 25 - LockValue
     Debug.Notification("You bash the door open.")
     brokenInUntil = Utility.GetCurrentGameTime() + 0.1
+    Report(3)
+  Else
+    Report(1)
   EndIf
 EndEvent
+
+; One time in ten someone notices (Dice100.SuccessRoll(10)).
+Function Report(Int crime)
+  If CrimeReport && Utility.RandomInt(1, 100) <= 10
+    CrimeReport.SetValue(crime)
+  EndIf
+EndFunction
