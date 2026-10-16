@@ -306,7 +306,9 @@ static class Program
                             {
                                 var now = DateTime.Now;
                                 recentStarts.RemoveAll(t => now - t > TimeSpan.FromSeconds(45));
-                                if (running == 0 || fixedCount || (now - lastStart > TimeSpan.FromSeconds(5) && Util.Machine.FreeRamGb() >= 4 + 3 * (1 + recentStarts.Count)))
+                                // RAM for the part, and room to commit it with 4 GB to spare (a small page file runs out first).
+                                double need = 4 + 3 * (1 + recentStarts.Count);
+                                if (running == 0 || fixedCount || (now - lastStart > TimeSpan.FromSeconds(5) && Util.Machine.FreeRamGb() >= need && Util.Machine.FreeCommitGb() >= need + 4))
                                 {
                                     running++;
                                     mostAtOnce = Math.Max(mostAtOnce, running);
@@ -393,8 +395,8 @@ static class Program
                     return true;
                 }
                 Settle(all: false);
-                // Redguard, Morrowind and Oblivion side by side, each in a process of its own (user, 2026-10-14: "should be a
-                // 1 hour conversion"; one after another they took about 50 minutes, Oblivion alone 35). They write their own
+                // Redguard, Morrowind and Oblivion side by side as the memory allows, each in a process of its own (user,
+                // 2026-10-14: "should be a 1 hour conversion"; one after another they took about 50 minutes, Oblivion alone 35). They write their own
                 // folders (TamrielMerge's rg, mw and ob folders); each one's plugin appearing is its success.
                 var games = new (Game Game, string Plugin, string[] Args)[]
                 {
@@ -422,18 +424,46 @@ static class Program
                     foreach (var g in toBuild.SkipLast(1)) Begin(g.Game.ToString()).Dispose();
                     var results = new System.Collections.Concurrent.ConcurrentDictionary<Game, bool>();
                     int ended = 0;
-                    Parallel.ForEach(toBuild, new ParallelOptions { MaxDegreeOfParallelism = toBuild.Count == 0 ? 1 : toBuild.Count }, g =>
+                    // Side by side as the memory allows (2026-10-16: all three at once committed 35.9 of the user's 38.9 GB and
+                    // their other programs failed with "Not enough memory"): the biggest first, and each next one only when
+                    // the free commit holds its peak, what the running ones may still grow by, and 4 GB for everything else.
+                    // With nothing running the next one starts whatever the room.
+                    static double PeakGb(Game g) => g switch { Game.Oblivion => 14, Game.Morrowind => 8, _ => 4 };
+                    var waiting = new Queue<(Game Game, string Plugin, string[] Args)>(toBuild.OrderByDescending(g => PeakGb(g.Game)));
+                    var runningGames = new List<((Game Game, string Plugin, string[] Args) G, System.Diagnostics.Process P)>();
+                    void Finish(((Game Game, string Plugin, string[] Args) G, System.Diagnostics.Process P) r, int code)
                     {
-                        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
-                        foreach (var a in g.Args) psi.ArgumentList.Add(a);
-                        psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";
-                        int code;
-                        try { using var p = System.Diagnostics.Process.Start(psi)!; p.WaitForExit(); code = p.ExitCode; }
-                        catch (Exception e) { Console.WriteLine($"{g.Game}: failed: {e.Message}"); code = -1; }
-                        results[g.Game] = code == 0 && File.Exists(Path.Combine(outDir, g.Plugin));
+                        results[r.G.Game] = code == 0 && File.Exists(Path.Combine(outDir, r.G.Plugin));
                         int n = Interlocked.Increment(ref ended);
-                        Progress.Report(n / (double)toBuild.Count, $"{g.Game} converted ({n} of {toBuild.Count})");
-                    });
+                        Progress.Report(n / (double)toBuild.Count, $"{r.G.Game} converted ({n} of {toBuild.Count})");
+                    }
+                    while (waiting.Count > 0 || runningGames.Count > 0)
+                    {
+                        foreach (var r in runningGames.Where(r => r.P.HasExited).ToList())
+                        {
+                            Finish(r, r.P.ExitCode);
+                            r.P.Dispose();
+                            runningGames.Remove(r);
+                        }
+                        if (waiting.Count > 0)
+                        {
+                            var next = waiting.Peek();
+                            double growth = runningGames.Sum(r => { try { r.P.Refresh(); return Math.Max(0, PeakGb(r.G.Game) - r.P.PrivateMemorySize64 / (double)(1L << 30)); } catch (InvalidOperationException) { return 0; } });
+                            double free = Util.Machine.FreeCommitGb();
+                            if (runningGames.Count == 0 || free >= PeakGb(next.Game) + growth + 4)
+                            {
+                                waiting.Dequeue();
+                                var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
+                                foreach (var a in next.Args) psi.ArgumentList.Add(a);
+                                psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";
+                                if (runningGames.Count > 0) Console.WriteLine($"{next.Game}: started beside {string.Join(", ", runningGames.Select(r => r.G.Game))} ({free:F0} GB of memory free to commit)");
+                                try { runningGames.Add((next, System.Diagnostics.Process.Start(psi)!)); }
+                                catch (Exception e) { Console.WriteLine($"{next.Game}: failed: {e.Message}"); results[next.Game] = false; Interlocked.Increment(ref ended); }
+                                continue;
+                            }
+                        }
+                        Thread.Sleep(2000);
+                    }
                     foreach (var g in toBuild)
                         if (results.GetValueOrDefault(g.Game)) plugins.Add(g.Plugin); else failed.Add(g.Game.ToString());
                 }
