@@ -734,11 +734,7 @@ public sealed partial class RgPluginBuilder
             psi.ArgumentList.Add("-f=TESV_Papyrus_Flags.flg");
             psi.ArgumentList.Add($"-i={imports}");
             psi.ArgumentList.Add($"-o={Path.GetFullPath(outDir)}");
-            using var p = System.Diagnostics.Process.Start(psi)!;
-            var err = p.StandardError.ReadToEndAsync();
-            string output = p.StandardOutput.ReadToEnd() + err.Result;
-            p.WaitForExit();
-            return output;
+            return Skyrim.PapyrusRun.Run(psi, all ? Skyrim.PapyrusRun.Batch : Skyrim.PapyrusRun.One).Output;
         }
         // The library.
         foreach (var lib in Library)

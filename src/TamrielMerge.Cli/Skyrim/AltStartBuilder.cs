@@ -461,19 +461,34 @@ public static class AltStartBuilder
             Console.WriteLine($"No Creation Kit Papyrus compiler: used {copied} precompiled scripts");
             return;
         }
-        var psi = new ProcessStartInfo(compiler)
+        // SKSE's script sources (Data\Scripts\Source, when SKSE is installed) come before vanilla's, so scripts may use
+        // SKSE functions; without SKSE in the game those calls just do nothing.
+        string imports = $"-i={sourceDir};{Path.Combine(skyrimData, "Scripts", "Source")};{vanillaSources}";
+        var started = DateTime.UtcNow.AddSeconds(-2);
+        bool Fresh(string psc)
         {
-            // SKSE's script sources (Data\Scripts\Source, when SKSE is installed) come before vanilla's, so scripts may use
-            // SKSE functions; without SKSE in the game those calls just do nothing.
-            ArgumentList = { sourceDir, "-all", "-f=TESV_Papyrus_Flags.flg", $"-i={sourceDir};{Path.Combine(skyrimData, "Scripts", "Source")};{vanillaSources}", $"-o={scriptsOut}" },
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        using var p = Process.Start(psi)!;
-        string output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-        p.WaitForExit();
-        if (p.ExitCode != 0 || !output.Contains(" 0 failed"))
-            throw new InvalidOperationException($"Papyrus compile failed:\n{output}");
+            string pex = Path.Combine(scriptsOut, Path.ChangeExtension(Path.GetFileName(psc), ".pex"));
+            return File.Exists(pex) && File.GetLastWriteTimeUtc(pex) >= started;
+        }
+        var (_, output) = PapyrusRun.Run(new ProcessStartInfo(compiler)
+        {
+            ArgumentList = { sourceDir, "-all", "-q", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={scriptsOut}" },
+        }, TimeSpan.FromMinutes(3)); // about 20 seconds when it works
+        // Scripts the batch left (it stopped answering, or a script of its own failed) are compiled one at a time.
+        var left = sources.Where(s => !Fresh(s)).ToList();
+        if (left.Count > 0)
+        {
+            Console.WriteLine($"  {left.Count} scripts not compiled by the batch: compiled one at a time");
+            foreach (var psc in left)
+                output += PapyrusRun.Run(new ProcessStartInfo(compiler)
+                {
+                    ArgumentList = { Path.GetFileName(psc), "-q", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={scriptsOut}" },
+                    WorkingDirectory = sourceDir,
+                }, PapyrusRun.One).Output;
+            left = sources.Where(s => !Fresh(s)).ToList();
+        }
+        if (left.Count > 0)
+            throw new InvalidOperationException($"Papyrus compile failed for {string.Join(", ", left.Select(Path.GetFileNameWithoutExtension))}:\n{output}");
         Console.WriteLine($"Compiled {sources.Length} scripts");
         // Keep the compiled copies beside the sources (in the source tree, when running from it) up to date.
         foreach (var dir in new[] { precompiled, RepoPapyrusCompiled() }.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))

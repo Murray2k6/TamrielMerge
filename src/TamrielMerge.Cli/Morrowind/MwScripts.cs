@@ -71,14 +71,7 @@ public sealed partial class MwPluginBuilder
             }));
         return (names.Where(Fresh).ToHashSet(StringComparer.OrdinalIgnoreCase), log.ToString());
 
-        static string Run(ProcessStartInfo info)
-        {
-            using var p = Process.Start(info)!;
-            var err = p.StandardError.ReadToEndAsync();
-            string output = p.StandardOutput.ReadToEnd() + err.Result;
-            p.WaitForExit();
-            return output;
-        }
+        static string Run(ProcessStartInfo info) => Skyrim.PapyrusRun.Run(info, info.ArgumentList.Contains("-all") ? Skyrim.PapyrusRun.Batch : Skyrim.PapyrusRun.One).Output;
     }
 
     /// <summary>Writes translated scripts' sources (Windows-1252, as Morrowind's text and Papyrus's strings are).</summary>
