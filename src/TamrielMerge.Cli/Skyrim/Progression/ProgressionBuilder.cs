@@ -247,6 +247,10 @@ public static class ProgressionBuilder
         var built = ProgressionSkills.Prepare(mod, skills);
         var perks = new ProgressionPerks(mod, skyrim, built.Lists.ToDictionary(kv => kv.Key, kv => kv.Value.FormKey), built.Globals);
         ProgressionSkills.Build(mod, skyrim, perks, built);
+        built.HitEffect.VirtualMachineAdapter = new VirtualMachineAdapter
+        {
+            Scripts = [new ScriptEntry { Name = "TMSkillHitEffect", Properties = [new ScriptObjectProperty { Name = "Skills", Object = quest.ToLink<ISkyrimMajorRecordGetter>() }] }],
+        };
         var dfSkills = ProgressionSkills.DaggerfallSkills(dir);
         quest.VirtualMachineAdapter.Scripts.Add(SkillsScript(built, listed, dfSkills));
         var web = PassiveWeb.Build(mod, perks, factions);
@@ -413,6 +417,7 @@ public static class ProgressionBuilder
         sb.Append("  nodes: [").AppendJoin(",\n    ", web.Nodes.Select(n =>
             $"[{F(n.X)}, {F(n.Y)}, {(int)n.Kind}, {Q(n.Name)}, {Q(n.Description)}, {Q(n.GateText)}, {n.Sign}, {n.Stat}, {F(n.Amount)}]")).Append("],\n");
         sb.Append("  links: [").AppendJoin(", ", web.Links.Select(l => $"{l.A}, {l.B}")).Append("],\n");
+        sb.Append("  cx: ").Append(F(PassiveWeb.CentreX)).Append(", cy: ").Append(F(PassiveWeb.CentreY)).Append(",\n");
         sb.Append("  factions: ").Append(factions.Count).Append('\n');
         sb.Append("};");
         return sb.ToString();

@@ -84,6 +84,11 @@ public static class FlashMenus
             var exported = Directory.Exists(back) ? Directory.GetFiles(back, "*.as", SearchOption.AllDirectories) : [];
             if (exported.Length == 0 || new FileInfo(exported[0]).Length < as2Source.Length / 4)
                 throw new InvalidOperationException($"the script didn't compile into {outSwf}: {output}");
+            // Every function of the source must be in the movie.
+            string decompiled = File.ReadAllText(exported[0]);
+            var lost = System.Text.RegularExpressions.Regex.Matches(as2Source, @"function (\w+)\(").Select(m => m.Groups[1].Value).Distinct()
+                .Where(f => !decompiled.Contains($"function {f}(")).ToList();
+            if (lost.Count > 0) throw new InvalidOperationException($"{outSwf} lost functions FFDec couldn't compile: {string.Join(", ", lost)}: {output}");
             return output;
         }
         finally { try { Directory.Delete(work, true); } catch { } }

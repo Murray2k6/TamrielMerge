@@ -246,6 +246,16 @@ Function Tally(Int i, Int uses)
   EndIf
 EndFunction
 
+; How far skill i is toward its next rise, 0-1 (the Tamriel menu's Skills tab, TMSkills.SendState).
+Float Function SkillProgress(Int i)
+  If !skillUses || !Skills || i < 0 || i >= Skills.Length || !Skills[i]
+    Return 0.0
+  EndIf
+  Int value = Skills[i].GetValueInt()
+  Float needed = Math.Floor(value * SkillAdvancement[i] * Math.pow(1.04, PlayerRef.GetLevel()) * 2.0 / 5.0 + 1.0)
+  Return skillUses[i] / needed
+EndFunction
+
 ; CalculateEnemyPacification on first meeting: Etiquette or Streetwise skill / 10 + Personality / 5, a language
 ; skill + Personality / 10 (Skyrim's Speech stands for Personality); +10 with weapons sheathed, else -25; out of 200.
 ; Success tallies the skill 3 times, a failed language once.

@@ -4,8 +4,9 @@ SKSE's UI.OpenCustomMenu from the "Tamriel" power or the "Tamriel Menu" control,
 Settings > Controls; our Interface\Controls\PC\controlmap.txt adds it) and the data behind it. Factions: every converted
 game's joinable factions, found in their plugins at run time (so a game that isn't installed is just left out); the
 menu lists each game's, marking the ones the player belongs to with their rank and title. Coin: each converted game's
-money (kept by TMStoryOrder) and how much the player has of it. The menu asks for its data
-when it has loaded (mod event TM_MenuReady) and says when it closes (TM_MenuClose).}
+money (kept by TMStoryOrder) and how much the player has of it. Skills: TMSkills (the new skills and their perk
+trees). Passives: TMPassives (the passive web). The menu asks for its data when it has loaded (mod event TM_MenuReady),
+each of those tabs when opened (TM_Skills, TM_Web), and says when it closes (TM_MenuClose).}
 
 Actor Property PlayerRef Auto
 Spell Property TamrielPower Auto
@@ -55,6 +56,14 @@ Function Setup()
   TMNightDanger night = (Self as Quest) as TMNightDanger
   If night
     night.Setup()
+  EndIf
+  TMSkills skills = (Self as Quest) as TMSkills
+  If skills
+    skills.Setup()
+  EndIf
+  TMPassives passives = (Self as Quest) as TMPassives
+  If passives
+    passives.Setup()
   EndIf
 EndFunction
 

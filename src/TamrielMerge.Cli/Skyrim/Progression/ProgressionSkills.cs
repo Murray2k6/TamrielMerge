@@ -22,7 +22,7 @@ public sealed record TreePerk(string Name, params TreeRank[] Ranks);
 public sealed record SkillDef(string Name, string[] Games, string Rises, string Effect, float Use, SkillAv[] Avs, SkillEntry[] Entries, TreePerk[] Tree,
     float ImproveMult = 2, float ImproveOffset = 0)
 {
-    public string Id => Regex.Replace(Name, "[^A-Za-z]", "");
+    public string Id => Regex.Replace(Name, "[^A-Za-z]+([a-z]?)", m => m.Groups[1].Value.ToUpperInvariant());
 }
 
 /// <summary>
@@ -223,6 +223,7 @@ public static class ProgressionSkills
         public Dictionary<string, FormKey> Globals = [];
         public Perk HitPerk = null!;
         public Spell HitSpell = null!;
+        public MagicEffect HitEffect = null!;
     }
 
     /// <summary>The globals and lists the skills' conditions name (made before any perk).</summary>
@@ -303,6 +304,7 @@ public static class ProgressionSkills
         hitEffect.HitEffectArt.Clear();
         hitEffect.Keywords?.Clear();
         mod.MagicEffects.Add(hitEffect);
+        b.HitEffect = hitEffect;
         b.HitSpell = new Spell(mod)
         {
             EditorID = "TMSkillHitSpell",

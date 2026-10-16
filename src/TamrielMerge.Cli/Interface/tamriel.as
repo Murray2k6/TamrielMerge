@@ -9,6 +9,10 @@
 // and gets ClearTravel / AddTravel("w|w|name|status", "g|w:g|name|towns" or "t|w:g:t|name|time") / ShowTravel(title) /
 // TravelStatus(text) / TripInfo("name|kind|time|cost|gold|cautious|inn|ship|horse|horse here|speed|note|world|era"); each
 // destination is labelled with its time's era and year ("3E 427").
+// Skills (TMSkills): the build writes the skills and their perk trees into `built`; opening the tab sends TM_Skills
+// ("state"; "take:<perk>") and Papyrus answers SkillState("level,xp,need;...#df level,progress;...#owned perks#perk
+// points#message"). Passives (TMPassives): the web's nodes and links are in `built` too; the tab sends TM_Web ("state";
+// "take:<node>"; "reset") and gets WebState("taken#free points#start#sign#gates open#message#level").
 
 var built = null; // the build's skills and passive web (ProgressionBuilder.MenuData)
 var root = this;
@@ -73,12 +77,17 @@ for (var i = 0; i < tabNames.length; i++) {
     b.onRelease = function() {
         tab = this.index; page = 0;
         if (tab == 2) { trip = null; askTravel("worlds", 0); }
+        if (tab == 3) skse.SendModEvent("TM_Skills", "state", 0);
+        if (tab == 4) skse.SendModEvent("TM_Web", "state", 0);
         draw();
     };
 }
 button(this, "closeButton", 20, W - PAD - 130, H - PAD - 34, 110, 34, "Close", function() { close(); });
 button(this, "prevButton", 21, PAD + 20, H - PAD - 34, 110, 34, "< Previous", function() { if (page > 0) { page--; draw(); } });
 button(this, "nextButton", 22, PAD + 140, H - PAD - 34, 110, 34, "Next >", function() { page++; draw(); });
+// Skills: the buttons step through the skills; Passives has no pages.
+root.prevButton.onRelease = function() { if (tab == 3) { if (skillPick > 0) skillPick--; draw(); } else if (page > 0) { page--; draw(); } };
+root.nextButton.onRelease = function() { if (tab == 3) skillPick++; else page++; draw(); };
 var body = this.createEmptyMovieClip("body", 5);
 
 var keys = new Object();
@@ -86,12 +95,16 @@ keys.onKeyDown = function() { if (Key.getCode() == Key.ESCAPE) close(); };
 Key.addListener(keys);
 
 // ---- Papyrus ----
+// Whether Papyrus has sent each list yet (until then the tab says it is reading them).
+var factionsReady = false;
+var moneyReady = false;
 function ClearFactions(s) { factions = []; }
 function AddFaction(line) { factions.push(line.split("|")); }
-function ShowFactions(s) { if (tab == 0) draw(); }
+function ShowFactions(s) { factionsReady = true; if (tab == 0) draw(); }
 function ClearMoney(s) { money = []; }
 function AddMoney(line) { money.push(line.split("|")); }
 function ShowMoney(s) {
+    moneyReady = true;
     purse.text = "";
     for (var i = 0; i < money.length; i++)
         if (money[i][3] == "1") purse.text = "Carrying " + money[i][2] + " " + money[i][1] + " (" + money[i][0] + ")";
@@ -103,16 +116,28 @@ function draw() {
     body.removeMovieClip();
     body = root.createEmptyMovieClip("body", 5);
     for (var i = 0; i < tabNames.length; i++) root["tab" + i]._alpha = i == tab ? 100 : 55;
+    root.prevButton._visible = tab != 1 && tab != 4;
+    root.nextButton._visible = tab != 1 && tab != 4;
     if (tab == 0) drawFactions();
     else if (tab == 1) drawMoney();
     else if (tab == 2) drawTravel();
-    else drawLater(tab == 3 ? "Skills" : "Passives");
+    else if (tab == 3) drawSkills();
+    else drawWeb();
+}
+
+// A tab's message when it has nothing to list: still reading, or what there is (or isn't) and why.
+function drawNote(what) {
+    var t = text(body, "note", 1, PAD + 20, PAD + 70, W - 2 * PAD - 40, 90, 20, 0xA8A090, false);
+    t.wordWrap = true;
+    t.multiline = true;
+    t.text = what;
 }
 
 // Each converted game's coin and how much of it the player has; the one carried is the coin of the time they're in.
 // With a money changer's or bank's service open, other purses can be changed and the bank's business done below.
 function drawMoney() {
-    if (money.length == 0) { drawLater("Coin from the converted games"); return; }
+    if (!moneyReady) { drawNote("Counting your coin..."); return; }
+    if (money.length == 0) { drawNote("You carry no coin of any time."); return; }
     var head = text(body, "note", 1, PAD + 20, PAD + 66, W - 2 * PAD - 40, 30, 16, 0x8C877C, false);
     head.text = "Each time keeps its own coin. You carry the coin of the time you are in; the rest waits in its purse.";
     for (var i = 0; i < money.length; i++) {
@@ -304,11 +329,6 @@ function drawTrip() {
     }
 }
 
-function drawLater(what) {
-    var t = text(body, "soon", 1, PAD + 20, PAD + 70, W - 2 * PAD - 40, 40, 20, 0xA8A090, false);
-    t.text = what + " are on their way.";
-}
-
 // Factions game by game: name, then rank and title, or "not a member".
 function drawFactions() {
     var lines = [];
@@ -318,7 +338,13 @@ function drawFactions() {
         if (f[0] != game) { game = f[0]; lines.push({ header: game }); }
         lines.push({ name: f[1], rank: Number(f[2]), ranks: Number(f[3]), title: f[4] });
     }
-    if (lines.length == 0) { drawLater("Factions from the converted games"); return; }
+    if (!factionsReady) { drawNote("Reading the factions..."); return; }
+    if (lines.length == 0) {
+        // The build found factions in the converted games, but none of their plugins is in the load order; or it found none.
+        drawNote(built != null && built.factions > 0 ? "None of the converted games' plugins with factions to join is loaded."
+            : "None of the converted games has factions to join.");
+        return;
+    }
     var pages = Math.ceil(lines.length / (PER_PAGE * 2));
     if (page >= pages) page = pages - 1;
     var start = page * PER_PAGE * 2;
@@ -337,6 +363,348 @@ function drawFactions() {
     }
     var p = text(body, "pageNo", 400, W / 2 - 100, H - PAD - 30, 200, 30, 16, 0x8C877C, false, "center");
     p.text = "page " + (page + 1) + " of " + pages;
+}
+
+function wrapped(parent, name, depth, x, y, w, h, size, colour) {
+    var t = text(parent, name, depth, x, y, w, h, size, colour, false);
+    t.wordWrap = true;
+    t.multiline = true;
+    return t;
+}
+
+// A circle centred on (x, y): eight quarter-octant curves.
+function circle(mc, x, y, r) {
+    var k = Math.tan(Math.PI / 8) * r;
+    var s = Math.sin(Math.PI / 4) * r;
+    mc.moveTo(x + r, y);
+    mc.curveTo(x + r, y + k, x + s, y + s);
+    mc.curveTo(x + k, y + r, x, y + r);
+    mc.curveTo(x - k, y + r, x - s, y + s);
+    mc.curveTo(x - r, y + k, x - r, y);
+    mc.curveTo(x - r, y - k, x - s, y - s);
+    mc.curveTo(x - k, y - r, x, y - r);
+    mc.curveTo(x + k, y - r, x + s, y - s);
+    mc.curveTo(x + r, y - k, x + r, y);
+}
+
+// ---- skills: the converted games' skills Skyrim lacks (TMSkills) ----
+var skillState = null;
+var dfState = [];
+var ownedPerks = "";
+var perkPoints = 0;
+var skillMessage = "";
+var skillPick = 0;
+
+function SkillState(line) {
+    var p = line.split("#");
+    skillState = [];
+    if (p[0] != "") {
+        var rows = p[0].split(";");
+        for (var i = 0; i < rows.length; i++) {
+            var v = rows[i].split(",");
+            skillState.push([Number(v[0]), Number(v[1]), Number(v[2])]);
+        }
+    }
+    dfState = [];
+    if (p[1] != "") {
+        var d = p[1].split(";");
+        for (var j = 0; j < d.length; j++) {
+            var w = d[j].split(",");
+            dfState.push([Number(w[0]), Number(w[1])]);
+        }
+    }
+    ownedPerks = p[2];
+    perkPoints = Number(p[3]);
+    skillMessage = p[4];
+    if (tab == 3) draw();
+}
+
+function bar(mc, x, y, w, frac) {
+    box(mc, x, y, w, 8, 0x3A3A40, 100);
+    if (frac > 0) box(mc, x, y, Math.max(2, w * Math.min(1, frac)), 8, 0xD9B76A, 100);
+}
+
+// The skills on the left with level and progress; the chosen one on the right with what it does and its perk tree.
+function drawSkills() {
+    if (built == null || (built.skills.length == 0 && built.df.length == 0)) {
+        drawNote("None of the converted games has skills Skyrim lacks (Redguard's are Skyrim's own), so there are no new skills.");
+        return;
+    }
+    if (skillState == null) { drawNote("Reading your skills..."); return; }
+    var count = built.skills.length + (built.df.length > 0 ? 1 : 0);
+    if (skillPick >= count) skillPick = count - 1;
+    var points = text(body, "points", 2, W - PAD - 340, PAD + 66, 320, 28, 18, 0xD9B76A, true, "right");
+    points.text = "Perk points: " + perkPoints;
+    for (var i = 0; i < count; i++) {
+        var row = body.createEmptyMovieClip("row" + i, 10 + i);
+        box(row, 0, 0, 470, 30, i == skillPick ? 0x3A3426 : 0x1E1E24, 90);
+        row._x = PAD + 20;
+        row._y = PAD + 100 + i * 33;
+        var n = text(row, "n", 1, 10, 4, 230, 26, 17, i == skillPick ? 0xF0E6C8 : 0xC8C0B0, i == skillPick);
+        if (i < built.skills.length) {
+            var st = skillState[i];
+            n.text = built.skills[i].n;
+            var lv = text(row, "l", 2, 236, 4, 50, 26, 17, 0xD9B76A, true, "right");
+            lv.text = st != undefined ? String(st[0]) : "";
+            if (st != undefined) bar(row, 300, 11, 155, st[0] >= 100 ? 1 : (st[2] > 0 ? st[1] / st[2] : 0));
+        } else {
+            n.text = "Daggerfall's own skills";
+        }
+        row.index = i;
+        row.onRelease = function() { skillPick = this.index; draw(); };
+        row.onRollOver = function() { this._alpha = 80; };
+        row.onRollOut = function() { this._alpha = 100; };
+    }
+    if (skillPick < built.skills.length) drawSkill(skillPick);
+    else drawDfSkills();
+    if (skillMessage != "") {
+        var m = text(body, "msg", 3, PAD + 280, H - PAD - 64, W - 2 * PAD - 440, 28, 16, 0xE8C878, false);
+        m.text = skillMessage;
+    }
+}
+
+function drawSkill(i) {
+    var s = built.skills[i];
+    var st = skillState[i];
+    var x0 = PAD + 520;
+    var w0 = W - PAD - 20 - x0;
+    var head = text(body, "sName", 100, x0, PAD + 96, w0, 34, 24, 0xD9B76A, true);
+    head.text = s.n + (st != undefined ? "  " + st[0] : "");
+    var from = wrapped(body, "sFrom", 101, x0, PAD + 130, w0, 44, 15, 0x8C877C);
+    from.text = "From " + s.f + ". Rises with " + s.r + ".";
+    var does = wrapped(body, "sDoes", 102, x0, PAD + 172, w0, 44, 15, 0xC8C0B0);
+    does.text = "Its level: " + s.e + ", growing with each level.";
+    var xp = text(body, "sXp", 103, x0, PAD + 214, w0, 24, 15, 0xA8A090, false);
+    if (st == undefined) xp.text = "";
+    else if (st[0] >= 100) xp.text = "Mastered.";
+    else xp.text = "Experience " + st[1] + " of " + st[2] + " toward " + (st[0] + 1) + ".";
+    // The perk tree: each perk a column, its ranks one below the other.
+    var chains = [];
+    for (var k = 0; k < built.perks.length; k++) {
+        var p = built.perks[k];
+        if (p[0] != i) continue;
+        if (p[2] < 0) chains.push([k]);
+        else for (var c = 0; c < chains.length; c++) if (chains[c][chains[c].length - 1] == p[2]) chains[c].push(k);
+    }
+    var links = body.createEmptyMovieClip("perkLinks", 110);
+    var colW = Math.min(196, Math.floor((w0 - (chains.length - 1) * 10) / Math.max(1, chains.length)));
+    var top = PAD + 248;
+    var depth = 120;
+    for (var c2 = 0; c2 < chains.length; c2++) {
+        for (var r = 0; r < chains[c2].length; r++) {
+            var n = chains[c2][r];
+            var q = built.perks[n];
+            var x = x0 + c2 * (colW + 10);
+            var y = top + r * 116;
+            var owned = ownedPerks.charAt(n) == "1";
+            var reach = st != undefined && st[0] >= q[1];
+            var before = q[2] < 0 || ownedPerks.charAt(q[2]) == "1";
+            var card = body.createEmptyMovieClip("perk" + n, depth++);
+            box(card, 0, 0, colW, 104, owned ? 0x4A4026 : (reach && before ? 0x2A2A30 : 0x18181C), 95);
+            card._x = x;
+            card._y = y;
+            var name = text(card, "n", 1, 8, 4, colW - 16, 24, 16, owned ? 0xF0E6C8 : (reach ? 0xD9B76A : 0x8C877C), true);
+            name.text = q[3] + (q[5] > 1 ? " " + q[4] : "");
+            var need = text(card, "r", 2, 8, 24, colW - 16, 20, 13, 0x8C877C, false);
+            need.text = s.n + " " + q[1] + (owned ? "  -  taken" : "");
+            var desc = wrapped(card, "d", 3, 8, 42, colW - 16, 40, 13, 0xC8C0B0);
+            desc.text = q[6];
+            if (!owned && reach && before) {
+                var take = button(card, "take", 4, colW - 78, 76, 70, 24, "Take", null);
+                take.perk = n;
+                take.onRelease = function() { skse.SendModEvent("TM_Skills", "take:" + this.perk, 0); };
+            }
+            if (r > 0) {
+                links.lineStyle(2, owned ? 0xD9B76A : 0x4A4A52, 100);
+                links.moveTo(x + colW / 2, y - 12);
+                links.lineTo(x + colW / 2, y);
+            }
+        }
+    }
+}
+
+// Daggerfall's own skills (DFSkill<name>): levels and progress, raised as Daggerfall raises them.
+function drawDfSkills() {
+    var x0 = PAD + 520;
+    var w0 = W - PAD - 20 - x0;
+    var head = text(body, "sName", 100, x0, PAD + 96, w0, 34, 24, 0xD9B76A, true);
+    head.text = "Daggerfall's own skills";
+    var about = wrapped(body, "sAbout", 101, x0, PAD + 130, w0, 64, 15, 0x8C877C);
+    about.text = "Raised as Daggerfall raises them: a language by calming the creatures that speak it, Etiquette and Streetwise by talking down nobles and the underworld.";
+    for (var i = 0; i < built.df.length; i++) {
+        var y = PAD + 200 + i * 30;
+        var d = dfState[i];
+        var n = text(body, "df" + i, 120 + i * 2, x0, y, 240, 26, 17, 0xF0E6C8, false);
+        n.text = built.df[i];
+        var lv = text(body, "dl" + i, 121 + i * 2, x0 + 240, y, 120, 26, 17, 0xD9B76A, true, "right");
+        if (d == undefined || d[0] < 0) lv.text = "not loaded";
+        else {
+            lv.text = String(d[0]);
+            bar(body, x0 + 380, y + 8, 180, d[0] >= 100 ? 1 : d[1] / 100);
+        }
+    }
+}
+
+// ---- passives: the web (TMPassives) ----
+var webTaken = null;
+var webFree = 0;
+var webStart = -1;
+var webSign = -1;
+var webGates = "";
+var webMessage = "";
+var webLevel = 1;
+var webHover = -1;
+var webInfo = null;
+var NODE_SIZE = [5, 9, 12, 10];
+var NODE_KIND = ["", "Notable", "Keystone", "Birthsign"];
+
+function WebState(line) {
+    var p = line.split("#");
+    webTaken = p[0];
+    webFree = Number(p[1]);
+    webStart = Number(p[2]);
+    webSign = Number(p[3]);
+    webGates = p[4];
+    webMessage = p[5];
+    webLevel = Number(p[6]);
+    if (tab == 4) draw();
+}
+
+function isTaken(n) { return webTaken.charAt(n) == "1"; }
+
+// What the player could take now: the start (theirs, or any sign without one), or a node touching one taken.
+function reachable() {
+    var reach = [];
+    var L = built.links;
+    for (var i = 0; i < L.length; i += 2) {
+        if (isTaken(L[i])) reach[L[i + 1]] = true;
+        if (isTaken(L[i + 1])) reach[L[i]] = true;
+    }
+    return reach;
+}
+
+function canTake(n, reach) {
+    if (isTaken(n)) return false;
+    var node = built.nodes[n];
+    if (webStart < 0) return node[2] == 3 && (webSign < 0 || node[6] == webSign);
+    return reach[n] == true && webFree > 0 && webGates.charAt(n) == "1";
+}
+
+// The web: links, then nodes (taken gold, takeable bright-edged, closed by a faction rank red), the signs named round
+// the edge; hovering a node shows it on the right, a click takes it.
+function drawWeb() {
+    if (built == null || built.nodes.length == 0) { drawNote("This menu was built without the passive web."); return; }
+    if (webTaken == null) { drawNote("Reading your passive web..."); return; }
+    var reach = reachable();
+    var lines = body.createEmptyMovieClip("lines", 1);
+    var L = built.links;
+    for (var i = 0; i < L.length; i += 2) {
+        var a = built.nodes[L[i]];
+        var b = built.nodes[L[i + 1]];
+        var both = isTaken(L[i]) && isTaken(L[i + 1]);
+        var one = isTaken(L[i]) || isTaken(L[i + 1]);
+        lines.lineStyle(both ? 3 : 1, both ? 0xD9B76A : (one ? 0x8C7A4A : 0x44444C), 100);
+        lines.moveTo(a[0], a[1]);
+        lines.lineTo(b[0], b[1]);
+    }
+    for (var n = 0; n < built.nodes.length; n++) {
+        var node = built.nodes[n];
+        var r = NODE_SIZE[node[2]];
+        var taken = isTaken(n);
+        var open = webGates.charAt(n) == "1";
+        var can = canTake(n, reach);
+        var c = body.createEmptyMovieClip("node" + n, 10 + n);
+        // A wider, invisible hit area for the small nodes.
+        c.beginFill(0x000000, 0);
+        circle(c, 0, 0, r + 4);
+        c.endFill();
+        var edge = node[2] == 2 ? 0xE0A040 : (node[2] == 1 ? 0xC8B88A : (node[2] == 3 ? 0x90B0E0 : 0x6A6A72));
+        c.lineStyle(can ? 2 : 1, can ? 0xF0E6C8 : edge, 100);
+        c.beginFill(taken ? 0xD9B76A : (!open ? 0x5A2A2A : (can ? 0x5A5040 : 0x24242A)), 100);
+        circle(c, 0, 0, r);
+        c.endFill();
+        c._x = node[0];
+        c._y = node[1];
+        c.index = n;
+        c.onRollOver = function() { webHover = this.index; drawWebInfo(); };
+        c.onRollOut = function() { if (webHover == this.index) webHover = -1; drawWebInfo(); };
+        c.onRelease = function() { skse.SendModEvent("TM_Web", "take:" + this.index, 0); };
+        if (node[2] == 3) {
+            // The sign's name outside the ring, along its spoke.
+            var dx = node[0] - built.cx;
+            var dy = node[1] - built.cy;
+            var len = Math.sqrt(dx * dx + dy * dy);
+            var lx = built.cx + dx / len * 268;
+            var ly = built.cy + dy / len * 268;
+            var label = text(body, "sign" + n, 300 + n, lx - 50, ly - 9, 100, 20, 12, node[6] == webSign ? 0xF0E6C8 : 0x90A0B8, node[6] == webSign, "center");
+            label.text = built.signs[node[6]];
+        }
+    }
+    var reset = button(body, "reset", 600, W - PAD - 270, H - PAD - 34, 130, 34, "Reset", null);
+    reset.onRelease = function() { skse.SendModEvent("TM_Web", "reset", 0); };
+    drawWebInfo();
+}
+
+// The right panel: points and start; the node under the mouse; or, with none, what has been taken in all.
+function drawWebInfo() {
+    if (webInfo != null) webInfo.removeMovieClip();
+    webInfo = body.createEmptyMovieClip("info", 500);
+    var x0 = 850;
+    var w0 = W - PAD - 10 - x0;
+    var pts = text(webInfo, "pts", 1, x0, PAD + 70, w0, 28, 20, 0xD9B76A, true);
+    pts.text = webFree + " of " + webLevel + " points free";
+    var st = wrapped(webInfo, "start", 2, x0, PAD + 100, w0, 44, 15, 0xA8A090);
+    if (webStart >= 0) st.text = "Begun at " + built.nodes[webStart][3] + ". Take nodes next to those you have; each level brings a point.";
+    else if (webSign >= 0) st.text = "Born under the " + built.signs[webSign] + ": begin there (it is free).";
+    else st.text = "No birthsign is known: begin at whichever sign you choose (it is free).";
+    var y = PAD + 156;
+    if (webHover >= 0) {
+        var node = built.nodes[webHover];
+        var name = text(webInfo, "name", 3, x0, y, w0, 28, 19, 0xF0E6C8, true);
+        name.text = node[3];
+        y += 28;
+        if (NODE_KIND[node[2]] != "") {
+            var kind = text(webInfo, "kind", 4, x0, y, w0, 22, 14, node[2] == 2 ? 0xE0A040 : 0xC8B88A, false);
+            kind.text = NODE_KIND[node[2]];
+            y += 22;
+        }
+        if (node[4] != node[3]) {
+            var desc = wrapped(webInfo, "desc", 5, x0, y, w0, 64, 15, 0xC8C0B0);
+            desc.text = node[4];
+            y += 66;
+        }
+        if (node[5] != "") {
+            var gate = wrapped(webInfo, "gate", 6, x0, y, w0, 64, 14, webGates.charAt(webHover) == "1" ? 0x8C877C : 0xD07060);
+            gate.text = node[5];
+            y += 66;
+        }
+        var state = text(webInfo, "state", 7, x0, y, w0, 22, 14, 0xA8A090, false);
+        if (isTaken(webHover)) state.text = "Taken.";
+        else if (canTake(webHover, reachable())) state.text = "Click to take it.";
+        else if (webStart < 0) state.text = "Begin at your birthsign first.";
+        else if (webGates.charAt(webHover) != "1") state.text = "Your rank is too low for it.";
+        else if (webFree < 1) state.text = "No points free.";
+        else state.text = "Take a node next to it first.";
+    } else {
+        // Totals of what is taken: the small nodes' stats, then the notables and keystones.
+        var sums = [];
+        var named = [];
+        for (var n = 0; n < built.nodes.length; n++) {
+            if (!isTaken(n)) continue;
+            var nd = built.nodes[n];
+            if (nd[7] >= 0) sums[nd[7]] = (sums[nd[7]] == undefined ? 0 : sums[nd[7]]) + nd[8];
+            if (nd[2] == 1 || nd[2] == 2) named.push(nd[3]);
+        }
+        var lines = [];
+        for (var s = 0; s < built.stats.length; s++) if (sums[s] != undefined) lines.push("+" + Math.round(sums[s] * 10) / 10 + " " + built.stats[s]);
+        for (var k = 0; k < named.length; k++) lines.push(named[k]);
+        var total = wrapped(webInfo, "total", 8, x0, y, w0, H - PAD - 80 - y, 14, 0xC8C0B0);
+        total.text = lines.length == 0 ? "Nothing taken yet." : lines.join("\n");
+    }
+    if (webMessage != "") {
+        var m = wrapped(webInfo, "msg", 9, x0, H - PAD - 110, w0, 44, 15, 0xE8C878);
+        m.text = webMessage;
+    }
 }
 
 draw();
