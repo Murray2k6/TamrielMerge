@@ -227,6 +227,8 @@ public static class DungeonCheck
             var allBlocks = refs.OfType<IPlacedObjectGetter>().Where(r => bases.TryGetValue(r.Base.FormKey, out var bb) && bb.EditorId.StartsWith("DFDunBlk")).ToList();
             Console.WriteLine($"  all {allBlocks.Count} block refs x {allBlocks.Min(r => r.Placement!.Position.X)}..{allBlocks.Max(r => r.Placement!.Position.X)} y {allBlocks.Min(r => r.Placement!.Position.Y)}..{allBlocks.Max(r => r.Placement!.Position.Y)}");
             foreach (var t in floors.Near(qx - 64, qy - 64, qx + 64, qy + 64).Take(8)) Console.WriteLine($"  floor near: {t.A} {t.B} {t.C}");
+            Console.WriteLine("  flat faces right under it: " + string.Join(", ", floors.Near(qx, qy, qx, qy).Select(t => (t, h: HeightAt(t, qx, qy))).Where(x => x.h is not null)
+                .Select(x => $"{x.h:F0} (n.z {x.t.N.Z:F2})").Distinct()));
             foreach (var t in all.Near(qx - 32, qy - 32, qx + 32, qy + 32).Take(8)) Console.WriteLine($"  any near: {t.A} {t.B} {t.C} n {t.N}");
         }
         // Solid objects' boxes (turned about z), for what things rest on and what people stand in.
@@ -234,6 +236,9 @@ public static class DungeonCheck
         foreach (var r in refs.OfType<IPlacedObjectGetter>())
         {
             if (r.Placement is not { } pl || !bases.TryGetValue(r.Base.FormKey, out var bi) || !Solid.Contains(bi.Type) || bi.EditorId.StartsWith("DFDunBlk")) continue;
+            // Markers and other things of no size: a box without area read as covering the whole cell (2026-10-16: every
+            // XMarkerHeading was a "floor" everywhere at its height, 71,236 things sunk into floors that weren't there).
+            if (bi.Max.X - bi.Min.X < 1 || bi.Max.Y - bi.Min.Y < 1 || bi.EditorId.Contains("Marker", StringComparison.OrdinalIgnoreCase)) continue;
             float sc = r.Scale ?? 1, h = pl.Rotation.Z, c = MathF.Cos(h), s = MathF.Sin(h);
             var p = pl.Position;
             var corners = (from x in new[] { bi.Min.X * sc, bi.Max.X * sc } from y in new[] { bi.Min.Y * sc, bi.Max.Y * sc }
@@ -254,8 +259,11 @@ public static class DungeonCheck
                 if (sign == 0) sign = MathF.Sign(d);
                 if (MathF.Sign(d) != sign || MathF.Abs(d) < shrink) return false;
             }
-            return true;
+            return sign != 0;   // a box without area holds nothing
         }
+        if (Environment.GetEnvironmentVariable("TM_CHECK_NEAR") is { Length: > 0 } near3 && near3.Split(',') is [var c3, var x3, var y3] && c3 == cellName)
+            foreach (var b in boxes.Where(b => Inside(b, float.Parse(x3), float.Parse(y3))))
+                Console.WriteLine($"  box over it: {b.Key} {(refs.FirstOrDefault(r => r.FormKey == b.Key) is IPlacedObjectGetter br && bases.TryGetValue(br.Base.FormKey, out var bb) ? bb.EditorId : "?")} bottom {b.Bottom:F0} top {b.Top:F0}");
         float? SupportBelow(float x, float y, float z, FormKey self)
         {
             float? best = null;

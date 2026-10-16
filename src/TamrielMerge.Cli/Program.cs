@@ -2580,6 +2580,19 @@ static class Program
                 // duration, tag), across every RDB block.
                 var wantModels = opts.GetValueOrDefault("models", "61032").Split(',').Select(uint.Parse).ToHashSet();
                 var bsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                // --location NAME: every action model in that location's dungeon blocks, one line each.
+                if (opts.TryGetValue("location", out var locName))
+                {
+                    var loc = DfLocations.LoadAll(arena2).First(l => l.Name.Equals(locName, StringComparison.OrdinalIgnoreCase));
+                    foreach (var blockName in loc.DungeonBlocks.Select(b => b.BlockName).Distinct(StringComparer.OrdinalIgnoreCase))
+                    {
+                        var block = DfDungeonBlock.Load(bsa, blockName);
+                        for (int i = 0; i < block.Objects.Count; i++)
+                            if (block.Objects[i] is { Action: { } a } o && o.Type == DfRdbObjectType.Model)
+                                Console.WriteLine($"  {blockName} #{i} model {o.ModelId} tag {o.Tag} type {a.Flags} axis {a.Axis} magnitude {a.Magnitude} duration {a.Duration} at ({o.Position.X:F0},{o.Position.Y:F0},{o.Position.Z:F0}) rot ({o.Rotation.X},{o.Rotation.Y},{o.Rotation.Z}) trigger {o.TriggerAndLock} next {a.NextObjectIndex}");
+                    }
+                    return 0;
+                }
                 var tally = new Dictionary<string, int>();
                 foreach (var e in bsa.Entries.Where(e => e.Name.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase)))
                     foreach (var o in DfDungeonBlock.Load(bsa, e.Name).Objects.Where(o => o.Type == DfRdbObjectType.Model && wantModels.Contains(o.ModelId) && o.Action is not null))

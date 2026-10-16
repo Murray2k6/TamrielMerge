@@ -111,13 +111,20 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             foreach (var t in tris)
             {
                 Vector3 a = V(verts[t.Vertices.X]), b = V(verts[t.Vertices.Y]), c = V(verts[t.Vertices.Z]);
-                if (HeightOver(a, b, c, p.X, p.Y) is { } h && MathF.Abs(h - p.Z) <= 24) { on = true; break; }
+                // On it: over a triangle and within 64 (the mesh lies up to about 32 over the floor the actor stands on).
+                if (HeightOver(a, b, c, p.X, p.Y) is { } h && MathF.Abs(h - p.Z) <= 64) { on = true; break; }
                 var q = ClosestOnTriangle(p, a, b, c);
-                float d = Vector3.DistanceSquared(p, q);
+                // The same level only (at most 96 up or down), height counting four times: the nearest point in plain
+                // distance was often on the floor above or below (2026-10-16: 360 actors 700-1,200 units off).
+                float dz = q.Z - p.Z;
+                if (MathF.Abs(dz) > 96) continue;
+                float d = (q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y) + 16 * dz * dz;
                 if (d < best) { best = d; at = q + ((a + b + c) / 3 - q) * 0.2f; }
             }
             if (on || at is not { } to) continue;
-            pl.Position = new P3Float(to.X, to.Y, to.Z + 4);
+            // Its own height when the mesh is level with it (the mesh floats over the floor; set on it, an actor stood 36
+            // units up), else the mesh's.
+            pl.Position = new P3Float(to.X, to.Y, MathF.Abs(to.Z - p.Z) <= 48 ? p.Z : to.Z + 4);
             moved++;
         }
         return moved;
