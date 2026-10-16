@@ -60,6 +60,11 @@ static class Program
                 string? staging = opts.ContainsKey("no-staging") ? null
                     : opts.ContainsKey("resume") && Util.Drives.Seeks(finalDir) == true && Util.Drives.ExistingStaging("TamrielMergeBuild") is { } left ? left
                     : Util.Drives.FastStaging(finalDir, ConvertSize(Has), "TamrielMergeBuild");
+                if (staging is null && !opts.ContainsKey("no-staging") && Util.Drives.Seeks(finalDir) == true)
+                    // 2026-10-15: with 70 GB free on the solid-state drive the build went to the hard disk without a word,
+                    // and its hundreds of thousands of small files took many times as long.
+                    Console.WriteLine($"Output: {finalDir} is on a hard disk and no solid-state drive has {ConvertSize(Has) >> 30} GB free beyond what is kept for "
+                        + "Windows: building there directly, which is much slower. Free some space on a solid-state drive to build faster.");
                 if (staging is not null)
                 {
                     // A stopped run's partial build is cleared, unless this run carries it on (--resume).
