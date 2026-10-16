@@ -744,7 +744,9 @@ public sealed partial class RgPluginBuilder
         foreach (var scene in scenes.Values)
             foreach (var call in scene.Script.Calls.Where(c => c.Function == loadWorld && c.Args.Length >= 3))
                 foreach (var o in scene.Data.Objects.Where(o => o.Script.Equals(call.Actor, StringComparison.OrdinalIgnoreCase)).Take(1))
-                    if (call.Args[1] is int marker)
+                    // A person's own map change (VILEKID after the riddles: its map a flag it sets) is its script's
+                    // (S_LoadWorld), not a door where it stands.
+                    if (call.Args[1] is int marker && !(call.Args[0] is null && People.ContainsKey(call.Actor)))
                         triggers.Add(new Trigger(scene, call.Actor, o.Position, call.Args[0], marker, call.Args[2] ?? 0));
         triggers = triggers.DistinctBy(t => (t.From.Name, t.Actor, t.World, t.Marker)).ToList();
 
@@ -892,6 +894,10 @@ public sealed partial class RgPluginBuilder
         foreach (var scene in scenes.Values.OrderBy(s => s.Name == "ISLAND" ? 1 : s.Terrain is null ? 0 : 2)) PlaceActors(scene);
         foreach (var scene in scenes.Values) PlaceScriptMarkers(scene);
         log?.Invoke($"placed {Statics} statics, {Props} props, {LightCount} lights, {Effects} effects, {ActorCount} actors; {statics.Count} models");
+        // Ropes, and the ledges Redguard's Cyrus could catch (RgEngine), once the places' models are there.
+        foreach (var scene in scenes.Values) { PlaceRopes(scene); PlaceLedges(scene); }
+        surfaces.Clear();
+        log?.Invoke($"ropes: {Ropes} ({RopeSwings} to swing on); ledges: {Ledges} to climb");
 
         // The start: where the opening cutscene (START.RGM) sends Cyrus — Stros M'Kai's docks.
         var start = ini.Maps.TryGetValue(ini.StartWorld, out var startMap) ? startMap : null;

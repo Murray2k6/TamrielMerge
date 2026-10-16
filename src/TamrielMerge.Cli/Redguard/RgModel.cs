@@ -234,6 +234,11 @@ public sealed class RgScene
     public List<(uint Rgb, Vector3 Position, int Range)> Lights { get; } = [];
     /// <summary>Flat textured quads (MPSF: 24-byte records): position and texture (bank, image).</summary>
     public List<(Vector3 Position, int Bank, int Image)> Flats { get; } = [];
+    /// <summary>A rope or chain (MPRP: 80-byte records — its top as 3 x i32 in 256ths at 4, the number of links (i16) at
+    /// 32, what hangs on its end (9 chars, a model, often none) at 34 and the link's model at 43, ROPELINK or
+    /// CHAINLNK). The player swings and climbs on ropes; chains carry chandeliers and cages.</summary>
+    public sealed record Rope(Vector3 Top, int Links, string Hang, string Link);
+    public List<Rope> Ropes { get; } = [];
     public Dictionary<string, (int Offset, int Length)> Sections { get; } = [];
 
     static int I24(byte[] b, int o) { int v = b[o] | b[o + 1] << 8 | b[o + 2] << 16; return (v & 0x800000) != 0 ? v - 0x1000000 : v; }
@@ -303,6 +308,17 @@ public sealed class RgScene
                 if (b[o + 0x1F] != 1 || b[o + 0x25] != 7) continue;   // channel map 0..7: an active light
                 uint C(int at) => (uint)Math.Min(255, Math.Abs((int)BitConverter.ToInt16(b, o + at)));
                 scene.Lights.Add((C(0x18) << 16 | C(0x1A) << 8 | C(0x1C), new Vector3(BitConverter.ToInt32(b, o + 8), BitConverter.ToInt32(b, o + 12), BitConverter.ToInt32(b, o + 16)), BitConverter.ToInt32(b, o + 0x14)));
+            }
+        }
+        if (scene.Sections.TryGetValue("MPRP", out var mprp))
+        {
+            int n = BitConverter.ToInt32(b, mprp.Offset);
+            for (int i = 0; i < n && mprp.Offset + 4 + (i + 1) * 80 <= mprp.Offset + mprp.Length; i++)
+            {
+                int o = mprp.Offset + 4 + i * 80;
+                string S(int at) => System.Text.Encoding.ASCII.GetString(b, o + at, 9).Split('\0')[0].Trim();
+                scene.Ropes.Add(new Rope(new Vector3(BitConverter.ToInt32(b, o + 4), BitConverter.ToInt32(b, o + 8), BitConverter.ToInt32(b, o + 12)) / 256f,
+                    BitConverter.ToInt16(b, o + 32), S(34), S(43)));
             }
         }
         if (scene.Sections.TryGetValue("MPSF", out var mpsf))

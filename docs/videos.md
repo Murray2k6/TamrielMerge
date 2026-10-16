@@ -24,6 +24,18 @@ They are only resized (`remaster.py --plain`: bicubic to 1440x1080, no model), s
 the Python environment but not the upscaler; `--upscale-quest-videos` runs them through Real-ESRGAN as the intros are
 (slow on the CPU). `--no-quest-videos` leaves them out. Dev: `videos --quest-videos-only --anims 11,AZURA`.
 
+## Redguard's story movies
+
+Redguard plays ten more movies in the story (MENU.INI `movie_name[n]`, Smacker files on the CD): 1 SCENE3 (the
+journal), 2 SCENE7 (escaping N'Gasta's isle after Vile's riddles), 3 SCENE10 (A'tor's soul going into the sword), 4 WIN
+(the ending), 5-10 C/A/B_RUINS1-2 (the dwarven ruins' machines). The videos step (Redguard/RgMovies.cs) extracts each
+from REDGUARD.bin and remasters it as the intro is (640x240 interlaced shown at 640x480, then 1440x1080) to
+`Video\TamrielMerge_RedguardMovie{n}.bik`, with the movie's lines (`movie#_text`: first and last frame, text) drawn at
+the foot of their frames (`remaster.py --subtitles`), since Skyrim's Bink player shows no text. The scripts play them
+where Redguard queued them (QueueMovie(n) right before the map change that followed; WonGame plays 4) through
+`Game.PlayBink` (TMRgState.PlayMovie). `videos --no-upscale` (and `remaster.py --no-upscale`) only resizes the frames,
+for a quick check (C_RUINS1, 111 frames: 38 s).
+
 ## The ray-traced look (`--gpu`)
 
 User request (2026-10-08): the intros made to look ray-traced, like the path-traced menu intro. They are footage, so

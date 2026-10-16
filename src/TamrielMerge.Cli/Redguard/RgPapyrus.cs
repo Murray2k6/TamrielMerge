@@ -30,9 +30,40 @@ public sealed class RgPapyrus
         (int Index, string Text, float Seconds) Line(int tag, bool cyrus);
         /// <summary>Cyrus's log entry's stage on the log quest.</summary>
         int LogStage(int tag);
-        /// <summary>Whether this LoadWorld is already a load door (the trigger converted by BuildDoors).</summary>
-        bool LoadWorldIsDoor(int? map, int? marker);
+        /// <summary>Whether this LoadWorld is already a load door (the trigger converted by BuildDoors); setByScript:
+        /// the map is a flag the script set just before (its own choice of map, not a door's way back).</summary>
+        bool LoadWorldIsDoor(int? map, int? marker, bool setByScript);
+        /// <summary>A place a script names by number (Redguard's x east, y down, z north, whole units) where it is in
+        /// Skyrim (the scene's stretched world).</summary>
+        System.Numerics.Vector3 Place(System.Numerics.Vector3 redguard);
+        /// <summary>What HandItem(n) becomes in Skyrim (a weapon or torch equipped, a potion's own use, or nothing).</summary>
+        Category HandItem(int item);
+        /// <summary>A screen picture (ViewGXA's file) as the build's picture number, -1 for none.</summary>
+        int Picture(string file);
+        /// <summary>The script acts on Cyrus (an item's use script, COMMON): its animations are his.</summary>
+        bool ActsOnPlayer { get; }
     }
+
+    /// <summary>
+    /// Redguard's animation groups (SOUP386.DEF's anim_* order) that Skyrim has an idle for, by Skyrim's EditorID:
+    /// people's and Cyrus's (whose numbered "misc" groups are his own: 12 is drinking in every use script). The
+    /// translator counts a group with an idle as Skyrim's behaviour; TMRgState plays it (RGIdles, RGPlayerIdles).
+    /// </summary>
+    public static readonly Dictionary<int, string> PeopleIdles = new()
+    {
+        [0] = "IdleNervous", [1] = "IdleStop", [2] = "IdleLookAround", [3] = "IdleWipeBrow", [144] = "IdleActivatePickUpLow",
+        [152] = "IdleStop", [153] = "DialogueNeutralExpressive", [154] = "DialogueHappyExpressive", [155] = "DialogueAngryExpressive",
+    };
+
+    public static readonly Dictionary<int, string> CyrusIdles = new()
+    {
+        [1] = "IdleStop", [12] = "IdleDrink", [144] = "IdlePickup_Ground", [145] = "IdleLeverPush_Player", [146] = "IdleLeverPush_Player",
+        [147] = "IdleLeverPush_Player", [148] = "IdleLeverPush_Player", [152] = "IdleStop",
+    };
+
+    /// <summary>Attributes that act in Skyrim when set (TMRgSoup.S_SetAttribute): strength, health, armor, group,
+    /// aggression, invulnerable; the panic group (44) when its idle exists.</summary>
+    static readonly HashSet<int> ActingAttributes = [2, 3, 4, 29, 58, 120];
 
     public sealed record Output(string ScriptName, string Source, int Statements, Dictionary<Category, int> Counts,
         Dictionary<string, Dictionary<Category, int>> ByFunction, List<string> Objects, List<(int? Map, int? Marker, int? Facing)> Places,
@@ -64,26 +95,29 @@ public sealed class RgPapyrus
     /// </summary>
     static readonly Dictionary<string, (Category Cat, string Why)> Kinds = new(StringComparer.OrdinalIgnoreCase)
     {
-        // The camera: Redguard's cutscene camera moves; the player's camera stays (Papyrus has no camera placement).
-        ["showObj"] = (Category.NoEffect, "camera"), ["showObjLoc"] = (Category.NoEffect, "camera"), ["showObjPan"] = (Category.NoEffect, "camera"),
-        ["showObjPanLoc"] = (Category.NoEffect, "camera"), ["showObjRot"] = (Category.NoEffect, "camera"), ["lookObj"] = (Category.NoEffect, "camera"),
-        ["showPlayer"] = (Category.NoEffect, "camera"), ["showPlayerPan"] = (Category.NoEffect, "camera"), ["lookCyrus"] = (Category.NoEffect, "camera"),
-        ["showCyrus"] = (Category.NoEffect, "camera"), ["showCyrusLoc"] = (Category.NoEffect, "camera"), ["showCyrusPan"] = (Category.NoEffect, "camera"),
-        ["showCyrusPanLoc"] = (Category.NoEffect, "camera"), ["XResetCamera"] = (Category.NoEffect, "camera"), ["updatePlayerViewAttrib"] = (Category.NoEffect, "camera"),
-        ["cameraController"] = (Category.NoEffect, "camera"),
-        // Redguard's animation numbers and hand items: Skyrim's animations are its own (times kept by the frame waits).
+        // The camera: Skyrim's can't be placed, so a shot of an object turns the player's view to it and a shot of Cyrus
+        // is the third-person camera on him (TMRgState.ShotOf/ShotOfCyrus); showPlayer gives the camera back.
+        ["showObj"] = (Category.Approximate, "camera shot"), ["showObjLoc"] = (Category.Approximate, "camera shot"), ["showObjPan"] = (Category.Approximate, "camera shot"),
+        ["showObjPanLoc"] = (Category.Approximate, "camera shot"), ["showObjRot"] = (Category.Approximate, "camera shot"), ["lookObj"] = (Category.Approximate, "camera shot"),
+        ["showPlayer"] = (Category.Native, "camera back"), ["showPlayerPan"] = (Category.Native, "camera back"), ["lookCyrus"] = (Category.Approximate, "camera shot"),
+        ["showCyrus"] = (Category.Approximate, "camera shot"), ["showCyrusLoc"] = (Category.Approximate, "camera shot"), ["showCyrusPan"] = (Category.Approximate, "camera shot"),
+        ["showCyrusPanLoc"] = (Category.Approximate, "camera shot"), ["XResetCamera"] = (Category.Native, "camera back"), ["updatePlayerViewAttrib"] = (Category.Approximate, "camera"),
+        ["cameraController"] = (Category.Approximate, "camera"),
+        // Redguard's animation groups: Skyrim's idle where it has one (PeopleIdles/CyrusIdles, decided per call), the times
+        // kept by the frame waits; hand items: Skyrim's equip calls (decided per item).
         ["PushAnimation"] = (Category.Approximate, "animation"), ["PushControlAnimation"] = (Category.Approximate, "animation"),
         ["PlayAnimation"] = (Category.Approximate, "animation"), ["WaitAnimFrame"] = (Category.Approximate, "animation time"),
         ["WaitPlayerAnimFrame"] = (Category.Approximate, "animation time"), ["SetAction"] = (Category.NoEffect, "animation"),
         ["ResetAction"] = (Category.NoEffect, "animation"), ["ResetAllAction"] = (Category.NoEffect, "animation"), ["HoldAnimation"] = (Category.NoEffect, "animation"),
-        ["ReleaseAnimation"] = (Category.NoEffect, "animation"), ["PauseAnimation"] = (Category.NoEffect, "animation"), ["HandItem"] = (Category.NoEffect, "hand item"),
-        ["DisplayHandItem"] = (Category.NoEffect, "hand item"), ["DisplayHandModel"] = (Category.NoEffect, "hand item"), ["DisplayHiltItem"] = (Category.NoEffect, "hand item"),
+        ["ReleaseAnimation"] = (Category.NoEffect, "animation"), ["PauseAnimation"] = (Category.NoEffect, "animation"), ["HandItem"] = (Category.Approximate, "hand item"),
+        ["DisplayHandItem"] = (Category.Approximate, "hand item"), ["DisplayHandModel"] = (Category.NoEffect, "hand item"), ["DisplayHiltItem"] = (Category.Approximate, "hand item"),
         ["DisplayHiltModel"] = (Category.NoEffect, "hand item"), ["ShowItem"] = (Category.NoEffect, "item close-up"), ["ShowItemNoRtx"] = (Category.NoEffect, "item close-up"),
-        // Sprite flats (MPSF/flat objects aren't converted) and the 2D screen.
+        // Sprite flats (MPSF/flat objects aren't converted) and the 2D screen: the potion status icons as a line, the
+        // full-screen pictures as a page showing them, the movies as Bink.
         ["Flat"] = (Category.NoEffect, "flat"), ["FlatSetTexture"] = (Category.NoEffect, "flat"), ["FlatOff"] = (Category.NoEffect, "flat"), ["FlatOffset"] = (Category.NoEffect, "flat"),
         ["FlatLikeStatic"] = (Category.NoEffect, "flat"), ["FlatAnimate"] = (Category.NoEffect, "flat"), ["FlatStop"] = (Category.NoEffect, "flat"),
-        ["ShowBitmap"] = (Category.NoEffect, "screen picture"), ["UnShowBitmap"] = (Category.NoEffect, "screen picture"), ["ViewGXA"] = (Category.NoEffect, "screen picture"),
-        ["AnimateGXA"] = (Category.NoEffect, "screen picture"), ["QueueMovie"] = (Category.NoEffect, "movie"),
+        ["ShowBitmap"] = (Category.Approximate, "status icon"), ["UnShowBitmap"] = (Category.Approximate, "status icon"), ["ViewGXA"] = (Category.Approximate, "screen picture"),
+        ["AnimateGXA"] = (Category.NoEffect, "screen picture"), ["QueueMovie"] = (Category.Native, "movie"),
         // Light tuning (on/off are Skyrim's).
         ["LightRadius"] = (Category.NoEffect, "light tuning"), ["LightIntensity"] = (Category.NoEffect, "light tuning"), ["LightOffset"] = (Category.NoEffect, "light tuning"),
         ["LightFlicker"] = (Category.NoEffect, "light tuning"), ["FlickerLight"] = (Category.NoEffect, "light tuning"), ["LightFlickerOff"] = (Category.NoEffect, "light tuning"),
@@ -95,24 +129,25 @@ public sealed class RgPapyrus
         // Debugging (developer keys and printouts).
         ["InKey"] = (Category.NoEffect, "debug key"), ["PrintSingleParm"] = (Category.Native, "debug print"), ["PrintParms"] = (Category.NoEffect, "debug print"),
         ["PrintStringParm"] = (Category.NoEffect, "debug print"), ["LogParms"] = (Category.NoEffect, "debug print"),
-        // Approximations.
-        ["SyncWithGroup"] = (Category.Approximate, "group sync"), ["SyncWithUser"] = (Category.Approximate, "group sync"), ["ResetGroupSync"] = (Category.NoEffect, "group sync"),
-        ["ChangeGroup"] = (Category.NoEffect, "group sync"), ["PlayerLineUp"] = (Category.Approximate, "line up"), ["PlayerPickupLineUp"] = (Category.Approximate, "line up"),
+        // Approximations (and what used to be: group sync is a barrier on TMRgState, people walk, Cyrus hangs).
+        ["SyncWithGroup"] = (Category.Native, "group sync"), ["SyncWithUser"] = (Category.Native, "group sync"), ["ResetGroupSync"] = (Category.Native, "group sync"),
+        ["ChangeGroup"] = (Category.NoEffect, "group sync"),
         ["PlayerParallelLineUp"] = (Category.Approximate, "line up"), ["PushPlayer"] = (Category.NoEffect, "line up"), ["PopPlayer"] = (Category.NoEffect, "line up"),
-        ["MovePlayerAboveMe"] = (Category.NoEffect, "line up"), ["MoveAboveMe"] = (Category.NoEffect, "line up"), ["Offset"] = (Category.NoEffect, "attach offset"),
+        ["MovePlayerAboveMe"] = (Category.Native, "teleport"), ["MoveAboveMe"] = (Category.NoEffect, "line up"), ["Offset"] = (Category.NoEffect, "attach offset"),
         ["UnOffset"] = (Category.NoEffect, "attach offset"), ["PlayerOffset"] = (Category.NoEffect, "attach offset"), ["PlayerOffsettask"] = (Category.NoEffect, "attach offset"),
         ["BounceObject"] = (Category.NoEffect, "bounce"), ["SetObjectLocation"] = (Category.NoEffect, "location edit"), ["OffsetLocation"] = (Category.NoEffect, "location edit"),
-        ["PlayerHanging"] = (Category.Approximate, "no ledge hanging"), ["PlayerStatus"] = (Category.Approximate, "player status"), ["PlayerStand"] = (Category.Approximate, "standing on"),
+        ["PlayerLineUp"] = (Category.Native, "line up"), ["PlayerPickupLineUp"] = (Category.Native, "line up (facing)"),
+        ["PlayerHanging"] = (Category.Native, "hanging (TMRgMove)"), ["PlayerStatus"] = (Category.Approximate, "player status"), ["PlayerStand"] = (Category.Approximate, "standing on"),
         ["PlayerCollide"] = (Category.Approximate, "touching"), ["PlayerCollideStatic"] = (Category.Approximate, "touching"), ["CollidePlayerWeapon"] = (Category.Approximate, "weapon hit"),
         ["shoot"] = (Category.Approximate, "projectile spell"), ["shootPlayer"] = (Category.Approximate, "projectile spell"), ["DragonBreath"] = (Category.Approximate, "breath spell"),
         ["DragonBreathTask"] = (Category.Approximate, "breath spell"), ["GolemSteam"] = (Category.NoEffect, "particles"), ["AddFlatEffect"] = (Category.NoEffect, "particles"),
         ["ScriptParticles"] = (Category.NoEffect, "particles"), ["AddLightEffect"] = (Category.NoEffect, "particles"),
-        ["MoveMarker"] = (Category.Approximate, "path to marker"), ["MoveNodeMarker"] = (Category.Approximate, "path to marker"), ["MoveNodeLocation"] = (Category.Approximate, "path"),
-        ["WalkForward"] = (Category.Approximate, "walk"), ["WalkBackward"] = (Category.Approximate, "walk"), ["MoveForward"] = (Category.Approximate, "walk"),
-        ["FacePlayer"] = (Category.Approximate, "turn"), ["FacePlayerInertia"] = (Category.Approximate, "turn"), ["FaceObject"] = (Category.Approximate, "turn"),
-        ["PlayerFaceObj"] = (Category.Approximate, "turn"), ["DropAllItems"] = (Category.NoEffect, "the player keeps their things"), ["PushAllItems"] = (Category.NoEffect, "item stash"),
+        ["MoveMarker"] = (Category.Native, "walk to marker"), ["MoveNodeMarker"] = (Category.Native, "walk to marker"), ["MoveNodeLocation"] = (Category.Native, "walk"),
+        ["WalkForward"] = (Category.Native, "walk"), ["WalkBackward"] = (Category.Native, "walk"), ["MoveForward"] = (Category.Native, "walk"),
+        ["FacePlayer"] = (Category.Native, "turn"), ["FacePlayerInertia"] = (Category.Native, "turn"), ["FaceObject"] = (Category.Approximate, "turn"),
+        ["PlayerFaceObj"] = (Category.Native, "turn"), ["DropAllItems"] = (Category.NoEffect, "the player keeps their things"), ["PushAllItems"] = (Category.NoEffect, "item stash"),
         ["ItemUsed"] = (Category.NoEffect, "use count"), ["SelectItem"] = (Category.Native, "selection"),
-        ["SetAttribute"] = (Category.Approximate, "attributes"), ["setStrength"] = (Category.Approximate, "strength"), ["strength"] = (Category.Approximate, "strength"),
+        ["SetAttribute"] = (Category.Approximate, "attributes"), ["SetMyAttr"] = (Category.Approximate, "attributes"), ["setStrength"] = (Category.Approximate, "strength"), ["strength"] = (Category.Approximate, "strength"),
         ["setArmor"] = (Category.Approximate, "armor"), ["armor"] = (Category.Approximate, "armor"), ["InRectangle"] = (Category.Approximate, "unstretched rectangle"),
         ["WaitNonMulti"] = (Category.Native, "wait"), ["GetFramePassed"] = (Category.Approximate, "frames"), ["EndSound"] = (Category.Approximate, "sound"),
         ["EndMySound"] = (Category.Approximate, "sound"), ["StopAllSounds"] = (Category.Approximate, "sound"), ["KillMyTasks"] = (Category.Native, "tasks"),
@@ -198,6 +233,14 @@ public sealed class RgPapyrus
         public int Temp;
         public readonly List<List<int>> Menus = [];
         public int Menu = -1;
+        /// <summary>The call being written acts on the player (Player.Fn()).</summary>
+        public bool OnPlayer;
+        /// <summary>Flags and variables the script last set to a number (in address order, as written).</summary>
+        public readonly Dictionary<string, int> Consts = [];
+        public static string? KeyOf(Value v) => v switch { Flag f => $"F{f.Index}", Local l => $"L{l.Index}", _ => null };
+        public int? LastConst(Value v) => KeyOf(v) is { } k && Consts.TryGetValue(k, out var c) ? c : null;
+        /// <summary>Instructions already written as part of an earlier one (a run of position assignments).</summary>
+        public readonly HashSet<int> Merged = [];
         /// <summary>A statement (counted in Counts) or, with statement false, a function used in a value.</summary>
         public void Count(string what, Category c, bool statement = true)
         {
@@ -239,7 +282,11 @@ public sealed class RgPapyrus
                     leaders.Add(i + 1);
                     if (j.J.Kind is "goto" or "end" or "gosub" && IndexOf(j.J.Target) is >= 0 and var t) leaders.Add(t);
                     break;
-                case Exec { Source: CallStmt call } when IsWait(call): leaders.Add(i + 1); break;
+                case Exec { Source: CallStmt call } when IsWait(call):
+                    leaders.Add(i + 1);
+                    // A task that may run again until done (TMRgSoup.Retry) is a block of its own.
+                    if (functionNames.ElementAtOrDefault(call.Function) is "SyncWithGroup" or "SyncWithUser") leaders.Add(i);
+                    break;
                 case Exec { Source: OtherStmt { What: "return" or "endint" } }: leaders.Add(i + 1); break;
             }
         }
@@ -389,7 +436,15 @@ public sealed class RgPapyrus
                 return;
             case Exec e:
             {
-                bool transferred = Statement(st, e.Source, next, o);
+                bool transferred;
+                if (st.Merged.Contains(i))
+                {
+                    // Written with the position assignment before it.
+                    st.Count("assign", st.InDialogue ? Category.Dialogue : Category.Native);
+                    transferred = false;
+                }
+                else if (e.Source is AssignStmt a && PositionOf(a.Target) is { } pos) transferred = PositionRun(st, ins, i, blockEnd, pos.Obj, o);
+                else transferred = Statement(st, e.Source, next, o);
                 if (last && !transferred) o.AppendLine($"  Go({next})");
                 return;
             }
@@ -404,6 +459,10 @@ public sealed class RgPapyrus
             case AssignStmt a:
             {
                 st.Count("assign", st.InDialogue ? Category.Dialogue : Category.Native);
+                if (State.KeyOf(a.Target) is { } key)
+                {
+                    if (a.Formula is [(Num n, 0)]) st.Consts[key] = n.V; else st.Consts.Remove(key);
+                }
                 var pre = new StringBuilder();
                 string value = Formula(st, a.Formula, pre);
                 o.Append(pre);
@@ -441,6 +500,48 @@ public sealed class RgPapyrus
                 return fr.Field > 0 ? $"SetField({ObjectExpr(st, fr.Obj)}, {fr.Field}, {value})" : $"; {o.What} = {value} (no Skyrim counterpart)";
         }
         return $"; {target} = {value}";
+    }
+
+    (string Obj, int Field)? PositionOf(Value target) =>
+        target is Other o && ParseField(o.What) is { Field: >= 1 and <= 3 } fr ? fr : null;
+
+    /// <summary>
+    /// Position fields set one after another on one object (Player.ref18/19/20 = ...) as one move: numbers are a
+    /// place in Redguard's world, stretched as the world was (Context.Place); values read from other objects are
+    /// already Skyrim's. TMRgSoup.SetPos makes a far move of the held player a flight. True when it set the next block.
+    /// </summary>
+    bool PositionRun(State st, List<Ins> ins, int i, int blockEnd, string obj, StringBuilder o)
+    {
+        var comps = new Dictionary<int, List<(Value Value, int Op)>>();
+        var run = new List<int>();
+        for (int j = i; j < blockEnd && ins[j] is Exec { Source: AssignStmt a } && PositionOf(a.Target) is { } p && p.Obj == obj && !comps.ContainsKey(p.Field); j++)
+        {
+            comps[p.Field] = a.Formula;
+            run.Add(j);
+        }
+        if (comps.Count < 2) return Statement(st, ins[i].Source, i + 1 < ins.Count ? i + 1 : -1, o);
+        foreach (int j in run.Skip(1)) st.Merged.Add(j);
+        st.Count("assign", st.InDialogue ? Category.Dialogue : Category.Native);
+        string target = ObjectExpr(st, obj);
+        if (comps.Count == 3 && comps.Values.All(f => f is [(Num, 0)]))
+        {
+            int C(int f) => ((Num)comps[f][0].Value).V;
+            var at = st.Ctx.Place(new System.Numerics.Vector3(C(1) / 256f, C(2) / 256f, C(3) / 256f));
+            string F(float v) => v.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture);
+            o.AppendLine($"  SetPos({target}, {F(at.X)}, {F(at.Y)}, {F(at.Z)}) ; a place Redguard names, stretched");
+            return false;
+        }
+        var pre = new StringBuilder();
+        string r = $"q{st.Temp++}";
+        pre.AppendLine($"  ObjectReference {r} = {target}");
+        string X = comps.TryGetValue(1, out var fx) ? $"({Formula(st, fx, pre)}) / 256.0 - 32768.0" : $"{r}.GetPositionX()";
+        string Y = comps.TryGetValue(3, out var fz) ? $"({Formula(st, fz, pre)}) / 256.0 - 32768.0" : $"{r}.GetPositionY()";
+        string Z = comps.TryGetValue(2, out var fy) ? $"-({Formula(st, fy, pre)}) / 256.0" : $"{r}.GetPositionZ()";
+        o.Append(pre);
+        o.AppendLine($"  If {r}");
+        o.AppendLine($"    SetPos({r}, {X}, {Y}, {Z})");
+        o.AppendLine("  EndIf");
+        return false;
     }
 
     (string Obj, int Field)? ParseField(string what)
@@ -562,7 +663,9 @@ public sealed class RgPapyrus
             if (IsWait(call)) { o.AppendLine($"  Task(0.0, {next})"); return true; }
             return false;
         }
+        st.OnPlayer = call.Target == "Player";
         var (expr, cat) = FunctionCall(st, name, call.Args, pre, isValue: false);
+        st.OnPlayer = false;
         st.Count(name, st.InDialogue ? Category.Dialogue : cat);
         o.Append(pre);
         bool other = call.Target is { } tg && tg != "Me";
@@ -581,6 +684,8 @@ public sealed class RgPapyrus
         return false;
     }
 
+    static bool IdleExists(int anim, bool cyrus) => (cyrus ? CyrusIdles : PeopleIdles).ContainsKey(anim);
+
     static bool IsCamera(string name) => name.StartsWith("show", StringComparison.Ordinal) || name.StartsWith("look", StringComparison.Ordinal)
         || name is "XResetCamera" or "updatePlayerViewAttrib" or "cameraController";
 
@@ -595,18 +700,57 @@ public sealed class RgPapyrus
             case "RTX": case "rtxAnim": case "RTXp": case "RTXpAnim": case "AmbientRtx":
             {
                 bool cyrus = name.StartsWith("RTXp");
-                if (Const(0) is not int tag) return ("Line(-1, \"\", 0.0, False)", Category.Approximate);
+                if (Const(0) is not int tag) return ("Line(-1, \"\", 0.0, False, -1)", Category.Approximate);
                 var (index, text, seconds) = st.InDialogue ? (-1, "", 0f) : st.Ctx.Line(tag, cyrus);
                 string sec = seconds.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture);
-                return ($"Line({index}, \"{Escape(text)}\", {sec}, {(cyrus ? "True" : "False")})", Category.Native);
+                // rtxAnim's animation groups (said with gestures): the first Skyrim has an idle for.
+                int gesture = name.EndsWith("Anim") ? Enumerable.Range(1, Math.Max(0, args.Length - 1)).Select(Const)
+                    .FirstOrDefault(a => a is int g && IdleExists(g, cyrus)) ?? -1 : -1;
+                return ($"Line({index}, \"{Escape(text)}\", {sec}, {(cyrus ? "True" : "False")}, {gesture})", Category.Native);
             }
             case "AddLog":
                 return Const(0) is int log ? ($"S_AddLog({st.Ctx.LogStage(log)})", Category.Native) : ("S_AddLog(0)", Category.Approximate);
             case "LoadWorld":
             {
-                if (st.Ctx.LoadWorldIsDoor(Const(0), Const(1))) return ("S_None() ; LoadWorld: the load door here does this", Category.Native);
-                st.Places.Add((Const(0), Const(1), Const(2)));
-                return ($"S_LoadWorld({st.Places.Count - 1})", Const(0) is null ? Category.Approximate : Category.Native);
+                // A map held in a flag or variable (timeofday: the island's day or night map): the value the script
+                // last gave it before the call (VILEKID: timeofday = 1, then LoadWorld(timeofday, 5, 512)).
+                int? set = Const(0) is null && args.Length > 0 ? st.LastConst(args[0]) : null;
+                if (st.Ctx.LoadWorldIsDoor(Const(0) ?? set, Const(1), set is not null)) return ("S_None() ; LoadWorld: the load door here does this", Category.Native);
+                int? map = Const(0) ?? set;
+                st.Places.Add((map, Const(1), Const(2)));
+                return ($"S_LoadWorld({st.Places.Count - 1})", map is null ? Category.Approximate : Category.Native);
+            }
+            case "SetAttribute": case "SetMyAttr":
+            {
+                // Kept on the object in every case; acting in Skyrim for some (ActingAttributes, the panic group's idle).
+                var cat = Const(0) is int attr && (ActingAttributes.Contains(attr) || attr == 44 && Const(1) is int v && (v == 0 || IdleExists(v, st.Ctx.ActsOnPlayer)))
+                    ? Category.Native : Category.Approximate;
+                return ($"S_{name}({Arg(0)}, {Arg(1)})", cat);
+            }
+            case "PushAnimation": case "PushControlAnimation": case "PlayAnimation": case "WaitAnimFrame": case "WaitPlayerAnimFrame":
+            {
+                bool cyrus = name == "WaitPlayerAnimFrame" || st.Ctx.ActsOnPlayer || st.OnPlayer;
+                var cat = Const(0) is int anim && IdleExists(anim, cyrus) ? Category.Native : Category.Approximate;
+                return ($"S_{name}({Arg(0)}, {Arg(1)})", cat);
+            }
+            case "HandItem": case "DisplayHandItem": case "DisplayHiltItem":
+            {
+                var cat = Const(0) is int item ? st.Ctx.HandItem(item) : Category.Approximate;
+                return (name == "HandItem" ? $"S_HandItem({Arg(0)})" : $"S_{name}({Arg(0)}, {Arg(1)}, {Arg(2)}, {Arg(3)})", cat);
+            }
+            case "ViewGXA":
+            {
+                // The image's file is a script string: the build's picture of it.
+                string file = args.Length > 0 && args[0] is Other { What: var w } && w.StartsWith("string") && int.TryParse(w[6..], out int si) && si < st.Strings.Count ? st.Strings[si] : "";
+                int picture = file.Length > 0 ? st.Ctx.Picture(file) : -1;
+                return ($"S_ViewGXA({picture}, {Arg(1)}, {Arg(2)})", picture >= 0 ? Category.Native : Category.Approximate);
+            }
+            case "InRectangle" when Const(0) is int x1 && Const(1) is int z1 && Const(2) is int x2 && Const(3) is int z2:
+            {
+                // The rectangle stretched as the world is (its corners and edge middles).
+                var pts = new[] { (x1, z1), (x2, z1), (x1, z2), (x2, z2), ((x1 + x2) / 2, z1), ((x1 + x2) / 2, z2), (x1, (z1 + z2) / 2), (x2, (z1 + z2) / 2) }
+                    .Select(c => st.Ctx.Place(new System.Numerics.Vector3(c.Item1, 0, c.Item2))).ToList();
+                return ($"S_InRectangleSk({(int)MathF.Floor(pts.Min(p => p.X))}, {(int)MathF.Floor(pts.Min(p => p.Y))}, {(int)MathF.Ceiling(pts.Max(p => p.X))}, {(int)MathF.Ceiling(pts.Max(p => p.Y))})", Category.Native);
             }
             case "ACTIVATE": case "TorchActivate":
                 return ($"S_{name}(0)", Category.Native);
@@ -633,10 +777,10 @@ public sealed class RgPapyrus
             case "ActiveItem":
                 return ("S_ActiveItem()", Category.Native);
         }
-        if (IsCamera(name))
+        if (IsCamera(name) && !lib.ContainsKey(name))
         {
-            if (lib.ContainsKey(name)) return ($"S_{name}()", Category.NoEffect);
-            return (isValue ? "0" : "S_Camera()", Category.NoEffect);
+            for (int i = 0; i < args.Length; i++) Arg(i);
+            return (isValue ? "0" : "S_Camera()", Kinds.TryGetValue(name, out var ck) ? ck.Cat : Category.NoEffect);
         }
         if (lib.TryGetValue(name, out var f))
         {

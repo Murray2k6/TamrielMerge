@@ -111,8 +111,9 @@ public sealed partial class RgPluginBuilder
     }
 
     /// <summary>
-    /// Gerrick's talking parrot: Skyrim has no birds that act, so a chicken's body under the name, on a copy of the
-    /// chicken's race that may be talked to (and an old man's voice type for packing its own recordings).
+    /// Gerrick's talking parrot: Skyrim has no birds that act, so a chicken under the name, on a copy of the chicken's
+    /// race that may be talked to (and an old man's voice type for packing its own recordings), its body unseen and
+    /// Redguard's own parrot model on the perch where it stands (PlaceParrotModel).
     /// </summary>
     Npc? ParrotNpc()
     {
@@ -191,6 +192,7 @@ public sealed partial class RgPluginBuilder
             };
             cell.Temporary.Add(placed);
             placedActors.TryAdd((scene.Name, o.Script.ToUpperInvariant()), placed);
+            if (o.Script.Equals("PARROT", StringComparison.OrdinalIgnoreCase)) PlaceParrotModel(scene, o, npc);
             if (ScriptOf(scene, o.Script) is not null)
             {
                 if (namedObjects.Contains((scene.Name, o.Script)))

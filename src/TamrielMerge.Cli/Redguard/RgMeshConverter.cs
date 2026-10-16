@@ -70,7 +70,8 @@ public sealed class RgMeshConverter(RgArt art)
 
     /// <param name="moving">A variant whose collision moves with the object (keyframed), for scripted props.</param>
     /// <param name="itemMass">A loose item's variant (_item): a dynamic box body of this mass instead of fixed collision.</param>
-    public Result? Convert(RgModel model, string name, string palette, string modOutDir, bool moving = false, float? itemMass = null)
+    /// <param name="collide">False: no collision (a rope the player swings on).</param>
+    public Result? Convert(RgModel model, string name, string palette, string modOutDir, bool moving = false, float? itemMass = null, bool collide = true)
     {
         var verts = model.Vertices.Select(RgSpace.Dir).ToList();
         // Face normals (Skyrim space) and, per vertex, the faces using it, for smoothing.
@@ -176,7 +177,7 @@ public sealed class RgMeshConverter(RgArt art)
             }
             if (itemMass is float mass && verts.Count > 0)
                 BlockMeshBuilder.AddDynamicCollision(nif, root, verts.Aggregate(Vector3.Min), verts.Aggregate(Vector3.Max), mass, BlockMeshBuilder.WoodMaterial);
-            else if (solid.Count > 0) BlockMeshBuilder.AddCollision(nif, root, moving ? solid : BlockMeshBuilder.StairCollision(solid), moving);
+            else if (collide && solid.Count > 0) BlockMeshBuilder.AddCollision(nif, root, moving ? solid : BlockMeshBuilder.StairCollision(solid), moving);
             BlockMeshBuilder.AddBsxFlags(nif, root);
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
             if (nif.Save(outPath) != 0) throw new IOException($"nifly failed to save {outPath}");

@@ -98,8 +98,26 @@ public sealed partial class RgPluginBuilder
     {
         public (int Index, string Text, float Seconds) Line(int tag, bool cyrus) => b.ScriptLine(tag, cyrus ? null : speaker);
         public int LogStage(int tag) => b.LogStage(tag);
-        public bool LoadWorldIsDoor(int? map, int? marker) =>
-            marker is not null && scene.Data.Objects.Any(o => o.Script.Equals(actor, StringComparison.OrdinalIgnoreCase));
+        // A person sending Cyrus on by a map they chose (VILEKID after the riddles) isn't a door where they stand.
+        public bool LoadWorldIsDoor(int? map, int? marker, bool setByScript) =>
+            !(setByScript && People.ContainsKey(actor)) && marker is not null && scene.Data.Objects.Any(o => o.Script.Equals(actor, StringComparison.OrdinalIgnoreCase));
+        public Vector3 Place(Vector3 redguard) => At(scene, redguard);
+        public RgPapyrus.Category HandItem(int item) => HandCategory(b.ItemDefs, item);
+        public int Picture(string file) => b.PictureIndex(file);
+        public bool ActsOnPlayer => PlayerScripts.Contains(actor) || b.ItemDefs.Any(d => d.UseScript.Equals(actor, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Use scripts of items one drinks (Skyrim's own potion use shows the drinking).</summary>
+    static readonly HashSet<string> Drinks = new(StringComparer.OrdinalIgnoreCase) { "IHEALTH", "IIRONSK", "ISTRENTH", "IBLOOD", "IMILK", "IECTO", "ISAP", "IBOTWAT", "IBOTALOE" };
+
+    /// <summary>What HandItem(n) is in Skyrim: an empty hand, a sword (type 1) or the torch (type 3) are Skyrim's
+    /// equip calls, a drink Skyrim's own potion use; other items have nothing to show them held.</summary>
+    public static RgPapyrus.Category HandCategory(List<ItemDef> defs, int item)
+    {
+        if (item <= 0) return RgPapyrus.Category.Native;
+        var d = defs.FirstOrDefault(x => x.Id == item);
+        if (d is null) return RgPapyrus.Category.Approximate;
+        return d.Type is 1 or 3 || Drinks.Contains(d.UseScript) ? RgPapyrus.Category.Native : RgPapyrus.Category.Approximate;
     }
 
     void TranslateScripts(Action<string>? log)
@@ -389,7 +407,19 @@ public sealed partial class RgPluginBuilder
             shows.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(g.FormKey) });
         }
         state.Properties.Add(shows);
+        // What stands in for Redguard's engine (RgEngine): idles for its animation groups, its screen pictures, the
+        // movement helpers, and whether the camera returns to first person after a shot of Cyrus (0: it stays).
+        state.Properties.Add(ObjProp("Idles", IdleList("RGIdles", RgPapyrus.PeopleIdles).FormKey));
+        state.Properties.Add(ObjProp("PlayerIdles", IdleList("RGPlayerIdles", RgPapyrus.CyrusIdles).FormKey));
+        state.Properties.Add(ObjProp("IdleStop", Sk(0x0E4242)));   // IdleStop
+        state.Properties.Add(ObjProp("Pictures", BuildPictures().FormKey));
+        state.Properties.Add(ObjProp("Mover", MovementQuest().FormKey));
+        var firstPerson = new GlobalShort(mod) { EditorID = "RGCameraFirstPerson", Data = 0 };
+        mod.Globals.Add(firstPerson);
+        state.Properties.Add(ObjProp("FirstPersonAfterShots", firstPerson.FormKey));
         scriptsQuest.VirtualMachineAdapter = new QuestAdapter { Scripts = [state] };
+        FinishMovement();
+        SyncGroups();
 
         // Sources and compiling.
         string sourceDir = Path.Combine(modOutDir, "Source", "Scripts"), scriptsDir = Path.Combine(modOutDir, "Scripts");
@@ -458,6 +488,9 @@ public sealed partial class RgPluginBuilder
 
     public int ScriptsIdle { get; private set; }
 
+    /// <summary>The scripts the converted ones run on (Papyrus folder; compiled into the output with them).</summary>
+    static readonly string[] Library = ["TMRgSoup", "TMRgState", "TMRgUseItem", "TMRgMove", "TMRgRope"];
+
     static readonly HashSet<string> ControlOnly = new(StringComparer.OrdinalIgnoreCase) { "if", "goto", "end", "gosub", "return", "endint", "pause", "Wait", "WaitOnTasks", "WaitNonMulti" };
 
     static bool Idle(RgPapyrus.Output o) =>
@@ -506,7 +539,43 @@ public sealed partial class RgPluginBuilder
             entry.Properties.Add(new ScriptIntListProperty { Name = "UseItems", Data = [.. o.UseItems] });
             if (o.UseItems.Count > 1) entry.Properties.Add(ObjProp("UseMenu", UseMenu(o.UseItems).FormKey));
         }
+        // Starting attributes the engine reads (panic group, camera target height), its sync group, hanging from it.
+        if (scene.Script.Attributes.TryGetValue(actor, out var attrs))
+        {
+            var init = new List<int>();
+            foreach (int a in new[] { 44, 47, 48, 49 }) if (attrs[a] != 0) init.AddRange([a, attrs[a]]);
+            if (init.Count > 0) entry.Properties.Add(new ScriptIntListProperty { Name = "AttrInit", Data = [.. init] });
+            if (syncGroups.TryGetValue((scene.Name, attrs[29]), out var g) && o.ByFunction.ContainsKey("SyncWithGroup"))
+            {
+                entry.Properties.Add(new ScriptIntProperty { Name = "SyncGroup", Data = g.Id });
+                entry.Properties.Add(new ScriptIntProperty { Name = "SyncMembers", Data = g.Members });
+            }
+        }
+        if (o.ByFunction.ContainsKey("PlayerHanging")) entry.Properties.Add(new ScriptBoolProperty { Name = "Hangable", Data = true });
         return entry;
+    }
+
+    /// <summary>Redguard's synchronisation groups (attr_group of objects whose scripts SyncWithGroup), per scene, as
+    /// barrier numbers on RGScripts with how many objects take part.</summary>
+    readonly Dictionary<(string Scene, int Group), (int Id, int Members)> syncGroups = [];
+
+    void SyncGroups()
+    {
+        int sync = Fn("SyncWithGroup");
+        foreach (var scene in scenes.Values.OrderBy(s => s.Name))
+        {
+            var members = new Dictionary<int, int>();
+            foreach (var ((sceneName, index), _) in carriers)
+            {
+                if (sceneName != scene.Name) continue;
+                string actor = scene.Data.Objects[index].Script;
+                if (!scene.Script.Attributes.TryGetValue(actor, out var a) || a[29] == 0) continue;
+                if (!scene.Script.Calls.Any(c => c.Function == sync && c.Actor.Equals(actor, StringComparison.OrdinalIgnoreCase))) continue;
+                members[a[29]] = members.GetValueOrDefault(a[29]) + 1;
+            }
+            foreach (var (g, n) in members.OrderBy(kv => kv.Key))
+                if (syncGroups.Count < 128) syncGroups[(scene.Name, g)] = (syncGroups.Count, n);
+        }
     }
 
     static bool UsesMarkers(RgPapyrus.Output o) => o.ByFunction.Keys.Any(f => f is "MoveMarker" or "MoveNodeMarker" or "AtNodeMarker");
@@ -651,7 +720,7 @@ public sealed partial class RgPluginBuilder
         if (!CompilerFound)
         {
             // The library's precompiled copies still ship, for scripts compiled elsewhere.
-            foreach (var lib in new[] { "TMRgSoup", "TMRgState", "TMRgUseItem" })
+            foreach (var lib in Library)
                 if (File.Exists(Path.Combine(shipped, "Compiled", lib + ".pex"))) File.Copy(Path.Combine(shipped, "Compiled", lib + ".pex"), Path.Combine(outDir, lib + ".pex"), true);
             return names.Where(n => File.Exists(Path.Combine(outDir, n + ".pex"))).ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
@@ -672,7 +741,7 @@ public sealed partial class RgPluginBuilder
             return output;
         }
         // The library.
-        foreach (var lib in new[] { "TMRgSoup", "TMRgState", "TMRgUseItem" })
+        foreach (var lib in Library)
         {
             string src = Path.Combine(shipped, lib + ".psc"), pex = Path.Combine(outDir, lib + ".pex");
             if (!File.Exists(pex) || File.GetLastWriteTimeUtc(pex) < File.GetLastWriteTimeUtc(src)) Run(lib + ".psc", false, shipped);
@@ -680,15 +749,16 @@ public sealed partial class RgPluginBuilder
         // A changed library (its functions' signatures) makes every script stale.
         string stamp = Path.Combine(outDir, "TMRgLibrary.hash");
         string libHash = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(
-            string.Concat(new[] { "TMRgSoup", "TMRgState" }.Select(l => File.ReadAllText(Path.Combine(shipped, l + ".psc")))))));
+            string.Concat(new[] { "TMRgSoup", "TMRgState", "TMRgMove" }.Select(l => File.ReadAllText(Path.Combine(shipped, l + ".psc")))))));
         bool libraryChanged = !File.Exists(stamp) || File.ReadAllText(stamp) != libHash;
         bool Fresh(string n) => !libraryChanged && File.Exists(Path.Combine(outDir, n + ".pex")) && File.GetLastWriteTimeUtc(Path.Combine(outDir, n + ".pex")) >= File.GetLastWriteTimeUtc(Path.Combine(sourceDir, n + ".psc"));
         var stale = names.Where(n => !Fresh(n)).ToList();
         if (stale.Count > 0)
         {
             // The changed ones together in a folder of their own, compiled as a batch; what a batch drops (the compiler
-            // can when memory runs short) once more one at a time.
-            string batch = Path.Combine(Path.GetTempPath(), "TamrielMergeRgScripts");
+            // can when memory runs short) once more one at a time. The folder is this process's own: two builds at once
+            // (an rg-build beside a conversion) shared one and deleted each other's batch.
+            string batch = Path.Combine(Path.GetTempPath(), $"TamrielMergeRgScripts_{Environment.ProcessId}");
             if (Directory.Exists(batch)) Directory.Delete(batch, true);
             Directory.CreateDirectory(batch);
             foreach (var n in stale)
@@ -722,11 +792,18 @@ public sealed partial class RgPluginBuilder
             && (People.ContainsKey(actor) || Kinds.Any(k => actor.StartsWith(k.Prefix, StringComparison.OrdinalIgnoreCase)));
     }
 
-    /// <summary>Lines, log stages and doors as placeholders: what a statement becomes doesn't depend on them.</summary>
-    public sealed class CoverageContext : RgPapyrus.Context
+    /// <summary>Lines, log stages, doors and places as placeholders: what a statement becomes doesn't depend on them
+    /// (items and pictures do: from the install, as the build reads them).</summary>
+    public sealed class CoverageContext(string rgDir) : RgPapyrus.Context
     {
+        readonly List<ItemDef> defs = LoadItemDefs(rgDir);
+        public string Actor { get; set; } = "";
         public (int Index, string Text, float Seconds) Line(int tag, bool cyrus) => (0, "", 1f);
         public int LogStage(int tag) => 10;
-        public bool LoadWorldIsDoor(int? map, int? marker) => marker is not null;
+        public bool LoadWorldIsDoor(int? map, int? marker, bool setByScript) => !(setByScript && People.ContainsKey(Actor)) && marker is not null;
+        public Vector3 Place(Vector3 redguard) => RgSpace.Point(redguard);
+        public RgPapyrus.Category HandItem(int item) => HandCategory(defs, item);
+        public int Picture(string file) => File.Exists(Path.Combine(rgDir, file.Replace('/', '\\'))) ? 0 : -1;
+        public bool ActsOnPlayer => PlayerScripts.Contains(Actor) || defs.Any(d => d.UseScript.Equals(Actor, StringComparison.OrdinalIgnoreCase));
     }
 }
