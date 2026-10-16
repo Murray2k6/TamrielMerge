@@ -266,11 +266,17 @@ Function WaitForPlayer3D()
 EndFunction
 
 ; Skyrim shows nothing of what an actor wears after its race changes (SetRace, the race menu) or after items are
-; equipped while it is still loading, until each item is equipped again. Waits for the player to be loaded, then
-; takes off and puts back on the worn armour, both hands' weapons and the shield.
+; equipped while it is still loading, until each item is equipped again. Waits for the player to be loaded, redraws
+; the body (SKSE), then takes off and puts back on the worn armour, both hands' weapons and the shield. The body is
+; redrawn first: redrawing it after a sheathed weapon is put back on shows the weapon drawn, in the hand. A weapon
+; that was sheathed is sheathed again if the refresh drew it.
 Function RefreshEquipment()
   Actor player = Game.GetPlayer()
   WaitForPlayer3D()
+  Bool drawn = player.IsWeaponDrawn()
+  ; SKSE: rebuild the body for its race (without SKSE this one call fails and the rest stands).
+  player.QueueNiNodeUpdate()
+  Utility.Wait(0.5)
   Form[] worn = new Form[32]
   Int count = 0
   Int slot = 30
@@ -314,9 +320,13 @@ Function RefreshEquipment()
   If shield && worn.Find(shield) < 0
     player.EquipItem(shield, false, true)
   EndIf
-  ; SKSE: redraw the body and what it holds now (without SKSE this one call fails and the rest stands).
-  player.QueueNiNodeUpdate()
-  Debug.Trace("[TamrielMerge] equipment refreshed: " + count + " worn, right hand " + right + ", left hand " + left)
+  If !drawn
+    Utility.Wait(0.3)
+    If player.IsWeaponDrawn()
+      player.SheatheWeapon()
+    EndIf
+  EndIf
+  Debug.Trace("[TamrielMerge] equipment refreshed: " + count + " worn, right hand " + right + ", left hand " + left + ", drawn " + player.IsWeaponDrawn())
 EndFunction
 
 ; Where a story begins: a placed reference (a missing plugin, or a form that isn't a reference,
