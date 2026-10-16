@@ -983,6 +983,19 @@ Int Function CurrentWeather() Global
   Return 0
 EndFunction
 
+; GetCurrentWeather on Morrowind's own weathers (akWeathers: MWWeatherList, in Morrowind's numbering): the current
+; weather's place in it; Skyrim's classification for a weather not Morrowind's (another world's).
+Int Function CurrentWeatherIn(FormList akWeathers) Global
+  Weather w = Weather.GetCurrentWeather()
+  If w && akWeathers
+    Int i = akWeathers.Find(w)
+    If i >= 0
+      Return i
+    EndIf
+  EndIf
+  Return CurrentWeather()
+EndFunction
+
 ; A number with this many decimals, for message boxes (%.2f).
 String Function Fixed(Float afValue, Int aiDecimals) Global
   Float scale = Math.Pow(10.0, aiDecimals)

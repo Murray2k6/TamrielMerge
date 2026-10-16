@@ -496,7 +496,7 @@ public sealed partial class MwPapyrus
                 return R($"TMMwScript.ChangeWeather({Prop("weather:" + Word(c, 0) + ":" + Word(c, 1), "Weather", "w_" + Clean(Word(c, 0)) + "_" + Clean(Word(c, 1)))})", T.Void);
             case "modregion":
                 return Nothing("Skyrim's regions keep their weather chances (ChangeWeather sets the weather)");
-            case "getcurrentweather": return R("TMMwScript.CurrentWeather()", T.Int);
+            case "getcurrentweather": return R($"TMMwScript.CurrentWeatherIn({Prop("weathers:all", "FormList", "MWWeathers")})", T.Int);
             case "getwindspeed": return R("Weather.GetCurrentWeather().GetWindDirection() / 360.0", T.Float);
             case "getmasserphase" or "getsecundaphase": return R("((Utility.GetCurrentGameTime() as Int) / 3) % 8", T.Int);
             case "turnmoonred" or "turnmoonwhite": return Nothing("Skyrim's moons can't be recoloured by script");
