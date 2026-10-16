@@ -114,6 +114,80 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     static Generated Generate(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, List<IPlacedObjectGetter> doorList, P3Float? keepAround, IEnumerable<P3Float>? keepAlso,
         Func<P3Float, bool>? underwater)
     {
+        // Recast's mesh, or the same input's from another part (SharedExteriors: a town part's building interiors are
+        // the same buildings as other parts', 2026-10-15: a fifth of a town part's work).
+        var (outVerts, tris) = SharedExteriors is { } dir ? SharedInterior(dir, polygons) : RecastInterior(polygons);
+        (outVerts, tris) = PruneIslands(outVerts, tris, doorList.Select(d => d.Placement!.Position).Append(keepAround ?? default).Concat(keepAlso ?? []).ToList());
+        if (tris.Count > short.MaxValue || outVerts.Count > short.MaxValue)
+            throw new InvalidOperationException($"navmesh too large for one NAVM: {tris.Count} triangles, {outVerts.Count} vertices");
+
+        var data = new NavigationMeshData
+        {
+            NavmeshVersion = NavmeshVersion,
+            CrcHash = Stamp,
+            Parent = new CellNavmeshParent { Parent = cell.ToLink<ICellGetter>() },
+        };
+        data.Vertices.AddRange(outVerts);
+        var neighbours = Adjacency(tris);
+        for (int i = 0; i < tris.Count; i++)
+            data.Triangles.Add(new NavmeshTriangle
+            {
+                Vertices = new P3Int16((short)tris[i].A, (short)tris[i].B, (short)tris[i].C),
+                EdgeLink_0_1 = (short)neighbours[i, 0],
+                EdgeLink_1_2 = (short)neighbours[i, 1],
+                EdgeLink_2_0 = (short)neighbours[i, 2],
+                // Ground under water is swum over (the Water flag), so swimming creatures can use it.
+                Flags = NavmeshTriangle.Flag.Found | (underwater?.Invoke(Centroid(outVerts, tris[i])) == true ? NavmeshTriangle.Flag.Water : 0),
+            });
+
+        // Load doors: tag the nearest triangle within 256 units of the door.
+        var linked = new List<IPlacedObjectGetter>();
+        foreach (var door in doorList)
+        {
+            var dp = door.Placement!.Position;
+            int best = -1; float bestD = 256f * 256f;
+            for (int i = 0; i < tris.Count; i++)
+            {
+                var c = Centroid(outVerts, tris[i]);
+                float d = (c.X - dp.X) * (c.X - dp.X) + (c.Y - dp.Y) * (c.Y - dp.Y) + (c.Z - dp.Z) * (c.Z - dp.Z) / 4;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            if (best < 0) continue;
+            data.DoorTriangles.Add(new DoorTriangle { TriangleBeforeDoor = (short)best, Unknown = DoorTag, Door = door.ToLink() });
+            data.Triangles[best].Flags |= NavmeshTriangle.Flag.Door;
+            linked.Add(door);
+        }
+
+        WriteGrid(data, outVerts, tris);
+        return new Generated(data, outVerts, linked, tris.Count);
+    }
+
+    /// <summary>Interiors whose mesh another process had left in <see cref="SharedExteriors"/>.</summary>
+    public static int InteriorsShared => interiorsShared;
+    static int interiorsShared;
+
+    /// <summary>An interior's Recast mesh from <see cref="SharedExteriors"/> when another part made one of the same
+    /// polygons (to 1/16 unit, their normals to 1/1024), else made and left there.</summary>
+    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris) SharedInterior(string dir, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons)
+    {
+        var q = new List<int>();
+        foreach (var (pts, n) in polygons)
+        {
+            q.Add(pts.Length);
+            q.Add((int)MathF.Round(n.X * 1024)); q.Add((int)MathF.Round(n.Y * 1024)); q.Add((int)MathF.Round(n.Z * 1024));
+            foreach (var p in pts) { q.Add((int)MathF.Round(p.X * 16)); q.Add((int)MathF.Round(p.Y * 16)); q.Add((int)MathF.Round(p.Z * 16)); }
+        }
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Runtime.InteropServices.MemoryMarshal.AsBytes(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(q)));
+        string file = Path.Combine(dir, $"i{BitConverter.ToUInt64(hash, 0):x16}{BitConverter.ToUInt64(hash, 8):x16}.bin");
+        if (ReadShared(file, out var shared)) { Interlocked.Increment(ref interiorsShared); return shared is { } m ? (m.Item1.ToList(), m.Item2.ToList()) : ([], []); }
+        var made = RecastInterior(polygons);
+        WriteShared(file, (made.Verts.ToArray(), made.Tris.ToArray()));
+        return made;
+    }
+
+    /// <summary>An interior's mesh as Recast makes it from its polygons, before its islands are pruned.</summary>
+    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris) RecastInterior(IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons)
+    {
         // Skyrim (x, y north, z up) -> Recast (x, y up, z) by rotation (x, z, -y), which keeps winding.
         var verts = new List<float>();
         var faces = new List<int>();
@@ -186,49 +260,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             var biggest = Enumerable.Range(0, tpieces).Select(c => tc.Count(x => x == c)).OrderDescending().Take(6);
             Console.WriteLine($"    navmesh debug: {pmesh.npolys} polys in {pieces} pieces by Recast adjacency; {tris.Count} triangles in {tpieces} pieces by shared vertices; largest {string.Join(",", biggest)}");
         }
-        (outVerts, tris) = PruneIslands(outVerts, tris, doorList.Select(d => d.Placement!.Position).Append(keepAround ?? default).Concat(keepAlso ?? []).ToList());
-        if (tris.Count > short.MaxValue || outVerts.Count > short.MaxValue)
-            throw new InvalidOperationException($"navmesh too large for one NAVM: {tris.Count} triangles, {outVerts.Count} vertices");
-
-        var data = new NavigationMeshData
-        {
-            NavmeshVersion = NavmeshVersion,
-            CrcHash = Stamp,
-            Parent = new CellNavmeshParent { Parent = cell.ToLink<ICellGetter>() },
-        };
-        data.Vertices.AddRange(outVerts);
-        var neighbours = Adjacency(tris);
-        for (int i = 0; i < tris.Count; i++)
-            data.Triangles.Add(new NavmeshTriangle
-            {
-                Vertices = new P3Int16((short)tris[i].A, (short)tris[i].B, (short)tris[i].C),
-                EdgeLink_0_1 = (short)neighbours[i, 0],
-                EdgeLink_1_2 = (short)neighbours[i, 1],
-                EdgeLink_2_0 = (short)neighbours[i, 2],
-                // Ground under water is swum over (the Water flag), so swimming creatures can use it.
-                Flags = NavmeshTriangle.Flag.Found | (underwater?.Invoke(Centroid(outVerts, tris[i])) == true ? NavmeshTriangle.Flag.Water : 0),
-            });
-
-        // Load doors: tag the nearest triangle within 256 units of the door.
-        var linked = new List<IPlacedObjectGetter>();
-        foreach (var door in doorList)
-        {
-            var dp = door.Placement!.Position;
-            int best = -1; float bestD = 256f * 256f;
-            for (int i = 0; i < tris.Count; i++)
-            {
-                var c = Centroid(outVerts, tris[i]);
-                float d = (c.X - dp.X) * (c.X - dp.X) + (c.Y - dp.Y) * (c.Y - dp.Y) + (c.Z - dp.Z) * (c.Z - dp.Z) / 4;
-                if (d < bestD) { bestD = d; best = i; }
-            }
-            if (best < 0) continue;
-            data.DoorTriangles.Add(new DoorTriangle { TriangleBeforeDoor = (short)best, Unknown = DoorTag, Door = door.ToLink() });
-            data.Triangles[best].Flags |= NavmeshTriangle.Flag.Door;
-            linked.Add(door);
-        }
-
-        WriteGrid(data, outVerts, tris);
-        return new Generated(data, outVerts, linked, tris.Count);
+        return (outVerts, tris);
     }
 
     // ---- Exterior cells ----
