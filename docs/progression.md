@@ -202,3 +202,35 @@ never follows the player into another's.
 
 Each game's guards and townsfolk join their area's crime faction; each area gets its jail from that game's prisons.
 Characters copied from vanilla looks no longer keep Skyrim's crime faction (checked with `faction-check`).
+
+Built (2026-10-15):
+
+- **Shared** (`Skyrim/CrimeFactions.cs`, for every game's builder): a crime faction with its crime gold values and none
+  of Skyrim's shared crime lists; its jail (Skyrim finds a jail by the prison marker in the cell of the faction's
+  player-inventory chest: both are placed, with the stolen-goods chest, follower wait marker and exterior marker);
+  guards (Skyrim's `IsGuardFaction`, so the engine has them pursue and force-greet a wanted player; Skyrim's own arrest
+  lines, `GuardDialogueFaction`, only when a game has none) and residents. A copy of a vanilla actor drops its
+  template's "use factions" so no Skyrim crime faction reaches it. `faction-check` follows templates and leveled lists
+  and fails on any actor answering to Skyrim's crime factions; it lists each plugin's own crime factions and jails.
+- **Daggerfall** (`Skyrim/DfLaw.cs`, `TMDfLaw`): DFCrime00-61, one per region (Daggerfall.esm, fixed numbers
+  0xDF0800 + region), named for it. Townsfolk, street guards and town-dungeon people answer to their region; houses
+  and shops are owned by it (theft); the City Watch takes the region's faction when sent. Skyrim's guards do nothing
+  (arrest and attack-on-sight off): TMDfLaw reads each rise in a region's crime gold as Daggerfall's crime (violent
+  1000+ murder, else assault; 25 pickpocketing, 5 trespassing, else theft; a bashed street door noticed one time in ten
+  is breaking and entering), sends the Watch at once in town (none in dungeons; leaving the town forgets the crime),
+  lowers the legal standing when they confront the player and holds Daggerfall Unity's court for that crime (FALL.EXE's
+  tables, guild bribes, plea, debate or lie, banishment; docs/daggerfall-quests.md). Prison is Daggerfall's: an
+  interior from the entrance block of its first prison dungeon (The Hold of Slachke), every region's jail in it; the
+  days count down there and the player is let out at the town's gates. Daggerfall Unity takes no skills for prison.
+- **Morrowind** (`Morrowind/MwLaw.cs`, `TMMwLaw`): MWCrimeFaction with Morrowind's crime GMSTs; every Morrowind person
+  answers to it, its guards are Skyrim's guards of it. Morrowind's own arrest greetings (an alarmed guard: pay, jail,
+  resist, writs) are the force-greet of a blocking branch, as Skyrim's are. TMMwLaw keeps the dialogue's crime globals
+  (PCHasCrimeGold, CrimeGoldDiscount = half for the Thieves Guild, CrimeGoldTurnIn...) and does PayFine (bounty cleared,
+  stolen goods confiscated), PayFineThief (cleared only) and GoToJail: max(1, bounty / 100) days at the nearest of
+  Morrowind's prison markers (Seyda Neen, Pelagiad, Ebonheart, the Legion forts, Mournhold), a skill a day changed
+  (Sneak and Security up, the rest down, as OpenMW does). The faction's Skyrim jail stands at the first prison marker.
+- **Redguard** (`Redguard/RgLaw.cs`, `TMRgLaw`): no crime faction; its guards (no vanilla soldier's factions) attack a
+  drawn weapon they see within 2048 units and stop when it is put away, unless hurt.
+
+Not verified in the game (no test launches): that Skyrim's guards force-greet with a blocking branch's force-greet
+topic of a game's own (Morrowind's arrest) as they do with DGCrimeForcegreet.

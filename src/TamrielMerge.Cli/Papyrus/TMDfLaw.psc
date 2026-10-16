@@ -233,9 +233,8 @@ Function Forget()
   EndIf
   crime = 0
   confronted = False
-  If !pending
-    ClearGuards()
-  EndIf
+  ; The Watch sent for it go too (they stay behind in the town the player left).
+  ClearGuards()
 EndFunction
 
 Function SpawnGuards(Int region)

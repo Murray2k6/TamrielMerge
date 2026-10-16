@@ -89,6 +89,8 @@ public sealed partial class RgPluginBuilder
         var npc = mod.Npcs.DuplicateInAsNewRecord(template);
         npc.EditorID = "RG" + Sanitize(kind.Prefix) + "Kind";
         npc.Name = kind.Name;
+        // Not the vanilla template's law (an Imperial soldier's crime faction): Stros M'Kai has none (RgLaw).
+        WithoutSkyrimLaw(npc, guard: kind.Prefix == "GUARD");
         if (!Hostile.Contains(kind.Prefix) && npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
         return npc;
     }
@@ -203,6 +205,8 @@ public sealed partial class RgPluginBuilder
             }
             if (Ordinary.FirstOrDefault(k => o.Script.StartsWith(k, StringComparison.OrdinalIgnoreCase)) is { } kind)
                 creatureSpots.Add((placed, scene, kind));
+            // The Empire's guards, who mind drawn weapons (RgLaw).
+            if (o.Script.StartsWith("GUARD", StringComparison.OrdinalIgnoreCase)) guardSpots.Add((placed, scene));
             ActorCount++;
         }
     }

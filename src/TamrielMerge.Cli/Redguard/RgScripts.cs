@@ -651,7 +651,7 @@ public sealed partial class RgPluginBuilder
         if (!CompilerFound)
         {
             // The library's precompiled copies still ship, for scripts compiled elsewhere.
-            foreach (var lib in new[] { "TMRgSoup", "TMRgState", "TMRgUseItem" })
+            foreach (var lib in new[] { "TMRgSoup", "TMRgState", "TMRgUseItem", "TMRgLaw" })
                 if (File.Exists(Path.Combine(shipped, "Compiled", lib + ".pex"))) File.Copy(Path.Combine(shipped, "Compiled", lib + ".pex"), Path.Combine(outDir, lib + ".pex"), true);
             return names.Where(n => File.Exists(Path.Combine(outDir, n + ".pex"))).ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
@@ -672,7 +672,7 @@ public sealed partial class RgPluginBuilder
             return output;
         }
         // The library.
-        foreach (var lib in new[] { "TMRgSoup", "TMRgState", "TMRgUseItem" })
+        foreach (var lib in new[] { "TMRgSoup", "TMRgState", "TMRgUseItem", "TMRgLaw" })
         {
             string src = Path.Combine(shipped, lib + ".psc"), pex = Path.Combine(outDir, lib + ".pex");
             if (!File.Exists(pex) || File.GetLastWriteTimeUtc(pex) < File.GetLastWriteTimeUtc(src)) Run(lib + ".psc", false, shipped);
