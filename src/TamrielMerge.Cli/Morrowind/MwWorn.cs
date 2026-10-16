@@ -80,30 +80,34 @@ public sealed partial class MwPluginBuilder
         return parts;
     }
 
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, Dictionary<(bool Female, bool FirstPerson), string>?> wornMeshes = new(StringComparer.OrdinalIgnoreCase);
+    readonly object wornSourceLock = new();
+
     /// <summary>
-    /// Morrowind's worn look for an item as Skyrim armor addons (one per addon of the vanilla template, keeping its
-    /// races, sounds and priorities), or null when it can't be made (logged; the item then keeps its template's look).
+    /// The worn meshes of an item (male and female, both weights, first person where it has arms or hands), written
+    /// under meshes\tamrielmerge\mw\worn\&lt;id&gt;\; their data-relative paths by (female, first person), or null when
+    /// they can't be made (the reason added to <paramref name="problems"/>). Safe to run in parallel.
     /// </summary>
-    List<ArmorAddon>? WornAddons(Tes3Record rec, string edid, WornLook look, IArmorGetter template)
+    Dictionary<(bool Female, bool FirstPerson), string>? WornMeshes(Tes3Record rec, WornLook look, List<string> problems)
     {
         var parts = WornParts(rec);
         if (parts.Count == 0) return null;
-        characterAssets ??= new SkyrimCharacterAssets(SkyrimData!);
-        wornSource ??= new MwWornSource(data, textures);
         string folder = $@"{MwMeshConverter.OutFolder}\worn\{Sanitize(rec.Id).ToLowerInvariant()}";
         var paths = new Dictionary<(bool Female, bool FirstPerson), string>();
         try
         {
             foreach (bool female in new[] { false, true })
             {
-                var skyrimSkeleton = characterAssets.Skeleton(female);
+                var skyrimSkeleton = characterAssets!.Skeleton(female);
                 var shapes = new List<WornShape>();
                 foreach (var (index, male, fem) in parts)
                 {
                     string? bodyId = female ? fem ?? male : male;
                     if (bodyId is null || !world.Objects.TryGetValue(bodyId, out var body) || body.Type != "BODY" || body.Str("MODL") is not { Length: > 0 } model) continue;
-                    var (source, skeleton) = wornSource.Part(model, index, female, Problems);
-                    shapes.AddRange(WornMesh.Retarget(source, skeleton, skyrimSkeleton, Problems));
+                    List<WornShape> source; BindSkeleton skeleton;
+                    // Reading converts textures (shared state): one part at a time.
+                    lock (wornSourceLock) (source, skeleton) = wornSource!.Part(model, index, female, problems);
+                    shapes.AddRange(WornMesh.Retarget(source, skeleton, skyrimSkeleton, problems));
                 }
                 if (shapes.Count == 0) throw new InvalidDataException("no part has a model");
                 bool any1st = false;
@@ -128,12 +132,67 @@ public sealed partial class MwPluginBuilder
                 paths[(female, false)] = $@"{folder}\{(female ? "f" : "m")}_1.nif";
                 if (any1st) paths[(female, true)] = $@"{folder}\1st_{(female ? "f" : "m")}_1.nif";
             }
+            return paths;
         }
         catch (Exception e)
         {
-            Problems.Add($"worn {rec.Id}: {e.Message} (template look kept)");
+            problems.Add($"worn {rec.Id}: {e.Message} (template look kept)");
             return null;
         }
+    }
+
+    /// <summary>The look an item gets (null: none drawn, or a canon Skyrim remake that keeps Skyrim's).</summary>
+    WornLook? LookOf(Tes3Record rec)
+    {
+        if (rec.Type == "ARMO" && rec.Get("AODT") is { } d)
+        {
+            int type = d.Int(0);
+            return CanonArmor(rec.Id, type) is null ? ArmorLook(type, WornParts(rec).Any(p => p.Index == 0)) : null;
+        }
+        return rec.Type == "CLOT" && rec.Get("CTDT") is { } c ? ClothingLook(c.Int(0)) : null;
+    }
+
+    /// <summary>
+    /// Converts every armour and clothing item's worn meshes at once, in parallel (geometry on all cores; NIF writing
+    /// and Morrowind's texture conversion one at a time), so building the items later only makes their records.
+    /// Returns (converted, failed).
+    /// </summary>
+    public (int Converted, int Failed) PrepareWorn()
+    {
+        characterAssets ??= new SkyrimCharacterAssets(SkyrimData!);
+        wornSource ??= new MwWornSource(data, textures);
+        foreach (bool female in new[] { false, true })
+        {
+            characterAssets.Skeleton(female);
+            foreach (var part in new[] { "body", "hands", "feet" })
+                foreach (int w in new[] { 0, 1 }) characterAssets.Surface(part, female, w);
+        }
+        var work = world.Objects.Values.Where(o => o.Type is "ARMO" or "CLOT")
+            .Select(o => (Rec: o, Look: LookOf(o))).Where(x => x.Look is not null && WornParts(x.Rec).Count > 0).ToList();
+        int converted = 0, failed = 0;
+        var problems = new System.Collections.Concurrent.ConcurrentBag<string>();
+        Parallel.ForEach(work, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 2) }, x =>
+        {
+            var local = new List<string>();
+            var paths = WornMeshes(x.Rec, x.Look!, local);
+            wornMeshes[x.Rec.Id] = paths;
+            if (paths is null) Interlocked.Increment(ref failed); else Interlocked.Increment(ref converted);
+            foreach (var p in local) problems.Add(p);
+        });
+        Problems.AddRange(problems);
+        return (converted, failed);
+    }
+
+    /// <summary>
+    /// Morrowind's worn look for an item as Skyrim armor addons (one per addon of the vanilla template, keeping its
+    /// races, sounds and priorities), or null when it can't be made (logged; the item then keeps its template's look).
+    /// </summary>
+    List<ArmorAddon>? WornAddons(Tes3Record rec, string edid, WornLook look, IArmorGetter template)
+    {
+        characterAssets ??= new SkyrimCharacterAssets(SkyrimData!);
+        wornSource ??= new MwWornSource(data, textures);
+        if (!wornMeshes.TryGetValue(rec.Id, out var paths)) wornMeshes[rec.Id] = paths = WornMeshes(rec, look, Problems);
+        if (paths is null) return null;
         string Model(bool female, bool firstPerson) => SkyrimModelPath(paths[(female, firstPerson)]);
         // One addon per template addon (races: human, Argonian, Khajiit variants), all wearing Morrowind's model.
         var templates = template.Armature.Select(l => SkyrimEsm.ArmorAddons.FirstOrDefault(a => a.FormKey == l.FormKey)).OfType<IArmorAddonGetter>().ToList();

@@ -2958,6 +2958,9 @@ static class Program
                     builder.PrepareScripts();
                     Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%) ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
+                // Worn armour and clothing meshes, all at once in parallel (the records come with the items later).
+                var (wornMade, wornFailed) = builder.PrepareWorn();
+                Console.WriteLine($"  worn meshes: {wornMade} items re-rigged to Skyrim's skeleton, {wornFailed} failed ({sw.Elapsed.TotalSeconds:F0}s)");
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cells", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 int cells = 0, refs = 0;
                 foreach (var cell in world.Interiors.Values.Where(c => rx.IsMatch(c.Name)))
