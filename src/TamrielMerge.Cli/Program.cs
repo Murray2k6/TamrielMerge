@@ -3018,6 +3018,7 @@ static class Program
                 Console.WriteLine($"  records: {m.Statics.Count} statics, {m.Doors.Count} doors, {m.Activators.Count} swinging doors, {m.Lights.Count} lights, {m.Containers.Count} containers, " +
                     $"{m.MiscItems.Count} misc, {m.Keys.Count} keys, {m.Books.Count} books, {m.Weapons.Count} weapons, {m.Ammunitions.Count} ammo, {m.Armors.Count} armour/clothing, " +
                     $"{m.Ingestibles.Count} potions, {m.Ingredients.Count} ingredients, {m.LeveledItems.Count} leveled lists, {m.Npcs.Count} actors, {m.LeveledNpcs.Count} leveled actor lists");
+                Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Morrowind's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
                 builder.Write();
                 Console.WriteLine($"  barks: {builder.BarkCount} recorded lines in {builder.BarkTopicCount} voice topics (Morrowind's own recordings)");
                 var problems = builder.Problems.Distinct().ToList();
@@ -3477,6 +3478,136 @@ static class Program
                     foreach (var c in nif.Blocks.OfType<Morrowind.NiParticleSystemController>())
                         Console.WriteLine($"  particles: target {nif.Get<Morrowind.NiNode>(c.Target)?.Name} size {c.InitialSize} speed {c.Speed} life {c.Lifetime} rate {c.BirthRate} n {c.NumParticles} dims {c.EmitterDimensions}");
                 }
+                return 0;
+            }
+            case "worn-bones":
+            {
+                // Dev aid: how a Morrowind skeleton's Bip01 bones line up with Skyrim's for worn armour (--model: a skinned
+                // body part, whose own skeleton is its bind pose; default base_anim.nif; --female).
+                var data = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                bool female = opts.ContainsKey("female");
+                var assets = new Skyrim.Meshes.SkyrimCharacterAssets(skyrimData);
+                var source = new Morrowind.MwWornSource(data, new Morrowind.MwTextures(data, Path.GetTempPath()));
+                var problems = new List<string>();
+                var from = opts.TryGetValue("model", out var model) ? source.Part(model, int.Parse(opts.GetValueOrDefault("part", "3")), female, problems).Skeleton : source.CharacterSkeleton(female);
+                foreach (var line in Skyrim.Meshes.WornMesh.Report(from, assets.Skeleton(female))) Console.WriteLine(line);
+                foreach (var p in problems) Console.WriteLine("problem: " + p);
+                return 0;
+            }
+            case "worn-check":
+            {
+                // Dev aid: a written worn NIF (--file a;b) read back on Skyrim's skeleton (--female): per shape its bounds,
+                // bones, and how much of it lies inside Skyrim's naked --part (body/hands/feet) at --weight (0/1).
+                bool female = opts.ContainsKey("female");
+                var assets = new Skyrim.Meshes.SkyrimCharacterAssets(skyrimData);
+                var skeleton = assets.Skeleton(female);
+                var surface = assets.Surface(opts.GetValueOrDefault("part", "body"), female, int.Parse(opts.GetValueOrDefault("weight", "1")));
+                // The naked part's normals should point out of the body: on the torso, away from the body's centre line.
+                foreach (var b in assets.Naked(opts.GetValueOrDefault("part", "body"), female, int.Parse(opts.GetValueOrDefault("weight", "1"))))
+                {
+                    var torso = Enumerable.Range(0, b.V.Length).Where(i => MathF.Abs(b.V[i].X) < 10 && b.V[i].Z > 80 && b.V[i].Z < 110 && b.N.Length == b.V.Length).ToList();
+                    if (torso.Count > 0)
+                        Console.WriteLine($"naked {b.Name}: torso normals outward {torso.Average(i => System.Numerics.Vector3.Dot(b.N[i], System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(b.V[i].X, b.V[i].Y + 2, 0)))):F2} (1 = all out)");
+                }
+                // --png out.png: every file's shapes drawn together, front and side, flat-shaded (skin tan, the rest by file).
+                var drawn = new List<(Skyrim.Meshes.WornShape Shape, int File)>();
+                int fileIndex = 0;
+                foreach (var file in opts["file"].Split(';'))
+                {
+                    using var nif = new nifly.NifFile();
+                    if (nif.Load(file) != 0) { Console.WriteLine($"{file}: unreadable"); continue; }
+                    Console.WriteLine($"== {Path.GetFileName(file)}");
+                    fileIndex++;
+                    foreach (var s in Skyrim.Meshes.WornMesh.ReadSkinned(nif, skeleton))
+                    {
+                        drawn.Add((s, fileIndex));
+                        var lo = s.V.Aggregate(System.Numerics.Vector3.Min); var hi = s.V.Aggregate(System.Numerics.Vector3.Max);
+                        int inside = 0; float deepest = 0;
+                        foreach (var v in s.V)
+                            if (surface.Nearest(v) is { } hit)
+                            {
+                                float d = System.Numerics.Vector3.Dot(v - hit.Point, hit.Normal);
+                                if (d < 0) { inside++; deepest = MathF.Min(deepest, d); }
+                            }
+                        var bones = s.Weights.SelectMany(w => w.Select(x => x.Bone)).Distinct().ToList();
+                        Console.WriteLine($"  {s.Name,-28} {s.V.Length,5} verts  {lo:F0} .. {hi:F0}  inside {inside} (deepest {deepest:F1})  {bones.Count} bones: {string.Join(", ", bones.Take(8))}{(bones.Count > 8 ? " ..." : "")}");
+                    }
+                }
+                if (opts.TryGetValue("png", out var png) && drawn.Count > 0)
+                {
+                    // Two orthographic views side by side: front (looking along +Y at the body's front, x right) and the
+                    // left side (looking along +X); a z-buffer and light from the viewer's upper left.
+                    const int size = 512;
+                    var rgb = new byte[size * 2 * size * 3];
+                    var depth = new float[size * 2 * size];
+                    Array.Fill(depth, float.MaxValue);
+                    for (int i = 0; i < rgb.Length; i++) rgb[i] = 40;
+                    float zmin = -2, zmax = 160, scale = size / (zmax - zmin);
+                    System.Numerics.Vector3[] palette = [new(0.55f, 0.6f, 0.75f), new(0.75f, 0.55f, 0.45f), new(0.5f, 0.7f, 0.5f), new(0.7f, 0.7f, 0.4f), new(0.6f, 0.5f, 0.75f)];
+                    foreach (var (s, f) in drawn)
+                        for (int view = 0; view < 2; view++)
+                        {
+                            // Screen x, screen y (down), depth towards the viewer negative.
+                            (float X, float Y, float D) P(System.Numerics.Vector3 v) => view == 0
+                                ? (size / 2 + v.X * scale, size - (v.Z - zmin) * scale, v.Y)
+                                : (size + size / 2 - v.Y * scale, size - (v.Z - zmin) * scale, -v.X);
+                            var colour = s.IsSkin ? new System.Numerics.Vector3(0.85f, 0.68f, 0.55f) : palette[(f - 1) % palette.Length];
+                            var eye = view == 0 ? new System.Numerics.Vector3(0, -1, 0) : new System.Numerics.Vector3(1, 0, 0);
+                            var light = System.Numerics.Vector3.Normalize(eye * 2 + new System.Numerics.Vector3(-0.5f, 0, 1));
+                            for (int t = 0; t + 2 < s.Tris.Length; t += 3)
+                            {
+                                var a = s.V[s.Tris[t]]; var b = s.V[s.Tris[t + 1]]; var c = s.V[s.Tris[t + 2]];
+                                var n = System.Numerics.Vector3.Cross(b - a, c - a);
+                                if (n.LengthSquared() < 1e-10f) continue;
+                                n = System.Numerics.Vector3.Normalize(n);
+                                float shade = 0.25f + 0.75f * MathF.Abs(System.Numerics.Vector3.Dot(n, light));
+                                var (ax, ay, ad) = P(a); var (bx, by, bd) = P(b); var (cx, cy, cd) = P(c);
+                                int x0 = (int)MathF.Max(view * size, MathF.Floor(MathF.Min(ax, MathF.Min(bx, cx)))), x1 = (int)MathF.Min(view * size + size - 1, MathF.Ceiling(MathF.Max(ax, MathF.Max(bx, cx))));
+                                int y0 = (int)MathF.Max(0, MathF.Floor(MathF.Min(ay, MathF.Min(by, cy)))), y1 = (int)MathF.Min(size - 1, MathF.Ceiling(MathF.Max(ay, MathF.Max(by, cy))));
+                                float area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+                                if (MathF.Abs(area) < 1e-6f) continue;
+                                for (int y = y0; y <= y1; y++)
+                                    for (int x = x0; x <= x1; x++)
+                                    {
+                                        float px = x + 0.5f, py = y + 0.5f;
+                                        float w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / area;
+                                        float w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / area;
+                                        float w2 = 1 - w0 - w1;
+                                        if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+                                        float d = w0 * ad + w1 * bd + w2 * cd;
+                                        int k = y * size * 2 + x;
+                                        if (d >= depth[k]) continue;
+                                        depth[k] = d;
+                                        rgb[k * 3] = (byte)(255 * colour.X * shade); rgb[k * 3 + 1] = (byte)(255 * colour.Y * shade); rgb[k * 3 + 2] = (byte)(255 * colour.Z * shade);
+                                    }
+                            }
+                        }
+                    Util.Png.WriteRgb(png, size * 2, size, rgb);
+                    Console.WriteLine($"wrote {png}");
+                }
+                return 0;
+            }
+            case "mw-worn":
+            {
+                // Dev aid: Morrowind items' worn look (--items id,id,...) converted into --out with their records; writes
+                // --out\MorrowindWornTest.esp holding just those records.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                string outDir = opts.GetValueOrDefault("out", "out/mwworn");
+                var world = Morrowind.MwWorld.Load(dataFiles);
+                var builder = new Morrowind.MwPluginBuilder(world, Morrowind.Tes3Data.Open(dataFiles), outDir) { SkyrimData = skyrimData };
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                // --items id,id or --match regex (ARMO/CLOT ids; --take n, default 20).
+                var ids = opts.TryGetValue("items", out var itemList) ? itemList.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList()
+                    : world.Objects.Values.Where(o => o.Type is "ARMO" or "CLOT" && System.Text.RegularExpressions.Regex.IsMatch(o.Id, opts.GetValueOrDefault("match", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        .Select(o => o.Id).Take(int.Parse(opts.GetValueOrDefault("take", "20"))).ToList();
+                foreach (var line in builder.ConvertWorn(ids)) Console.WriteLine(line);
+                Console.WriteLine($"worn looks: {builder.WornConverted} Morrowind's, {builder.WornFallbacks} template fallbacks in {sw.Elapsed.TotalSeconds:F1}s");
+                var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                Directory.CreateDirectory(outDir);
+                builder.Mod.WriteToBinary(Path.Combine(outDir, "Morrowind.esm"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
+                });
                 return 0;
             }
             case "esm-dump":
