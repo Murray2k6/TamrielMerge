@@ -2673,8 +2673,7 @@ static class Program
                 void Remaster(string name, string input, params string[] extra) => RemasterTo(name, Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik"), input, extra);
                 void RemasterTo(string name, string target, string input, params string[] extra)
                 {
-                    if (File.Exists(target)) { Console.WriteLine($"{name}: {target} already there"); return; }
-                    var psi = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+                    if (File.Exists(target)) { Console.WriteLine($"{name}: {target} already there"); return; }                    var psi = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
                     // --plain needs no model (and no device): frames are only resized.
                     string[] how = extra.Contains("--plain") ? [] : device;
                     foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", Path.Combine(work, name.ToLowerInvariant()) }.Concat(how).Concat(extra)) psi.ArgumentList.Add(arg);
@@ -2775,7 +2774,9 @@ static class Program
                         string subs = Path.Combine(movieWork, "lines.json");
                         File.WriteAllText(subs, Redguard.RgMovies.SubtitlesJson(movie));
                         var extra = new List<string> { "--prescale", "640x480", "--subtitles", subs };
-                        if (opts.ContainsKey("no-upscale")) extra.Add("--no-upscale");
+                        // Resized only, as Daggerfall's quest videos are, unless --upscale-quest-videos (2026-10-16: on the
+                        // CPU the upscale took nearly two hours for movie 1's 2,472 frames; ten movies would take a day).
+                        if (opts.ContainsKey("no-upscale") || !opts.ContainsKey("upscale-quest-videos")) extra.Add("--plain");
                         RemasterTo($"Redguard movie {movie.Number}", Path.Combine(videoDir, $"TamrielMerge_RedguardMovie{movie.Number}.bik"), file, [.. extra]);
                     }
                 }

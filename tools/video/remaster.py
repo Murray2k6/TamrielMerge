@@ -64,8 +64,12 @@ def extract(args, src_dir):
         loop = ["-stream_loop", str(args.loop)] if args.loop > 0 else []
         subprocess.run([FFMPEG, "-v", "error", "-y"] + loop + ["-i", args.input, "-vf", ",".join(vf), "-start_number", "1",
                         os.path.join(src_dir, "frame%05d.png")], check=True)
-        subprocess.run([FFMPEG, "-v", "error", "-y", "-i", args.input, "-vn", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
-                        os.path.join(src_dir, "audio.wav")], check=False)
+        # A silent source (Daggerfall's FLC animations) has no sound track: ffmpeg then writes nothing and says so.
+        sound = subprocess.run([FFMPEG, "-v", "error", "-y", "-i", args.input, "-vn", "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
+                                os.path.join(src_dir, "audio.wav")], capture_output=True, text=True)
+        if sound.returncode != 0:
+            silent = "does not contain any stream" in sound.stderr
+            print("no sound track" if silent else sound.stderr.strip(), flush=True)
     return fps
 
 
@@ -289,6 +293,9 @@ def main():
     fps = extract(args, src_dir)
     print(f"frames at {fps:.3f} fps", flush=True)
     if args.plain or args.no_upscale:
+        # Resized frames in a folder of their own: a stopped upscale's frames in up\ are kept for a later upscale, not
+        # mixed with resized ones.
+        up_dir = os.path.join(args.work, "plain")
         resize(src_dir, up_dir, args.size)
     else:
         upscale(src_dir, up_dir, args.size, args.device, args.model, args.threads)
