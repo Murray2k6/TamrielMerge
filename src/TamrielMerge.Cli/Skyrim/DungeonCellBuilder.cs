@@ -333,6 +333,12 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                     bool underwater = water is { } wl && o.Position.Y < wl;
                     FormKey? spawn = o.TextureRecord == RandomEnemyRecord ? creatures.RandomEncounter(location.DungeonType, underwater)
                         : mobile == NoEnemy ? null : creatures.Spawn(mobile, passive, underwater);
+                    // A marker inside the solid rock of an edge block: its player never met it (LightFixturePlacer.InVoid).
+                    if (spawn is not null && fixtures.InVoid(origin + o.Position))
+                    {
+                        fixtureCounts["creature left out in solid rock"] = fixtureCounts.GetValueOrDefault("creature left out in solid rock") + 1;
+                        spawn = null;
+                    }
                     if (spawn is { } s)
                     {
                         var c = origin + o.Position;
