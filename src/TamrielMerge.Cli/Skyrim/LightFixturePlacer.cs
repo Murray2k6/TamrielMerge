@@ -56,6 +56,23 @@ public sealed class LightFixturePlacer
         floors = polys.Where(p => p.Normal.Y > 0.7f).ToList();
         ceilings = polys.Where(p => p.Normal.Y < -0.7f).ToList();
         walls = polys.Where(p => MathF.Abs(p.Normal.Y) < 0.3f).ToList();
+        anyUp = polys.Where(p => p.Normal.Y > 0.3f).ToList();
+        anyDown = polys.Where(p => p.Normal.Y < -0.3f).ToList();
+    }
+
+    readonly List<DfPlacedPolygon> anyUp = [], anyDown = [];
+
+    /// <summary>
+    /// A point no room holds (Daggerfall units, Y up): nothing at all under it, or the nearest thing under it more
+    /// than 512 below and nothing over it within 512. Daggerfall has lights and their sprites inside its edge blocks' solid
+    /// stone (2026-10-16: 199 candles 1,900 units over any floor in W0000022, 116 candelabras under every floor),
+    /// where its player never saw them: they are left out.
+    /// </summary>
+    public bool InVoid(Vector3 p)
+    {
+        if (anyUp.Count == 0 && anyDown.Count == 0) return false;   // no room given (the streets' fires)
+        if (Surface(anyUp, p, below: true) is not { } under) return true;
+        return p.Y - under > 512 && (Surface(anyDown, p, below: false) is not { } over || over - p.Y > 512);
     }
 
     public sealed record Placement(FormKey Base, Vector3 PositionDf, float HeadingRadians, string Kind);
@@ -66,6 +83,7 @@ public sealed class LightFixturePlacer
     /// </summary>
     public IEnumerable<Placement> Fixtures(DfRdbObject flat, Vector3 position)
     {
+        if (InVoid(position)) yield break;
         var sizes = spriteSizes.GetValueOrDefault(flat.TextureArchive) ?? spriteSizes[LightsArchive];
         var (w, h) = flat.TextureRecord < sizes.Length ? sizes[flat.TextureRecord] : (16, 48);
         float bottom = position.Y - h / 2f, top = position.Y + h / 2f;

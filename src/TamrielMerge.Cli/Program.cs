@@ -2604,6 +2604,32 @@ static class Program
                 Console.WriteLine(string.Join(", ", byRecord.Select(kv => $"{kv.Key.Item1}.{kv.Key.Item2} x{kv.Value}")));
                 return 0;
             }
+            case "df-objects-near":
+            {
+                // Dev aid: Daggerfall's own objects of a location's dungeon (--location) within --radius (default 300) of a
+                // Skyrim-space point (--at x,y,z): block, index, type, model or sprite, action, and Skyrim position.
+                var bsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                var loc = DfLocations.LoadAll(arena2).First(l => l.Name.Equals(opts["location"], StringComparison.OrdinalIgnoreCase) && l.DungeonBlocks.Count > 0);
+                var at = opts["at"].Split(',').Select(s => float.Parse(s, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                float radius = float.Parse(opts.GetValueOrDefault("radius", "300"), System.Globalization.CultureInfo.InvariantCulture);
+                var models = DfModel.LoadAll(arena2);
+                foreach (var (block, placement) in DfDungeon.Load(loc, bsa, []).Blocks)
+                {
+                    var origin = DfDungeon.BlockOrigin(placement);
+                    for (int i = 0; i < block.Objects.Count; i++)
+                    {
+                        var o = block.Objects[i];
+                        var w = (origin + o.Position) * Skyrim.Meshes.BlockMeshBuilder.Scale;
+                        var p = new System.Numerics.Vector3(w.X, w.Z, w.Y);
+                        if (MathF.Abs(p.X - at[0]) > radius || MathF.Abs(p.Y - at[1]) > radius || MathF.Abs(p.Z - at[2]) > radius) continue;
+                        string what = o.Type == DfRdbObjectType.Model
+                            ? $"model {o.ModelId}{(models.TryGetValue(o.ModelId, out var dm) ? $" ({dm.Polygons.Count} polys)" : " (missing)")}{(Skyrim.PropReplacer.IsReplaced(o.ModelId) ? " replaced" : "")}"
+                            : o.Type == DfRdbObjectType.Flat ? $"sprite {o.TextureArchive}.{o.TextureRecord}" : o.Type.ToString();
+                        Console.WriteLine($"  {block.Name} #{i} {what}{(o.Action is { } a ? $" action {a.Flags}" : "")} at ({p.X:F0},{p.Y:F0},{p.Z:F0})");
+                    }
+                }
+                return 0;
+            }
             case "df-action-census":
             {
                 // The actions of the given dungeon models (--models 61032,54000): how many of each (type, axis, magnitude,

@@ -254,7 +254,8 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         var campfireRefs = new List<PlacedObject>();
         var actions = new ActionObjectBuilder(mod, models, modOutDir, Spells) { Text = text ??= DfText.Load(arena2), Riddles = riddles, QuestGlobal = QuestGlobal };
         var floorPolys = dungeon.Polygons(models).Where(q => q.Normal.Y > 0.7f).ToList();
-        var ceilingPolys = dungeon.Polygons(models).Where(q => q.Normal.Y < -0.7f).ToList();
+        // Slanted ones too (a cove, a vault): hung things hang from them (2026-10-16: 186 chains hung from nothing).
+        var ceilingPolys = dungeon.Polygons(models).Where(q => q.Normal.Y < -0.3f).ToList();
         var clutterObstacles = new List<PlacedObject>();
         var rooms = new RoomFacing(dungeon.Polygons(models));
         var spawnPoints = new List<P3Float>();
@@ -393,6 +394,12 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                     PlacedPeople.Add(person);
                     spawnPoints.Add(at);
                     fixtureCounts["person: " + person.Name] = fixtureCounts.GetValueOrDefault("person: " + person.Name) + 1;
+                }
+                else if ((Clutter?.Covers(o) == true || o.Type == DfRdbObjectType.Model && !o.HasAction && PropReplacer.IsReplaced(o.ModelId))
+                    && fixtures.InVoid(origin + o.Position))
+                {
+                    // Inside the solid stone of Daggerfall's edge blocks, where its player never saw it (LightFixturePlacer.InVoid).
+                    fixtureCounts["left out in solid rock"] = fixtureCounts.GetValueOrDefault("left out in solid rock") + 1;
                 }
                 else if (Clutter is { } clutter && clutter.Covers(o))
                 {
