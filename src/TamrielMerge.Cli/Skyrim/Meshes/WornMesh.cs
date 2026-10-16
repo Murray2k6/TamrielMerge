@@ -338,6 +338,22 @@ public static class WornMesh
                 float d = Vector3.Dot(p - q, qn);
                 if (d < margin - 0.01f) push[i] = qn * (margin - d);
             }
+            // The body's bulges between the cloth's vertices (a breast under a coarse robe): where a body vertex lies
+            // outside the cloth face over it, that face's corners are pushed out past it, by their share of the point.
+            var cloth = new WornSurface([s], surface.Reach);
+            foreach (var (b, bn) in surface.Vertices)
+            {
+                // Only real poke-throughs: the body point just past the face over it (not a hand reaching past a hip).
+                if (cloth.NearestTriangle(b) is not { } h || Vector3.Dot(h.Normal, bn) < 0.6f || Vector3.Distance(b, h.Point) > 3) continue;
+                float d = Vector3.Dot(b - h.Point, h.Normal);
+                if (d <= -margin) continue;
+                float need = d + margin;
+                foreach (var (vi, share) in new[] { (h.A, 1 - h.U - h.W), (h.B, h.U), (h.C, h.W) })
+                {
+                    var want = h.Normal * need * MathF.Min(1, share * 1.5f);
+                    if (want.LengthSquared() > push[vi].LengthSquared()) push[vi] = want;
+                }
+            }
             // Smooth the pushes along the shape's edges (each vertex takes the most of itself and its neighbours'
             // average, so a push spreads to the vertices around it instead of making a dent).
             var neighbours = new List<int>[s.V.Length];
@@ -633,26 +649,36 @@ public static class WornMesh
 }
 
 /// <summary>A surface to fit worn shapes outside of (<see cref="WornMesh.FitOutside"/>): its triangles with vertex
-/// normals, in a grid of cells as large as the reach, for nearest-point queries.</summary>
+/// normals, in a grid of cells as large as the reach, for nearest-point queries, and its vertices.</summary>
 public sealed class WornSurface
 {
-    readonly List<(Vector3 A, Vector3 B, Vector3 C, Vector3 Na, Vector3 Nb, Vector3 Nc)> tris = [];
+    readonly List<(Vector3 A, Vector3 B, Vector3 C, Vector3 Na, Vector3 Nb, Vector3 Nc, int Ia, int Ib, int Ic)> tris = [];
     readonly Dictionary<(int, int, int), List<int>> grid = [];
     readonly float cell;
+    /// <summary>How far a query looks (the grid's cell size).</summary>
+    public float Reach => cell;
+    /// <summary>Every vertex with its normal.</summary>
+    public List<(Vector3 Point, Vector3 Normal)> Vertices { get; } = [];
 
+    /// <summary>A surface of the shapes; triangle corners keep their vertex index within their own shape (queries on
+    /// a one-shape surface name the shape's vertices).</summary>
     public WornSurface(IEnumerable<WornShape> shapes, float reach = 10)
     {
         cell = reach;
         foreach (var s in shapes)
+        {
+            bool hasNormals = s.N.Length == s.V.Length;
+            for (int i = 0; i < s.V.Length; i++) Vertices.Add((s.V[i], hasNormals ? s.N[i] : Vector3.Zero));
             for (int t = 0; t + 2 < s.Tris.Length; t += 3)
             {
                 int a = s.Tris[t], b = s.Tris[t + 1], c = s.Tris[t + 2];
                 Vector3 fn = Vector3.Cross(s.V[b] - s.V[a], s.V[c] - s.V[a]);
                 if (fn.LengthSquared() < 1e-10f) continue;
                 fn = Vector3.Normalize(fn);
-                Vector3 N(int i) => s.N.Length == s.V.Length && s.N[i].LengthSquared() > 0 ? s.N[i] : fn;
-                tris.Add((s.V[a], s.V[b], s.V[c], N(a), N(b), N(c)));
+                Vector3 N(int k) => hasNormals && s.N[k].LengthSquared() > 0 ? s.N[k] : fn;
+                tris.Add((s.V[a], s.V[b], s.V[c], N(a), N(b), N(c), a, b, c));
             }
+        }
         for (int i = 0; i < tris.Count; i++)
         {
             var lo = Vector3.Min(tris[i].A, Vector3.Min(tris[i].B, tris[i].C));
@@ -665,13 +691,13 @@ public sealed class WornSurface
 
     (int, int, int) Key(Vector3 p) => ((int)MathF.Floor(p.X / cell), (int)MathF.Floor(p.Y / cell), (int)MathF.Floor(p.Z / cell));
 
-    /// <summary>The nearest surface point within reach and the surface's (interpolated) normal there; null if none.</summary>
-    public (Vector3 Point, Vector3 Normal)? Nearest(Vector3 p)
+    /// <summary>The nearest surface point within reach, the surface's (interpolated) normal there, the triangle's corner
+    /// vertices and the point's barycentric weights for B and C; null if none.</summary>
+    public (Vector3 Point, Vector3 Normal, int A, int B, int C, float U, float W)? NearestTriangle(Vector3 p)
     {
         var (kx, ky, kz) = Key(p);
         float best = cell * cell;
-        Vector3 q = default, qn = default;
-        bool found = false;
+        int bestTri = -1; Vector3 q = default; float bu = 0, bw = 0;
         for (int x = kx - 1; x <= kx + 1; x++) for (int y = ky - 1; y <= ky + 1; y++) for (int z = kz - 1; z <= kz + 1; z++)
                 if (grid.TryGetValue((x, y, z), out var l))
                     foreach (int ti in l)
@@ -680,12 +706,17 @@ public sealed class WornSurface
                         var (cp, u, w) = WornMesh.Closest(p, t.A, t.B, t.C);
                         float d2 = Vector3.DistanceSquared(p, cp);
                         if (d2 >= best) continue;
-                        best = d2; q = cp; found = true;
-                        qn = t.Na * (1 - u - w) + t.Nb * u + t.Nc * w;
+                        best = d2; q = cp; bestTri = ti; bu = u; bw = w;
                     }
-        if (!found || qn.LengthSquared() < 1e-8f) return null;
-        return (q, Vector3.Normalize(qn));
+        if (bestTri < 0) return null;
+        var tb = tris[bestTri];
+        var qn = tb.Na * (1 - bu - bw) + tb.Nb * bu + tb.Nc * bw;
+        if (qn.LengthSquared() < 1e-8f) return null;
+        return (q, Vector3.Normalize(qn), tb.Ia, tb.Ib, tb.Ic, bu, bw);
     }
+
+    /// <summary>The nearest surface point within reach and the surface's (interpolated) normal there; null if none.</summary>
+    public (Vector3 Point, Vector3 Normal)? Nearest(Vector3 p) => NearestTriangle(p) is { } h ? (h.Point, h.Normal) : null;
 }
 /// <summary>
 /// Skyrim's own character assets for worn meshes, from the game's archives (loose files in Data first, as the game

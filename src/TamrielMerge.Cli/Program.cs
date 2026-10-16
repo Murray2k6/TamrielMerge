@@ -3246,6 +3246,9 @@ static class Program
                     builder.PrepareScripts();
                     Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%) ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
+                // Worn armour and clothing meshes, all at once in parallel (the records come with the items later).
+                var (obWornMade, obWornFailed) = builder.PrepareWorn();
+                Console.WriteLine($"  worn meshes: {obWornMade} model sets re-rigged to Skyrim's skeleton, {obWornFailed} failed ({sw.Elapsed.TotalSeconds:F0}s)");
                 if (opts.TryGetValue("cells", out var only))
                     foreach (var id in only.Split(','))
                     {
@@ -3279,6 +3282,7 @@ static class Program
                 Console.WriteLine($"  records: {m.Statics.Count} statics, {m.Doors.Count} doors, {m.Activators.Count} swinging doors, {m.Lights.Count} lights, {m.LandscapeTextures.Count} landscape textures, " +
                     $"{m.Containers.Count} containers, {m.MiscItems.Count} misc, {m.Keys.Count} keys, {m.Books.Count} books, {m.Weapons.Count} weapons, {m.Ammunitions.Count} ammo, {m.Armors.Count} armour/clothing, " +
                     $"{m.Ingestibles.Count} potions, {m.Ingredients.Count} ingredients, {m.SoulGems.Count} soul gems, {m.LeveledItems.Count} leveled lists, {m.Npcs.Count} actors, {m.LeveledNpcs.Count} leveled actor lists; {builder.Navmeshes} navmeshes ({builder.NavmeshTriangles} triangles)");
+                Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Oblivion's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
                 builder.Write();
                 var problems = builder.Problems.Distinct().ToList();
                 File.WriteAllLines(Path.Combine(outDir, "problems.txt"), problems);
@@ -3497,8 +3501,26 @@ static class Program
                 foreach (var p in problems) Console.WriteLine("problem: " + p);
                 return 0;
             }
-            case "worn-check":
+            case "ob-worn":
             {
+                // Dev aid: Oblivion armour and clothing (EditorID matching --match, --take n) with their worn look converted
+                // into --out, and those records written as --out\Oblivion.esm.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed through Steam or GOG");
+                string outDir = opts.GetValueOrDefault("out", "out/obworn");
+                using var builder = new Oblivion.ObPluginBuilder(new Oblivion.ObData(dataDir), outDir) { SkyrimData = skyrimData };
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                foreach (var line in builder.ConvertWorn(new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase), int.Parse(opts.GetValueOrDefault("take", "20"))))
+                    Console.WriteLine(line);
+                Console.WriteLine($"worn looks: {builder.WornConverted} Oblivion's, {builder.WornFallbacks} template fallbacks in {sw.Elapsed.TotalSeconds:F1}s");
+                var masterOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                Directory.CreateDirectory(outDir);
+                builder.Mod.WriteToBinary(Path.Combine(outDir, Oblivion.ObPluginBuilder.PluginName), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(masterOrder),
+                });
+                return 0;
+            }
+            case "worn-check":            {
                 // Dev aid: a written worn NIF (--file a;b) read back on Skyrim's skeleton (--female): per shape its bounds,
                 // bones, and how much of it lies inside Skyrim's naked --part (body/hands/feet) at --weight (0/1).
                 bool female = opts.ContainsKey("female");
