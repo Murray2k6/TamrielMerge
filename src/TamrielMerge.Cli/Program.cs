@@ -1,4 +1,4 @@
-﻿using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Skyrim;
 using TamrielMerge.Daggerfall;
 using TamrielMerge.Skyrim;
@@ -2923,8 +2923,12 @@ static class Program
                 // Upscaled textures (tools/upscale/out, from upscale-textures, or --upscaled DIR) replace the originals where present.
                 string upscaled = opts.GetValueOrDefault("upscaled", UpscaleFolder(Game.Morrowind));
                 if (Directory.Exists(upscaled) && !opts.ContainsKey("no-upscale")) Morrowind.MwTextures.UpscaleCache = Path.GetFullPath(upscaled);
-                // Builds Morrowind.esm (ours) from the original install into --out. For now: the interior cells whose
-                // names match --cells (regex).
+                // Builds Morrowind.esm (ours) from the original install (plus the selected mods) into --out: every
+                // interior (or those whose names match --cells, a regex) with its navmesh; the exterior worldspace
+                // MWVvardenfell (Vvardenfell and Solstheim: terrain, references, regions with Morrowind's weathers and
+                // climates, its water, navmeshes, terrain LOD; --no-exterior skips it, --exterior-box limits it); load
+                // doors linked; items, containers, NPCs, creatures, worn armour and clothing; dialogue (--no-dialogue)
+                // and translated scripts (--no-scripts); the start marker. Models and textures go under --out too.
                 string dataFiles = GameInstalls.DataDir(Game.Morrowind) ?? throw new DirectoryNotFoundException("Morrowind isn't installed through Steam or GOG");
                 string outDir = opts.GetValueOrDefault("out", "out/mwmod");
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -2935,6 +2939,15 @@ static class Program
                 foreach (var note in modProblems) Console.WriteLine($"  mods: {note}");
                 var world = Morrowind.MwWorld.Load(dataFiles, mwPlugins);
                 Console.WriteLine($"Loaded {string.Join(", ", world.Plugins.Select(p => p.FileName))}: {world.Objects.Count} objects, {world.Interiors.Count} interiors, {world.Exteriors.Count} exterior cells ({sw.Elapsed.TotalSeconds:F0}s)");
+                // --exterior-box "x0,y0,x1,y1" (Morrowind cell grid): only those exterior cells, for test builds.
+                if (opts.TryGetValue("exterior-box", out var box))
+                {
+                    var b = box.Split(',').Select(int.Parse).ToArray();
+                    bool Inside((int X, int Y) g) => g.X >= b[0] && g.Y >= b[1] && g.X <= b[2] && g.Y <= b[3];
+                    foreach (var g in world.Exteriors.Keys.Where(g => !Inside(g)).ToList()) world.Exteriors.Remove(g);
+                    foreach (var g in world.Lands.Keys.Where(g => !Inside(g)).ToList()) world.Lands.Remove(g);
+                    Console.WriteLine($"  exterior box {box}: {world.Exteriors.Count} exterior cells");
+                }
                 var builder = new Morrowind.MwPluginBuilder(world, Morrowind.Tes3Data.Open(dataFiles, mwPlugins), outDir);
                 builder.SkyrimData = skyrimData;
                 // Scripts are translated first: the references they name are placed persistent, scripted activators are
@@ -2965,6 +2978,7 @@ static class Program
                 {
                     var ws = builder.BuildExteriors(skyrimData);
                     Console.WriteLine($"  exterior {ws.EditorID}: {ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Count()} cells, {ws.TopCell!.Persistent.Count} doors, {builder.ExteriorNavmeshes} navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  weather: {builder.WeatherCount} Morrowind weathers, {builder.ClimateCount} climates (one per region + the worldspace's), {builder.Mod.Regions.Count} regions, water {builder.Mod.Waters.FirstOrDefault()?.EditorID}");
                 }
                 var missing = builder.MissingTextures.ToList();
                 Console.WriteLine($"  missing textures: {missing.Count}{(missing.Count > 0 ? " (" + string.Join(", ", missing.Take(15)) + ")" : "")}");
@@ -3422,6 +3436,89 @@ static class Program
                     if (r.DoorDestination is { } d && r.DoorDestinationCell is { } dc && !cellsWithDoors.Contains(dc))
                         Console.WriteLine($"{r.BaseId} ({world.Objects.GetValueOrDefault(r.BaseId)?.Type}) in {from} at {r.Position} -> \"{dc}\" at {d.Position}; cell exists: {world.Interiors.ContainsKey(dc)}");
                 return 0;
+            }
+            case "mw-files":
+            {
+                // Dev aid: Morrowind data files (loose and archived) whose path matches --match (a regex).
+                var data = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var folder in new[] { "meshes", "textures", "sound", "icons", "bookart" })
+                    foreach (var n in data.List(folder).Where(n => rx.IsMatch(n)).Take(400)) Console.WriteLine(n);
+                return 0;
+            }
+            case "mw-nif":
+            {
+                // Dev aid: a Morrowind model's node tree (--model a;b): nodes with their world position, shapes with
+                // vertex counts and textures, skins with their bones, particle controllers with their texture.
+                var data = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                foreach (var model in opts["model"].Split(';'))
+                {
+                    string path = model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
+                    var nif = Morrowind.Nif4.Read(data.Read(path) ?? throw new FileNotFoundException(path), path);
+                    Console.WriteLine($"== {path}: {nif.Blocks.Count} blocks");
+                    string Tex(Morrowind.NiNode n) => string.Join(",", n.Properties.Select(nif.Get<Morrowind.NifBlock>).OfType<Morrowind.NiTexturingProperty>()
+                        .Select(t => t.Base is { } b ? nif.Get<Morrowind.NiSourceTexture>(b.Source)?.FileName : null).Where(s => s is not null));
+                    void Walk(int i, Morrowind.NifTransform parent, int depth)
+                    {
+                        if (nif.Get<Morrowind.NiNode>(i) is not { } n) return;
+                        var w = n.Transform.Then(parent);
+                        string extra = "";
+                        if (n is Morrowind.NiTriShape s && nif.Get<Morrowind.NiGeometryData>(s.Data) is { } d)
+                        {
+                            extra = $" verts {d.Vertices.Length} tex [{Tex(n)}]";
+                            if (nif.Get<Morrowind.NiSkinInstance>(s.Skin) is { } sk)
+                                extra += $" SKIN root {nif.Get<Morrowind.NiNode>(sk.SkeletonRoot)?.Name} bones {string.Join("|", sk.Bones.Select(b => nif.Get<Morrowind.NiNode>(b)?.Name))}";
+                        }
+                        else if (Tex(n) is { Length: > 0 } t) extra = $" tex [{t}]";
+                        Console.WriteLine($"{new string(' ', depth * 2)}{n.Type} \"{n.Name}\"{(n.Hidden ? " hidden" : "")} at {w.Translation:F1} s {w.Scale:F2}{extra}");
+                        foreach (var c in n.Children) Walk(c, w, depth + 1);
+                    }
+                    foreach (var r in nif.Roots) Walk(r, Morrowind.NifTransform.Identity, 0);
+                    foreach (var c in nif.Blocks.OfType<Morrowind.NiParticleSystemController>())
+                        Console.WriteLine($"  particles: target {nif.Get<Morrowind.NiNode>(c.Target)?.Name} size {c.InitialSize} speed {c.Speed} life {c.Lifetime} rate {c.BirthRate} n {c.NumParticles} dims {c.EmitterDimensions}");
+                }
+                return 0;
+            }
+            case "esm-dump":
+            {
+                // Dev aid: every field of the records of --plugin (default Skyrim.esm) whose editor ID matches --edid.
+                string plugin = Path.Combine(skyrimData, opts.GetValueOrDefault("plugin", "Skyrim.esm"));   // a file name is in Skyrim's Data
+                var re = new System.Text.RegularExpressions.Regex(opts["edid"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                using var m = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
+                foreach (var r in m.EnumerateMajorRecords().Where(r => r.EditorID is { } e && re.IsMatch(e)
+                             && (!opts.TryGetValue("type", out var t) || r.Registration.Name.Equals(t, StringComparison.OrdinalIgnoreCase))).Take(int.Parse(opts.GetValueOrDefault("max", "4"))))
+                {
+                    Console.WriteLine($"== {r.Registration.Name} {r.EditorID} {r.FormKey}");
+                    DumpFields(r, "  ", 0);
+                }
+                return 0;
+                static void DumpFields(object? o, string indent, int depth)
+                {
+                    if (o is null || depth > 4) return;
+                    foreach (var p in o.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                    {
+                        if (p.GetIndexParameters().Length > 0 || p.Name is "Registration" or "StaticRegistration" or "EditorID" or "FormKey" or "ContainedFormLinks" or "EnumerateFormLinks") continue;
+                        object? v;
+                        try { v = p.GetValue(o); } catch { continue; }
+                        if (v is null) { Console.WriteLine($"{indent}{p.Name}: null"); continue; }
+                        var vt = v.GetType();
+                        if (vt.IsPrimitive || vt.IsEnum || v is string || v is System.Drawing.Color || vt.Name.StartsWith("FormLink") || vt.Name.StartsWith("AssetLink") || vt.Name.StartsWith("P3") || vt.Name.StartsWith("P2") || vt.Name is "Percent" or "TimeOnly" or "FormKey")
+                            Console.WriteLine($"{indent}{p.Name}: {v}");
+                        else if (v is System.Collections.IEnumerable list && v is not string)
+                        {
+                            int i = 0;
+                            foreach (var item in list)
+                            {
+                                if (i++ >= 40) { Console.WriteLine($"{indent}  ..."); break; }
+                                var it = item?.GetType();
+                                if (it is null || it.IsPrimitive || item is string || it.Name.StartsWith("FormLink") || it.Name.StartsWith("AssetLink")) Console.WriteLine($"{indent}{p.Name}[{i - 1}]: {item}");
+                                else { Console.WriteLine($"{indent}{p.Name}[{i - 1}]:"); DumpFields(item, indent + "  ", depth + 1); }
+                            }
+                        }
+                        else if (vt.Namespace?.StartsWith("Mutagen") == true || vt.Namespace?.StartsWith("Noggog") == true) { Console.WriteLine($"{indent}{p.Name}:"); DumpFields(v, indent + "  ", depth + 1); }
+                        else Console.WriteLine($"{indent}{p.Name}: {v}");
+                    }
+                }
             }
             case "mw-fx-census":
             {
@@ -4775,7 +4872,7 @@ static class Program
             {
                 // Dev aid: records of --plugin (default Skyrim.esm) whose editor ID matches --edid (a regex), with type and
                 // form ID; --type limits the record type (e.g. SoundDescriptor).
-                string plugin = opts.GetValueOrDefault("plugin", Path.Combine(skyrimData, "Skyrim.esm"));
+                string plugin = Path.Combine(skyrimData, opts.GetValueOrDefault("plugin", "Skyrim.esm"));   // a file name is in Skyrim's Data
                 var re = new System.Text.RegularExpressions.Regex(opts["edid"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 using var m = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
                 foreach (var r in m.EnumerateMajorRecords().Where(r => r.EditorID is { } e && re.IsMatch(e)

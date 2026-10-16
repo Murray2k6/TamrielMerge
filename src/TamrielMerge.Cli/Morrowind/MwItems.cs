@@ -24,14 +24,20 @@ public sealed partial class MwPluginBuilder
 
     T Vanilla<T>(string editorId) where T : class, IMajorRecordGetter
     {
-        if (vanilla is null)
-        {
-            skyrimEsm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(SkyrimData ?? throw new InvalidOperationException("SkyrimData not set"), "Skyrim.esm"), SkyrimRelease.SkyrimSE);
-            vanilla = new(StringComparer.OrdinalIgnoreCase);
-            foreach (var r in skyrimEsm.EnumerateMajorRecords())
-                if (r.EditorID is { } e && r is IWeaponGetter or IArmorGetter or IAmmunitionGetter or IMagicEffectGetter or IContainerGetter) vanilla.TryAdd(e, r);
-        }
-        return vanilla[editorId] as T ?? throw new KeyNotFoundException($"vanilla {typeof(T).Name} {editorId}");
+        LoadVanilla();
+        return vanilla![editorId] as T ?? throw new KeyNotFoundException($"vanilla {typeof(T).Name} {editorId}");
+    }
+
+    /// <summary>Skyrim.esm (opened on first use).</summary>
+    ISkyrimModDisposableGetter SkyrimEsm { get { LoadVanilla(); return skyrimEsm!; } }
+
+    void LoadVanilla()
+    {
+        if (vanilla is not null) return;
+        skyrimEsm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(SkyrimData ?? throw new InvalidOperationException("SkyrimData not set"), "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+        vanilla = new(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in skyrimEsm.EnumerateMajorRecords())
+            if (r.EditorID is { } e && r is IWeaponGetter or IArmorGetter or IAmmunitionGetter or IMagicEffectGetter or IContainerGetter) vanilla.TryAdd(e, r);
     }
 
     static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
