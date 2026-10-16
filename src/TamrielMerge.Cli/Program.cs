@@ -188,6 +188,11 @@ static class Program
                 foreach (var dir in new[] { outDir, finalDir }.Distinct())
                     foreach (var old in Directory.GetFiles(dir, "Daggerfall Towns *.esm").Concat(Directory.GetFiles(dir, "Daggerfall Dungeons *.esm")).Concat(Directory.GetFiles(dir, "Daggerfall Dungeons *.creatures.json")))
                         File.Delete(old);
+                // Parts an earlier conversion left in --out (Daggerfall Towns.part10.esm, ...): a new conversion makes its
+                // own, so they go; a resumed one keeps only its own (made after its Daggerfall.esm, BuildParts).
+                if (!resume)
+                    foreach (var old in Directory.GetFiles(finalDir, "Daggerfall Towns.part*.*").Concat(Directory.GetFiles(finalDir, "Daggerfall Dungeons.part*.*")))
+                        File.Delete(old);
                 Settle(all: false);
                 if (plugins.Contains("Daggerfall.esm") && !skip.Contains("Towns"))
                 {
@@ -243,9 +248,18 @@ static class Program
                     var pending = new List<int>();
                     for (int k = 1; k <= parts; k++)
                     {
-                        // A part the stopped run finished (with its creature spots), kept.
+                        // A part the stopped run finished (with its creature spots), kept: only one made after this
+                        // Daggerfall.esm (2026-10-15: a resume took parts 10-14 from an older conversion left in --out,
+                        // built against an older Daggerfall.esm: 100,833 links to the wrong records, navmeshes on the
+                        // wrong grid). An older one is made again.
                         string partName = Path.GetFileName(partPath(k));
-                        if (Reuse(partName))
+                        if (Reuse(partName) && File.GetLastWriteTimeUtc(partPath(k)) <= File.GetLastWriteTimeUtc(Path.Combine(outDir, "Daggerfall.esm")))
+                        {
+                            Console.WriteLine($"{plugin}: part {k} of {parts} is older than Daggerfall.esm, made again");
+                            File.Delete(partPath(k));
+                            pending.Add(k);
+                        }
+                        else if (File.Exists(partPath(k)))
                         {
                             if (File.Exists(Skyrim.CreatureCatalog.PathFor(Path.Combine(finalDir, partName))) && outDir != finalDir)
                                 File.Copy(Skyrim.CreatureCatalog.PathFor(Path.Combine(finalDir, partName)), Skyrim.CreatureCatalog.PathFor(partPath(k)), overwrite: true);
@@ -5444,6 +5458,9 @@ static class Program
                         var mine = mods.Last(m => m.ModKey.FileName.String.Equals(target, StringComparison.OrdinalIgnoreCase));
                         long records = 0, links = 0;
                         var bad = new Dictionary<string, int>();
+                        // --parts N: bad records counted by the part (of N, PluginMerger's FormID ranges) that made them.
+                        var byPart = opts.TryGetValue("parts", out var partsText) ? new Dictionary<int, int>() : null;
+                        int PartOf(uint id) => (int)((id - 0x800) / Skyrim.PluginMerger.Stride(int.Parse(partsText!))) + 1;
                         var examples = new List<string>();
                         foreach (var rec in mine.EnumerateMajorRecords())
                         {
@@ -5459,6 +5476,7 @@ static class Program
                                 if (problem is null) continue;
                                 string key = $"{rec.Registration.Name} -> {problem}";
                                 bad[key] = bad.GetValueOrDefault(key) + 1;
+                                if (byPart is not null && rec.FormKey.ModKey == mine.ModKey) byPart[PartOf(rec.FormKey.ID)] = byPart.GetValueOrDefault(PartOf(rec.FormKey.ID)) + 1;
                                 if (examples.Count < 12) examples.Add($"    {rec.Registration.Name} {rec.FormKey} {rec.EditorID}: {link.FormKey} {problem}");
                             }
                             if (records % 1_000_000 == 0) Console.WriteLine($"  {target}: {records:N0} records...");
@@ -5476,6 +5494,7 @@ static class Program
                                             if (wp.Coordinates.X != g.Point.Y || wp.Coordinates.Y != g.Point.X)
                                             {
                                                 wrongGrid++;
+                                                if (byPart is not null) byPart[PartOf(n.FormKey.ID)] = byPart.GetValueOrDefault(PartOf(n.FormKey.ID)) + 1;
                                                 if (examples.Count < 12) examples.Add($"    NavigationMesh {n.FormKey} in cell ({g.Point.X},{g.Point.Y}) names grid Y={wp.Coordinates.X} X={wp.Coordinates.Y}");
                                             }
                                         }
@@ -5483,6 +5502,7 @@ static class Program
                         Console.WriteLine($"{target}: {records:N0} records, {links:N0} links, {bad.Values.Sum():N0} bad");
                         foreach (var (k, n) in bad.OrderByDescending(kv => kv.Value).Take(20)) Console.WriteLine($"  {n,8:N0}  {k}");
                         foreach (var e in examples) Console.WriteLine(e);
+                        if (byPart is { Count: > 0 }) Console.WriteLine("  bad records by part: " + string.Join(", ", byPart.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}: {kv.Value:N0}")));
                     }
                     finally { foreach (var m in mods) m.Dispose(); }
                 }
