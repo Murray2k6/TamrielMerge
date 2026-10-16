@@ -85,11 +85,20 @@ static class Program
                 bool voices = ck == Setup.Dependencies.CreationKitChoice.Ready && !skip.Contains("Voices");
                 var plugins = new List<string>();
                 var failed = new List<string>();
+                // Daggerfall's models and textures being moved to --out in the background (below), and its finishing.
+                Task<string>? earlyMove = null;
+                void AwaitEarlyMove()
+                {
+                    if (earlyMove is null) return;
+                    Console.WriteLine(earlyMove.GetAwaiter().GetResult());
+                    earlyMove = null;
+                }
                 // Moves the staged build into --out; with all: false only when the solid-state drive runs short of room.
                 void Settle(bool all)
                 {
                     // Moved early when a step more would cut into the room the drive keeps (Windows' own, on its drive).
                     if (outDir == finalDir || (!all && Util.Drives.FreeBytes(outDir) >= Util.Drives.Reserve(outDir) + (12L << 30))) return;
+                    AwaitEarlyMove();
                     Console.WriteLine($"Moving the build into {finalDir}{(all ? "" : " (the solid-state drive is short of room)")}...");
                     try
                     {
@@ -198,6 +207,28 @@ static class Program
                         // Daggerfall.esm's own doors on the overland too (Privateer's Hold's: 2026-10-14, no navmesh led to it).
                         if (Main(["overland-doors", "--dir", outDir, "--plugins", string.Join(";", new[] { "Daggerfall.esm", Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName }.Where(plugins.Contains))]) == 0)
                             plugins.Add(Skyrim.Terrain.OverlandDoorLinks.PluginName);
+                // Daggerfall's own models and textures (two thirds of a build's bytes, and its land's distant terrain's
+                // 100,000 files) moved to the hard disk while the other games are built, which leave the disk idle, rather
+                // than all at the end (user, 2026-10-15: "fix everything and the gaps"). Nothing after reads them from the
+                // build folder alone: the distant objects look in --out too, and the menu's render (which doesn't) waits.
+                if (outDir != finalDir && plugins.Contains("Daggerfall.esm"))
+                {
+                    string from = outDir, to = finalDir;
+                    string[] daggerfallOnly = [@"meshes\TamrielMerge\DF", @"meshes\TamrielMerge\Towns", @"meshes\TamrielMerge\Dungeons", @"textures\TamrielMerge\DF",
+                                               @"meshes\terrain\" + DaggerfallPluginBuilder.WorldEditorId, @"textures\terrain\" + DaggerfallPluginBuilder.WorldEditorId];
+                    earlyMove = Task.Run(() =>
+                    {
+                        var clock = System.Diagnostics.Stopwatch.StartNew();
+                        int moved = 0;
+                        try
+                        {
+                            foreach (var rel in daggerfallOnly) moved += Util.Drives.MoveInto(Path.Combine(from, rel), Path.Combine(to, rel));
+                            return $"Daggerfall's models and textures: {moved} files moved into {to} beside the other games' builds ({clock.Elapsed.TotalMinutes:F1} min)";
+                        }
+                        // A file in --out in use: the rest goes with the build at the end.
+                        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return $"Daggerfall's models and textures: moving stopped after {moved} files ({e.Message}); the rest go at the end"; }
+                    });
+                }
                 bool BuildParts(string command, int parts, string plugin, Func<int, string> partPath)
                 {
                     // Resumed after its parts were joined: the joined plugin (made after this Daggerfall.esm) is kept.
@@ -397,6 +428,8 @@ static class Program
                     if (Main(["menu-music", "--out", outDir]) != 0) failed.Add("main menu music");
                     if (opts.ContainsKey("gpu")) { if (Main(["menu", "--plugins", outDir, "--out", outDir]) != 0) failed.Add("main menu"); }
                     else Console.WriteLine("Main menu: skipped (it renders on the graphics card: add --gpu)");
+                // The menu's render reads the models from the build folder only: Daggerfall's are there or in --out by now.
+                AwaitEarlyMove();
                     // Packed as its own part (TamrielMerge Menu.esp), so the app can switch it off for Skyrim's menu.
                     Main(["menu-pack", "--out", outDir]);
                     if (File.Exists(Path.Combine(outDir, Skyrim.Render.MenuArchive.PluginName))) plugins.Add(Skyrim.Render.MenuArchive.PluginName);
@@ -497,6 +530,7 @@ static class Program
                 Console.WriteLine("Optional: SKSE + Address Library for SKSE Plugins make the date show the era of the time you're in (SKSE/Plugins/TamrielMergeEra.dll).");
                 if (opts.ContainsKey("install"))
                 using (Begin("Installing"))
+                AwaitEarlyMove();
                 {
                     foreach (var file in Directory.EnumerateFiles(outDir, "*", SearchOption.AllDirectories))
                     {
