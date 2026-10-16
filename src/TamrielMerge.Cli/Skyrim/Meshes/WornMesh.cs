@@ -321,7 +321,7 @@ public static class WornMesh
     /// <summary>
     /// Pushes the shapes out of the surface (Skyrim's body, hands or feet, in the same bind space) wherever a vertex is
     /// within the surface's reach and less than <paramref name="margin"/> outside it, along the surface's normal there;
-    /// the pushes are then smoothed over each shape's own edges (two passes) so the cloth bends rather than dents.
+    /// the pushes are then smoothed over each shape's own edges (four passes) so the cloth bends rather than dents.
     /// Returns how many vertices moved.
     /// </summary>
     public static int FitOutside(List<WornShape> shapes, WornSurface surface, float margin)
@@ -360,7 +360,7 @@ public static class WornMesh
             for (int i = 0; i < s.V.Length; i++) neighbours[i] = [];
             for (int t = 0; t + 2 < s.Tris.Length; t += 3)
                 for (int k = 0; k < 3; k++) { neighbours[s.Tris[t + k]].Add(s.Tris[t + (k + 1) % 3]); neighbours[s.Tris[t + k]].Add(s.Tris[t + (k + 2) % 3]); }
-            for (int pass = 0; pass < 2; pass++)
+            for (int pass = 0; pass < 4; pass++)
             {
                 var next = new Vector3[push.Length];
                 for (int i = 0; i < push.Length; i++)
