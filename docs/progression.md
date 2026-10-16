@@ -23,12 +23,27 @@ If another mod's controlmap.txt wins, the control is missing and the script fall
 Tabs:
 
 1. **Factions**: each converted game's joinable factions, the ones you have joined with their rank title and number.
-2. **Coin**: each converted game's money and how much you have (also shown under the title: the coin carried).
+   Until Papyrus has sent them it says it is reading them; with none it says whether the converted games have none or
+   none of their plugins is loaded.
+2. **Coin**: each converted game's money and how much you have (also shown under the title: the coin carried); "Counting
+   your coin..." until it arrives.
 3. **Travel**: Daggerfall's travel map for the Iliac Bay (TMDfOverland, in Daggerfall.esm): a region, then one of its
    towns with the time on the road; choosing one goes there and passes that time (Daggerfall Unity's travel on foot,
    108 minutes per map pixel, half on a horse). Skyrim's own map travels within the overland tile you are in.
-4. **Skills**: the new skills with level and progress, and each skill's perk tree.
-5. **Passives**: the web, with your start, allocated nodes and free points.
+4. **Skills**: the new skills on the left with level and a bar for the experience toward the next; the chosen one on
+   the right (where it is from, what it rises with, what its level does, the experience in numbers) with its perk tree:
+   a card per rank with the level it needs, taken (gold), takeable (a Take button, a Skyrim perk point) or not yet.
+   The perk points are Skyrim's own. A last row lists Daggerfall's own skills (Etiquette, Streetwise and the nine
+   languages) as they are. Previous / Next step through the skills.
+5. **Passives**: the web drawn as nodes and links (taken gold, takeable with a bright edge, closed by a faction rank
+   red), the signs named round its edge; on the right the free points, where it begins, the node under the mouse (what
+   it gives, the faction rank it needs, whether it can be taken) or, with none, the totals of what is taken. A click
+   takes a node; Reset gives every point back.
+
+The build writes the skills, perk trees and web into the menu (`built` in tamriel.as, `ProgressionBuilder.MenuData`),
+so Papyrus only sends state: TMSkills `SkillState` and TMPassives `WebState`, asked for by mod events `TM_Skills`
+("state", "take:<perk>") and `TM_Web` ("state", "take:<node>", "reset") when the tabs open or a button is pressed.
+FlashMenus checks that every function of the script made it into the movie (FFDec drops what it can't compile).
 
 ## The Iliac Bay's size and its tiles (user requests 2026-10-07)
 
@@ -182,11 +197,76 @@ level gives its effect.
 | Etiquette, Streetwise | DF | talking with nobles / the underworld | their reactions |
 | 9 languages | DF | meeting their creatures | calming them |
 
+Built (2026-10-15; ProgressionSkills, TMSkills on the TMProgression quest). Etiquette, Streetwise and the languages are
+Daggerfall's own (DfSenses: globals `DFSkill<name>` in Daggerfall.esm at 0xDF0310 on, raised by TMDfSensesControl);
+the Skills tab lists them with their progress (`TMDfSensesControl.SkillProgress`) and nothing else changes them. The
+other thirteen, for the games converted (Athletics and Acrobatics also stand for Daggerfall's Running and Jumping):
+
+- **Records**: `TMSkill<Id>Level` (starting at 15, Skyrim's untrained skill) and `TMSkill<Id>XP` (the experience toward
+  the next level) globals; an ability `TMSkill<Id>Ability` for actor values and a hidden perk `TMSkill<Id>Effect` for
+  entry points, both scaled by the level after each rise and each load (SKSE `Spell.SetNthEffectMagnitude`,
+  `Perk.SetNthEntryValue`: SKSE's changes to forms aren't saved).
+- **Experience**: Skyrim's curve, a level L needs 2 x L^1.95 (fSkillUseCurve); a rise gives character experience of the
+  new level x fXPPerSkillRank (`Game.SetPlayerExperience`), as a Skyrim skill rise does, with a notification.
+- **Rising** (cheap): a 2-second poll (distance sprinted, run, swum; health recovered), the jump animation events
+  (JumpUp, JumpFall, JumpDown: a jump, and the height of a fall past 150 units), the player alias's OnSpellCast,
+  OnHit (struck by a weapon, at most every half second), OnObjectEquipped (what is worn) and OnItemAdded/Removed filtered
+  to gold (counted while the barter menu is open), sleep (as 8 health an hour), and a combat hit spell (TMSkillHitPerk's
+  Apply Combat Hit Spell, TMSkillHitEffect) on whoever the player strikes. Only one combat hit spell applies to a hit,
+  the highest priority's: ours is below Skyrim's own bleeding perks, except for spears (priority 11).
+- **Lists** (`TM<List>List`, filled at run time from the plugin and FormID the build found, again when a build lists
+  others): Mysticism spells (MW and OB spells with an effect their converters give Alteration that was Mysticism:
+  absorbing, detecting life, dispelling, Mark, Recall, the Interventions, reflecting, soul trapping, spell absorption,
+  telekinesis; Daggerfall's dispels, Recall, Soul Trap, Spell Reflection, Comprehend Languages and Lock); Thaumaturgy
+  spells (Daggerfall's Levitate, Open, Water Walking, Disintegrate, Spell Resistance); Morrowind's spears and halberds;
+  Morrowind's medium armour (weight over 0.6 and up to 0.9 of the piece's: fLightMaxMod, fMedMaxMod).
+
+| Skill | Rises with (experience a use) | Its level (at 100) |
+|---|---|---|
+| Mysticism, Thaumaturgy | casting a listed spell (2 a point of its cost) | its spells cost 40% less (Mod Spell Cost) |
+| Athletics | 100 units sprinted (1), run or swum (half) | +20% speed, +50% stamina regeneration |
+| Acrobatics | a jump (15), 100 units fallen past 150 | jumping +50, 50% less fall damage (Mod Falling Damage) |
+| Hand-to-Hand | an unarmed hit (25) | +20 unarmed damage |
+| Spear | a hit with a spear (30) | +30% spear damage (Mod Attack Damage) |
+| Medium Armor | struck in medium armour (25) | +40% medium armour rating (Mod Armor Rating) |
+| Mercantile | a coin changing hands in barter (0.36) | buy 20% cheaper, sell 20% dearer |
+| Unarmored | struck in no armour (25) | +150 armour rating while unarmoured (TMUnarmored) |
+| Swimming | 100 units swum (1.5) | +50% speed swimming; fActorSwimBreathMult up to twice Skyrim's (not verified in game) |
+| Backstabbing | a sneak attack (60) | sneak attacks twice the damage (Mod Sneak Attack Mult) |
+| Critical Strike | a critical strike (80) | Daggerfall's own: a level/4 % chance a hit strikes critically, extra damage |
+| Medical | a point of health recovered (0.5) | +50% health regeneration |
+
+Each has a perk tree of real perks (two or three, some with two ranks; 44 ranks in all) needing 25 to 80 in the skill
+(the perk's own conditions and the menu check the same) and taken with Skyrim's perk points: e.g. Mysticism's Mystic
+Adept (15% cheaper, twice), Spell Ward, Far Reaching; Spear's Spearman, Impaling Thrust, Long Reach; Critical Strike's
+Keen Eye (Skyrim's critical chance) and Deadly Precision. TMMediumArmorWorn and TMUnarmored (kept on each change of
+what is worn) let perks ask what the player wears. Not tested in game.
+
 ## Passive web
 
 One web: small nodes (+attribute-like stats), notables (perks), keystones (big trade-offs); starts at the 13 birthsigns
 (the Morrowind/Oblivion signs; Daggerfall's and Skyrim's stones mapped to them); 1 point per level; faction-gated
 notables and keystones need a rank in a converted game's faction.
+
+Built (2026-10-15; PassiveWeb, TMPassives on the TMProgression quest), 136 nodes and 149 links:
+
+- **Layout**: the 13 signs on a ring (the Warrior's charges, the Mage's, the Thief's, the Serpent), two small nodes
+  between each pair; from each sign a branch outwards (two small nodes and a notable) and one inwards (two small nodes,
+  a notable, a hub); the 13 hubs ring the 6 keystones in the middle. Small nodes give the sign's own stats (the
+  Warrior health and weapons, the Mage magicka, the Thief sneaking and locks...), the ring between signs resistances.
+- **The start**: the player's sign is the standing stone they hold (Skyrim's doom<Sign>Ability, which Morrowind's
+  signs give too) or Oblivion's chosen sign (TMObState.ChosenBirthsign, mapped by its menu's order); Daggerfall has no
+  signs, so with neither the player begins at whichever sign they like. The start is free and gives its sign's stat
+  twice over.
+- **Points**: one per character level; a node must touch one taken; Reset gives them all back.
+- **Gates**: by the faction registry, in groups (Fighters, Mages, Thieves, Assassins, Temple, Knights, Great Houses) of
+  any converted game: the Warrior's, Lord's, Mage's, Ritual's, Thief's, Lover's and Shadow's outer notables need rank 3,
+  five keystones rank 5 (Avatar of Steel, Atronach's Vessel, Shadowborn, Martyr of the Nine, Blood Price; Unbound needs
+  none). A group none of the converted games has gates nothing.
+- **Effects**: the small nodes' sums go into one hidden ability (TMWebStats, a magnitude a stat); notables and keystones
+  are perks (`TMWeb<Name>`: entry points, and abilities for actor values) given or taken away as nodes are taken or
+  reset. What is taken is kept in TMPassives (an array, a node each), applied again after loading.
+- Not tested in game.
 
 ## Crime by game and area (user request 2026-10-07)
 

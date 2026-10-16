@@ -127,7 +127,7 @@ public static class PassiveWeb
             [PerkFx.Raise(ActorValue.SpeedMult, 15), PerkFx.Raise(ActorValue.StaminaRateMult, 50), PerkFx.Times(EP.ModArmorRating, 0.5f)], null),
     ];
 
-    public const float CentreX = 560, CentreY = 372;
+    public const float CentreX = 500, CentreY = 384;
 
     public sealed class Web
     {
@@ -198,7 +198,7 @@ public static class PassiveWeb
         {
             double a = -Math.PI / 2 + (k + 0.5) * 2 * Math.PI / Keystones.Length;
             var key = Keystones[k];
-            int n = Add(26, a, Kind.Keystone, key.Name, key.Description, fx: key.Fx, gate: key.Gate is { } g ? G(g) : -1, gateRank: 5);
+            int n = Add(31, a, Kind.Keystone, key.Name, key.Description, fx: key.Fx, gate: key.Gate is { } g ? G(g) : -1, gateRank: 5);
             // The hub nearest in angle.
             int hub = Enumerable.Range(0, 13).OrderBy(i => Math.Abs(Math.IEEERemainder(a - (-Math.PI / 2 + i * step), 2 * Math.PI))).First();
             Link(hubs[hub], n);

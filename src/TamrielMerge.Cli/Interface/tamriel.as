@@ -458,7 +458,7 @@ function drawSkills() {
     if (skillPick < built.skills.length) drawSkill(skillPick);
     else drawDfSkills();
     if (skillMessage != "") {
-        var m = text(body, "msg", 3, PAD + 280, H - PAD - 64, W - 2 * PAD - 440, 28, 16, 0xE8C878, false);
+        var m = text(body, "msg", 3, PAD + 520, H - PAD - 64, W - 2 * PAD - 680, 28, 16, 0xE8C878, false);
         m.text = skillMessage;
     }
 }
@@ -513,6 +513,8 @@ function drawSkill(i) {
                 var take = button(card, "take", 4, colW - 78, 76, 70, 24, "Take", null);
                 take.perk = n;
                 take.onRelease = function() { skse.SendModEvent("TM_Skills", "take:" + this.perk, 0); };
+                take.lineStyle(1, 0xD9B76A, 100);
+                take.moveTo(0, 0); take.lineTo(70, 0); take.lineTo(70, 24); take.lineTo(0, 24); take.lineTo(0, 0);
             }
             if (r > 0) {
                 links.lineStyle(2, owned ? 0xD9B76A : 0x4A4A52, 100);
@@ -634,9 +636,15 @@ function drawWeb() {
             var dx = node[0] - built.cx;
             var dy = node[1] - built.cy;
             var len = Math.sqrt(dx * dx + dy * dy);
-            var lx = built.cx + dx / len * 268;
-            var ly = built.cy + dy / len * 268;
-            var label = text(body, "sign" + n, 300 + n, lx - 50, ly - 9, 100, 20, 12, node[6] == webSign ? 0xF0E6C8 : 0x90A0B8, node[6] == webSign, "center");
+            // Beyond the outer notable: to its left or right on the sides, above or below at the top and bottom.
+            var cos = dx / len;
+            var sin = dy / len;
+            var lx = built.cx + cos * 254;
+            var ly = built.cy + sin * 254 - 9 + sin * 8;
+            var lw = 110;
+            var at = cos < -0.3 ? lx - lw : (cos > 0.3 ? lx : lx - lw / 2);
+            var label = text(body, "sign" + n, 300 + n, at, ly, lw, 20, 12, node[6] == webSign ? 0xF0E6C8 : 0x90A0B8, node[6] == webSign,
+                cos < -0.3 ? "right" : (cos > 0.3 ? "left" : "center"));
             label.text = built.signs[node[6]];
         }
     }
@@ -649,7 +657,7 @@ function drawWeb() {
 function drawWebInfo() {
     if (webInfo != null) webInfo.removeMovieClip();
     webInfo = body.createEmptyMovieClip("info", 500);
-    var x0 = 850;
+    var x0 = 800;
     var w0 = W - PAD - 10 - x0;
     var pts = text(webInfo, "pts", 1, x0, PAD + 70, w0, 28, 20, 0xD9B76A, true);
     pts.text = webFree + " of " + webLevel + " points free";
@@ -695,11 +703,11 @@ function drawWebInfo() {
             if (nd[7] >= 0) sums[nd[7]] = (sums[nd[7]] == undefined ? 0 : sums[nd[7]]) + nd[8];
             if (nd[2] == 1 || nd[2] == 2) named.push(nd[3]);
         }
-        var lines = [];
-        for (var s = 0; s < built.stats.length; s++) if (sums[s] != undefined) lines.push("+" + Math.round(sums[s] * 10) / 10 + " " + built.stats[s]);
-        for (var k = 0; k < named.length; k++) lines.push(named[k]);
-        var total = wrapped(webInfo, "total", 8, x0, y, w0, H - PAD - 80 - y, 14, 0xC8C0B0);
-        total.text = lines.length == 0 ? "Nothing taken yet." : lines.join("\n");
+        var stats = [];
+        for (var s = 0; s < built.stats.length; s++) if (sums[s] != undefined) stats.push("+" + Math.round(sums[s] * 10) / 10 + " " + built.stats[s]);
+        var total = wrapped(webInfo, "total", 8, x0, y, w0, 240, 14, 0xC8C0B0);
+        total.text = stats.length == 0 && named.length == 0 ? "Nothing taken yet."
+            : stats.join(", ") + (named.length > 0 ? "\n\n" + named.join(", ") : "");
     }
     if (webMessage != "") {
         var m = wrapped(webInfo, "msg", 9, x0, H - PAD - 110, w0, 44, 15, 0xE8C878);
