@@ -438,7 +438,9 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
 
     static bool IsEditorMarker(string? name) => name?.StartsWith("EditorMarker", StringComparison.OrdinalIgnoreCase) == true;
 
-    void Write(List<Piece> pieces, List<(V3[] Pts, V3 N)> solid, string outPath, bool moving, float? itemMass = null)
+    /// <param name="more">Adds to the model before it is saved (an effect's particle systems).</param>
+    /// <param name="bsxAdd">BSX flags added to the usual (0x1 when the model has controllers that must run).</param>
+    void Write(List<Piece> pieces, List<(V3[] Pts, V3 N)> solid, string outPath, bool moving, float? itemMass = null, Action<NifFile>? more = null, int bsxAdd = 0)
     {
         using var nif = new NifFile();
         nif.Create(NiVersion.getSSE());
@@ -455,15 +457,16 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             if (pts.Count > 0)
             {
                 BlockMeshBuilder.AddDynamicCollision(nif, root, pts.Aggregate(new V3(float.MaxValue), V3.Min), pts.Aggregate(new V3(float.MinValue), V3.Max), mass, BlockMeshBuilder.WoodMaterial);
-                BlockMeshBuilder.AddBsxFlags(nif, root, 194);
+                BlockMeshBuilder.AddBsxFlags(nif, root, 194 | bsxAdd);
             }
         }
         else
         {
             if (solid.Count > 0)
                 BlockMeshBuilder.AddCollision(nif, root, Stairs(solid.Select(s => (s.Pts, s.N, new BlockMeshBuilder.Tex("", "", false))).ToList(), moving), moving);
-            BlockMeshBuilder.AddBsxFlags(nif, root);
+            BlockMeshBuilder.AddBsxFlags(nif, root, 10 | bsxAdd);
         }
+        more?.Invoke(nif);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
         if (nif.Save(outPath) != 0) throw new IOException($"nifly failed to save {outPath}");
     }

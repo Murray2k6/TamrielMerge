@@ -100,6 +100,8 @@ public sealed partial class ObPluginBuilder : IDisposable
         if (converted.TryGetValue(model, out var hit)) return hit;
         try { hit = meshes.Convert(model, modOutDir); }
         catch (Exception e) { Problems.Add($"model {model}: {e.Message}"); hit = null; }
+        Problems.AddRange(meshes.Notes);
+        meshes.Notes.Clear();
         return converted[model] = hit;
     }
 

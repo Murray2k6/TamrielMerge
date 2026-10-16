@@ -38,17 +38,20 @@ public sealed class Ob10Nif
     }
 
     /// <summary>
-    /// Whether nifly would fail on the file: Gamebryo 10.1 files (their controller sequences), and 10.2 files with
-    /// particle systems (nifly reads their particle blocks as 20.0's).
+    /// Whether nifly would fail on the file, and why. Found with ob-nif10-bisect (each model cut after 1, 2, ... blocks,
+    /// loaded by nifly in a child process) and confirmed by splicing a block that reads fine elsewhere right after the
+    /// suspect: nifly reads NiPSysData in its Gamebryo 20.0 layout, so in a 10.1 or 10.2 file it loses its place there
+    /// and fails on the next block (NiPSysAgeDeathModifier in every effect here); and it can't read a 10.1.0.106
+    /// NiTransformInterpolator (the 10.1 layout, with its three "valid" flags). It ends the process (a fail-fast,
+    /// 0xC0000409), which .NET can't catch, so it must not be given these files.
     /// </summary>
     public static bool IsUnreadableByNifly(byte[] b, out string why)
     {
         why = "";
         if (Header(b) is not { } h || h.Version >= 0x14000004) return false;
         string v = VersionString(h.Version);
-        if (h.Version < 0x0A020000) { why = $"Gamebryo {v}, which nifly can't read"; return true; }
-        var ps = h.Types.Where(t => t.StartsWith("NiPSys") || t == "NiParticleSystem").ToList();
-        if (ps.Count > 0) { why = $"Gamebryo {v} with particles ({string.Join(", ", ps)}), which nifly can't read"; return true; }
+        if (h.Types.Contains("NiPSysData")) { why = $"nifly can't read a Gamebryo {v} NiPSysData (particle data)"; return true; }
+        if (h.Version <= V10_1_0_110 && h.Types.Contains("NiTransformInterpolator")) { why = $"nifly can't read a Gamebryo {v} NiTransformInterpolator"; return true; }
         return false;
     }
 
@@ -99,11 +102,18 @@ public sealed class Ob10Nif
     {
         public List<(int Interpolator, int Controller, string Node, string ControllerType, string ControllerId, string InterpolatorId)> Links = [];
         public uint Cycle; public float Frequency = 1, Start, Stop;
+        /// <summary>Gamebryo 10.2: the links' names as offsets into a string palette read later in the file.</summary>
+        internal List<(int Interp, int Ctlr, uint[] Offsets)> Pending = [];
+        internal int Palette = -1;
     }
 
     public uint Version { get; private set; }
     public List<Block?> Blocks { get; } = [];
     public List<int> Roots { get; } = [];
+    /// <summary>Where each block starts (its zero word, in versions that have one) and where the blocks end.</summary>
+    public List<int> Starts { get; } = [];
+    public int BlocksEnd { get; private set; }
+    int indexAt;
 
     public T? Get<T>(int index) where T : Block => index >= 0 && index < Blocks.Count ? Blocks[index] as T : null;
 
@@ -142,17 +152,29 @@ public sealed class Ob10Nif
         for (int k = 0; k < 3; k++) r.Skip(1 + bytes[r.Pos]);
         int typeCount = r.U16();
         for (int k = 0; k < typeCount; k++) r.S();
+        nif.indexAt = r.Pos;
         r.Skip(2 * h.BlockTypes.Count);
         r.U32();   // groups
         for (int i = 0; i < h.BlockTypes.Count; i++)
         {
             string type = h.Types[h.BlockTypes[i]];
+            nif.Starts.Add(r.Pos);
+            // Up to 10.1.0.106 every block is preceded by a zero word.
+            if (h.Version <= V10_1_0_106) r.U32();
             int at = r.Pos;
             try { nif.Blocks.Add(nif.ReadBlock(r, type, i)); }
             catch (Exception e) when (e is InvalidDataException or ArgumentOutOfRangeException or IndexOutOfRangeException or ArgumentException)
             {
                 throw new InvalidDataException($"{name}: block {i} {type} at {at} doesn't read as Gamebryo {VersionString(h.Version)} ({e.Message})");
             }
+        }
+        nif.BlocksEnd = r.Pos;
+        // Gamebryo 10.2 sequences name their links through a palette that comes after them.
+        foreach (var s in nif.Blocks.OfType<Sequence>())
+        {
+            foreach (var (interp, ctlr, o) in s.Pending)
+                s.Links.Add((interp, ctlr, nif.PaletteString(s.Palette, o[0]), nif.PaletteString(s.Palette, o[2]), nif.PaletteString(s.Palette, o[3]), nif.PaletteString(s.Palette, o[4])));
+            s.Pending.Clear();
         }
         int roots = r.I32();
         for (int k = 0; k < roots; k++) nif.Roots.Add(r.I32());
@@ -435,7 +457,9 @@ public sealed class Ob10Nif
             case "NiBlendPoint3Interpolator":
                 BlendInterpolator(r); r.V(); return new Interpolator { Type = type, Index = index };
             case "NiBlendTransformInterpolator":
-                BlendInterpolator(r); return new Interpolator { Type = type, Index = index };
+                BlendInterpolator(r);
+                if (Version <= V10_1_0_110) r.Skip(32 + 3);   // its value (translation, rotation, scale) and which are valid
+                return new Interpolator { Type = type, Index = index };
             case "NiFloatData":
             {
                 var d = new KeyData { Type = type, Index = index }; Keys<float>(r, d, 4, () => new Vector4(r.F(), 0, 0, 0)); return d;
@@ -488,12 +512,10 @@ public sealed class Ob10Nif
                 if (Version == V10_1_0_106) r.Bool();   // play backwards
                 r.I32();               // manager
                 r.S();                 // accum root name
-                int palette = Version >= V10_1_0_113 ? r.I32() : -1;
+                s.Palette = Version >= V10_1_0_113 ? r.I32() : -1;
                 foreach (var (interp, ctlr, names, offsets) in raw)
-                {
-                    string[] n = names.Length == 5 ? names : offsets.Select(o => PaletteString(palette, o)).ToArray();
-                    s.Links.Add((interp, ctlr, n[0], n[2], n[3], n[4]));
-                }
+                    if (names.Length == 5) s.Links.Add((interp, ctlr, names[0], names[2], names[3], names[4]));
+                    else s.Pending.Add((interp, ctlr, offsets));
                 return s;
             }
             case "NiPSysAgeDeathModifier":
@@ -578,9 +600,9 @@ public sealed class Ob10Nif
                 r.I32(); r.U16(); r.I32();   // target, flags, body
                 return new Block { Type = type, Index = index };
             case "bhkRigidBody" or "bhkRigidBodyT":
-                // World object (shape, filter, info), entity info, Oblivion's rigid body info (192 bytes), constraints,
+                // World object (shape, filter, info), entity info, Oblivion's rigid body info (196 bytes), constraints,
                 // body flags. Collision is rebuilt from the visible geometry.
-                r.Skip(4 + 4 + 20 + 4 + 192);
+                r.Skip(4 + 4 + 20 + 4 + 196);
                 r.Skip(4 * r.I32());
                 r.U32();
                 return new Block { Type = type, Index = index };
@@ -601,6 +623,25 @@ public sealed class Ob10Nif
             default:
                 throw new InvalidDataException($"block type {type} isn't read");
         }
+    }
+
+    /// <summary>
+    /// The file cut after its first <paramref name="keep"/> blocks (the block count and type index shortened, the
+    /// first block the root): for finding the block nifly fails on (ob-nif10-bisect).
+    /// </summary>
+    public byte[] Truncated(byte[] file, int keep)
+    {
+        int countAt = Array.IndexOf(file, (byte)10) + 1 + 4 + 4;
+        int blocksEnd = keep < Starts.Count ? Starts[keep] : BlocksEnd;
+        var output = new List<byte>();
+        output.AddRange(file.AsSpan(0, countAt).ToArray());
+        output.AddRange(BitConverter.GetBytes(keep));
+        output.AddRange(file.AsSpan(countAt + 4, indexAt + 2 * keep - countAt - 4).ToArray());
+        int afterIndex = indexAt + 2 * Starts.Count;
+        output.AddRange(file.AsSpan(afterIndex, blocksEnd - afterIndex).ToArray());
+        output.AddRange(BitConverter.GetBytes(1));
+        output.AddRange(BitConverter.GetBytes(0));
+        return output.ToArray();
     }
 
     string PaletteString(int palette, uint offset)
