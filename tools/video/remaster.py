@@ -222,18 +222,31 @@ def subtitle(up_dir, lines_path):
             pass
     if font is None:
         font = ImageFont.load_default()
+    # Each frame's lines (in order: lines can overlap), the frames drawn on every core (2026-10-16: one at a time took
+    # eight minutes for Redguard's movie 2).
+    texts = {}
     for line in lines:
         for n in range(int(line["start"]), int(line["end"]) + 1):
             path = os.path.join(up_dir, f"frame{n + 1:05d}.png")
-            if not os.path.exists(path):
-                continue
-            img = Image.open(path).convert("RGB")
-            draw = ImageDraw.Draw(img)
+            if os.path.exists(path):
+                texts.setdefault(path, []).append(line["text"])
+
+    import threading
+    local = threading.local()
+
+    def one(path):
+        # A font of the thread's own: a FreeType face isn't shared between threads.
+        if not hasattr(local, "font"):
+            local.font = ImageFont.truetype(font.path, size) if hasattr(font, "path") else font
+        font_here = local.font
+        img = Image.open(path).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        for text in texts[path]:
             # Wrapped to the frame's width, centred near the foot, white with a dark outline.
-            words, rows, row = line["text"].split(), [], ""
+            words, rows, row = text.split(), [], ""
             for word in words:
                 test = (row + " " + word).strip()
-                if draw.textlength(test, font=font) > w * 0.86 and row:
+                if draw.textlength(test, font=font_here) > w * 0.86 and row:
                     rows.append(row)
                     row = word
                 else:
@@ -241,11 +254,15 @@ def subtitle(up_dir, lines_path):
             rows.append(row)
             y = h - (len(rows) + 1) * int(size * 1.25)
             for r in rows:
-                x = (w - draw.textlength(r, font=font)) / 2
-                draw.text((x, y), r, font=font, fill=(255, 255, 255), stroke_width=max(1, size // 12), stroke_fill=(0, 0, 0))
+                x = (w - draw.textlength(r, font=font_here)) / 2
+                draw.text((x, y), r, font=font_here, fill=(255, 255, 255), stroke_width=max(1, size // 12), stroke_fill=(0, 0, 0))
                 y += int(size * 1.25)
-            img.save(path + ".tmp.png", compress_level=1)
-            os.replace(path + ".tmp.png", path)
+        img.save(path + ".tmp.png", compress_level=1)
+        os.replace(path + ".tmp.png", path)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        list(pool.map(one, texts))
     open(done, "w").close()
 
 
