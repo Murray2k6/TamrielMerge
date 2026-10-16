@@ -86,7 +86,10 @@ public sealed class ClutterPlacer
     /// The objects standing for a sprite. <paramref name="spriteHeightSkyrim"/> is the sprite's in-world height;
     /// <paramref name="anchorZ"/> is the floor (Floor) or ceiling (Ceiling, UpsideDown) height under/over it.
     /// </summary>
-    public IEnumerable<Placement> Place(DfRdbObject o, Vector3 centreSkyrim, float spriteHeightSkyrim, float anchorZ, Vector2? facing = null, float spriteWidthSkyrim = 0)
+    /// <param name="clearance">For hung things: the room's height under the ceiling (Skyrim units), which they keep 16
+    /// units clear of the floor within.</param>
+    public IEnumerable<Placement> Place(DfRdbObject o, Vector3 centreSkyrim, float spriteHeightSkyrim, float anchorZ, Vector2? facing = null, float spriteWidthSkyrim = 0,
+        float? clearance = null)
     {
         // Deterministic per-object variety (heading, variant).
         uint hash = (uint)HashCode.Combine(o.RecordOffset, o.TextureArchive, o.TextureRecord, (int)centreSkyrim.X, (int)centreSkyrim.Y);
@@ -125,6 +128,8 @@ public sealed class ClutterPlacer
             float foot = MathF.Max(main.Max.X - main.Min.X, main.Max.Y - main.Min.Y);
             if (spriteWidthSkyrim > 0 && foot > 1) scale = MathF.Min(scale, spriteWidthSkyrim * 1.5f / foot);
         }
+        if (spec.Mount == Mount.Ceiling && clearance is { } room && height * scale > room - 16 && height > 1)
+            scale = MathF.Max(0.2f, (room - 16) / height);
         Vector3 rotation = new(spec.Mount == Mount.UpsideDown ? MathF.PI : 0, 0, heading);
         float z = spec.Mount switch
         {

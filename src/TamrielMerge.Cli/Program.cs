@@ -7629,6 +7629,22 @@ static class Program
                 Console.WriteLine($"{counts.Values.Sum()} objects of {counts.Count} kinds, {npcs} actors; {missing} converted models missing, {broken} unreadable");
                 return 0;
             }
+            case "shape-info":
+            {
+                // Dev aid: Skyrim objects' bounds (--ids A,B by EditorID): the record's OBND and the shape PropReplacer
+                // places them by (read from the mesh, or the record's when the mesh read looks wrong).
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var shapes = new Skyrim.PropReplacer(sk, skyrimData);
+                foreach (var id in opts["ids"].Split(','))
+                {
+                    var rec = sk.EnumerateMajorRecords().FirstOrDefault(r => r.EditorID == id);
+                    if (rec is null) { Console.WriteLine($"{id}: not in Skyrim.esm"); continue; }
+                    var ob = (rec as IObjectBoundedGetter)?.ObjectBounds;
+                    var (min, max, _) = shapes.SkyrimShape(rec.FormKey);
+                    Console.WriteLine($"{id}: OBND {(ob is null ? "-" : $"{ob.First} .. {ob.Second}")}; shape {min} .. {max}; model {(rec as IModeledGetter)?.Model?.File.DataRelativePath.Path}");
+                }
+                return 0;
+            }
             case "creature-animdata-check":
             {
                 // Dev aid: the readers of the game's animation single files (CreatureBehavior) checked against the projects

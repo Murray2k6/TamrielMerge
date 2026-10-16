@@ -241,7 +241,14 @@ public sealed class PropReplacer
     public (Vector3 Min, Vector3 Max, Vector2 Back) SkyrimShape(FormKey key)
     {
         if (skyrimShapes.TryGetValue(key, out var shape)) return shape;
-        var record = skyrim.EnumerateMajorRecords().First(r => r.FormKey == key);
+        return SkyrimShape(skyrim.EnumerateMajorRecords().First(r => r.FormKey == key));
+    }
+
+    /// <summary><see cref="SkyrimShape(FormKey)"/> for a record already in hand (any plugin's).</summary>
+    public (Vector3 Min, Vector3 Max, Vector2 Back) SkyrimShape(Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter record)
+    {
+        var key = record.FormKey;
+        if (skyrimShapes.TryGetValue(key, out var shape)) return shape;
         var bounds = (record as IObjectBoundedGetter)?.ObjectBounds;
         var min = bounds is null ? Vector3.Zero : new Vector3(bounds.First.X, bounds.First.Y, bounds.First.Z);
         var max = bounds is null ? Vector3.Zero : new Vector3(bounds.Second.X, bounds.Second.Y, bounds.Second.Z);

@@ -694,8 +694,10 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                              : SurfaceY(floorPolys, c.X, c.Z, c.Y - h / 2 + 24, above: false) ?? c.Y - h / 2;
         var facing = ClutterPlacer.IsStatue(o) && !hangs ? StatueFacing(rooms, c.X, anchor, c.Z) : null;
         var pos = ToSkyrim(c);
+        // Hung things no longer than the room is high (2026-10-16: 188 giant's hanging bones reached through the floor).
+        float? clearance = hangs && SurfaceY(floorPolys, c.X, c.Z, anchor - 1, above: false) is { } floor ? (anchor - floor) * BlockMeshBuilder.Scale : null;
         return clutter.Place(o, new Vector3(pos.X, pos.Y, pos.Z), h * BlockMeshBuilder.Scale, anchor * BlockMeshBuilder.Scale,
-            facing, SpriteWidth(o.TextureArchive, o.TextureRecord) * BlockMeshBuilder.Scale);
+            facing, SpriteWidth(o.TextureArchive, o.TextureRecord) * BlockMeshBuilder.Scale, clearance);
     }
 
     /// <summary>For a replaced model turned to the room (statues): the way into the room from where it stands.</summary>

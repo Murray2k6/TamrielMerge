@@ -60,6 +60,24 @@ public static class DungeonCheck
                         bases[r.FormKey] = new BaseInfo(r.Registration.Name, r.EditorID ?? "", (r as IModeledGetter)?.Model?.File.DataRelativePath.Path,
                             new Vector3(ob.First.X, ob.First.Y, ob.First.Z), new Vector3(ob.Second.X, ob.Second.Y, ob.Second.Z));
             log($"{bases.Count} placeable bases");
+            // Skyrim's own objects by the shape the converter places them by (PropReplacer.SkyrimShape: the mesh, else the
+            // record's bounds), not their records' bounds alone, which are loose for some (2026-10-16: HayBale01's reach
+            // 54 below its origin, its mesh none, and every hay bale read as 60 units into the floor).
+            var shapes = new PropReplacer(mods[0], skyrimData);
+            var vanilla = mods.Take(mods.Count - ours.Count).SelectMany(m => m.EnumerateMajorRecords()).Where(r => bases.ContainsKey(r.FormKey))
+                .GroupBy(r => r.FormKey).ToDictionary(g => g.Key, g => g.Last());
+            var used = new HashSet<FormKey>();
+            foreach (var mod in ours)
+                foreach (var cell in mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                    foreach (var r in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>())
+                        if (vanilla.ContainsKey(r.Base.FormKey)) used.Add(r.Base.FormKey);
+            foreach (var key in used)
+                if (bases[key] is { } b && Rests.Contains(b.Type))
+                {
+                    var (min, max, _) = shapes.SkyrimShape(vanilla[key]);
+                    bases[key] = b with { Min = min, Max = max };
+                }
+            log($"{used.Count} of Skyrim's objects used, by their meshes' shapes");
             var files = new FileFinder(skyrimData, dir);
             var blockGeometry = new Dictionary<string, List<Tri>?>(StringComparer.OrdinalIgnoreCase);
             List<Tri>? Geometry(string model)
@@ -273,6 +291,13 @@ public static class DungeonCheck
                 if (b.Key != self && b.Top <= z + 8 && (best is null || b.Top > best) && Inside(b, x, y)) best = b.Top;
             return best;
         }
+        float? FloorBelow(float x, float y, float z)
+        {
+            float? best = null;
+            foreach (var t in floors.Near(x, y, x, y))
+                if (t.N.Z > 0 && HeightAt(t, x, y) is { } h && h <= z + 8 && (best is null || h > best)) best = h;
+            return best;
+        }
         float? CeilingAbove(float x, float y, float z)
         {
             float? best = null;
@@ -366,12 +391,15 @@ public static class DungeonCheck
             }
 
             lock (Checked) Checked[bi.EditorId] = Checked.GetValueOrDefault(bi.EditorId) + 1;
-            // A floor or top between its lowest point and its middle: standing in it, not floating above the one below.
-            if (SupportBelow(p.X, p.Y, (bottom + top) / 2, obj.FormKey) is { } inside && inside - bottom > 12)
+            // A floor between its lowest point and its middle: standing in it, not floating above the one below. The
+            // dungeon's own floors only (a cage's box held the skull inside it, and every caged skull's cage read as sunk).
+            if (FloorBelow(p.X, p.Y, (bottom + top) / 2) is { } inside && inside - bottom > 12)
             {
                 Add("Sunk into the floor", $"{inside - bottom:F0} units in");
                 continue;
             }
+            // Held in something: resting on the inside of a box whose bottom is just under it (a skull in a hanging cage).
+            if (boxes.Any(b => b.Key != obj.FormKey && b.Bottom <= bottom + 4 && b.Bottom >= bottom - 40 && b.Top > top && Inside(b, p.X, p.Y))) continue;
             var under = SupportBelow(p.X, p.Y, bottom, obj.FormKey);
             float gap = under is { } u ? bottom - u : float.MaxValue;
             if (gap <= 12) continue;
