@@ -29,12 +29,14 @@ the Python environment but not the upscaler; `--upscale-quest-videos` runs them 
 Redguard plays ten more movies in the story (MENU.INI `movie_name[n]`, Smacker files on the CD): 1 SCENE3 (the
 journal), 2 SCENE7 (escaping N'Gasta's isle after Vile's riddles), 3 SCENE10 (A'tor's soul going into the sword), 4 WIN
 (the ending), 5-10 C/A/B_RUINS1-2 (the dwarven ruins' machines). The videos step (Redguard/RgMovies.cs) extracts each
-from REDGUARD.bin and remasters it as the intro is (640x240 interlaced shown at 640x480, then 1440x1080) to
+from REDGUARD.bin and converts it (640x240 interlaced shown at 640x480, then 1440x1080) to
 `Video\TamrielMerge_RedguardMovie{n}.bik`, with the movie's lines (`movie#_text`: first and last frame, text) drawn at
 the foot of their frames (`remaster.py --subtitles`), since Skyrim's Bink player shows no text. The scripts play them
 where Redguard queued them (QueueMovie(n) right before the map change that followed; WonGame plays 4) through
-`Game.PlayBink` (TMRgState.PlayMovie). `videos --no-upscale` (and `remaster.py --no-upscale`) only resizes the frames,
-for a quick check (C_RUINS1, 111 frames: 38 s).
+`Game.PlayBink` (TMRgState.PlayMovie). Like Daggerfall's quest videos they are only resized unless
+`--upscale-quest-videos` (2026-10-16: on the CPU the upscale took nearly two hours for movie 1's 2,472 frames, and
+movie 2 has 5,970). Resized frames go to the work folder's `plain\`, so a stopped upscale's frames in `up\` are kept for
+a later upscale and never mixed with them.
 
 ## The ray-traced look (`--gpu`)
 

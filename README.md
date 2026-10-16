@@ -104,7 +104,8 @@ other from any of your games; *Textures & PBR…* changes its textures and makes
 
 Optional:
 
-- **Voice generator** speaks Morrowind's unrecorded dialogue in Skyrim's voices. It runs for a long time; pause it
+- **Voice generator** speaks Morrowind's unrecorded dialogue, and the lines Oblivion never recorded, in Skyrim's
+  voices. It runs for a long time; pause it
   whenever you like, and it resumes where it stopped.
 - **Distant LOD** remakes the distant view of the converted worlds after you change something.
 - **Models…** and **Mod organizer…** as above.

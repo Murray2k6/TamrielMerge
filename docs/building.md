@@ -134,6 +134,12 @@ quiet one; before and after were run back to back under the same load.
   links on one volume (every writer replaces a .fuz by renaming it, never in place), else copies. `voice-cache-test`:
   8 Oblivion recordings decode to the same bytes twice; packed in 6.5 s, then under new names in 0.09 s, all from
   the cache and byte-identical. The voice summaries say how many came from the cache.
+- LipGenerator's working folder. It resamples the sound into `tmp16khz.wav` in its working folder, and every
+  parallel run used LipGenerator's own folder, so runs read each other's sound: 16 lines at once came out 10-40% off
+  from the same lines alone (two alike), and failures' retries held packing to about 270 lines a minute, though one
+  run takes half a second for 11 seconds of speech. `VoiceFiles.MakeLip` gives each run a folder of its own (kept for
+  reuse) and a time limit by the line's length (15 s + 2 s a second, at most 60). Voice files and cache entries
+  written before the fix (`VoiceFiles.LipSyncFixed`, `VoiceFiles.Current`) are packed again.
 - Redguard's scripts. Its 904 scripts compiled in one compiler run, on one core (261 s on a quiet machine). They
   now go in batches (at most 400; as many as can run at once when there are 100 or more each), up to four at once,
   each in a folder of its own named for the process: the compile 511 s -> 147 s under load, the whole `rg-build`
