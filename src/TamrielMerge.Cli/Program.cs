@@ -2675,14 +2675,21 @@ static class Program
                 {
                     if (File.Exists(target)) { Console.WriteLine($"{name}: {target} already there"); return; }                    var psi = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
                     // --plain needs no model (and no device): frames are only resized.
-                    string[] how = extra.Contains("--plain") ? [] : device;
-                    foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", Path.Combine(work, name.ToLowerInvariant()) }.Concat(how).Concat(extra)) psi.ArgumentList.Add(arg);
+                    bool plain = extra.Contains("--plain");
+                    string[] how = plain ? [] : device;
+                    // A resize's frames (3.5 MB each, 20 GB for Redguard's movie 2) are made on a solid-state drive when the
+                    // work folder is on a hard disk, and deleted once the movie is made (2026-10-16: on a shingled hard disk
+                    // the writes fell to a frame every ten seconds). An upscale's stay with the work, to resume.
+                    string? fastWork = plain ? Util.Drives.FastStaging(work, 30L << 30, "TamrielMergeVideo") : null;
+                    string jobWork = Path.Combine(fastWork ?? work, name.ToLowerInvariant());
+                    foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", jobWork }.Concat(how).Concat(extra)) psi.ArgumentList.Add(arg);
                     psi.Environment["TAMRIELMERGE_TOOLS"] = Setup.Dependencies.Root;
                     if (!opts.ContainsKey("gpu")) psi.Environment["CUDA_VISIBLE_DEVICES"] = "";
                     Console.WriteLine($"{name}: remastering {input}");
                     using var proc = System.Diagnostics.Process.Start(psi)!;
                     proc.WaitForExit();
                     if (proc.ExitCode != 0) Console.WriteLine($"{name}: remaster failed ({proc.ExitCode})");
+                    else if (fastWork is not null) try { Directory.Delete(jobWork, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
                 }
                 bool rtLook = canRemaster && opts.ContainsKey("gpu") && !opts.ContainsKey("no-rt-look");
                 void RtLook(string name, string light, bool clean)
