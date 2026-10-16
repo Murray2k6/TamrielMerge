@@ -7655,6 +7655,13 @@ static class Program
                 Console.WriteLine($"{counts.Values.Sum()} objects of {counts.Count} kinds, {npcs} actors; {missing} converted models missing, {broken} unreadable");
                 return 0;
             }
+            case "setup-music":
+            {
+                // FluidSynth, WildMIDI and the soundfont only (setup does them with the rest), where missing.
+                var musicProblems = Setup.Dependencies.InstallMusicTools();
+                foreach (var p in musicProblems) Console.WriteLine($"  problem: {p}");
+                return musicProblems.Count == 0 ? 0 : 1;
+            }
             case "shape-info":
             {
                 // Dev aid: Skyrim objects' bounds (--ids A,B by EditorID): the record's OBND and the shape PropReplacer

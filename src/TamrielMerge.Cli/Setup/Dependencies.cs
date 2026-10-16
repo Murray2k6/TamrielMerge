@@ -117,6 +117,30 @@ public static class Dependencies
     }
 
     const string FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+    const string FluidSynthUrl = "https://github.com/FluidSynth/fluidsynth/releases/download/v2.6.1/fluidsynth-v2.6.1-win10-x64-cpp11.zip";
+    const string WildMidiUrl = "https://github.com/Mindwerks/wildmidi/releases/download/wildmidi-0.5.0/wildmidi-0.5.0-windows.zip";
+    const string SoundFontUrl = "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/main/GeneralUser-GS.sf2";
+
+    /// <summary>A zip unpacked so that <paramref name="marker"/> (a file inside it, e.g. bin\fluidsynth.exe) ends up under
+    /// <paramref name="target"/>: wherever the zip keeps it, the folder <paramref name="depth"/> levels above the marker is
+    /// copied there.</summary>
+    static void Unpack(string zip, string marker, int depth, string target)
+    {
+        string temp = Path.Combine(Root, "downloads", Path.GetFileNameWithoutExtension(zip) + "-unpacked");
+        if (Directory.Exists(temp)) Directory.Delete(temp, true);
+        ZipFile.ExtractToDirectory(zip, temp, overwriteFiles: true);
+        string found = Directory.GetFiles(temp, Path.GetFileName(marker), SearchOption.AllDirectories)
+            .FirstOrDefault(f => f.EndsWith(marker, StringComparison.OrdinalIgnoreCase)) ?? throw new FileNotFoundException($"{marker} not in {Path.GetFileName(zip)}");
+        string root = found;
+        for (int i = 0; i < depth; i++) root = Path.GetDirectoryName(root)!;
+        foreach (var file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+        {
+            string to = Path.Combine(target, Path.GetRelativePath(root, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+            File.Copy(file, to, overwrite: true);
+        }
+        Directory.Delete(temp, true);
+    }
     const string RadUrl = "https://www.radgametools.com/down/Bink/RADTools.7z";
     const string SevenZrUrl = "https://www.7-zip.org/a/7zr.exe";
     const string UvUrl = "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip";
@@ -250,6 +274,39 @@ public static class Dependencies
         return ok;
     }
 
+    /// <summary>
+    /// The music tools (Daggerfall's songs, the menu's theme) where missing: FluidSynth, WildMIDI and the GeneralUser GS
+    /// soundfont. The released app carries them; a build from the repository has none (tools\ isn't in it: 2026-10-16, a
+    /// tester's build from source had no FluidSynth). Returns the problems left.
+    /// </summary>
+    public static List<string> InstallMusicTools()
+    {
+        var problems = new List<string>();
+        Directory.CreateDirectory(Root);
+        var music = Program.MusicTools(Path.Combine(Root, "none"));
+        void Step(string name, Func<bool> ready, Action install)
+        {
+            if (ready()) { Console.WriteLine($"  {name}: ready"); return; }
+            Console.WriteLine($"  {name}: installing...");
+            try { install(); }
+            catch (Exception e) { problems.Add($"{name}: {e.Message}"); return; }
+            if (!ready()) problems.Add($"{name}: installed but not usable");
+            else Console.WriteLine($"  {name}: done");
+        }
+        Step("FluidSynth", () => File.Exists(music.FluidSynth), () =>
+            Unpack(Download(FluidSynthUrl, Path.Combine(Root, "downloads", "fluidsynth.zip")), @"bin\fluidsynth.exe", 2,
+                Path.Combine(Path.GetDirectoryName(Path.GetDirectoryName(music.FluidSynth)!)!)));
+        Step("WildMIDI", () => File.Exists(music.WildMidi), () =>
+            Unpack(Download(WildMidiUrl, Path.Combine(Root, "downloads", "wildmidi.zip")), @"x64\wildmidi.exe", 2,
+                Path.GetDirectoryName(Path.GetDirectoryName(music.WildMidi)!)!));
+        Step("GeneralUser GS soundfont", () => File.Exists(music.SoundFont), () =>
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(music.SoundFont)!);
+            Download(SoundFontUrl, music.SoundFont);
+        });
+        return problems;
+    }
+
     /// <summary>Installs everything missing; returns the problems left (empty when all is ready).</summary>
     public static List<string> Install(string skyrimData, bool forceCpu = false)
     {
@@ -270,6 +327,8 @@ public static class Dependencies
             string zip = Download(FfmpegUrl, Path.Combine(Root, "downloads", "ffmpeg.zip"));
             ZipFile.ExtractToDirectory(zip, Path.Combine(Root, "ffmpeg"), overwriteFiles: true);
         });
+
+        problems.AddRange(InstallMusicTools());
 
         Step("RAD Video Tools", () => File.Exists(RadVideo), () =>
         {
