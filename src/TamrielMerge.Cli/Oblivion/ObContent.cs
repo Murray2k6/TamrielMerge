@@ -240,8 +240,9 @@ public sealed partial class ObPluginBuilder
         return ammo;
     }
 
-    /// <summary>The Skyrim slot template for an Oblivion biped part; parts Skyrim has no slot for (greaves) take an
-    /// unused slot with no worn look.</summary>
+    /// <summary>The vanilla template an Oblivion biped part's record is based on (keywords, sounds, armour type), and
+    /// the slot it falls back to if its worn look can't be made: greaves, which Skyrim has no slot for, an unused one,
+    /// drawing nothing. The worn look itself and its slots: ObWorn.</summary>
     static (string Heavy, string Light, BipedObjectFlag? Slot) ArmorTemplate(Ob.BipedFlag f) =>
         f.HasFlag(Ob.BipedFlag.UpperBody) ? ("ArmorIronCuirass", "ArmorLeatherCuirass", null)
         : f.HasFlag(Ob.BipedFlag.Head) || f.HasFlag(Ob.BipedFlag.Hair) ? ("ArmorIronHelmet", "ArmorLeatherHelmet", null)

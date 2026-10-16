@@ -298,8 +298,9 @@ public sealed partial class MwPluginBuilder
         return w;
     }
 
-    /// <summary>Morrowind armour part -> vanilla template and the Skyrim slot it takes. Parts Skyrim has no slot for
-    /// (pauldrons, greaves, left gauntlets and bracers) take unused slots and have no worn look.</summary>
+    /// <summary>Morrowind armour part -> the vanilla template its record is based on (keywords, sounds, armour type),
+    /// and the slot it falls back to if its worn look can't be made: parts Skyrim has no slot for (pauldrons, greaves,
+    /// left gauntlets and bracers) an unused one, drawing nothing. The worn look itself and its slots: MwWorn.</summary>
     static (string Template, BipedObjectFlag? Slot) ArmorTemplate(int type) => type switch
     {
         0 => ("ArmorIronHelmet", null), 1 => ("ArmorIronCuirass", null), 2 => ("ArmorIronCuirass", Slot(57)),
@@ -397,8 +398,8 @@ public sealed partial class MwPluginBuilder
         return null;
     }
 
-    /// <summary>Morrowind clothing -> vanilla clothes of the same kind (shirts and robes as farm clothes, shoes as
-    /// boots, rings and amulets as jewellery); pants, belts, skirts and gloves take unused slots.</summary>
+    /// <summary>Morrowind clothing on a record of vanilla clothes of the same kind (shirts and robes on farm clothes,
+    /// shoes on boots, rings and amulets on jewellery), wearing Morrowind's own look in its slots (MwWorn).</summary>
     IMajorRecord ClothingItem(Tes3Record rec, string edid, string? name, string? model)
     {
         var d = rec.Get("CTDT")!.Value;

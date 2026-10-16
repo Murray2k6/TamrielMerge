@@ -735,8 +735,8 @@ public sealed partial class MwPluginBuilder
     /// Makes Morrowind's teleporting doors Skyrim load doors. Morrowind stores only where a door takes you (DODT:
     /// position and rotation, DNAM: the interior cell, absent for the outside); Skyrim also needs the door on the other
     /// side. That is the door in the destination cell that leads back to this one, nearest the arrival point (else the
-    /// nearest door there). The player arrives at Morrowind's own spot. Doors to cells not built yet (the exterior,
-    /// for now) stay closed. Returns (linked, unlinked).
+    /// nearest door there). The player arrives at Morrowind's own spot. Doors to cells that weren't built (a test build's
+    /// --cells or --no-exterior) stay closed. Returns (linked, unlinked).
     /// </summary>
     public (int Linked, int Unlinked) LinkDoors()
     {
