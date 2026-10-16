@@ -288,8 +288,10 @@ static class Program
                         psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";   // the parent reports the parts
                         psi.Environment["TAMRIELMERGE_HEIGHTS"] = heights;
                         psi.Environment["TAMRIELMERGE_TOWN_MESHES"] = Path.Combine(sharedDir, "meshes");
-                        // Street navmeshes too: a town cell of the same input as one another part made takes its mesh (NavmeshBuilder.SharedExteriors).
-                        psi.Environment["TAMRIELMERGE_NAVMESHES"] = Path.Combine(sharedDir, "navmeshes");
+                        // Navmeshes too: a town's street cell or building of the same input as one another part made takes its
+                        // mesh (NavmeshBuilder.SharedExteriors). Not the dungeons: each is laid out of its own (2026-10-15, part 2
+                        // of 40 found none of part 1's).
+                        if (command == "df-towns") psi.Environment["TAMRIELMERGE_NAVMESHES"] = Path.Combine(sharedDir, "navmeshes");
                         // A first generation of 256 MB: a town part makes 500 MB of short-lived objects a second, and the default
                         // budget collected 200 times every 5 seconds (part 9: 2.2 minutes, with it 1.8; half a gigabyte more).
                         psi.Environment["DOTNET_GCgen0size"] = "0x10000000";
@@ -1693,7 +1695,7 @@ static class Program
                 int batch = int.Parse(opts.GetValueOrDefault("batch", "1")), batches = int.Parse(opts.GetValueOrDefault("batches", "8"));
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var r = Skyrim.DaggerfallDungeons.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts));
-                Console.WriteLine($"Dungeons batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.References} references, {r.NavmeshTriangles} navmesh triangles ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
+                Console.WriteLine($"Dungeons batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.References} references, {r.NavmeshTriangles} navmesh triangles, {Skyrim.Navmesh.NavmeshBuilder.InteriorsShared} navmeshes made by other parts ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
                 Console.WriteLine($"  time: setup {r.SetupSeconds:F0} s, dungeons {r.LayoutSeconds:F0} s (navmeshes {r.NavmeshSeconds:F0} s of work across threads), writing {r.WriteSeconds:F0} s");
                 return r.Built > 0 ? 0 : 2;
             }
