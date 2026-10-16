@@ -493,7 +493,13 @@ public sealed partial class ObPluginBuilder
                     // The speaker's disposition (Skyrim.Disposition), added directly: it isn't a ConditionData of its own.
                     list.Add(Skyrim.Disposition.Condition(op, value, or));
                     continue;
-                case "GetScriptVariable": case "GetIsCurrentPackage": case "GetPCExpelled": case "IsPlayerInJail": case "GetTrespassWarningLevel":
+                case "IsPlayerInJail":
+                    {
+                        // TMOB_PCInJail, which TMObState keeps while the player is in an Oblivion jail (ObCrime).
+                        var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, ScriptGlobal("TMOB_PCInJail").FormKey); data = d; target = false;
+                        break;
+                    }
+                case "GetScriptVariable": case "GetIsCurrentPackage": case "GetPCExpelled": case "GetTrespassWarningLevel":
                 case "IsTrespassing": case "IsActorAVictim": case "IsActorEvil": case "GetPersuasionNumber": case "GetTotalPersuasionNumber":
                     unknownHolds = Holds(op, 0, value); break;
                 default: unknownHolds = true; break;   // thresholds and states Skyrim can't test pass

@@ -29,6 +29,16 @@ Message Property BirthsignPage1 Auto
 Message Property BirthsignPage2 Auto
 FormList[] Property BirthsignSpells Auto
 {Each birthsign's spells and abilities, in the order the scripts number them.}
+Faction Property CyrodiilCrime Auto
+{OBCrimeCyrodiil: the crime faction of Cyrodiil's people. Skyrim keeps the player's bounty there and arrests through it.}
+Faction Property IslesCrime Auto
+{OBCrimeShiveringIsles: the Shivering Isles' crime faction.}
+GlobalVariable Property PCInSEWorld Auto
+{TMOB_PCInSEWorld: whether the player is in the Shivering Isles (which land's bounty a script's SetCrimeGold sets).}
+GlobalVariable Property PCInJail Auto
+{TMOB_PCInJail: whether the player is in an Oblivion jail (IsPlayerInJail).}
+FormList Property JailMarkers Auto
+{The prison markers of Oblivion's jails (TMObJailMarkers).}
 
 Int Property ChosenBirthsign = -1 Auto Hidden
 Bool Property PCSleeping = False Auto Hidden
@@ -405,7 +415,7 @@ EndFunction
 
 Int Function CrimeGold(Actor akActor)
   If !akActor || akActor == PlayerRef
-    Return PCCrimeGold.GetValueInt()
+    Return PlayerBounty()
   EndIf
   Init()
   Int i = bountyActors.Find(akActor)
@@ -420,6 +430,7 @@ Function SetCrimeGold(Actor akActor, Int aiGold)
     aiGold = 0
   EndIf
   If !akActor || akActor == PlayerRef
+    SetPlayerBounty(aiGold)
     PCCrimeGold.SetValueInt(aiGold)
     If aiGold > miscStats[4]
       miscStats[4] = aiGold
@@ -438,6 +449,66 @@ Function SetCrimeGold(Actor akActor, Int aiGold)
   bountyActors[i] = akActor
   bountyGold[i] = aiGold
   akActor.SetAttackActorOnSight(aiGold > 0)
+EndFunction
+
+; The player's bounty: Oblivion keeps one; Skyrim keeps it in each land's crime faction (its guards arrest through it),
+; so it is their sum, kept in TMOB_PCCrimeGold too.
+Int Function PlayerBounty()
+  Int gold = 0
+  If CyrodiilCrime
+    gold += CyrodiilCrime.GetCrimeGold()
+  EndIf
+  If IslesCrime
+    gold += IslesCrime.GetCrimeGold()
+  EndIf
+  If !CyrodiilCrime && !IslesCrime
+    Return PCCrimeGold.GetValueInt()
+  EndIf
+  If PCCrimeGold.GetValueInt() != gold
+    PCCrimeGold.SetValueInt(gold)
+  EndIf
+  Return gold
+EndFunction
+
+; A script setting the player's bounty sets the whole of it in the land the player is in (the other land's is cleared:
+; Oblivion has one bounty).
+Function SetPlayerBounty(Int aiGold)
+  Faction here = CyrodiilCrime
+  Faction other = IslesCrime
+  If IslesCrime && PCInSEWorld && PCInSEWorld.GetValueInt() != 0
+    here = IslesCrime
+    other = CyrodiilCrime
+  EndIf
+  If other
+    other.SetCrimeGoldViolent(0)
+    other.SetCrimeGold(0)
+  EndIf
+  If here
+    here.SetCrimeGoldViolent(0)
+    here.SetCrimeGold(aiGold)
+  EndIf
+EndFunction
+
+; Whether the player is in an Oblivion jail: in a jail cell, near its prison marker (where Skyrim puts the arrested
+; player). TMObPlayer asks every few seconds; IsPlayerInJail reads TMOB_PCInJail.
+Function CheckJail()
+  PlayerBounty()
+  If !PCInJail || !JailMarkers
+    Return
+  EndIf
+  Bool jailed = False
+  Cell here = PlayerRef.GetParentCell()
+  Int i = JailMarkers.GetSize()
+  While i > 0 && !jailed && here
+    i -= 1
+    ObjectReference m = JailMarkers.GetAt(i) as ObjectReference
+    If m && m.GetParentCell() == here && PlayerRef.GetDistance(m) < 512.0
+      jailed = True
+    EndIf
+  EndWhile
+  If jailed != (PCInJail.GetValueInt() != 0)
+    PCInJail.SetValueInt(jailed as Int)
+  EndIf
 EndFunction
 
 Function ModCrimeGold(Actor akActor, Int aiGold)

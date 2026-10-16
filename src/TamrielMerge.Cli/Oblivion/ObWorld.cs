@@ -68,7 +68,8 @@ public sealed partial class ObPluginBuilder
     static readonly FormKey DoorOpenSound = Sk(0x0BFBE8), DoorCloseSound = Sk(0x0BFBE9), SwingOpenSound = Sk(0x05B0F3), SwingCloseSound = Sk(0x05B134);
     readonly Dictionary<FormKey, Activator?> swingDoors = new();
 
-    Door? LoadDoor(Ob.IDoorGetter d, string edid)
+    /// <param name="solid">Whether the navmesh goes around it (a load door; not a door that opens by itself).</param>
+    Door? LoadDoor(Ob.IDoorGetter d, string edid, bool solid = true)
     {
         if (d.Model?.File is not { Length: > 0 } file || IsMarker(file)) return null;
         var mesh = Mesh(file);
@@ -83,9 +84,14 @@ public sealed partial class ObPluginBuilder
         };
         if (d.Name is { Length: > 0 } n) door.Name = n;
         mod.Doors.Add(door);
-        meshByBase[door.FormKey] = mesh;
+        // A door that opens by itself stands open as often as closed: the navmesh goes through it, as through swing
+        // doors.
+        if (solid) meshByBase[door.FormKey] = mesh;
         return door;
     }
+
+    /// <summary>Whether the door's model has its own Open animation (then Skyrim's door plays it).</summary>
+    bool OpensByItself(Ob.IDoorGetter d) => d.Model?.File is { Length: > 0 } file && !IsMarker(file) && Mesh(file) is { } mesh && mesh.Plays("Open");
 
     /// <summary>A door that doesn't teleport: an activator running TMSwingDoor (90 degrees about the model's origin),
     /// on a variant of the model with keyframed collision.</summary>
@@ -175,6 +181,8 @@ public sealed partial class ObPluginBuilder
             PlaceActorAt(r.FormKey, r.Base.FormKey, r.Location, r.Scale, cell, persistentCell);
             return null;
         }
+        // Oblivion's prisons: Skyrim prison markers, for the lands' jails (ObCrime).
+        if (rec?.EditorID == "PrisonMarker") return PlacePrisonMarker(r, cell, persistentCell);
         float scale = r.Scale ?? 1;
         FormKey baseKey;
         bool isDoor = false;
@@ -184,14 +192,16 @@ public sealed partial class ObPluginBuilder
                 if (TreeFor(tree) is not { } t) return null;
                 baseKey = t.Tree; scale *= t.Scale;
                 break;
-            case Ob.IDoorGetter door when r.TeleportDestination is null:
+            case Ob.IDoorGetter door when r.TeleportDestination is null && !OpensByItself(door):
                 if (SwingDoor(door.FormKey) is not { } swing) return null;
                 baseKey = swing.FormKey;
                 break;
             case Ob.IDoorGetter door:
-                if (!bases.TryGetValue(door.FormKey, out var known)) bases[door.FormKey] = known = LoadDoor(door, "OB" + Sanitize(door.EditorID ?? door.FormKey.ID.ToString("X6")));
+                // A load door, or a door whose model opens and closes by its own animation (gates, portcullises,
+                // cell doors, secret doors: a Skyrim door plays their Open and Close, as vanilla MineSecretDoor01).
+                if (!bases.TryGetValue(door.FormKey, out var known)) bases[door.FormKey] = known = LoadDoor(door, "OB" + Sanitize(door.EditorID ?? door.FormKey.ID.ToString("X6")), solid: r.TeleportDestination is not null);
                 if (known is null) return null;
-                baseKey = known.FormKey; isDoor = true;
+                baseKey = known.FormKey; isDoor = r.TeleportDestination is not null;
                 break;
             default:
                 if (Base(r.Base.FormKey) is not { } b)

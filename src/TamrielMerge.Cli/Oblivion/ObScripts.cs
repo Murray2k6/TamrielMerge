@@ -103,9 +103,7 @@ public sealed partial class ObPluginBuilder
         FormKey GeneratedGlobal(string edid)
         {
             if (generated.TryGetValue(edid, out var k)) return k;
-            var g = new GlobalFloat(mod) { EditorID = edid, Data = 0 };
-            mod.Globals.Add(g);
-            return generated[edid] = g.FormKey;
+            return generated[edid] = ScriptGlobal(edid).FormKey;
         }
         Quest? functionsQuest = null;
         // OBSE user functions: scripts on one quest that's always running.

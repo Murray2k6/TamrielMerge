@@ -314,6 +314,12 @@ public sealed partial class ObPluginBuilder
         foreach (var f in translations.Values.SelectMany(o => o.Properties).Where(p => p.Name.StartsWith("cf_", StringComparison.Ordinal)).Select(p => p.EditorID).Distinct(StringComparer.OrdinalIgnoreCase).Take(128))
             if (scriptWorld!.KeyOf(f) is { } fk && ObFaction(fk) is { } faction) crimeFactions.Objects.Add(new ScriptObjectProperty { Object = faction.ToLink<ISkyrimMajorRecordGetter>() });
         entry.Properties.Add(crimeFactions);
+        // The lands' crime factions and jails (ObCrime): the bounty Skyrim keeps, and IsPlayerInJail.
+        entry.Properties.Add(Obj("CyrodiilCrime", LandCrime(false).FormKey));
+        entry.Properties.Add(Obj("IslesCrime", LandCrime(true).FormKey));
+        entry.Properties.Add(Obj("PCInSEWorld", ScriptGlobal("TMOB_PCInSEWorld").FormKey));
+        entry.Properties.Add(Obj("PCInJail", ScriptGlobal("TMOB_PCInJail").FormKey));
+        entry.Properties.Add(Obj("JailMarkers", JailMarkers().FormKey));
         entry.Properties.Add(new ScriptObjectListProperty { Name = "PackageSlots", Objects = [.. slots.Select(s => new ScriptObjectProperty { Object = quest.ToLink<ISkyrimMajorRecordGetter>(), Alias = (short)s.Alias })] });
         entry.Properties.Add(new ScriptObjectListProperty { Name = "SlotPackages", Objects = [.. slots.Select(s => new ScriptObjectProperty { Object = s.Package.ToLink<ISkyrimMajorRecordGetter>() })] });
         var made = obPackages.Where(kv => kv.Value is not null).Take(128).ToList();

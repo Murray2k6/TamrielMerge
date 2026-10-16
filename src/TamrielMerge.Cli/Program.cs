@@ -3347,7 +3347,99 @@ static class Program
                     var r = conv.Convert(f, "out/obprobe");
                     Console.WriteLine($"{f}: {r.Shapes} shapes, {r.CollisionPolys} collision triangles, bounds {r.Min} .. {r.Max}, {t0.ElapsedMilliseconds} ms, {new FileInfo(Path.Combine("out/obprobe", r.Path)).Length / 1024} KB");
                     foreach (var e in r.Emitters) Console.WriteLine($"   emitter at {e.Position} size {e.Size:F1} rise {e.Rise:F1} texture {e.Texture}");
+                    if (r.Sequences.Count > 0) Console.WriteLine($"   plays {string.Join(", ", r.Sequences.Select(s => $"{s.Name} ({s.Length:F1} s)"))}");
+                    foreach (var n in conv.Notes) Console.WriteLine($"   note: {n}");
+                    conv.Notes.Clear();
                 }
+                return 0;
+            }
+            case "ob-seats":
+            {
+                // Dev aid: Oblivion furniture models (--file, ';'-separated; --sleep for beds) converted to out/obprobe
+                // with their Skyrim seat or bed markers (ObFurniture): position, heading, entry sides.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var data = new Oblivion.ObData(dataDir);
+                var conv = new Oblivion.ObMeshConverter(data, new Oblivion.ObTextures(data, "out/obprobe"));
+                foreach (var f in opts["file"].Split(';'))
+                {
+                    var r = conv.Convert(f, "out/obprobe");
+                    var seats = conv.AddSeats(f, Path.Combine("out/obprobe", r.Path), opts.ContainsKey("sleep"));
+                    Console.WriteLine($"{f}: bounds {r.Min} .. {r.Max}");
+                    foreach (var s in seats) Console.WriteLine($"   {(s.Lie ? "lie" : "sit")} at {s.At} heading {s.Heading:F2} entries {s.Entries} from markers {string.Join(",", s.Sources)}");
+                }
+                return 0;
+            }
+            case "nifly-load":
+            {
+                // Dev aid (ob-nif10-bisect's child): loads --file with nifly; exit 0 when it reads, 1 when it reports an
+                // error. nifly ends the process on what it can't follow, which the parent sees as a crash.
+                using var nif = new nifly.NifFile();
+                return nif.Load(opts["file"]) == 0 ? 0 : 1;
+            }
+            case "ob-nif10-bisect":
+            {
+                // Dev aid: the block nifly fails on in an Oblivion model it can't read (--file, data-relative): the model
+                // cut after 1, 2, ... blocks (Ob10Nif knows where each starts) is loaded by nifly in a child process
+                // until a cut crashes it; that cut's last block is the cause.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var data = new Oblivion.ObData(dataDir);
+                foreach (var f in opts["file"].Split(';'))
+                {
+                    string file = f.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? f : @"meshes\" + f;
+                    var bytes = data.Read(file) ?? throw new FileNotFoundException(file);
+                    var parsed = Oblivion.Ob10Nif.Read(bytes, file);
+                    var h = Oblivion.Ob10Nif.Header(bytes)!.Value;
+                    string tmp = Path.Combine(Path.GetTempPath(), $"tm-bisect-{Environment.ProcessId}.nif");
+                    int Try(int keep)
+                    {
+                        File.WriteAllBytes(tmp, parsed.Truncated(bytes, keep));
+                        var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { ArgumentList = { "nifly-load", "--file", tmp }, RedirectStandardOutput = true, RedirectStandardError = true };
+                        using var child = System.Diagnostics.Process.Start(psi)!;
+                        child.StandardOutput.ReadToEnd(); child.StandardError.ReadToEnd();
+                        child.WaitForExit();
+                        return child.ExitCode;
+                    }
+                    int full = Try(parsed.Blocks.Count);
+                    // The first cut that crashes: blocks are read in order, so it's the first block nifly can't follow.
+                    int lo = 1, hi = parsed.Blocks.Count, first = -1;
+                    while (lo <= hi)
+                    {
+                        int mid = (lo + hi) / 2;
+                        if (Try(mid) is 0 or 1) lo = mid + 1; else { first = mid; hi = mid - 1; }
+                    }
+                    string type = first > 0 ? h.Types[h.BlockTypes[first - 1]] : "-";
+                    // The cut just before: 0 when nifly read every block up to it and the footer right after (those blocks
+                    // read as they should), 1 when it read them but not to the footer (one of them misread).
+                    int before = first > 1 ? Try(first - 1) : 0;
+                    Console.WriteLine(first > 0
+                        ? $"{f}: nifly fails on block {first - 1}, {type}; the blocks before it read {(before == 0 ? "to the footer" : $"but not to the footer (exit {before})")}; block {first - 2} is {h.Types[h.BlockTypes[Math.Max(0, first - 2)]]} (the whole file: exit {full})"
+                        : $"{f}: no cut crashes nifly (the whole file: exit {full})");
+                    File.Delete(tmp);
+                }
+                return 0;
+            }
+            case "ob-nif10":
+            {
+                // Dev aid: reads Oblivion's models nifly can't (Gamebryo 10.1, 10.2 with particles) with Ob10Nif: every
+                // such model in the game (or --file a;b), with what failed where.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var data = new Oblivion.ObData(dataDir);
+                var files = opts.TryGetValue("file", out var fl) ? fl.Split(';').Select(f => f.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? f : @"meshes\" + f) : data.List("meshes");
+                int ok = 0, bad = 0;
+                foreach (var f in files)
+                {
+                    var bytes = data.Read(f);
+                    if (bytes is null || !Oblivion.Ob10Nif.IsUnreadableByNifly(bytes, out string why)) continue;
+                    try
+                    {
+                        var nif = Oblivion.Ob10Nif.Read(bytes, f);
+                        ok++;
+                        if (opts.ContainsKey("verbose"))
+                            Console.WriteLine($"  ok {f}: {nif.Blocks.Count} blocks, {nif.Blocks.OfType<Oblivion.Ob10Nif.Shape>().Count(s => s.Type == "NiParticleSystem")} particle systems; {why}");
+                    }
+                    catch (Exception e) { bad++; Console.WriteLine($"  FAIL {e.Message}"); }
+                }
+                Console.WriteLine($"{ok} read, {bad} failed");
                 return 0;
             }
             case "ob-nif":
