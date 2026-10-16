@@ -110,7 +110,7 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 
 | System | Status | Notes |
 |---|---|---|
-| World, interiors, terrain, doors | done | |
+| World, interiors, terrain, doors | done | moving parts (secret walls, gates, levers, drawbridges) keep their animation; doors with Open/Close sequences open by it |
 | Items, containers, leveled lists | done | |
 | Dialogue, voices, quests | done | |
 | Game scripts | done | translator (vanilla and OBSE): every statement translated (46,945 of 46,945 in the official plugins), MenuMode, OnAlarm, script packages, crimes, misc stats, gates through TMObState; see [oblivion-scripts.md](oblivion-scripts.md) |
@@ -125,9 +125,10 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | Birthsigns, classes, attributes, +5 levelling | missing | |
 | 21 skills, mastery perks (power attacks, block, sneak ×6, …) | missing | |
 | Trainers (5 per level), skill books | missing | books teach nothing yet |
-| Crime: bounties, jail, fences, Thieves Guild doyens | missing | |
+| Crime: bounties, jail, fences, Thieves Guild doyens | partial | Skyrim's crime system: a crime faction per land (Cyrodiil, Shivering Isles) with Oblivion's values, Oblivion's guards arrest through Skyrim's guard dialogue, one jail per land from Oblivion's prisons, IsPlayerInJail kept; fences and doyens by script; see [oblivion-scripts.md](oblivion-scripts.md#crime-and-jail) |
 | Fame/Infamy | missing | |
 | Horses (7 stables), horse armour | missing | |
+| Furniture (sit, sleep) | done | Skyrim furniture with markers from Oblivion's; see [oblivion-scripts.md](oblivion-scripts.md#furniture) |
 | Player houses and furnishing | partial | depends on translated scripts |
 | Oblivion gates (60, random sites) | partial | script driven |
 | Fast travel (map markers) | missing | |

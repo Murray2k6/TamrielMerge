@@ -389,7 +389,22 @@ public sealed class Ob10Nif
                 r.Skip(4 * r.U16());
                 return c;
             }
-            case "NiTransformController" or "NiVisController" or "NiAlphaController" or "NiFlipController" or "NiTextureTransformController":
+            case "NiTextureTransformController":
+            {
+                var c = new Controller { Type = type, Index = index };
+                SingleInterp(r, c);
+                r.Bool(); r.U32(); r.U32();   // shader map, texture slot, operation
+                return c;
+            }
+            case "NiFlipController":
+            {
+                var c = new Controller { Type = type, Index = index };
+                SingleInterp(r, c);
+                r.U32();                      // texture slot
+                r.Skip(4 * r.I32());          // sources
+                return c;
+            }
+            case "NiTransformController" or "NiVisController" or "NiAlphaController":
             {
                 var c = new Controller { Type = type, Index = index };
                 SingleInterp(r, c);
