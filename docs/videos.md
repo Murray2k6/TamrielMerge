@@ -20,7 +20,8 @@ The same step makes the videos Daggerfall's quests and covens play, from the pla
 - the Daedra Princes' `*.FLC` animations (shown when a coven summons one, `DfQuestBuilder.Daedra`) as
   `Video\TamrielMerge_DfDaedra<NAME>.bik`, through ffmpeg and looped three times (they are about three seconds).
 
-They are only resized (`remaster.py --plain`: bicubic to 1440x1080, no model), so they need RAD's compressor, ffmpeg and
+They are only resized (`remaster.py --plain`: bicubic to 960x720, no model; their sources are 640x480 at most, and the
+Bink compressor's time goes with the pixels), so they need RAD's compressor, ffmpeg and
 the Python environment but not the upscaler; `--upscale-quest-videos` runs them through Real-ESRGAN as the intros are
 (slow on the CPU). `--no-quest-videos` leaves them out. Dev: `videos --quest-videos-only --anims 11,AZURA`.
 

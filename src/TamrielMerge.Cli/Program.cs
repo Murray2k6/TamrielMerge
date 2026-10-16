@@ -2682,7 +2682,11 @@ static class Program
                     // the writes fell to a frame every ten seconds). An upscale's stay with the work, to resume.
                     string? fastWork = plain ? Util.Drives.FastStaging(work, 30L << 30, "TamrielMergeVideo") : null;
                     string jobWork = Path.Combine(fastWork ?? work, name.ToLowerInvariant());
-                    foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", jobWork }.Concat(how).Concat(extra)) psi.ArgumentList.Add(arg);
+                    // Resized only, at 960x720: the sources are 640x480 at most, so a bigger frame holds nothing more, and the
+                    // Bink compressor's time goes with the pixels (2026-10-16: Redguard's movie 3 at 1440x1080 took 22
+                    // minutes and 804 MB).
+                    string[] size = plain && !extra.Contains("--size") ? ["--size", "960x720"] : [];
+                    foreach (var arg in new[] { "-u", script, "--input", input, "--output", target, "--work", jobWork }.Concat(how).Concat(size).Concat(extra)) psi.ArgumentList.Add(arg);
                     psi.Environment["TAMRIELMERGE_TOOLS"] = Setup.Dependencies.Root;
                     if (!opts.ContainsKey("gpu")) psi.Environment["CUDA_VISIBLE_DEVICES"] = "";
                     Console.WriteLine($"{name}: remastering {input}");
