@@ -169,19 +169,15 @@ public static class VoiceFiles
         string words = System.Text.RegularExpressions.Regex.Replace(System.Text.RegularExpressions.Regex.Replace(ascii, @"[^A-Za-z0-9' ]+", " "), @"\s+", " ").Trim();
         string plainWords = System.Text.RegularExpressions.Regex.Replace(words, @"'", "");
         var attempts = new (string How, string Text)[] { ("text", text.Replace("\"", "'")), ("ascii", ascii), ("words", words), ("plain words", plainWords) };
-        // A working folder of its own: LipGenerator resamples the sound into tmp16khz.wav in its working folder, so runs
-        // side by side in one folder read each other's sound (2026-10-16: all of them ran in LipGenerator's folder,
-        // lines got another line's mouth movement or none, and the failures' retries held the packing to ~270 lines a
-        // minute; one run alone takes half a second).
-        string work = LipWorkDirs.TryTake(out var free) ? free : Path.Combine(Path.GetTempPath(), "TamrielMergeLipGen", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(work);
+        // A copy of LipGenerator of its own (LipSlot), run in its own folder.
+        var slot = TakeLipSlot(lipGen);
         try
         {
             foreach (var (name, attempt) in attempts.DistinctBy(a => a.Text))
             {
                 if (File.Exists(lip)) File.Delete(lip);
                 // A line takes about a twentieth of its length; one that runs past this has looped.
-                bool finished = Run(lipGen, $"\"{wav}\" \"{attempt}\"", work, LipTimeLimitMs(wav));
+                bool finished = Run(slot.Exe, $"\"{wav}\" \"{attempt}\"", slot.Dir, LipTimeLimitMs(wav));
                 if (finished && File.Exists(lip) && new FileInfo(lip).Length > 0)
                 {
                     var data = File.ReadAllBytes(lip);
@@ -194,11 +190,70 @@ public static class VoiceFiles
             how = "failed";
             return null;
         }
-        finally { LipWorkDirs.Add(work); }
+        finally { LipSlots.Add(slot); }
     }
 
-    /// <summary>LipGenerator working folders not in use (each run takes one, and gives it back).</summary>
-    static readonly System.Collections.Concurrent.ConcurrentBag<string> LipWorkDirs = [];
+    /// <summary>
+    /// A LipGenerator to run and the folder to run it in, used by one run at a time. Two things kept runs from going
+    /// side by side (2026-10-16): LipGenerator resamples the sound into tmp16khz.wav in its working folder, and every
+    /// run used LipGenerator's own folder, so runs read each other's sound (two different lines came out byte for byte
+    /// the same); and the Fonix library inside takes a named mutex, FonixMemoryMutex, for the whole analysis, so all
+    /// of them on the machine went one at a time (16 alive, 5 lines a second, the CPU a fifth busy). So each slot is a
+    /// copy (tools\lipgen\NN: LipGenerator.exe with the mutex named FonixMemoryMutNN, and FonixData.cdf) in a folder of
+    /// its own, held by this process through a lock file. A LipGenerator whose mutex name isn't found (another build)
+    /// runs as it is, each run in a folder of its own: correct, one at a time.
+    /// </summary>
+    sealed record LipSlot(string Exe, string Dir, FileStream? Hold);
+
+    static readonly System.Collections.Concurrent.ConcurrentBag<LipSlot> LipSlots = [];
+    static int lipSlotNext = -1;
+    static readonly byte[] FonixMutex = "FonixMemoryMutex"u8.ToArray();
+
+    static LipSlot TakeLipSlot(string lipGen)
+    {
+        if (LipSlots.TryTake(out var free)) return free;
+        string root = Path.Combine(Setup.Dependencies.Root, "lipgen");
+        // Slot numbers no other process holds (two of ours at once, a conversion and the voice generator).
+        for (int n = Interlocked.Increment(ref lipSlotNext); n < 100; n = Interlocked.Increment(ref lipSlotNext))
+        {
+            string dir = Path.Combine(root, n.ToString("D2"));
+            try
+            {
+                Directory.CreateDirectory(dir);
+                var hold = new FileStream(Path.Combine(dir, "in-use.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+                if (CopyLipGenerator(lipGen, dir, n) is { } exe) return new LipSlot(exe, dir, hold);
+                hold.Dispose();
+                break;   // no mutex name to change: the original, below
+            }
+            catch (IOException) { }   // held by another process: the next number
+            catch (UnauthorizedAccessException) { break; }
+        }
+        string own = Path.Combine(Path.GetTempPath(), "TamrielMergeLipGen", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(own);
+        return new LipSlot(lipGen, own, null);
+    }
+
+    /// <summary>LipGenerator.exe (and its FonixData.cdf) copied into <paramref name="dir"/> with its mutex named
+    /// FonixMemoryMut<paramref name="n"/>; null when the name isn't in it exactly once.</summary>
+    static string? CopyLipGenerator(string lipGen, string dir, int n)
+    {
+        string exe = Path.Combine(dir, "LipGenerator.exe"), data = Path.Combine(dir, "FonixData.cdf");
+        string sourceData = Path.Combine(Path.GetDirectoryName(lipGen)!, "FonixData.cdf");
+        var source = new FileInfo(lipGen);
+        if (File.Exists(exe) && File.Exists(data) && new FileInfo(exe).Length == source.Length && File.GetLastWriteTimeUtc(exe) >= source.LastWriteTimeUtc
+            && new FileInfo(data).Length == new FileInfo(sourceData).Length)
+            return exe;
+        var bytes = File.ReadAllBytes(lipGen);
+        int at = bytes.AsSpan().IndexOf(FonixMutex);
+        if (at < 0 || bytes.AsSpan(at + 1).IndexOf(FonixMutex) >= 0) return null;
+        var tag = System.Text.Encoding.ASCII.GetBytes(n.ToString("D2"));
+        bytes[at + FonixMutex.Length - 2] = tag[0];
+        bytes[at + FonixMutex.Length - 1] = tag[1];
+        File.Copy(sourceData, data, true);
+        File.WriteAllBytes(exe + ".tmp", bytes);
+        File.Move(exe + ".tmp", exe, true);
+        return exe;
+    }
 
     /// <summary>A LipGenerator run's time limit: 15 s, plus 2 s for each second of sound (a 16-bit .wav's length from
     /// its size and rate), at most a minute.</summary>
