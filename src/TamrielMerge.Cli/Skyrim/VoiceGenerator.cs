@@ -30,12 +30,14 @@ public static class VoiceGenerator
     // the machine to one worker with the graphics card three-quarters idle; Windows' own page file grows to hold it.
     const double WorkerGb = 3.5;
 
-    public static int Run(string skyrimData, string plugin, string voiceDir, string outDir, bool install, bool gpu)
+    /// <param name="planOnly">Only the job list, planned (or kept) and counted: no workers, nothing spoken or packed.</param>
+    public static int Run(string skyrimData, string plugin, string voiceDir, string outDir, bool install, bool gpu, bool planOnly = false)
     {
         if (!File.Exists(plugin)) { Console.WriteLine($"Voices: {plugin} isn't there (convert that game first)"); return 1; }
-        // The app shows this run's progress from voiceDir\progress.txt too (a run started elsewhere, or before the app).
-        using var status = Progress.ToStatusFile(Path.Combine(voiceDir, "progress.txt"));
-        string py = Setup.Dependencies.Python ?? throw new InvalidOperationException("the Python environment is missing: run setup");
+        // The app shows this run's progress from voiceDir\progress.txt too (a run started elsewhere, or before the app);
+        // a plan alone isn't a run.
+        using var status = planOnly ? null : Progress.ToStatusFile(Path.Combine(voiceDir, "progress.txt"));
+        string py = planOnly ? "" : Setup.Dependencies.Python ?? throw new InvalidOperationException("the Python environment is missing: run setup");
         string script = Setup.ToolScripts.Path("voice", "generate.py");
         string name = Path.GetFileNameWithoutExtension(plugin);
         string jobsFile = Path.Combine(voiceDir, name.Equals("Morrowind", StringComparison.OrdinalIgnoreCase) ? "mw-jobs.json" : name.ToLowerInvariant() + "-jobs.json");
@@ -47,9 +49,28 @@ public static class VoiceGenerator
         {
             Progress.Report(0, $"Voices: planning {name}'s lines");
             using var m = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
-            VoicePlanner.WriteJobs(VoicePlanner.Plan(m, skyrimData, out _), jobsFile);
+            var planned = VoicePlanner.Plan(m, skyrimData, out _);
+            // Oblivion's: only the lines Oblivion never recorded (user, 2026-10-16: "rest of oblivions missing voices
+            // need in"); the recorded ones are its own voice acting, packed by the conversion (ObVoices).
+            if (name.Equals("Oblivion", StringComparison.OrdinalIgnoreCase))
+            {
+                string map = Path.Combine(Path.GetDirectoryName(plugin)!, "Oblivion.voicemap.json");
+                string? obData = GameInstalls.DataDir(Game.Oblivion);
+                if (obData is null || !File.Exists(map)) { Console.WriteLine($"Voices: Oblivion's recordings or {map} not found: convert Oblivion again"); return 1; }
+                var obRecorded = Oblivion.ObVoices.Sources(new Oblivion.ObData(obData), planned, map);
+                planned = planned.Where(j => !obRecorded.ContainsKey(j.File)).ToList();
+                Console.WriteLine($"Voices: Oblivion: {obRecorded.Count:N0} voice files from its own recordings, {planned.Count:N0} to speak");
+            }
+            VoicePlanner.WriteJobs(planned, jobsFile);
         }
         var jobs = JsonSerializer.Deserialize<List<VoicePlanner.Job>>(File.ReadAllText(jobsFile))!;
+        if (planOnly)
+        {
+            var lines = jobs.Select(j => VoiceFiles.WavKey(j.Speech, j.Text)).ToHashSet();
+            int spoken = lines.Count(k => File.Exists(Path.Combine(wavs, k + ".wav")));
+            Console.WriteLine($"Voices: {name}: {jobs.Count:N0} voice files, {lines.Count:N0} distinct lines, {spoken:N0} spoken already ({jobsFile})");
+            return 0;
+        }
         // Lines with a recording of their own (Morrowind's barks) are that recording, decoded into the spoken lines.
         int recorded = Recordings(jobs, wavs);
         if (recorded > 0) Console.WriteLine($"Voices: {recorded:N0} of the game's own recordings ready");
@@ -70,7 +91,7 @@ public static class VoiceGenerator
         string packedDir = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outDir).TrimEnd('\\', '/'))!, "voices");
         string DirOf(VoicePlanner.Job j) => j.Recording is null ? packedDir : outDir;
         int files = jobs.Select(j => j.File).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-        int filesDone = jobs.DistinctBy(j => j.File, StringComparer.OrdinalIgnoreCase).Count(j => File.Exists(Path.Combine(DirOf(j), j.File)));
+        int filesDone = jobs.DistinctBy(j => j.File, StringComparer.OrdinalIgnoreCase).Count(j => VoiceFiles.Current(Path.Combine(DirOf(j), j.File)));
         double speakShare = total / (total + files * 0.2);
         double Overall(double spokenFraction, double packedFraction) => speakShare * spokenFraction + (1 - speakShare) * packedFraction;
         Console.WriteLine($"Voices: {name}: {total:N0} distinct lines, {done:N0} spoken already");
@@ -163,11 +184,13 @@ public static class VoiceGenerator
         int packed = packedR + packedG, existing = existingR + existingG, missing = missingR + missingG;
         // The generated voices as their own mod: archives and light plugins, which turn them off when disabled.
         // Voice files no line names any more (a rebuilt plugin's responses moved to new FormIDs): left out of the mod.
-        if (Directory.Exists(packedDir))
+        // Only this plugin's (sound\voice\<plugin>): the other games' generated voices are in packedDir too.
+        string ownVoices = Path.Combine(packedDir, "sound", "voice", Path.GetFileName(plugin));
+        if (Directory.Exists(ownVoices))
         {
             var wanted = jobs.Where(j => j.Recording is null).Select(j => Path.GetFullPath(Path.Combine(packedDir, j.File))).ToHashSet(StringComparer.OrdinalIgnoreCase);
             int stale = 0;
-            foreach (var f in Directory.EnumerateFiles(packedDir, "*.fuz", SearchOption.AllDirectories).ToList())
+            foreach (var f in Directory.EnumerateFiles(ownVoices, "*.fuz", SearchOption.AllDirectories).ToList())
                 if (!wanted.Contains(Path.GetFullPath(f))) { File.Delete(f); stale++; }
             if (stale > 0) Console.WriteLine($"Voices: {stale:N0} voice files no line names any more, left out");
         }

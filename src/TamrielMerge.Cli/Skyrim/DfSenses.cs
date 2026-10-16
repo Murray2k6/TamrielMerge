@@ -75,20 +75,25 @@ public static class DfSenses
     public static Quest Quest(SkyrimMod mod)
     {
         if (mod.Quests.FirstOrDefault(q => q.EditorID == QuestEditorId) is { } existing) return existing;
+        // Fixed numbers in Daggerfall.esm only. A town part makes its copies in its own range (they are swapped for
+        // Daggerfall.esm's by EditorID, DaggerfallTowns.UseMasterRecords): 2026-10-16, with 84 parts part 74's range
+        // (DEA257-E1AEF6) held 0xDF0300-0xDF0320, and a record of its own took DF031A beside the Spriggan skill.
+        bool fixedKey = mod.ModKey.FileName.String.Equals("Daggerfall.esm", StringComparison.OrdinalIgnoreCase);
+        FormKey Key(uint id) => fixedKey ? new FormKey(mod.ModKey, id) : mod.GetNextFormKey();
         // Daggerfall's language skills (pacification on first meeting; Etiquette and Streetwise also plead in court).
         var skills = new List<FormKey>();
         for (int i = 0; i < LanguageSkills.Length; i++)
         {
-            var g = new GlobalShort(new FormKey(mod.ModKey, SkillsId + (uint)i), SkyrimRelease.SkyrimSE) { EditorID = "DFSkill" + LanguageSkills[i], Data = (short)StartingSkill };
+            var g = new GlobalShort(Key(SkillsId + (uint)i), SkyrimRelease.SkyrimSE) { EditorID = "DFSkill" + LanguageSkills[i], Data = (short)StartingSkill };
             mod.Globals.Add(g);
             skills.Add(g.FormKey);
         }
         // The dungeon encounter lists' actors (CreatureBuilder fills it): what a rest in a dungeon may bring.
-        var encounters = new FormList(new FormKey(mod.ModKey, EncountersId), SkyrimRelease.SkyrimSE) { EditorID = "DFRestEncounters" };
+        var encounters = new FormList(Key(EncountersId), SkyrimRelease.SkyrimSE) { EditorID = "DFRestEncounters" };
         mod.FormLists.Add(encounters);
         var skillList = new ScriptObjectListProperty { Name = "Skills" };
         foreach (var k in skills) skillList.Objects.Add(new ScriptObjectProperty { Object = k.ToLink<ISkyrimMajorRecordGetter>() });
-        var quest = new Quest(new FormKey(mod.ModKey, FixedId), SkyrimRelease.SkyrimSE)
+        var quest = new Quest(Key(FixedId), SkyrimRelease.SkyrimSE)
         {
             EditorID = QuestEditorId,
             Name = "Daggerfall's enemy senses",

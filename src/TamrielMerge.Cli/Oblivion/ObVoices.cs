@@ -38,8 +38,37 @@ public static class ObVoices
     {
         using var plugin = SkyrimMod.CreateFromBinaryOverlay(pluginPath, SkyrimRelease.SkyrimSE);
         var jobs = Skyrim.VoicePlanner.Plan(plugin, skyrimData, out _);
-        var map = JsonSerializer.Deserialize<List<MapEntry>>(File.ReadAllText(mapPath))!.ToDictionary(e => e.Info);
+        var sources = Sources(data, jobs, mapPath);
 
+        string work = Path.Combine(Path.GetTempPath(), "TamrielMergeObVoices");
+        Directory.CreateDirectory(work);
+        var decoded = new ConcurrentDictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        int packed = 0, existing = 0, unrecorded = 0;
+        Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, job =>
+        {
+            string fuz = Path.Combine(outDir, job.File);
+            if (Skyrim.VoiceFiles.Current(fuz)) { Interlocked.Increment(ref existing); return; }
+            if (!sources.TryGetValue(job.File, out var mp3)) { Interlocked.Increment(ref unrecorded); return; }
+            string? wav = decoded.GetOrAdd(mp3, path => Decode(data, path, work));
+            if (wav is null) { Interlocked.Increment(ref unrecorded); return; }
+            // Pack from a copy: several voice types can share one recording.
+            string copy = Path.Combine(work, Guid.NewGuid().ToString("N") + ".wav");
+            File.Copy(wav, copy);
+            try { if (Skyrim.VoiceFiles.Pack(skyrimData, copy, job.Text, fuz)) Interlocked.Increment(ref packed); }
+            finally { File.Delete(copy); }
+        });
+        foreach (var wav in decoded.Values.OfType<string>()) File.Delete(wav);
+        return (packed, existing, unrecorded);
+    }
+
+    /// <summary>
+    /// Oblivion's recording (its path in the voice archives) for each voice file it recorded: the converted response's
+    /// Oblivion response (the voicemap), said by the Oblivion race and sex the voice type stands for, else any race of
+    /// that sex. Voice files not in it are lines Oblivion never recorded, which the voice generator speaks.
+    /// </summary>
+    public static Dictionary<string, string> Sources(ObData data, IEnumerable<Skyrim.VoicePlanner.Job> jobs, string mapPath)
+    {
+        var map = JsonSerializer.Deserialize<List<MapEntry>>(File.ReadAllText(mapPath))!.ToDictionary(e => e.Info);
         // Every Oblivion recording by (race, sex, response FormID's low 24 bits, line).
         var recordings = new Dictionary<(string Race, string Sex, uint Id, int Line), string>();
         foreach (var path in data.List(@"sound\voice").Where(p => p.EndsWith(".mp3")))
@@ -52,33 +81,19 @@ public static class ObVoices
             if (!uint.TryParse(bits[^2], System.Globalization.NumberStyles.HexNumber, null, out uint id)) continue;
             recordings.TryAdd((race, sex, id & 0xFFFFFF, line), path);
         }
-
-        string work = Path.Combine(Path.GetTempPath(), "TamrielMergeObVoices");
-        Directory.CreateDirectory(work);
-        var decoded = new ConcurrentDictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        int packed = 0, existing = 0, unrecorded = 0;
-        Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, job =>
+        var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var job in jobs)
         {
-            string fuz = Path.Combine(outDir, job.File);
-            if (File.Exists(fuz)) { Interlocked.Increment(ref existing); return; }
             // ..._<info FormID>_<line>.fuz
             var bits = Path.GetFileNameWithoutExtension(job.File).Split('_');
-            if (!uint.TryParse(bits[^2], System.Globalization.NumberStyles.HexNumber, null, out uint info) || !int.TryParse(bits[^1], out int line)
-                || !map.TryGetValue(info & 0xFFFFFF, out var source)) { Interlocked.Increment(ref unrecorded); return; }
+            if (bits.Length < 2 || !uint.TryParse(bits[^2], System.Globalization.NumberStyles.HexNumber, null, out uint info) || !int.TryParse(bits[^1], out int line)
+                || !map.TryGetValue(info & 0xFFFFFF, out var source)) continue;
             string sex = job.VoiceType.StartsWith("Female", StringComparison.OrdinalIgnoreCase) ? "f" : "m";
             var races = (RaceFolders.TryGetValue(job.VoiceType, out var r) ? r : []).Concat(AnyRace);
-            string? mp3 = races.Select(race => recordings.GetValueOrDefault((race, sex, source.OriginId & 0xFFFFFF, line))).FirstOrDefault(p => p is not null);
-            if (mp3 is null) { Interlocked.Increment(ref unrecorded); return; }
-            string? wav = decoded.GetOrAdd(mp3, path => Decode(data, path, work));
-            if (wav is null) { Interlocked.Increment(ref unrecorded); return; }
-            // Pack from a copy: several voice types can share one recording.
-            string copy = Path.Combine(work, Guid.NewGuid().ToString("N") + ".wav");
-            File.Copy(wav, copy);
-            try { if (Skyrim.VoiceFiles.Pack(skyrimData, copy, job.Text, fuz)) Interlocked.Increment(ref packed); }
-            finally { File.Delete(copy); }
-        });
-        foreach (var wav in decoded.Values.OfType<string>()) File.Delete(wav);
-        return (packed, existing, unrecorded);
+            if (races.Select(race => recordings.GetValueOrDefault((race, sex, source.OriginId & 0xFFFFFF, line))).FirstOrDefault(p => p is not null) is { } mp3)
+                found[job.File] = mp3;
+        }
+        return found;
     }
 
     /// <summary>An Oblivion MP3 as a 44.1 kHz mono 16-bit .wav (Windows Media Foundation), or null if it can't be read.</summary>

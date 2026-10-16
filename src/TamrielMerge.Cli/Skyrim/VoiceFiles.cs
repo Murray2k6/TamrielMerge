@@ -61,6 +61,16 @@ public static class VoiceFiles
     /// <summary>Voice files taken from the cache, and packed anew, since the program started.</summary>
     public static (int Hits, int Packed) CacheStats => (Volatile.Read(ref cacheHits), Volatile.Read(ref cacheMisses));
 
+    /// <summary>
+    /// When lip sync became trustworthy: before it, LipGenerator ran side by side in one working folder and lines took
+    /// each other's sound (2026-10-16: 16 lines at once came out 10-40% off from the same lines alone, two of them
+    /// alike). A voice file (or cache entry) written earlier is packed again.
+    /// </summary>
+    public static readonly DateTime LipSyncFixed = new DateTime(2026, 10, 16, 7, 0, 0, DateTimeKind.Local).ToUniversalTime();
+
+    /// <summary>A voice file that is there and was packed after <see cref="LipSyncFixed"/>.</summary>
+    public static bool Current(string fuz) => File.Exists(fuz) && File.GetLastWriteTimeUtc(fuz) >= LipSyncFixed;
+
     /// <summary>The cache's key for a recording and its text: the first 32 hex digits of SHA-256 over the .wav's bytes,
     /// a zero byte and the text (UTF-8).</summary>
     public static string CacheKey(string wav, string text)
@@ -83,7 +93,7 @@ public static class VoiceFiles
         // once and the others take it from the cache.
         lock (KeyLocks.GetOrAdd(key, _ => new object()))
         {
-            if (File.Exists(cached))
+            if (Current(cached))
             {
                 Place(cached, fuzPath);
                 Interlocked.Increment(ref cacheHits);
@@ -159,21 +169,51 @@ public static class VoiceFiles
         string words = System.Text.RegularExpressions.Regex.Replace(System.Text.RegularExpressions.Regex.Replace(ascii, @"[^A-Za-z0-9' ]+", " "), @"\s+", " ").Trim();
         string plainWords = System.Text.RegularExpressions.Regex.Replace(words, @"'", "");
         var attempts = new (string How, string Text)[] { ("text", text.Replace("\"", "'")), ("ascii", ascii), ("words", words), ("plain words", plainWords) };
-        foreach (var (name, attempt) in attempts.DistinctBy(a => a.Text))
+        // A working folder of its own: LipGenerator resamples the sound into tmp16khz.wav in its working folder, so runs
+        // side by side in one folder read each other's sound (2026-10-16: all of them ran in LipGenerator's folder,
+        // lines got another line's mouth movement or none, and the failures' retries held the packing to ~270 lines a
+        // minute; one run alone takes half a second).
+        string work = LipWorkDirs.TryTake(out var free) ? free : Path.Combine(Path.GetTempPath(), "TamrielMergeLipGen", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(work);
+        try
         {
-            if (File.Exists(lip)) File.Delete(lip);
-            bool finished = Run(lipGen, $"\"{wav}\" \"{attempt}\"", Path.GetDirectoryName(lipGen), 60_000);
-            if (finished && File.Exists(lip) && new FileInfo(lip).Length > 0)
+            foreach (var (name, attempt) in attempts.DistinctBy(a => a.Text))
             {
-                var data = File.ReadAllBytes(lip);
-                File.Delete(lip);
-                how = name;
-                return data;
+                if (File.Exists(lip)) File.Delete(lip);
+                // A line takes about a twentieth of its length; one that runs past this has looped.
+                bool finished = Run(lipGen, $"\"{wav}\" \"{attempt}\"", work, LipTimeLimitMs(wav));
+                if (finished && File.Exists(lip) && new FileInfo(lip).Length > 0)
+                {
+                    var data = File.ReadAllBytes(lip);
+                    File.Delete(lip);
+                    how = name;
+                    return data;
+                }
             }
+            if (File.Exists(lip)) File.Delete(lip);
+            how = "failed";
+            return null;
         }
-        if (File.Exists(lip)) File.Delete(lip);
-        how = "failed";
-        return null;
+        finally { LipWorkDirs.Add(work); }
+    }
+
+    /// <summary>LipGenerator working folders not in use (each run takes one, and gives it back).</summary>
+    static readonly System.Collections.Concurrent.ConcurrentBag<string> LipWorkDirs = [];
+
+    /// <summary>A LipGenerator run's time limit: 15 s, plus 2 s for each second of sound (a 16-bit .wav's length from
+    /// its size and rate), at most a minute.</summary>
+    static int LipTimeLimitMs(string wav)
+    {
+        double seconds = 30;
+        try
+        {
+            using var r = new BinaryReader(File.OpenRead(wav));
+            r.BaseStream.Position = 24;
+            int rate = r.ReadInt32(), bytesPerSecond = r.ReadInt32();
+            if (rate > 0 && bytesPerSecond > 0) seconds = (r.BaseStream.Length - 44) / (double)bytesPerSecond;
+        }
+        catch (IOException) { }   // EndOfStreamException too: a file too short to be a .wav
+        return (int)Math.Clamp(15_000 + seconds * 2_000, 15_000, 60_000);
     }
 
     /// <summary>
@@ -233,7 +273,7 @@ public static class VoiceFiles
         var allFiles = jobs.Select(j => j.File).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         int all = allFiles.Count;
         // Those already there counted first, so the reports climb at the packing's own pace from the start.
-        int already = allFiles.Count(f => File.Exists(Path.Combine(dataDir, f)));
+        int already = allFiles.Count(f => Current(Path.Combine(dataDir, f)));
         long lastReport = 0;
         void Tick()
         {
@@ -251,13 +291,13 @@ public static class VoiceFiles
         Parallel.ForEach(byLine, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, line =>
         {
             var targets = line.Select(j => Path.Combine(dataDir, j.File)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            var todo = targets.Where(f => !File.Exists(f)).ToList();
+            var todo = targets.Where(f => !Current(f)).ToList();
             Interlocked.Add(ref existing, targets.Count - todo.Count);
             if (todo.Count == 0) return;
             string wav = Path.Combine(wavDir, line.Key + ".wav");
             if (!File.Exists(wav)) { Interlocked.Add(ref missing, todo.Count); return; }
             // A finished voice file of this line, else one packed now from a copy of its .wav.
-            string? made = targets.FirstOrDefault(File.Exists);
+            string? made = targets.FirstOrDefault(Current);
             if (made is null)
             {
                 string work = Path.Combine(tmpDir, Guid.NewGuid().ToString("N") + ".wav");
@@ -266,7 +306,7 @@ public static class VoiceFiles
                 finally { File.Delete(work); }
                 if (made is null) return;
             }
-            foreach (var fuz in todo.Where(f => !File.Exists(f)))
+            foreach (var fuz in todo.Where(f => !Current(f)))
             {
                 Place(made, fuz);   // renamed when whole, as WriteFuz does
                 Interlocked.Increment(ref packed);

@@ -6980,10 +6980,21 @@ static class Program
                 // voice files (Skyrim/VoiceGenerator): workers on the graphics card (--gpu) and the CPU share the lines,
                 // with progress for the app; --plugin (default Morrowind.esm in --out, default out/convert), --install.
                 // Resumes where it stopped; workers already running are watched rather than doubled.
+                // Without --plugin: every converted game with lines to speak, one after another: Morrowind's dialogue (it
+                // recorded only barks) and the lines Oblivion never recorded.
                 string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/convert"));
-                string plugin = Path.GetFullPath(opts.GetValueOrDefault("plugin", Path.Combine(outDir, "Morrowind.esm")));
-                return Skyrim.VoiceGenerator.Run(skyrimData, plugin, Path.Combine(Setup.Dependencies.Root, "voice"), outDir,
-                    opts.ContainsKey("install"), opts.ContainsKey("gpu"));
+                var voicePlugins = opts.TryGetValue("plugin", out var onePlugin) ? [Path.GetFullPath(onePlugin)]
+                    : new[] { "Morrowind.esm", "Oblivion.esm" }.Select(p => Path.Combine(outDir, p)).Where(File.Exists).ToList();
+                if (voicePlugins.Count == 0) { Console.WriteLine($"Voices: no converted Morrowind.esm or Oblivion.esm in {outDir} (convert first)"); return 1; }
+                int voicesResult = 0;
+                foreach (var plugin in voicePlugins)
+                {
+                    int r = Skyrim.VoiceGenerator.Run(skyrimData, plugin, Path.Combine(Setup.Dependencies.Root, "voice"), outDir,
+                        opts.ContainsKey("install"), opts.ContainsKey("gpu"), planOnly: opts.ContainsKey("plan-only"));
+                    if (r == 1) return 1;
+                    voicesResult = Math.Max(voicesResult, r);
+                }
+                return voicesResult;
             }
             case "voice-pack-all":
             {

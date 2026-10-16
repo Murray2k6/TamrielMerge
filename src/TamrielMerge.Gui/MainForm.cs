@@ -515,11 +515,12 @@ public sealed class MainForm : Form
         catch (InvalidOperationException) { return false; }
     }
 
-    /// <summary>Voice generator: the converter's voices step on its own, for the converted Morrowind in the output folder.</summary>
+    /// <summary>Voice generator: the converter's voices step on its own, for the converted Morrowind (its dialogue) and
+    /// Oblivion (the lines it never recorded) in the output folder.</summary>
     void GenerateVoices()
     {
-        string plugin = Path.Combine(outputBox.Text, "Morrowind.esm");
-        if (!File.Exists(plugin)) { MessageBox.Show(this, "Convert Morrowind first: the voice generator speaks the dialogue of the converted Morrowind.esm in the output folder.", "TamrielMerge"); return; }
+        if (!new[] { "Morrowind.esm", "Oblivion.esm" }.Any(p => File.Exists(Path.Combine(outputBox.Text, p))))
+        { MessageBox.Show(this, "Convert Morrowind or Oblivion first: the voice generator speaks Morrowind's dialogue and the lines Oblivion never recorded, from the converted plugins in the output folder.", "TamrielMerge"); return; }
         string? skyrim = GameInstalls.SkyrimData();
         if (skyrim is null || Dependencies.CreationKitMissing(skyrim).Count > 0)
         { MessageBox.Show(this, "The voice files need the Creation Kit's tools (lip sync). Install it first (Open the Creation Kit in Steam).", "TamrielMerge"); return; }

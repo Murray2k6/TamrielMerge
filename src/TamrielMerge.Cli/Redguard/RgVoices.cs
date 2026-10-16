@@ -25,7 +25,7 @@ public static class RgVoices
         Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, job =>
         {
             string fuz = Path.Combine(outDir, job.File);
-            if (File.Exists(fuz)) { Interlocked.Increment(ref existing); return; }
+            if (Skyrim.VoiceFiles.Current(fuz)) { Interlocked.Increment(ref existing); return; }
             var bits = Path.GetFileNameWithoutExtension(job.File).Split('_');
             if (!uint.TryParse(bits[^2], System.Globalization.NumberStyles.HexNumber, null, out uint info) || !int.TryParse(bits[^1], out int line)
                 || !map.TryGetValue((info & 0xFFFFFF, line), out var tag) || !rtx.Entries.TryGetValue(tag, out var entry))
