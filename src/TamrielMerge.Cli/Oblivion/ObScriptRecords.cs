@@ -317,6 +317,7 @@ public sealed partial class ObPluginBuilder
         // The lands' crime factions and jails (ObCrime): the bounty Skyrim keeps, and IsPlayerInJail.
         entry.Properties.Add(Obj("CyrodiilCrime", LandCrime(false).FormKey));
         entry.Properties.Add(Obj("IslesCrime", LandCrime(true).FormKey));
+        entry.Properties.Add(new ScriptObjectListProperty { Name = "CityCrimes", Objects = [.. CityCrimes().Select(f => new ScriptObjectProperty { Object = f.ToLink<ISkyrimMajorRecordGetter>() })] });
         entry.Properties.Add(Obj("PCInSEWorld", ScriptGlobal("TMOB_PCInSEWorld").FormKey));
         entry.Properties.Add(Obj("PCInJail", ScriptGlobal("TMOB_PCInJail").FormKey));
         entry.Properties.Add(Obj("JailMarkers", JailMarkers().FormKey));

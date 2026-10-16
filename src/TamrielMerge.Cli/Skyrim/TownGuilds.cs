@@ -13,7 +13,8 @@ namespace TamrielMerge.Skyrim;
 /// KnightlyOrder and Temple classes, MIT; rank titles from UESP; messages from TEXT.RSC) on the "DFGuilds" quest
 /// (TMDfGuilds): a membership faction per guild whose ranks carry Daggerfall's titles, and on the town conversation
 /// quest, said by the guild's people, "I'd like to join.", "I'd like some training." (members; the speaker trains one
-/// of the guild's skills up to 50) and, at temples, "I need healing.". Promotion, demotion and expulsion run daily
+/// of the guild's skills up to 50), at temples "I need healing." and, at the Mages Guild and temples from the rank that
+/// opens their summoning chambers, "Summon a Daedra Prince." (AddSummoning). Promotion, demotion and expulsion run daily
 /// with Daggerfall's 28-day rule; the Thieves Guild and Dark Brotherhood invite. Reputation is the player's standing
 /// with the guild (DFReact_&lt;id&gt;, TownTalk).
 /// </summary>
@@ -116,6 +117,59 @@ public sealed class TownGuilds(SkyrimMod mod, ISkyrimModGetter skyrim, DfText te
     public Quest? Quest { get; private set; }
     public int Trainers { get; private set; }
     public int Responses { get; private set; }
+
+    readonly List<(List<Faction> Speakers, Faction Members, int Rank)> summoners = [];
+    Quest? summonQuest;
+    DialogBranch? summonBranch;
+
+    /// <summary>"Summon a Daedra Prince." to the Mages Guild's and temples' people once the player holds the rank that
+    /// opens their summoning chambers (Daggerfall Unity's MagesGuild and Temple services). Daggerfall.esm's quest machine
+    /// (TMDfQuestMachine.SummonDaedra) calls the prince whose day it is, as for anyone outside a coven.</summary>
+    public void AddSummoning(FormKey machine)
+    {
+        if (summoners.Count == 0 || summonQuest is null || summonBranch is null) return;
+        var topic = new DialogTopic(mod)
+        {
+            EditorID = "DFGuildSummon", Name = "Summon a Daedra Prince.", Quest = summonQuest.ToNullableLink<IQuestGetter>(), Priority = 50,
+            Category = DialogTopic.CategoryEnum.Topic, Subtype = DialogTopic.SubtypeEnum.Custom, Branch = summonBranch.ToNullableLink<IDialogBranchGetter>(), Responses = [],
+        };
+        mod.DialogTopics.Add(topic);
+        foreach (var (speakers, members, rank) in summoners)
+        {
+            var conditions = speakers.Select((f, n) => InFaction(f, or: n < speakers.Count - 1)).ToList();
+            var r = new GetFactionRankConditionData { RunOnType = Condition.RunOnType.Reference, Reference = new FormLink<ISkyrimMajorRecordGetter>(PlayerRef) };
+            r.Faction = new FormLinkOrIndex<IFactionGetter>(r, members.FormKey);
+            conditions.Add(Cond(r, CompareOperator.GreaterThanOrEqualTo, rank));
+            Responses++;
+            topic.Responses.Add(new DialogResponses(mod)
+            {
+                Responses = [new DialogResponse { Text = "Let us see who answers.", ResponseNumber = 1, Emotion = Emotion.Neutral, EmotionValue = 50 }],
+                Flags = new DialogResponseFlags(),
+                Conditions = [.. conditions],
+                VirtualMachineAdapter = new DialogResponsesAdapter
+                {
+                    Scripts =
+                    [
+                        new ScriptEntry
+                        {
+                            Name = "TMDfQuestTopic",
+                            Properties =
+                            [
+                                new ScriptObjectProperty { Name = "Machine", Object = machine.ToLink<ISkyrimMajorRecordGetter>() },
+                                new ScriptIntProperty { Name = "Service", Data = 2 },
+                            ],
+                        },
+                    ],
+                    ScriptFragments = new ScriptFragments
+                    {
+                        ExtraBindDataVersion = 2,
+                        FileName = "TMDfQuestTopic",
+                        OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfQuestTopic", FragmentName = "Fragment_End" },
+                    },
+                },
+            });
+        }
+    }
 
     /// <summary>Daggerfall's macros fixed when converting (the rest, the player's name and title, at run time).</summary>
     string Say(int textId, Guild g)
@@ -293,7 +347,12 @@ public sealed class TownGuilds(SkyrimMod mod, ISkyrimModGetter skyrim, DfText te
             if (g.Joinable) join.Responses.Add(Response("Let me see what you have done.", i, 0, By()));
             train.Responses.Add(Response("Very well.", i, 1, By()));
             if (g.Temple) heal.Responses.Add(Response($"{g.God} grant you health.", i, 2, By()));
+            // The rank whose promotion opens the Daedra summoning chambers (Mages Guild 5233, temples 6604).
+            int opens = g.PromotionByRank.Where(kv => kv.Value.Contains(5233) || kv.Value.Contains(6604)).Select(kv => kv.Key).DefaultIfEmpty(-1).First();
+            if (opens >= 0 && speakers.Count > 0) summoners.Add((speakers, members[i], opens));
         }
+        summonQuest = talkQuest;
+        summonBranch = branch;
 
         // Trainers: each of a guild's people teaches one of its skills, up to 50 (Daggerfall's training cap).
         var classes = new Dictionary<Skill, Class>();

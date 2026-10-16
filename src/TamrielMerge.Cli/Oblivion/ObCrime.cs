@@ -28,6 +28,43 @@ public sealed partial class ObPluginBuilder
     static readonly string[] CyrodiilJails = ["ICImperialLegionHQTheBastion"], IslesJails = ["XPAichan01", "XPCorpserotPassage01"];
 
     readonly Faction?[] landCrime = new Faction?[2];
+
+    /// <summary>
+    /// Cyrodiil's cities whose guards jail in their own castle's prison (2026-10-16, user: "fix the older gaps" - every
+    /// arrest went to the Bastion, where Oblivion jails you in the city whose guard took you): the city by its guards'
+    /// Oblivion faction, and its prison cell. Chorrol has no prison marker: its guards jail in Cyrodiil's (the Bastion).
+    /// </summary>
+    static readonly (string City, string GuardFaction, string Prison)[] Cities =
+    [
+        ("Anvil", "AnvilGuards", "AnvilCastleDungeon"), ("Bravil", "BravilGuards", "BravilCastleDungeon"),
+        ("Bruma", "BrumaGuardFaction", "BrumaCastleDungeon"), ("Cheydinhal", "CheydinhalGuardFaction", "CheydinhalCastleDungeon"),
+        ("Chorrol", "ChorrolGuardFaction", ""), ("Leyawiin", "LeyawiinGuards", "LeyawiinCastleDungeon"),
+        ("Skingrad", "SkingradGuardFaction", "SkingradCastleDungeon"),
+    ];
+
+    readonly Dictionary<string, Faction> cityCrime = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A city's guards' crime faction (OBCrime&lt;City&gt;): Cyrodiil's crime values, its own jail; the bounty
+    /// in it is kept the same as Cyrodiil's (TMObState.SyncCityBounty), as Oblivion has one.</summary>
+    Faction CityCrime(string city)
+    {
+        if (cityCrime.TryGetValue(city, out var hit)) return hit;
+        var land = LandCrime(false);
+        var f = new Faction(mod)
+        {
+            EditorID = "OBCrime" + city,
+            Name = city,
+            Flags = Faction.FactionFlag.TrackCrime | Faction.FactionFlag.CanBeOwner,
+            CrimeValues = land.CrimeValues?.DeepCopy(),
+            JailOutfit = new FormLinkNullable<IOutfitGetter>(JailOutfit),
+            Ranks = [new Rank { Number = 0 }],
+        };
+        mod.Factions.Add(f);
+        return cityCrime[city] = f;
+    }
+
+    /// <summary>Every city's guards' crime faction (made now if not yet), for TMObState.</summary>
+    IEnumerable<Faction> CityCrimes() => Cities.Select(c => CityCrime(c.City));
     FormList? jailMarkers;
     /// <summary>Prisons placed: the Skyrim marker, its cell, the Oblivion cell's editor ID and land.</summary>
     readonly List<(PlacedObject Marker, Cell Cell, bool Isles)> prisons = [];
@@ -58,10 +95,16 @@ public sealed partial class ObPluginBuilder
     /// Oblivion's guards.</summary>
     void AddCrime(Npc npc, Ob.INpcGetter n)
     {
-        var land = LandCrime(IsIsles(n.EditorID));
+        bool isles = IsIsles(n.EditorID);
+        var land = LandCrime(isles);
         npc.CrimeFaction.SetTo(land);
         if (!n.Class.IsNull && records.GetValueOrDefault(n.Class.FormKey) is Ob.IClassGetter cls && cls.Data?.Flags.HasFlag(Ob.ClassFlag.Guard) == true)
         {
+            // A city's guard arrests for that city (its jail): their Oblivion guard faction names it.
+            if (!isles && n.Factions.Select(f => (records.GetValueOrDefault(f.Faction.FormKey) as Ob.IFactionGetter)?.EditorID)
+                    .Select(e => Cities.FirstOrDefault(c => c.GuardFaction.Equals(e, StringComparison.OrdinalIgnoreCase)).City).FirstOrDefault(c => c is not null) is { } city)
+                land = CityCrime(city);
+            npc.CrimeFaction.SetTo(land);
             npc.Factions.Add(new RankPlacement { Faction = land.ToLink<IFactionGetter>(), Rank = 0 });
             npc.Factions.Add(new RankPlacement { Faction = new FormLink<IFactionGetter>(IsGuardFaction), Rank = 0 });
             npc.Factions.Add(new RankPlacement { Faction = new FormLink<IFactionGetter>(GuardDialogueFaction), Rank = 0 });
@@ -98,6 +141,7 @@ public sealed partial class ObPluginBuilder
     /// </summary>
     void FinishJails()
     {
+        var landJails = new (PlacedObject Marker, Cell Cell, bool Isles)?[2];
         for (int i = 0; i < 2; i++)
         {
             if (landCrime[i] is not { } faction) continue;
@@ -106,6 +150,23 @@ public sealed partial class ObPluginBuilder
             var candidates = prisons.Where(p => p.Isles == isles).ToList();
             if (candidates.Count == 0) continue;
             var jail = candidates.OrderBy(p => Array.FindIndex(preferred, n => ("OB" + n).Equals(p.Cell.EditorID, StringComparison.OrdinalIgnoreCase)) is var k and >= 0 ? k : 99).First();
+            landJails[i] = jail;
+            FinishJail(faction, jail);
+        }
+        // Each city's guards' jail: their castle's prison, else Cyrodiil's.
+        foreach (var (city, _, prison) in Cities)
+        {
+            if (!cityCrime.TryGetValue(city, out var faction)) continue;
+            var own = prison.Length > 0 ? prisons.FirstOrDefault(p => ("OB" + prison).Equals(p.Cell.EditorID, StringComparison.OrdinalIgnoreCase)) : default;
+            if (own.Marker is not null) FinishJail(faction, own);
+            else if (landJails[0] is { } cyrodiil) FinishJail(faction, cyrodiil);
+        }
+    }
+
+    /// <summary>A crime faction's jail: its chests in the prison cell, its release where the jail's way out leads.</summary>
+    void FinishJail(Faction faction, (PlacedObject Marker, Cell Cell, bool Isles) jail)
+    {
+        {
             var at = jail.Marker.Placement!.Position;
             PlacedObject Chest(FormKey container, float dx) => new(mod)
             {

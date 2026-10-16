@@ -77,8 +77,8 @@ These translate to a comment, because what they changed doesn't exist in Skyrim'
   package's usual procedure.
 - `SetRigidBodyMass` pins an object (0) or frees it; actors' mass can't be set in Skyrim.
 - `EssentialDeathReload`: the message, then the player dies (Skyrim then loads the last save).
-- Arrest is Skyrim's (its guards' crime dialogue: pay, jail, resist), not Oblivion's; each land has one jail (see
-  "Crime and jail" below), where Oblivion takes the player to the nearest city's.
+- Arrest is Skyrim's (its guards' crime dialogue: pay, jail, resist), not Oblivion's; each city's guards take the
+  player to that city's castle prison (see "Crime and jail" below).
 
 ## Moving parts
 
@@ -147,3 +147,11 @@ stolen-goods chests (Skyrim puts the player at the prison marker of the belongin
 the floor, and the player is let out where the jail's load door leads (a prison marker and a follower wait marker
 there; in the jail itself when that cell isn't built). TMObState keeps TMOB_PCCrimeGold as Skyrim's bounty and sets
 TMOB_PCInJail while the player is in a jail.
+
+Cities: Skyrim gives each crime faction one jail, so each of Oblivion's cities has its own, OBCrime&lt;City&gt; (Anvil,
+Bravil, Bruma, Cheydinhal, Chorrol, Leyawiin, Skingrad), with Cyrodiil's values. A guard in a city's Oblivion guard
+faction (AnvilGuards, BrumaGuardFaction, ...) reports to that city's faction, and its jail is the city's castle
+dungeon. Chorrol has no prison marker, so its guards take the player to Cyrodiil's jail (the Bastion). Oblivion's
+bounty is one for the whole land, so TMObState (`SyncCityBounty`, before each jail check) adds up what changed in
+any of the land's factions since the last sync and sets that total in all of them. Paying or serving time in one city
+clears it everywhere.

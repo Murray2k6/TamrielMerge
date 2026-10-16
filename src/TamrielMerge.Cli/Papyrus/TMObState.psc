@@ -33,6 +33,11 @@ Faction Property CyrodiilCrime Auto
 {OBCrimeCyrodiil: the crime faction of Cyrodiil's people. Skyrim keeps the player's bounty there and arrests through it.}
 Faction Property IslesCrime Auto
 {OBCrimeShiveringIsles: the Shivering Isles' crime faction.}
+Faction[] Property CityCrimes Auto
+{OBCrimeAnvil, ...: the crime factions of Cyrodiil's cities' guards, each jailing in its own castle's prison. Their bounty
+is kept the same as CyrodiilCrime's (SyncCityBounty): Oblivion has one bounty.}
+Int syncedNonViolent = 0
+Int syncedViolent = 0
 GlobalVariable Property PCInSEWorld Auto
 {TMOB_PCInSEWorld: whether the player is in the Shivering Isles (which land's bounty a script's SetCrimeGold sets).}
 GlobalVariable Property PCInJail Auto
@@ -492,6 +497,7 @@ EndFunction
 ; Whether the player is in an Oblivion jail: in a jail cell, near its prison marker (where Skyrim puts the arrested
 ; player). TMObPlayer asks every few seconds; IsPlayerInJail reads TMOB_PCInJail.
 Function CheckJail()
+  SyncCityBounty()
   PlayerBounty()
   If !PCInJail || !JailMarkers
     Return
@@ -509,6 +515,47 @@ Function CheckJail()
   If jailed != (PCInJail.GetValueInt() != 0)
     PCInJail.SetValueInt(jailed as Int)
   EndIf
+EndFunction
+
+; Oblivion's one bounty across Cyrodiil's crime faction and its cities' guards' (each city's guards arrest through their
+; own, for its jail): whatever changed in any of them since the last look is made so in all. A crime adds to one, paying
+; or serving clears one: the change is added to the bounty, and the bounty set in every one. Non-violent and violent
+; gold are kept apart, as Skyrim keeps them.
+Function SyncCityBounty()
+  If !CyrodiilCrime || !CityCrimes
+    Return
+  EndIf
+  Int dNon = CyrodiilCrime.GetCrimeGoldNonViolent() - syncedNonViolent
+  Int dVio = CyrodiilCrime.GetCrimeGoldViolent() - syncedViolent
+  Int i = CityCrimes.Length
+  While i > 0
+    i -= 1
+    If CityCrimes[i]
+      dNon += CityCrimes[i].GetCrimeGoldNonViolent() - syncedNonViolent
+      dVio += CityCrimes[i].GetCrimeGoldViolent() - syncedViolent
+    EndIf
+  EndWhile
+  If dNon == 0 && dVio == 0
+    Return
+  EndIf
+  syncedNonViolent += dNon
+  syncedViolent += dVio
+  If syncedNonViolent < 0
+    syncedNonViolent = 0
+  EndIf
+  If syncedViolent < 0
+    syncedViolent = 0
+  EndIf
+  CyrodiilCrime.SetCrimeGold(syncedNonViolent)
+  CyrodiilCrime.SetCrimeGoldViolent(syncedViolent)
+  i = CityCrimes.Length
+  While i > 0
+    i -= 1
+    If CityCrimes[i]
+      CityCrimes[i].SetCrimeGold(syncedNonViolent)
+      CityCrimes[i].SetCrimeGoldViolent(syncedViolent)
+    EndIf
+  EndWhile
 EndFunction
 
 Function ModCrimeGold(Actor akActor, Int aiGold)

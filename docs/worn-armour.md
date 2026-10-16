@@ -66,9 +66,12 @@ Skyrim's naked body is one piece (slot 32) where Morrowind's is many, so most pa
 Oblivion: upper body = 32 body (with Skyrim's body under it), lower body = 53, both (robes) = 32 + 53, hands 33, feet
 37, head 30 + 31, hair 31, shield 39; rings and amulets draw nothing worn, as in Oblivion.
 
-Known limits: Morrowind hides a cuirass or greaves under a robe or skirt; Skyrim can't hide one worn item under
-another, so a robe worn over armour may show the armour through it. Helmets aren't fitted to the head (heads differ by
-NPC). Not yet seen in the game.
+Robes and skirts over armour: Morrowind hides a cuirass or greaves under a robe or skirt. Skyrim draws, of the
+addons claiming one slot, the one with the higher priority, so a robe's addon also claims body, 53, shirt, pants and
+skirt (a skirt's: 53 and pants) at priority 50 (`MwWorn.OverPriority`). The armour stays equipped and counts, but
+only the robe is drawn. The robe's armour record keeps its own slot.
+
+Known limits: helmets aren't fitted to the head (heads differ by NPC). Not yet seen in the game.
 
 ## When it is built
 

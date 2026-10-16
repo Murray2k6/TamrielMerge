@@ -90,7 +90,9 @@ the quests that send the player to one ($CUREWER, R0C30Y25, R0C40Y23, R0C4XY23, 
 
 Talking to a witch (Daggerfall Unity DaggerfallWitchesCovenPopupWindow): "Do you have any work for me?" offers the
 covens' quests (Q, by level), and "Summon a Daedra Prince." runs TMDfQuestMachine.SummonDaedra
-(DaggerfallQuestPopupWindow, MIT):
+(DaggerfallQuestPopupWindow, MIT). The Mages Guild's and temples' people offer it too (TownGuilds.AddSummoning,
+DFGuildSummon), once the player holds the rank that opens their summoning chambers: Mages Guild 6, Julianos 6,
+Zenithar 8, the other temples 7:
 
 - who answers: the Glenmoril Witches always summon Hircine; any other coven a prince picked at random for the day (1-15,
   never Hircine); anyone else only the prince whose day it is (TEXT.RSC 480 otherwise). The days (Daggerfall's day of the

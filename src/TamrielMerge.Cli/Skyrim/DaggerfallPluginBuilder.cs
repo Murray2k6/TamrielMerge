@@ -179,6 +179,7 @@ public static class DaggerfallPluginBuilder
             Books = [.. mod.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey)],
         };
         questBuilder.Build();
+        guilds?.AddSummoning(questBuilder.Machine!.FormKey);
         var markerOf = markers.GroupBy(m => (m.Location.Region, m.Location.Index)).ToDictionary(g => g.Key, g => g.First().Marker.FormKey);
         questTowns.AddRange(questBuilder.ExteriorOnly.Select(l => new QuestSites.Town(l, null)));
         var questSites = QuestSites.Build(mod, "Main", questBuilder.Machine!.FormKey, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,

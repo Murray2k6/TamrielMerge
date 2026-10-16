@@ -1,6 +1,6 @@
 ScriptName TMDfQuestTopic extends TopicInfo
 {Daggerfall quest dialogue: Service 0 "Do you have any work for me?" (TMDfQuestMachine.OfferFrom), 1 an answer about a
-quest place, which marks it on the map, 2 a witches' coven's summoning of a Daedra Prince (TMDfQuestMachine.SummonDaedra).}
+quest place, which marks it on the map, 2 the summoning of a Daedra Prince by a witches' coven, the Mages Guild or a temple (TMDfQuestMachine.SummonDaedra).}
 
 TMDfQuestMachine Property Machine Auto
 Int Property Service = 0 Auto

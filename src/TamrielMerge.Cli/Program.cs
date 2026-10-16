@@ -1791,6 +1791,7 @@ static class Program
                         Foe = id => townCreatures.Spawn(id), CityWatch = townCreatures.Spawn(146, passive: true), GuildsQuest = guilds.Quest, Guilds = guilds.Built, SoundDir = outDir,
                     };
                     qb.Build();
+                    guilds.AddSummoning(qb.Machine!.FormKey);
                     var questTowns = picked.Zip(built).Select(p => new QuestSites.Town(p.First, p.Second)).ToList();
                     var sites = QuestSites.Build(mod, "Test", qb.Machine!.FormKey, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,
                         QuestSites.Individuals(mod, townBuilder.Placed.Concat(dungeons.PlacedPeople)), _ => null);
@@ -4361,6 +4362,29 @@ static class Program
                     foreach (var w in ob.Weathers) Console.WriteLine($"  WTHR {w.FormKey} {w.EditorID}");
                     foreach (var rg in ob.Regions.Take(int.Parse(opts["weathers"])))
                         Console.WriteLine($"  REGN {rg.EditorID} ws={rg.Worldspace.FormKey} areas={rg.Areas.Count} weathers=[{string.Join(", ", rg.Weather?.Weathers.Select(x => x.Weather.FormKey.ID.ToString("X6") + ":" + x.Chance) ?? [])}]");
+                    return 0;
+                }
+                // --guards: Oblivion's guards (their class's guard flag) by EditorID prefix, with where they stand and their
+                // factions, and every prison marker's cell, for the cities' jails.
+                if (opts.ContainsKey("guards"))
+                {
+                    var guardClasses = ob.Classes.Where(c => c.Data?.Flags.HasFlag(Mutagen.Bethesda.Oblivion.ClassFlag.Guard) == true).Select(c => c.FormKey).ToHashSet();
+                    var guards = ob.Npcs.Where(n => guardClasses.Contains(n.Class.FormKey)).ToDictionary(n => n.FormKey);
+                    var factions = ob.Factions.ToDictionary(f => f.FormKey, f => f.EditorID ?? "?");
+                    var where = new Dictionary<Mutagen.Bethesda.Plugins.FormKey, List<string>>();
+                    foreach (var c in ob.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(b => b.Cells))
+                        foreach (var r in c.Persistent.Concat(c.Temporary).OfType<Mutagen.Bethesda.Oblivion.IPlacedNpcGetter>().Where(r => guards.ContainsKey(r.Base.FormKey)))
+                            (where.TryGetValue(r.Base.FormKey, out var l) ? l : where[r.Base.FormKey] = []).Add(c.EditorID ?? "?");
+                    foreach (var w in ob.Worldspaces)
+                        foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Append(w.TopCell).OfType<Mutagen.Bethesda.Oblivion.ICellGetter>())
+                            foreach (var r in c.Persistent.Concat(c.Temporary).OfType<Mutagen.Bethesda.Oblivion.IPlacedNpcGetter>().Where(r => guards.ContainsKey(r.Base.FormKey)))
+                                (where.TryGetValue(r.Base.FormKey, out var l) ? l : where[r.Base.FormKey] = []).Add(w.EditorID ?? "?");
+                    foreach (var g in guards.Values.GroupBy(n => System.Text.RegularExpressions.Regex.Match(n.EditorID ?? "", "^[A-Z][a-z]+|^IC|^[A-Z]+").Value).OrderBy(g => g.Key))
+                        Console.WriteLine($"  {g.Key}: {g.Count()} guards, e.g. {string.Join(", ", g.Take(3).Select(n => n.EditorID))}; placed in {string.Join(", ", g.SelectMany(n => where.GetValueOrDefault(n.FormKey) ?? []).GroupBy(x => x).OrderByDescending(x => x.Count()).Take(4).Select(x => $"{x.Key} x{x.Count()}"))}; factions {string.Join(", ", g.SelectMany(n => n.Factions.Select(f => factions.GetValueOrDefault(f.Faction.FormKey, "?"))).Distinct().Take(5))}");
+                    var prisonMarker = new Mutagen.Bethesda.Plugins.FormKey(ob.ModKey, 0x000004);
+                    foreach (var c in ob.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(b => b.Cells))
+                        foreach (var r in c.Persistent.Concat(c.Temporary).OfType<Mutagen.Bethesda.Oblivion.IPlacedObjectGetter>().Where(r => r.Base.FormKey.ID == 0x000004))
+                            Console.WriteLine($"  prison marker in {c.EditorID} ({c.Name})");
                     return 0;
                 }
                 if (opts.TryGetValue("armor", out var apat))

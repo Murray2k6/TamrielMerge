@@ -125,6 +125,7 @@ public static class DaggerfallTowns
             townBuilder.AttachDaytime();
             var guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2), people.Factions);
             guilds.Build(talk, townBuilder.TalkQuest, everyone, townBuilder.BreakIns);
+            if (master.Quests.FirstOrDefault(q => q.EditorID == "DFQuestMachine")?.FormKey is { } summonMachine) guilds.AddSummoning(summonMachine);
             // This batch's own conversation quest; its banks keep their accounts in Daggerfall.esm's.
             townBuilder.TalkQuest.EditorID = "DFTalk" + batch;
             if (master.Quests.FirstOrDefault(q => q.EditorID == "DFTalk") is { } masterTalk)

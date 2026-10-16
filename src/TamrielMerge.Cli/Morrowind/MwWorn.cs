@@ -27,8 +27,13 @@ public sealed partial class MwPluginBuilder
     public int WornFallbacks { get; private set; }
 
     /// <summary>How a kind of worn item is drawn: its slots, the dismember partition, what it fits over (Skyrim's naked
-    /// "body", "hands" or "feet", null for nothing), how far outside it sits, and the bare skin it carries.</summary>
-    sealed record WornLook(BipedObjectFlag Slots, int Partition, string? Fit, float Margin, string? Skin);
+    /// "body", "hands" or "feet", null for nothing), how far outside it sits, the bare skin it carries, and the slots
+    /// whose worn items it draws over and hides (<see cref="Hides"/>: its addon claims them too, at a higher priority,
+    /// while the item itself keeps only its own slot, so the hidden items stay worn and keep their armour).</summary>
+    sealed record WornLook(BipedObjectFlag Slots, int Partition, string? Fit, float Margin, string? Skin, BipedObjectFlag Hides = 0);
+
+    /// <summary>The addon priority of things worn over others (robes, skirts): above every template's (0-1).</summary>
+    const byte OverPriority = 50;
 
     static readonly BipedObjectFlag Head = BipedObjectFlag.Head, Hair = BipedObjectFlag.Hair;
 
@@ -56,10 +61,14 @@ public sealed partial class MwPluginBuilder
         1 => new(BipedObjectFlag.Feet, 37, "feet", 0.5f, null),
         2 => new(Slot(46), 46, "body", 0.4f, null),
         3 => new(Slot(48), 48, "body", 0.9f, null),
-        4 => new(Slot(47), 47, "body", 1.8f, null),
+        // Robes are worn over everything on the body and legs, as Morrowind draws them (2026-10-16, user: "fix the older
+        // gaps" - a cuirass or greaves showed through the robe): the cuirass, greaves, shirt, pants and skirt hidden under
+        // it; the robe carries the bare body beneath, as a cuirass does, since it takes the body slot from the skin.
+        4 => new(Slot(47), 47, "body", 1.8f, "body", BipedObjectFlag.Body | Slot(53) | Slot(46) | Slot(52) | Slot(49)),
         5 => new(BipedObjectFlag.Hands, 33, "hands", 0.4f, "hands"),
         6 => new(Slot(60), 60, "hands", 0.4f, null),
-        7 => new(Slot(49), 49, "body", 1.4f, null),
+        // Skirts over the greaves and pants.
+        7 => new(Slot(49), 49, "body", 1.4f, null, Slot(53) | Slot(52)),
         _ => null,
     };
 
@@ -202,7 +211,9 @@ public sealed partial class MwPluginBuilder
         {
             var aa = mod.ArmorAddons.DuplicateInAsNewRecord(templates[i]);
             aa.EditorID = edid + "AA" + (i == 0 ? "" : i.ToString());
-            aa.BodyTemplate = new BodyTemplate { FirstPersonFlags = look.Slots, ArmorType = ArmorType.Clothing, Flags = templates[i].BodyTemplate?.Flags ?? 0 };
+            // The addon claims the slots it hides too: of addons sharing a slot, Skyrim draws the higher priority's.
+            aa.BodyTemplate = new BodyTemplate { FirstPersonFlags = look.Slots | look.Hides, ArmorType = ArmorType.Clothing, Flags = templates[i].BodyTemplate?.Flags ?? 0 };
+            if (look.Hides != 0) aa.Priority = new GenderedItem<byte>(OverPriority, OverPriority);
             aa.WorldModel = new GenderedItem<Model?>(new Model { File = Model(false, false) }, new Model { File = Model(true, false) });
             aa.FirstPersonModel = paths.ContainsKey((false, true)) || paths.ContainsKey((true, true))
                 ? new GenderedItem<Model?>(paths.ContainsKey((false, true)) ? new Model { File = Model(false, true) } : null, paths.ContainsKey((true, true)) ? new Model { File = Model(true, true) } : null)
