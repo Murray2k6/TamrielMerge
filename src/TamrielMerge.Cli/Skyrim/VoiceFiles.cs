@@ -46,9 +46,74 @@ public static class VoiceFiles
         return written;
     }
 
-    /// <summary>A .wav (and its text, for the lip sync) as a .fuz at <paramref name="fuzPath"/>. False when the sound
-    /// can't be encoded or no lip sync can be made for it (no file is written then).</summary>
+    /// <summary>
+    /// Packed voice files kept by what they are made of (user, 2026-10-15: "fix everything and the gaps"; a voice
+    /// file is named by its line's FormID, so when the FormIDs shift every line was lip-synced again by LipGenerator,
+    /// over an hour for Oblivion's 15,000 lines): tools\lipcache\&lt;key[..2]&gt;\&lt;key&gt;.fuz, the key a hash of the
+    /// recording's sound and the line's text (<see cref="CacheKey"/>). It outlives the conversions; a renumbered line,
+    /// or the same recording and text in another voice type, takes its .fuz from here.
+    /// </summary>
+    public static string CacheDir => CacheDirOverride ?? Path.Combine(Setup.Dependencies.Root, "lipcache");
+    /// <summary>Another cache folder (tests).</summary>
+    public static string? CacheDirOverride { get; set; }
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> KeyLocks = new();
+    static int cacheHits, cacheMisses;
+    /// <summary>Voice files taken from the cache, and packed anew, since the program started.</summary>
+    public static (int Hits, int Packed) CacheStats => (Volatile.Read(ref cacheHits), Volatile.Read(ref cacheMisses));
+
+    /// <summary>The cache's key for a recording and its text: the first 32 hex digits of SHA-256 over the .wav's bytes,
+    /// a zero byte and the text (UTF-8).</summary>
+    public static string CacheKey(string wav, string text)
+    {
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        hash.AppendData(File.ReadAllBytes(wav));
+        hash.AppendData([0]);
+        hash.AppendData(System.Text.Encoding.UTF8.GetBytes(text));
+        return Convert.ToHexString(hash.GetHashAndReset())[..32].ToLowerInvariant();
+    }
+
+    /// <summary>A .wav (and its text, for the lip sync) as a .fuz at <paramref name="fuzPath"/>, from the cache
+    /// (<see cref="CacheDir"/>) when this recording and text were packed before. False when the sound can't be encoded
+    /// or no lip sync can be made for it (no file is written then).</summary>
     public static bool Pack(string skyrimData, string wav, string text, string fuzPath)
+    {
+        string key = CacheKey(wav, text);
+        string cached = Path.Combine(CacheDir, key[..2], key + ".fuz");
+        // One line at a time per key: the same recording and text asked for at once (several voice types) is packed
+        // once and the others take it from the cache.
+        lock (KeyLocks.GetOrAdd(key, _ => new object()))
+        {
+            if (File.Exists(cached))
+            {
+                Place(cached, fuzPath);
+                Interlocked.Increment(ref cacheHits);
+                return true;
+            }
+            if (!PackNew(skyrimData, wav, text, fuzPath)) return false;
+            Interlocked.Increment(ref cacheMisses);
+            try { Place(fuzPath, cached); }
+            catch (IOException) { }   // a full or read-only cache only costs the next run its time
+            catch (UnauthorizedAccessException) { }
+            return true;
+        }
+    }
+
+    /// <summary>A whole copy of <paramref name="from"/> at <paramref name="to"/>: a hard link when both are on one
+    /// NTFS volume (no room taken twice; every writer here replaces a file by renaming, never rewrites it in place),
+    /// else a copy. Made under a temporary name and renamed, so a stopped run never leaves a partial file.</summary>
+    static void Place(string from, string to)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(to))!);
+        string tmp = to + ".tmp";
+        if (File.Exists(tmp)) File.Delete(tmp);
+        if (!CreateHardLink(tmp, from, IntPtr.Zero)) File.Copy(from, tmp, true);
+        File.Move(tmp, to, true);
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateHardLink(string newFile, string existingFile, IntPtr security);
+
+    static bool PackNew(string skyrimData, string wav, string text, string fuzPath)
     {
         string tools = Tools(skyrimData);
         wav = Path.GetFullPath(wav);   // LipGenerator runs from its own folder
@@ -68,6 +133,9 @@ public static class VoiceFiles
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(fuzPath))!);
         // Written under a temporary name and renamed, so a stopped run never leaves a partial file that looks done.
+        // A stopped run's temporary file goes first: it may be a hard link to the cache (Place), which writing into
+        // would change.
+        File.Delete(fuzPath + ".tmp");
         using (var w = new BinaryWriter(File.Create(fuzPath + ".tmp")))
         {
             w.Write("FUZE"u8.ToArray()); w.Write(1); w.Write(lipData.Length); w.Write(lipData); w.Write(xwmData);
@@ -200,9 +268,7 @@ public static class VoiceFiles
             }
             foreach (var fuz in todo.Where(f => !File.Exists(f)))
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(fuz)!);
-                File.Copy(made, fuz + ".tmp", true);   // renamed when whole, as WriteFuz does
-                File.Move(fuz + ".tmp", fuz, true);
+                Place(made, fuz);   // renamed when whole, as WriteFuz does
                 Interlocked.Increment(ref packed);
             }
             Tick();

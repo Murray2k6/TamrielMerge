@@ -26,7 +26,7 @@ public static class DaggerfallPluginBuilder
         var map = DfWorldMap.Load(arena2);
         var field = Terrain.HeightField.Generate(map, terrain);
         // The overland, built in global coordinates and split into tiles at the end (OverlandTiles); its land is in
-        // "Daggerfall Land N.esm", one plugin per tile.
+        // "Daggerfall Land.esm" (split into "Daggerfall Land 2.esm"... when too big for one, OverlandTiles.LandPluginNames).
         var world = Terrain.TerrainBuilder.NewWorldspace(mod, skyrim, field, WorldEditorId, "Iliac Bay");
         var layout = new Terrain.OverlandTiles(field);
         Console.WriteLine($"Overland: {field.CellsX}x{field.CellsY} cells ({terrain.PixelsPerCell} map pixels per cell), {layout.Columns}x{layout.Rows} tiles of {layout.CoreX}x{layout.CoreY}");
@@ -208,9 +208,11 @@ public static class DaggerfallPluginBuilder
         // The tiles' land and distant terrain, a tile at a time.
         var lands = layout.LandPlugins(outPath, skyrimData, field, map, regionOf, line => Console.WriteLine("Land: " + line));
         Console.WriteLine($"Land plugins: {string.Join(", ", lands)}");
-        // The overland's navmeshes, joined into the land plugin.
-        foreach (var land in lands)
-            Terrain.OverlandNavmesh.Build(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outPath))!, land), line => Console.WriteLine("Navmesh: " + line));
+        // The overland's navmeshes, joined into the (last) land plugin.
+        if (lands.Count > 0)
+            Terrain.OverlandNavmesh.Build(lands.Select(l => Path.Combine(outDir, l)).ToList(), line => Console.WriteLine("Navmesh: " + line));
+        foreach (var big in Terrain.OverlandTiles.Oversized(outDir))
+            Console.WriteLine($"Land: WARNING {big} is near the 2 GB Mutagen can read: build with --land-plugins {lands.Count + 1}");
         // What procedural creatures may use from Daggerfall: its ordinary monsters and dungeon spots. Daggerfall resets a
         // dungeon when you leave it, so spots (and new points) respawn whenever you come back (0 hours).
         var catalog = new CreatureCatalog { Game = "Daggerfall", Plugin = Path.GetFileName(outPath), ExteriorRespawnHours = 0, InteriorRespawnHours = 0 };

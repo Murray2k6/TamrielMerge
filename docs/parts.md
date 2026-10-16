@@ -5,7 +5,7 @@ The app's **Mod organizer…** (TamrielMerge.Gui/PartsDialog.cs) switches Tamrie
 
 | Part | Plugins |
 |---|---|
-| Daggerfall | Daggerfall.esm, Daggerfall Land.esm, Daggerfall Towns.esm, Daggerfall Dungeons.esm, Daggerfall Overland Doors.esp |
+| Daggerfall | Daggerfall.esm, Daggerfall Land.esm (and Daggerfall Land 2.esm when the land is split), Daggerfall Towns.esm, Daggerfall Dungeons.esm, Daggerfall Overland Doors.esp |
 | Redguard | Redguard.esm |
 | Morrowind | Morrowind.esm |
 | Oblivion | Oblivion.esm |

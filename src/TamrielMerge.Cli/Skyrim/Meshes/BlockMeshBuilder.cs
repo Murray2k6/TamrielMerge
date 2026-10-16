@@ -445,15 +445,15 @@ public static class BlockMeshBuilder
             ushort start = (ushort)verts.Count;
             foreach (var v in pts)
             {
-                verts.Add(new nifly.Vector3(v.X, v.Y, v.Z));
-                norms.Add(new nifly.Vector3(n.X, n.Y, n.Z));
+                Add(verts, v.X, v.Y, v.Z);
+                Add(norms, n.X, n.Y, n.Z);
                 var (u, w) = PlanarUv(v, n);
-                uvs.Add(new nifly.Vector2(u, w));
+                Add(uvs, u, w);
             }
             for (int i = 1; i + 1 < pts.Length; i++)
             {
                 bool flip = Vector3.Dot(Vector3.Cross(pts[i] - pts[0], pts[i + 1] - pts[0]), n) < 0;
-                tris.Add(flip ? new Triangle(start, (ushort)(start + i + 1), (ushort)(start + i)) : new Triangle(start, (ushort)(start + i), (ushort)(start + i + 1)));
+                Add(tris, start, (ushort)(start + (flip ? i + 1 : i)), (ushort)(start + (flip ? i : i + 1)));
             }
         }
         var shape = nif.CreateShapeFromData("StairTest", verts, tris, uvs, norms);
@@ -585,17 +585,17 @@ public static class BlockMeshBuilder
                 for (int k = 0; k < pts.Length; k++)
                 {
                     var v = pts[k];
-                    verts.Add(new nifly.Vector3(v.X, v.Y, v.Z));
-                    norms.Add(new nifly.Vector3(n.X, n.Y, n.Z));
+                    Add(verts, v.X, v.Y, v.Z);
+                    Add(norms, n.X, n.Y, n.Z);
                     var (u, w) = texel is not null ? (texel[k].X / group.Key.ImageW, texel[k].Y / group.Key.ImageH) : panelUv?[k] ?? PlanarUv(v, n);
-                    uvs.Add(new nifly.Vector2(u, w));
+                    Add(uvs, u, w);
                 }
                 // Fan-triangulate, wound counter-clockwise around the polygon normal.
                 for (int i = 1; i + 1 < pts.Length; i++)
                 {
                     var c = Vector3.Cross(pts[i] - pts[0], pts[i + 1] - pts[0]);
                     bool flip = Vector3.Dot(c, n) < 0;
-                    tris.Add(flip ? new Triangle(start, (ushort)(start + i + 1), (ushort)(start + i)) : new Triangle(start, (ushort)(start + i), (ushort)(start + i + 1)));
+                    Add(tris, start, (ushort)(start + (flip ? i + 1 : i)), (ushort)(start + (flip ? i : i + 1)));
                 }
                 if (verts.Count > 60000) break; // BSTriShape uses 16-bit indices
             }
@@ -681,16 +681,20 @@ public static class BlockMeshBuilder
         shape.vertsProp.capacityAndFlags = 0x80000000;
         shape.normalsProp.capacityAndFlags = 0x80000000;
         shape.SetMaterial(material);
-        for (int i = 0; i < 8; i++)
-        {
-            var c = new Vector3((i & 1) != 0 ? hi.X : lo.X, (i & 2) != 0 ? hi.Y : lo.Y, (i & 4) != 0 ? hi.Z : lo.Z);
-            shape.verts.push_back(new nifly.Vector4(c.X / HavokScale, c.Y / HavokScale, c.Z / HavokScale, 0));
-        }
-        foreach (var (n, p) in new[] { (Vector3.UnitX, hi), (-Vector3.UnitX, lo), (Vector3.UnitY, hi), (-Vector3.UnitY, lo), (Vector3.UnitZ, hi), (-Vector3.UnitZ, lo) })
-        {
-            var pl = Plane(n, p);
-            shape.normals.push_back(new nifly.Vector4(pl.X, pl.Y, pl.Z, pl.W));
-        }
+        using (var sv = shape.verts)
+            for (int i = 0; i < 8; i++)
+            {
+                var c = new Vector3((i & 1) != 0 ? hi.X : lo.X, (i & 2) != 0 ? hi.Y : lo.Y, (i & 4) != 0 ? hi.Z : lo.Z);
+                using var v4 = new nifly.Vector4(c.X / HavokScale, c.Y / HavokScale, c.Z / HavokScale, 0);
+                sv.push_back(v4);
+            }
+        using (var sn = shape.normals)
+            foreach (var (n, p) in new[] { (Vector3.UnitX, hi), (-Vector3.UnitX, lo), (Vector3.UnitY, hi), (-Vector3.UnitY, lo), (Vector3.UnitZ, hi), (-Vector3.UnitZ, lo) })
+            {
+                var pl = Plane(n, p);
+                using var v4 = new nifly.Vector4(pl.X, pl.Y, pl.Z, pl.W);
+                sn.push_back(v4);
+            }
         uint shapeId = hdr.AddBlock(shape);
 
         var size = (hi - lo) / HavokScale;
@@ -765,7 +769,9 @@ public static class BlockMeshBuilder
                 var slab = ConvexSlab(pts, n, materialOverride ?? MaterialOf(tex));
                 if (slab is null) continue;
                 list.subShapeRefs.AddBlockRef(hdr.AddBlock(slab));
-                list.filters.push_back(new HavokFilter { layer = 0, flagsAndParts = 0, group = 0 });
+                using (var filters = list.filters)
+                using (var filter = new HavokFilter { layer = 0, flagsAndParts = 0, group = 0 })
+                    filters.push_back(filter);
                 total++;
             }
             uint listId = hdr.AddBlock(list);
@@ -844,10 +850,18 @@ public static class BlockMeshBuilder
         shape.vertsProp.capacityAndFlags = 0x80000000;
         shape.normalsProp.capacityAndFlags = 0x80000000;
         shape.SetMaterial(material);
-        foreach (var p in pts.Concat(back))
-            shape.verts.push_back(new nifly.Vector4(p.X / HavokScale, p.Y / HavokScale, p.Z / HavokScale, 0));
-        foreach (var pl in planes)
-            shape.normals.push_back(new nifly.Vector4(pl.X, pl.Y, pl.Z, pl.W));
+        using (var sv = shape.verts)
+            foreach (var p in pts.Concat(back))
+            {
+                using var v4 = new nifly.Vector4(p.X / HavokScale, p.Y / HavokScale, p.Z / HavokScale, 0);
+                sv.push_back(v4);
+            }
+        using (var sn = shape.normals)
+            foreach (var pl in planes)
+            {
+                using var v4 = new nifly.Vector4(pl.X, pl.Y, pl.Z, pl.W);
+                sn.push_back(v4);
+            }
         return shape;
     }
 
@@ -878,6 +892,13 @@ public static class BlockMeshBuilder
     /// finalizer from freeing them a second time.
     /// </summary>
     internal static T Owned<T>(T block) where T : class { GC.SuppressFinalize(block); return block; }
+
+    // nifly's small values (vectors, triangles) are copied into its lists, so each wrapper is freed as soon as it is
+    // added rather than left to the finalizer (2026-10-15: town part 9's finalizer thread was busy for 111 of its 127
+    // seconds freeing them one by one, under a lock, and every one of them outlived a collection first).
+    internal static void Add(vectorVector3 list, float x, float y, float z) { using var v = new nifly.Vector3(x, y, z); list.Add(v); }
+    internal static void Add(vectorVector2 list, float u, float v) { using var w = new nifly.Vector2(u, v); list.Add(w); }
+    internal static void Add(vectorTriangle list, ushort a, ushort b, ushort c) { using var t = new Triangle(a, b, c); list.Add(t); }
 
     /// <summary>Havok plane equation in Havok units: n·x + w = 0, positive outside.</summary>
     static System.Numerics.Vector4 Plane(Vector3 n, Vector3 p) => new(n.X, n.Y, n.Z, -Vector3.Dot(n, p) / HavokScale);

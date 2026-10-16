@@ -18,19 +18,33 @@ namespace TamrielMerge.Skyrim.Terrain;
 /// </summary>
 public static class OverlandNavmesh
 {
-    public static (int Meshes, int Triangles, int Links) Build(string landPlugin, Action<string>? log = null)
+    public static (int Meshes, int Triangles, int Links) Build(string landPlugin, Action<string>? log = null) => Build([landPlugin], log);
+
+    /// <summary>
+    /// The navmeshes of a land split into several plugins (<see cref="OverlandTiles.LandPluginNames"/>, in load order):
+    /// all of them go in the last, with the cells of the others it covers as overrides there (their land left in their
+    /// own plugin), so the links between neighbouring cells' navmeshes, and the navmesh map, are all in one plugin.
+    /// </summary>
+    public static (int Meshes, int Triangles, int Links) Build(IReadOnlyList<string> landPlugins, Action<string>? log = null)
     {
+        string landPlugin = landPlugins[^1];
         string dir = Path.GetDirectoryName(Path.GetFullPath(landPlugin))!;
         string work = Path.Combine(dir, "Daggerfall Land.navmesh");
         Directory.CreateDirectory(work);
-        var masters = PluginMerger.Masters("Daggerfall.esm");
         var parts = new List<string>();
         var infos = new List<NavigationMapInfo>();
         int meshes = 0, triangles = 0, links = 0;
+        var earlier = landPlugins.SkipLast(1).Select(p => SkyrimMod.CreateFromBinaryOverlay(p, SkyrimRelease.SkyrimSE)).ToList();
+        try
+        {
         using (var land = SkyrimMod.CreateFromBinaryOverlay(landPlugin, SkyrimRelease.SkyrimSE))
         {
-            var worlds = land.Worldspaces.ToList();
-            bool already = worlds.SelectMany(w => w.SubCells).SelectMany(b => b.Items).SelectMany(sb => sb.Items).Take(4000).Any(c => c.NavigationMeshes.Count > 0);
+            // The parts list the plugin's own masters (Daggerfall.esm, and the land plugins before it).
+            var masters = land.ModHeader.MasterReferences.Select(m => m.Master).ToArray();
+            // Every plugin's copies of each worldspace (each holds its share of the cells).
+            var copies = earlier.Append(land).SelectMany(p => p.Worldspaces).GroupBy(w => w.FormKey).ToList();
+            var worlds = copies.Select(g => g.Last()).ToList();
+            bool already = land.Worldspaces.SelectMany(w => w.SubCells).SelectMany(b => b.Items).SelectMany(sb => sb.Items).Take(4000).Any(c => c.NavigationMeshes.Count > 0);
             if (already) { log?.Invoke($"{Path.GetFileName(landPlugin)} has navmeshes already"); return (0, 0, 0); }
             // New FormIDs above every one the land used, a range per tile and one for the map.
             uint used = land.EnumerateMajorRecords().Where(r => r.FormKey.ModKey == land.ModKey).Select(r => r.FormKey.ID).DefaultIfEmpty(0x800u).Max();
@@ -47,7 +61,7 @@ public static class OverlandNavmesh
                 // square) at a time with a ring of neighbours, each chunk's land let go once its navmeshes are made, so
                 // a worldspace of the whole map (1000 x 500 cells) never holds all its land at once.
                 var sources = new Dictionary<(int X, int Y), ICellGetter>();
-                foreach (var cell in source.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                foreach (var cell in copies[t].SelectMany(w => w.SubCells).SelectMany(b => b.Items).SelectMany(sb => sb.Items))
                     if (cell.Grid is not null && cell.Landscape is not null) sources[(cell.Grid.Point.X, cell.Grid.Point.Y)] = cell;
                 const int k = OverlandTiles.ChunkCells;
                 var chunks = sources.Keys.GroupBy(c => (FloorDiv(c.X, k), FloorDiv(c.Y, k))).OrderBy(g => g.Key.Item2).ThenBy(g => g.Key.Item1).ToList();
@@ -101,6 +115,8 @@ public static class OverlandNavmesh
             Write(map, mapPart, masters);
             parts.Add(mapPart);
         }
+        }
+        finally { foreach (var e in earlier) e.Dispose(); }
         // The land plugin with the navmeshes joined in.
         string merged = Path.Combine(work, "merged.esm");
         long records = PluginMerger.Merge([landPlugin, .. parts], merged);

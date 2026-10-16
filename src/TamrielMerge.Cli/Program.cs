@@ -85,11 +85,20 @@ static class Program
                 bool voices = ck == Setup.Dependencies.CreationKitChoice.Ready && !skip.Contains("Voices");
                 var plugins = new List<string>();
                 var failed = new List<string>();
+                // Daggerfall's models and textures being moved to --out in the background (below), and its finishing.
+                Task<string>? earlyMove = null;
+                void AwaitEarlyMove()
+                {
+                    if (earlyMove is null) return;
+                    Console.WriteLine(earlyMove.GetAwaiter().GetResult());
+                    earlyMove = null;
+                }
                 // Moves the staged build into --out; with all: false only when the solid-state drive runs short of room.
                 void Settle(bool all)
                 {
                     // Moved early when a step more would cut into the room the drive keeps (Windows' own, on its drive).
                     if (outDir == finalDir || (!all && Util.Drives.FreeBytes(outDir) >= Util.Drives.Reserve(outDir) + (12L << 30))) return;
+                    AwaitEarlyMove();
                     Console.WriteLine($"Moving the build into {finalDir}{(all ? "" : " (the solid-state drive is short of room)")}...");
                     try
                     {
@@ -150,7 +159,13 @@ static class Program
                         foreach (var g in new[] { Game.Daggerfall, Game.Morrowind }.Where(Has))
                             if (Main(opts.ContainsKey("gpu") ? ["upscale-textures", "--game", g.ToString(), "--gpu"] : ["upscale-textures", "--game", g.ToString()]) != 0)
                                 failed.Add($"{g} texture upscaling");
-                if (Has(Game.Daggerfall) && Reuse("Daggerfall.esm") && Reuse(Skyrim.Terrain.OverlandTiles.LandPluginName))
+                // The land's plugins a stopped run made (one, or the land split in several), all kept or none.
+                bool ReuseLand()
+                {
+                    var made = Skyrim.Terrain.OverlandTiles.LandPluginsIn(resume && outDir != finalDir && File.Exists(Path.Combine(outDir, Skyrim.Terrain.OverlandTiles.LandPluginName)) ? outDir : finalDir);
+                    return made.Count > 0 && made[0] == Skyrim.Terrain.OverlandTiles.LandPluginName && made.All(Reuse);
+                }
+                if (Has(Game.Daggerfall) && Reuse("Daggerfall.esm") && ReuseLand())
                 {
                     Begin("Daggerfall").Dispose();
                     plugins.Add("Daggerfall.esm");
@@ -158,9 +173,16 @@ static class Program
                 }
                 else if (Has(Game.Daggerfall)) using (Begin("Daggerfall")) Step(Game.Daggerfall, "Daggerfall.esm", ["build", "--out", Path.Combine(outDir, "Daggerfall.esm")]);
                 else Step(Game.Daggerfall, "Daggerfall.esm", ["build", "--out", Path.Combine(outDir, "Daggerfall.esm")]);
-                // The overland's land (one plugin, built a tile at a time by the Daggerfall build), right after it.
+                // The overland's land (one plugin, or several when it is too big for one: built a tile at a time by the
+                // Daggerfall build), right after it; land plugins of an earlier run split otherwise aren't left in --out.
                 if (plugins.Contains("Daggerfall.esm") && File.Exists(Path.Combine(outDir, Skyrim.Terrain.OverlandTiles.LandPluginName)))
-                    plugins.Add(Skyrim.Terrain.OverlandTiles.LandPluginName);
+                {
+                    var lands = Skyrim.Terrain.OverlandTiles.LandPluginsIn(outDir);
+                    plugins.AddRange(lands);
+                    if (outDir != finalDir)
+                        foreach (var stale in Skyrim.Terrain.OverlandTiles.LandPluginNames.Except(lands).Select(n => Path.Combine(finalDir, n)).Where(File.Exists))
+                            File.Delete(stale);
+                }
                 // Daggerfall's other towns and its other 4,228 dungeons: one plugin each, built in parts, each part in its
                 // own process so its memory is given back before the next, then joined into the one plugin.
                 foreach (var dir in new[] { outDir, finalDir }.Distinct())
@@ -185,6 +207,28 @@ static class Program
                         // Daggerfall.esm's own doors on the overland too (Privateer's Hold's: 2026-10-14, no navmesh led to it).
                         if (Main(["overland-doors", "--dir", outDir, "--plugins", string.Join(";", new[] { "Daggerfall.esm", Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName }.Where(plugins.Contains))]) == 0)
                             plugins.Add(Skyrim.Terrain.OverlandDoorLinks.PluginName);
+                // Daggerfall's own models and textures (two thirds of a build's bytes, and its land's distant terrain's
+                // 100,000 files) moved to the hard disk while the other games are built, which leave the disk idle, rather
+                // than all at the end (user, 2026-10-15: "fix everything and the gaps"). Nothing after reads them from the
+                // build folder alone: the distant objects look in --out too, and the menu's render (which doesn't) waits.
+                if (outDir != finalDir && plugins.Contains("Daggerfall.esm"))
+                {
+                    string from = outDir, to = finalDir;
+                    string[] daggerfallOnly = [@"meshes\TamrielMerge\DF", @"meshes\TamrielMerge\Towns", @"meshes\TamrielMerge\Dungeons", @"textures\TamrielMerge\DF",
+                                               @"meshes\terrain\" + DaggerfallPluginBuilder.WorldEditorId, @"textures\terrain\" + DaggerfallPluginBuilder.WorldEditorId];
+                    earlyMove = Task.Run(() =>
+                    {
+                        var clock = System.Diagnostics.Stopwatch.StartNew();
+                        int moved = 0;
+                        try
+                        {
+                            foreach (var rel in daggerfallOnly) moved += Util.Drives.MoveInto(Path.Combine(from, rel), Path.Combine(to, rel));
+                            return $"Daggerfall's models and textures: {moved} files moved into {to} beside the other games' builds ({clock.Elapsed.TotalMinutes:F1} min)";
+                        }
+                        // A file in --out in use: the rest goes with the build at the end.
+                        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return $"Daggerfall's models and textures: moving stopped after {moved} files ({e.Message}); the rest go at the end"; }
+                    });
+                }
                 bool BuildParts(string command, int parts, string plugin, Func<int, string> partPath)
                 {
                     // Resumed after its parts were joined: the joined plugin (made after this Daggerfall.esm) is kept.
@@ -224,27 +268,35 @@ static class Program
                     // same however many ran together.
                     // At most a share of the cores (or --parts-at-once N); each part starts when the memory is free for it,
                     // judged as it starts, not once at the beginning (2026-10-15: measured while the app was being rebuilt, the
-                    // last town parts ran 3 at a time all through), and half a minute after the one before, so its memory
-                    // shows before the next is judged and the parts' peaks don't come together.
+                    // last town parts ran 3 at a time all through). A part started in the last 45 seconds may not show its
+                    // memory yet, so each of those counts its budget too (it had been half a minute between any two starts,
+                    // which once the parts took a minute or two held a town part to two a minute: 84 parts, 42 minutes
+                    // at the least; 2026-10-15), and a few seconds go between starts.
                     bool fixedCount = opts.TryGetValue("parts-at-once", out var pa);
                     int atOnce = fixedCount ? Math.Max(1, int.Parse(pa!)) : Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4));
                     if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, up to {atOnce} at a time as the memory allows");
                     int running = 0, mostAtOnce = 0;
                     var lastStart = DateTime.MinValue;
+                    var recentStarts = new List<DateTime>();
                     var startGate = new object();
                     void WaitForRoom()
                     {
                         while (true)
                         {
                             lock (startGate)
-                                if (running == 0 || fixedCount || (DateTime.Now - lastStart > TimeSpan.FromSeconds(30) && Util.Machine.FreeRamGb() >= 4 + 3))
+                            {
+                                var now = DateTime.Now;
+                                recentStarts.RemoveAll(t => now - t > TimeSpan.FromSeconds(45));
+                                if (running == 0 || fixedCount || (now - lastStart > TimeSpan.FromSeconds(5) && Util.Machine.FreeRamGb() >= 4 + 3 * (1 + recentStarts.Count)))
                                 {
                                     running++;
                                     mostAtOnce = Math.Max(mostAtOnce, running);
-                                    lastStart = DateTime.Now;
+                                    lastStart = now;
+                                    recentStarts.Add(now);
                                     return;
                                 }
-                            Thread.Sleep(2000);
+                            }
+                            Thread.Sleep(1000);
                         }
                     }
                     // What every part would make the same: the overland's heights (made once here, read in place by
@@ -255,6 +307,7 @@ static class Program
                     if (pending.Count > 0 && (!File.Exists(heights) || File.GetLastWriteTimeUtc(heights) < File.GetLastWriteTimeUtc(Environment.ProcessPath!)))
                     {
                         if (Directory.Exists(Path.Combine(sharedDir, "meshes"))) Directory.Delete(Path.Combine(sharedDir, "meshes"), true);
+                        if (Directory.Exists(Path.Combine(sharedDir, "navmeshes"))) Directory.Delete(Path.Combine(sharedDir, "navmeshes"), true);
                         Directory.CreateDirectory(sharedDir);
                         var clock = System.Diagnostics.Stopwatch.StartNew();
                         Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom([])).Save(heights);
@@ -274,6 +327,10 @@ static class Program
                         psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";   // the parent reports the parts
                         psi.Environment["TAMRIELMERGE_HEIGHTS"] = heights;
                         psi.Environment["TAMRIELMERGE_TOWN_MESHES"] = Path.Combine(sharedDir, "meshes");
+                        // Navmeshes too: a town's street cell or building of the same input as one another part made takes its
+                        // mesh (NavmeshBuilder.SharedExteriors). Not the dungeons: each is laid out of its own (2026-10-15, part 2
+                        // of 40 found none of part 1's).
+                        if (command == "df-towns") psi.Environment["TAMRIELMERGE_NAVMESHES"] = Path.Combine(sharedDir, "navmeshes");
                         // A first generation of 256 MB: a town part makes 500 MB of short-lived objects a second, and the default
                         // budget collected 200 times every 5 seconds (part 9: 2.2 minutes, with it 1.8; half a gigabyte more).
                         psi.Environment["DOTNET_GCgen0size"] = "0x10000000";
@@ -371,6 +428,8 @@ static class Program
                 recorded.Dispose();
                 using (Begin("Intro videos"))
                     if (!skip.Contains("Videos")) Main(opts.ContainsKey("gpu") ? ["videos", "--out", finalDir, "--gpu"] : ["videos", "--out", finalDir]);
+                // The menu's render reads the models from the build folder only: Daggerfall's are there or in --out by now.
+                AwaitEarlyMove();
                 var menuStep = Begin("Main menu");
                 // The main menu: the red emblem over a ray-traced intro flying over the conversions (GPU-heavy: --gpu); its music always.
                 if (!skip.Contains("Menu"))
@@ -471,6 +530,7 @@ static class Program
                     catch (Exception e) { Console.WriteLine($"Model replacements: failed: {e.Message}"); failed.Add("model replacements"); }
                 }
 
+                AwaitEarlyMove();
                 storyStep.Dispose();
                 Console.WriteLine();
                 Console.WriteLine($"Converted into {outDir}. Enable these plugins, in this order, after Skyrim's own:");
@@ -1325,7 +1385,7 @@ static class Program
                 string pluginPath = opts.GetValueOrDefault("plugin", "out/rgmod/Redguard.esm");
                 var (packed, existing, missing) = Redguard.RgVoices.Build(skyrimData, rg, pluginPath,
                     Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pluginPath))!, "Redguard.voicemap.json"), opts.GetValueOrDefault("out", "out/rgvoice"));
-                Console.WriteLine($"{packed} voice files from Redguard's recordings, {existing} already there, {missing} lines without a recording");
+                Console.WriteLine($"{packed} voice files from Redguard's recordings ({Skyrim.VoiceFiles.CacheStats.Hits} of them from the lip sync cache), {existing} already there, {missing} lines without a recording");
                 return 0;
             }
             case "df-town-render":
@@ -1709,7 +1769,7 @@ static class Program
                 int batch = int.Parse(opts.GetValueOrDefault("batch", "1")), batches = int.Parse(opts.GetValueOrDefault("batches", "8"));
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var r = Skyrim.DaggerfallDungeons.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts));
-                Console.WriteLine($"Dungeons batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.References} references, {r.NavmeshTriangles} navmesh triangles ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
+                Console.WriteLine($"Dungeons batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.References} references, {r.NavmeshTriangles} navmesh triangles, {Skyrim.Navmesh.NavmeshBuilder.InteriorsShared} navmeshes made by other parts ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
                 Console.WriteLine($"  time: setup {r.SetupSeconds:F0} s, dungeons {r.LayoutSeconds:F0} s (navmeshes {r.NavmeshSeconds:F0} s of work across threads), writing {r.WriteSeconds:F0} s");
                 return r.Built > 0 ? 0 : 2;
             }
@@ -4917,10 +4977,10 @@ static class Program
                 string data = opts.GetValueOrDefault("data", skyrimData);
                 var loadOrder = File.ReadAllLines(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Skyrim Special Edition", "Plugins.txt"))
                     .Where(l => l.StartsWith('*')).Select(l => l[1..].Trim()).ToList();
+                // A master not in --data (Skyrim's own, beside a scratch folder's plugins) is read from Skyrim's Data.
+                string PathOf(string f) => File.Exists(Path.Combine(data, f)) ? Path.Combine(data, f) : Path.Combine(skyrimData, f);
                 var order = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Concat(loadOrder)
-                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => File.Exists(Path.Combine(data, f)) || File.Exists(Path.Combine(skyrimData, f))).ToList();
-                // A plugin in --data, else Skyrim's (a scratch folder holds only the plugin to check; its masters are the game's).
-                string PluginPath(string f) => File.Exists(Path.Combine(data, f)) ? Path.Combine(data, f) : Path.Combine(skyrimData, f);
+                    .Distinct(StringComparer.OrdinalIgnoreCase).Where(f => File.Exists(PathOf(f))).ToList();
                 var targets = opts["plugins"].Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                 // A target not in Plugins.txt (a scratch plugin in a --data folder of its own) is checked after its masters.
                 order.AddRange(targets.Where(t => !order.Contains(t, StringComparer.OrdinalIgnoreCase) && File.Exists(Path.Combine(data, t))));
@@ -4932,7 +4992,7 @@ static class Program
                     string targetDir = Path.IsPathRooted(targetSpec) ? Path.GetDirectoryName(targetSpec)! : data;
                     var masters = Setup.Parts.MastersOf(targetDir, target);
                     var mods = order.Where(f => masters.Contains(f, StringComparer.OrdinalIgnoreCase) && !f.Equals(target, StringComparison.OrdinalIgnoreCase))
-                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(PluginPath(f), SkyrimRelease.SkyrimSE))
+                        .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(PathOf(f), SkyrimRelease.SkyrimSE))
                         .Append(SkyrimMod.CreateFromBinaryOverlay(Path.Combine(targetDir, target), SkyrimRelease.SkyrimSE)).ToList();
                     try
                     {
@@ -4987,22 +5047,25 @@ static class Program
             case "plugin-compare":
             {
                 // Dev aid: two plugins' records by type, and their navmeshes' and land's contents, compared (--a, --b).
-                (Dictionary<string, int> Types, long Nav, long Land) Read(string path)
+                (Dictionary<string, int> Types, long Nav, long Land, long NavTris, long NavVerts) Read(string path)
                 {
                     using var m = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
                     var types = m.EnumerateMajorRecords().GroupBy(r => r.Registration.Name).ToDictionary(g => g.Key, g => g.Count());
-                    long nav = 0, land = 0;
+                    long nav = 0, land = 0, navTris = 0, navVerts = 0;
                     foreach (var r in m.EnumerateMajorRecords())
                         if (r is INavigationMeshGetter n && n.Data is { } d)
+                        {
+                            navTris += d.Triangles.Count; navVerts += d.Vertices.Count;
                             nav += d.Vertices.Count * 31 + d.Triangles.Count * 7 + d.Vertices.Sum(v => (long)(v.X * 3 + v.Y * 5 + v.Z * 7)) + d.Triangles.Sum(t => (long)t.Vertices.X + t.Vertices.Y * 3 + t.Vertices.Z * 5);
+                        }
                         else if (r is ILandscapeGetter l && l.VertexHeightMap is { } h)
                             land += (long)(h.Offset * 10) + h.HeightMap.Sum(x => (long)x.Value);
-                    return (types, nav, land);
+                    return (types, nav, land, navTris, navVerts);
                 }
                 var a = Read(opts["a"]); var b = Read(opts["b"]);
                 foreach (var t in a.Types.Keys.Union(b.Types.Keys).Order())
                     if (a.Types.GetValueOrDefault(t) != b.Types.GetValueOrDefault(t)) Console.WriteLine($"  {t}: {a.Types.GetValueOrDefault(t)} vs {b.Types.GetValueOrDefault(t)}");
-                Console.WriteLine($"records {a.Types.Values.Sum()} vs {b.Types.Values.Sum()}; navmesh {a.Nav} vs {b.Nav}; land {a.Land} vs {b.Land}");
+                Console.WriteLine($"records {a.Types.Values.Sum()} vs {b.Types.Values.Sum()}; navmesh {a.Nav} vs {b.Nav} ({a.NavTris:N0} vs {b.NavTris:N0} triangles, {a.NavVerts:N0} vs {b.NavVerts:N0} vertices); land {a.Land} vs {b.Land}");
                 return a.Types.Values.Sum() == b.Types.Values.Sum() && a.Nav == b.Nav && a.Land == b.Land ? 0 : 2;
             }
             case "plugin-compress":
@@ -6432,9 +6495,12 @@ static class Program
             case "df-navmesh":
             {
                 // Navmeshes for Daggerfall's overland, added to a built "Daggerfall Land.esm" (--plugin, default
-                // out/convert): Skyrim/Terrain/OverlandNavmesh. The full Daggerfall build runs this after the land.
+                // out/convert): Skyrim/Terrain/OverlandNavmesh. The full Daggerfall build runs this after the land. A
+                // split land (its other plugins beside it) gets them in its last plugin.
                 string plugin = Path.GetFullPath(opts.GetValueOrDefault("plugin", Path.Combine("out", "convert", Skyrim.Terrain.OverlandTiles.LandPluginName)));
-                var (meshes, tris, links) = Skyrim.Terrain.OverlandNavmesh.Build(plugin, line => Console.WriteLine("Navmesh: " + line));
+                var landSet = Skyrim.Terrain.OverlandTiles.LandPluginsIn(Path.GetDirectoryName(plugin)!);
+                var (meshes, tris, links) = Skyrim.Terrain.OverlandNavmesh.Build(landSet.Contains(Path.GetFileName(plugin)) ? landSet.Select(l => Path.Combine(Path.GetDirectoryName(plugin)!, l)).ToList() : [plugin],
+                    line => Console.WriteLine("Navmesh: " + line));
                 Console.WriteLine($"Overland navmesh: {meshes:N0} navmeshes, {tris:N0} triangles, {links:N0} links between cells");
                 return 0;
             }
@@ -6465,7 +6531,7 @@ static class Program
                 string pluginPath = opts.GetValueOrDefault("plugin", "out/obmod/Oblivion.esm");
                 var (packed, existing, unrecorded) = Oblivion.ObVoices.Build(skyrimData, new Oblivion.ObData(dataDir), pluginPath,
                     Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pluginPath))!, "Oblivion.voicemap.json"), opts.GetValueOrDefault("out", "out/obvoice"));
-                Console.WriteLine($"{packed} voice files from Oblivion's recordings, {existing} already there, {unrecorded} lines Oblivion didn't record");
+                Console.WriteLine($"{packed} voice files from Oblivion's recordings ({Skyrim.VoiceFiles.CacheStats.Hits} of them from the lip sync cache), {existing} already there, {unrecorded} lines Oblivion didn't record");
                 return 0;
             }
             case "ob-voice-test":
@@ -6476,6 +6542,51 @@ static class Program
                 var wav = Oblivion.ObVoices.Decode(data, opts["path"], Path.GetFullPath("out/voicetest"));
                 Console.WriteLine(wav is null ? "could not decode" : $"{wav}: {new FileInfo(wav).Length} bytes");
                 return 0;
+            }
+            case "voice-cache-test":
+            {
+                // Dev aid: the lip sync cache (VoiceFiles.Pack) on --count N (default 8) of Oblivion's recordings, in
+                // --out (a scratch folder, its cache inside): each decoded twice (the same bytes, or the cache can't
+                // match), packed under one set of names with the cache empty, then under new names (renumbered
+                // FormIDs), timed; the second set must come from the cache, byte for byte the first.
+                string dir = Path.GetFullPath(opts["out"]);
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+                Directory.CreateDirectory(dir);
+                Skyrim.VoiceFiles.CacheDirOverride = Path.Combine(dir, "lipcache");
+                var data = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion)!);
+                int count = int.Parse(opts.GetValueOrDefault("count", "8"));
+                var mp3s = data.List(@"sound\voice").Where(p => p.EndsWith(".mp3")).Order(StringComparer.OrdinalIgnoreCase).Where((_, i) => i % 997 == 0).Take(count).ToList();
+                var wavs = new List<string>();
+                int same = 0;
+                foreach (var mp3 in mp3s)
+                {
+                    string? a = Oblivion.ObVoices.Decode(data, mp3, dir), b = Oblivion.ObVoices.Decode(data, mp3, dir);
+                    if (a is null || b is null) continue;
+                    if (File.ReadAllBytes(a).AsSpan().SequenceEqual(File.ReadAllBytes(b))) same++;
+                    File.Delete(b);
+                    wavs.Add(a);
+                }
+                Console.WriteLine($"{wavs.Count} recordings decoded, {same} the same both times");
+                double Pass(string names)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    Parallel.For(0, wavs.Count, i =>
+                    {
+                        string copy = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".wav");
+                        File.Copy(wavs[i], copy);
+                        try { Skyrim.VoiceFiles.Pack(skyrimData, copy, $"Test line {i}, as Oblivion says it.", Path.Combine(dir, names, $"line_{names}_{i}.fuz")); }
+                        finally { File.Delete(copy); }
+                    });
+                    return sw.Elapsed.TotalSeconds;
+                }
+                double first = Pass("first");
+                var afterFirst = Skyrim.VoiceFiles.CacheStats;
+                double second = Pass("second");
+                var afterSecond = Skyrim.VoiceFiles.CacheStats;
+                int identical = Enumerable.Range(0, wavs.Count).Count(i => File.Exists(Path.Combine(dir, "first", $"line_first_{i}.fuz"))
+                    && File.ReadAllBytes(Path.Combine(dir, "first", $"line_first_{i}.fuz")).AsSpan().SequenceEqual(File.ReadAllBytes(Path.Combine(dir, "second", $"line_second_{i}.fuz"))));
+                Console.WriteLine($"first pass {first:F1} s ({afterFirst.Packed} packed, {afterFirst.Hits} from the cache); renumbered pass {second:F2} s ({afterSecond.Packed - afterFirst.Packed} packed, {afterSecond.Hits - afterFirst.Hits} from the cache); {identical} of {wavs.Count} identical");
+                return identical == wavs.Count && afterSecond.Hits - afterFirst.Hits == wavs.Count ? 0 : 2;
             }
             case "voice-coverage":
             {
@@ -6855,7 +6966,8 @@ static class Program
                 // --plugins (';' list of names in --dir) picks which of the two (convert passes the ones it built this run,
                 // so a plugin left from an earlier run never becomes a master); else whichever are there.
                 string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
-                string land = Path.Combine(dir, Skyrim.Terrain.OverlandTiles.LandPluginName);
+                // The navmeshes are in the last of the land's plugins (all of them, when the land is split).
+                string land = Path.Combine(dir, Skyrim.Terrain.OverlandTiles.NavmeshPluginIn(dir) ?? Skyrim.Terrain.OverlandTiles.LandPluginName);
                 var doorPlugins = (opts.TryGetValue("plugins", out var chosenDoors) ? chosenDoors.Split(';', StringSplitOptions.RemoveEmptyEntries)
                         : [Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName])
                     .Select(p => Path.Combine(dir, p)).Where(File.Exists).ToList();
@@ -8062,8 +8174,87 @@ static class Program
                 List<int>? only = spec == "all" ? null : spec.Split(',').Select(int.Parse).ToList();
                 sw.Restart();
                 string dir = Path.GetDirectoryName(outPath)!;
+                // --land-plugins N: the land split into N plugins (as a full map's is when too big for one); --navmesh: the
+                // overland navmeshes made over them too (OverlandNavmesh, as the build does), then checked: each land
+                // cell's navmesh found once, in the last plugin, its edge links reaching navmeshes there.
+                if (opts.TryGetValue("land-plugins", out var landPluginsWanted)) Skyrim.Terrain.OverlandTiles.LandPluginsWanted = int.Parse(landPluginsWanted);
                 var lands = layout.LandPlugins(outPath, skyrimData, field, map, regionOf, l => Console.WriteLine("  land: " + l), only);
                 Console.WriteLine($"Land in {sw.Elapsed.TotalSeconds:F0}s: {string.Join(", ", lands.Select(l => $"{l} {new FileInfo(Path.Combine(dir, l)).Length / 1048576} MB"))}");
+                if (opts.ContainsKey("navmesh") && lands.Count > 0)
+                {
+                    sw.Restart();
+                    var (navmeshes, navTris, navLinks) = Skyrim.Terrain.OverlandNavmesh.Build(lands.Select(l => Path.Combine(dir, l)).ToList(), l => Console.WriteLine("  navmesh: " + l));
+                    Console.WriteLine($"Navmesh in {sw.Elapsed.TotalSeconds:F0}s: {navmeshes:N0} navmeshes, {navTris:N0} triangles, {navLinks:N0} links; {string.Join(", ", lands.Select(l => $"{l} {new FileInfo(Path.Combine(dir, l)).Length / 1048576} MB"))}");
+                    var mods = lands.Select(l => SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, l), SkyrimRelease.SkyrimSE)).ToList();
+                    try
+                    {
+                        var landAt = new Dictionary<(FormKey, int, int), string>();
+                        var navAt = new Dictionary<(FormKey, int, int), int>();
+                        var navKeys = new HashSet<FormKey>();
+                        foreach (var m in mods)
+                            foreach (var w in m.Worldspaces)
+                                foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                                {
+                                    if (c.Grid is null) continue;
+                                    if (c.Landscape is not null) landAt[(w.FormKey, c.Grid.Point.X, c.Grid.Point.Y)] = m.ModKey.FileName;
+                                    if (c.NavigationMeshes.Count == 0) continue;
+                                    if (m != mods[^1]) { Console.WriteLine($"  PROBLEM: navmesh in {m.ModKey.FileName}, not the last land plugin"); bad++; }
+                                    navAt[(w.FormKey, c.Grid.Point.X, c.Grid.Point.Y)] = navAt.GetValueOrDefault((w.FormKey, c.Grid.Point.X, c.Grid.Point.Y)) + c.NavigationMeshes.Count;
+                                    foreach (var n in c.NavigationMeshes) navKeys.Add(n.FormKey);
+                                }
+                        int twice = navAt.Values.Count(v => v > 1), dangling = 0, crossLinks = 0;
+                        var navCellPlugin = new Dictionary<FormKey, string>();
+                        foreach (var w in mods[^1].Worldspaces)
+                            foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                                foreach (var n in c.NavigationMeshes)
+                                {
+                                    navCellPlugin[n.FormKey] = c.FormKey.ModKey.FileName;
+                                    foreach (var e in n.Data?.EdgeLinks ?? [])
+                                        if (!navKeys.Contains(e.Mesh.FormKey)) dangling++;
+                                }
+                        foreach (var w in mods[^1].Worldspaces)
+                            foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                                foreach (var n in c.NavigationMeshes)
+                                    foreach (var e in n.Data?.EdgeLinks ?? [])
+                                        if (navCellPlugin.TryGetValue(e.Mesh.FormKey, out var other) && other != c.FormKey.ModKey.FileName) crossLinks++;
+                        var byPlugin = landAt.Values.GroupBy(v => v).Select(g => $"{g.Key} {g.Count():N0}");
+                        Console.WriteLine($"  land cells by plugin: {string.Join(", ", byPlugin)}; cells with a navmesh {navAt.Count:N0} (more than one: {twice}), without land under them {navAt.Keys.Count(k => !landAt.ContainsKey(k))}");
+                        Console.WriteLine($"  edge links reaching no navmesh: {dangling}; links between cells of different land plugins: {crossLinks:N0}; navigation map entries {mods[^1].NavigationMeshInfoMaps.Sum(x => x.MapInfos.Count):N0} for {navKeys.Count:N0} navmeshes");
+                        if (twice > 0 || dangling > 0 || navAt.Keys.Any(k => !landAt.ContainsKey(k)) || mods[^1].NavigationMeshInfoMaps.Sum(x => x.MapInfos.Count) != navKeys.Count) bad++;
+                        // Overland doors (OverlandDoorLinks, as the conversion joins the towns' gates): a stand-in door
+                        // plugin with a door on a navmesh triangle of 20 cells of each land plugin, joined to the navmeshes.
+                        var doorsMod = new SkyrimMod(ModKey.FromFileName("DoorsTest.esp"), SkyrimRelease.SkyrimSE);
+                        int placedDoors = 0;
+                        foreach (var w in mods[^1].Worldspaces)
+                        {
+                            var ws = w.DeepCopy(new Worldspace.TranslationMask(defaultOn: true) { SubCells = false, TopCell = false });
+                            ws.SubCells.Clear(); ws.TopCell = null;
+                            doorsMod.Worldspaces.Add(ws);
+                            foreach (var group in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Where(c => c.NavigationMeshes.Count > 0).GroupBy(c => c.FormKey.ModKey))
+                                foreach (var c in group.Take(20))
+                                {
+                                    var nd = c.NavigationMeshes[0].Data!;
+                                    var tri = nd.Triangles[0];
+                                    var (a, b2, c2) = (nd.Vertices[tri.Vertices.X], nd.Vertices[tri.Vertices.Y], nd.Vertices[tri.Vertices.Z]);
+                                    var copy = c.DeepCopy(new Cell.TranslationMask(defaultOn: true) { Temporary = false, Persistent = false, NavigationMeshes = false, Landscape = false });
+                                    copy.Temporary.Clear(); copy.Persistent.Clear(); copy.NavigationMeshes.Clear(); copy.Landscape = null;
+                                    var door = new PlacedObject(doorsMod) { Placement = new Placement { Position = new Noggog.P3Float((a.X + b2.X + c2.X) / 3, (a.Y + b2.Y + c2.Y) / 3, (a.Z + b2.Z + c2.Z) / 3) } };
+                                    door.TeleportDestination = new TeleportDestination { Door = new Mutagen.Bethesda.Plugins.FormLink<IPlacedObjectGetter>(door.FormKey), Position = door.Placement.Position };
+                                    copy.Temporary.Add(door);
+                                    Skyrim.Terrain.TerrainBuilder.AddCell(ws, copy);
+                                    placedDoors++;
+                                }
+                        }
+                        var doorMasters = Skyrim.PluginMerger.Masters([Path.GetFileName(outPath), .. lands]);
+                        doorsMod.WriteToBinary(Path.Combine(dir, "DoorsTest.esp"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                        { MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(doorMasters) });
+                        var dl = Skyrim.Terrain.OverlandDoorLinks.Build(Path.Combine(dir, lands[^1]), [Path.Combine(dir, "DoorsTest.esp")], Path.Combine(dir, "DoorsTestLinks.esp"), l => Console.WriteLine("  doors: " + l));
+                        using (var links = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, "DoorsTestLinks.esp"), SkyrimRelease.SkyrimSE))
+                            Console.WriteLine($"  door links plugin: masters {string.Join(", ", links.ModHeader.MasterReferences.Select(m => m.Master.FileName))}");
+                        if (dl.Linked != placedDoors) { Console.WriteLine($"  PROBLEM: {dl.Linked} of {placedDoors} doors joined"); bad++; }
+                    }
+                    finally { foreach (var m in mods) m.Dispose(); }
+                }
                 // Land checks: heights match the field, markers on the ground, overlap identical between neighbours.
                 static float Height(ILandscapeGetter land, int qx, int qy)
                 {
@@ -8085,7 +8276,8 @@ static class Program
                     var (ox, oy) = layout.Origin(t);
                     var cells = new Dictionary<(int, int), ILandscapeGetter>();
                     float worst = 0;
-                    foreach (var c in ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                    // (Cells without land: another land plugin's, carrying the navmeshes over them.)
+                    foreach (var c in ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Where(c => c.Landscape is not null))
                     {
                         cells[(c.Grid!.Point.X, c.Grid.Point.Y)] = c.Landscape!;
                         int gx = c.Grid.Point.X + ox - field.MinCellX, gy = c.Grid.Point.Y + oy - field.MinCellY;
@@ -8103,7 +8295,14 @@ static class Program
                     }
                     Console.WriteLine($"  {ws.EditorID}: {cells.Count} cells, worst height error {worst} units vs the field; markers on the land {onLand}, off it {off}");
                     if (worst > 8 || off > 0) bad++;
-                    landCells[t] = cells.ToDictionary(kv => (kv.Key.Item1 + ox, kv.Key.Item2 + oy), kv => (kv.Value.VertexHeightMap!.Offset is var o ? (int)o : 0, kv.Value.VertexHeightMap!.HeightMap.Select(e => e.Value).ToArray()));
+                    // A tile's cells from every land plugin it is split over.
+                    if (!landCells.TryGetValue(t, out var tileCells)) landCells[t] = tileCells = [];
+                    foreach (var kv in cells)
+                        if (!tileCells.TryAdd((kv.Key.Item1 + ox, kv.Key.Item2 + oy), (kv.Value.VertexHeightMap!.Offset is var o ? (int)o : 0, kv.Value.VertexHeightMap!.HeightMap.Select(e => e.Value).ToArray())))
+                        {
+                            Console.WriteLine($"  PROBLEM: cell {kv.Key} of {ws.EditorID} in more than one land plugin");
+                            bad++;
+                        }
                 }
                 }
                 foreach (var (a, ca) in landCells)
@@ -8352,6 +8551,8 @@ static class Program
                 string outPath = opts.GetValueOrDefault("out", "out/mod/Daggerfall.esm");
                 // --no-uncut leaves out uncut content (songs Daggerfall never plays).
                 // --towns "Daggerfall,Wayrest" (town names, optionally "Name@Region"), "all", or "none"; default Daggerfall.
+                // --land-plugins N splits the land into N plugins (default: as its size needs, OverlandTiles.LandPluginNames).
+                if (opts.TryGetValue("land-plugins", out var landPlugins)) Skyrim.Terrain.OverlandTiles.LandPluginsWanted = int.Parse(landPlugins);
                 return DaggerfallPluginBuilder.Build(arena2, skyrimData, outPath, TerrainSettingsFrom(opts), uncut: !opts.ContainsKey("no-uncut"),
                     towns: opts.GetValueOrDefault("towns", "Daggerfall@Daggerfall"));
             }

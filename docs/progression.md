@@ -45,7 +45,8 @@ Skyrim's; more records than 11 full plugins can hold and hundreds of GB), and Sk
 - Everything on the overland (map markers, town and dungeon entrances) is placed in whole-map coordinates and moved into
   its tile at the end; doors leading to a moved reference arrive at its new position.
 - The tiles' land is one plugin, `Daggerfall Land.esm` (master Daggerfall.esm), built a tile at a time, with each
-  tile's distant terrain covering it and 32 cells around it.
+  tile's distant terrain covering it and 32 cells around it; split into `Daggerfall Land 2.esm`... when it would be
+  too big for one (docs/building.md, "The land's plugins").
 - Weather regions are per tile and climate. `df-overland-test` builds and checks the overland alone.
 
 Every town is built (user request 2026-10-07, "then batch it"): Daggerfall.esm holds Daggerfall city; the other 3,443

@@ -135,7 +135,8 @@ SHOTS = [
     # the camera and the crowd move with the offset scene.json records. The overland's land under the town is taken out.
     # Under a sunlit morning mist (user, 2026-10-08: the first render's horizon read as a grey fog bank).
     {"name": "daggerfall", "scene": "daggerfall", "caption": ("Daggerfall", "Daggerfall"), "seconds": 7.5,
-     # The overland's land is in its own plugin (Daggerfall Land.esm), loaded over Daggerfall.esm.
+     # The overland's land is in its own plugin (Daggerfall Land.esm, with Daggerfall Land 2.esm... when it is split),
+     # loaded over Daggerfall.esm.
      "export": {"plugin": "Daggerfall.esm", "also": ["Daggerfall Land.esm"], "world": "~+DFTDaggerfall17@door",
                 "centre": [-2048, -2048], "radius": 46000, "land_radius": 75000},
      "light": {"azimuth": 240, "elevation": 14, "sun": [1.0, 0.74, 0.48], "sun_power": 4.2, "sky": [0.38, 0.5, 0.72],
@@ -400,7 +401,9 @@ def export(cli, plugins, names, data=None):
         plugin = os.path.join(data or "", e["plugin"]) if e.get("skyrim") else os.path.join(plugins, e["plugin"])
         if not os.path.exists(plugin):
             print(f"{s['name']}: {e['plugin']} not converted, shot left out"); continue
-        files = [plugin] + [q for q in (os.path.join(plugins, a) for a in e.get("also", [])) if os.path.exists(q)]
+        # A land too big for one plugin is split: "Daggerfall Land.esm" stands for "Daggerfall Land 2.esm"... too.
+        also = [x for a in e.get("also", []) for x in ([a] + [f"Daggerfall Land {i}.esm" for i in range(2, 5)] if a == "Daggerfall Land.esm" else [a])]
+        files = [plugin] + [q for q in (os.path.join(plugins, a) for a in also) if os.path.exists(q)]
         stamp = {"plugins": [[os.path.basename(f), os.path.getsize(f), int(os.path.getmtime(f))] for f in files],
                  "converter": int(os.path.getmtime(cli)) if os.path.exists(cli) else 0, "export": e}
         selected.append(s["name"])
