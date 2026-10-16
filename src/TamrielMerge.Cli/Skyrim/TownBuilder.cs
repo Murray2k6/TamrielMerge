@@ -218,6 +218,13 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
             return breakIns;
         }
     }
+    /// <summary>Buildings whose things are someone's: houses and shops (and the bank's vault); not a house for sale, which
+    /// may be the player's.</summary>
+    static bool IsPrivate(DfBuildingType t) => t is DfBuildingType.Alchemist or DfBuildingType.Armorer or DfBuildingType.Bookseller
+        or DfBuildingType.ClothingStore or DfBuildingType.FurnitureStore or DfBuildingType.GemStore or DfBuildingType.GeneralStore
+        or DfBuildingType.PawnShop or DfBuildingType.WeaponSmith or DfBuildingType.Bank
+        or DfBuildingType.House1 or DfBuildingType.House2 or DfBuildingType.House3 or DfBuildingType.House4 or DfBuildingType.House5 or DfBuildingType.House6;
+
     Quest NewTalkQuest()
     {
         var q = new Quest(mod) { EditorID = "DFTalk", Name = "Daggerfall Conversations" };
@@ -379,6 +386,9 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                     {
                         var built = cells.BuildBuildingInterior($"DFI{LocationPlacer.Sanitize(key)}", BuildingName(b.Data.Type), interiorBlock, $@"{style}\{interiorBlock.Name}", interiorPicker, doorBase, exitDoorBase);
                         built.Cell.Location = new FormLinkNullable<ILocationGetter>(overland.Location.FormKeyNullable ?? FormKey.Null);
+                        // Houses and shops are private property (Daggerfall Unity: a house's things, a shop's wares): owned by
+                        // the region's law, so taking them is theft (TMDfLaw counts it in the region the player is in).
+                        if (IsPrivate(b.Data.Type)) built.Cell.Owner.SetTo(DfLaw.Region(mod, loc.Region));
                         interiors++;
                         foreach (var (k, v) in built.Fixtures) fixtures[k] = fixtures.GetValueOrDefault(k) + v;
                         // Where each way in arrives: in front of the exit nearest the street door.
@@ -441,6 +451,7 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                         entry.Properties.Add(new ScriptIntProperty { Name = "BuildingType", Data = (int)b.Data.Type });
                         entry.Properties.Add(new ScriptIntProperty { Name = "LockValue", Data = b.Data.Quality / 2 });
                         entry.Properties.Add(new ScriptObjectProperty { Name = "BreakIns", Object = BreakIns.ToLink<ISkyrimMajorRecordGetter>() });
+                        entry.Properties.Add(new ScriptObjectProperty { Name = "CrimeReport", Object = DfLaw.CrimeReport(mod).ToLink<ISkyrimMajorRecordGetter>() });
                         if (People is { } namer && namedBuildings.TryGetValue((bx, by, b.Index), out var nb)
                             && DfBuildingNames.Name(nb.Seed, b.Data.Type, nb.Faction, loc.Name, loc.Region, namer.Factions, namer.Names, DfTextFile) is { } buildingName)
                             entry.Properties.Add(new ScriptStringProperty { Name = "BuildingName", Data = buildingName });

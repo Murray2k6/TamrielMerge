@@ -520,27 +520,71 @@ static class Program
             }
             case "faction-check":
             {
-                // Checks that each converted game's guilds are its own factions (--dir): same-named factions across the
-                // games' plugins, and any link from them to Skyrim's own guild factions (which would merge memberships).
+                // Checks that each converted game's guilds are its own factions (--dir, or --plugins A,B full paths):
+                // same-named factions across the games' plugins, any link from them to Skyrim's own guild factions (which
+                // would merge memberships), and any actor answering to Skyrim's crime factions (each game's law is its own).
                 string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
                 using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
                 var guildWords = new[] { "DarkBrotherhood", "ThievesGuild", "Companions", "College", "MagesGuild", "FightersGuild", "Blades", "Vampire", "Imperial", "Stormcloak" };
                 var skyrimGuilds = sk.Factions.Where(f => f.EditorID is { } e && guildWords.Any(w => e.Contains(w, StringComparison.OrdinalIgnoreCase)))
                     .ToDictionary(f => f.FormKey, f => f.EditorID!);
                 var byName = new List<(string Name, string Plugin, FormKey Key)>();
-                int links = 0;
-                foreach (var file in new[] { "Daggerfall.esm", "Redguard.esm", "Morrowind.esm", "Oblivion.esm" }.Select(p => Path.Combine(dir, p)).Where(File.Exists))
+                int links = 0, crimeActors = 0;
+                // Each game's law is its own (docs/progression.md, "Crime by game and area"): no converted actor may answer
+                // to Skyrim's crime factions, by its own list, its crime faction, or what a vanilla template or leveled
+                // list gives it through "use factions" (members only: vanilla's rank -1 is "not a member").
+                var vanillaMods = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => Path.Combine(skyrimData, f)).Where(File.Exists)
+                    .Select(f => (ISkyrimModDisposableGetter)SkyrimMod.CreateFromBinaryOverlay(f, SkyrimRelease.SkyrimSE)).ToList();
+                var skyrimCrime = vanillaMods.SelectMany(v => v.Factions).Where(CrimeFactions.IsSkyrimCrimeFaction).GroupBy(f => f.FormKey).ToDictionary(g => g.Key, g => g.Last().EditorID ?? g.Key.ToString());
+                var vanillaNpcs = vanillaMods.SelectMany(v => v.Npcs).GroupBy(n => n.FormKey).ToDictionary(g => g.Key, g => g.Last());
+                var vanillaLists = vanillaMods.SelectMany(v => v.LeveledNpcs).GroupBy(n => n.FormKey).ToDictionary(g => g.Key, g => g.Last());
+                var files = opts.TryGetValue("plugins", out var only) ? only.Split(',').Select(Path.GetFullPath).ToList()
+                    : new[] { "Daggerfall.esm", "Redguard.esm", "Morrowind.esm", "Oblivion.esm" }.Select(p => Path.Combine(dir, p)).ToList();
+                foreach (var file in files.Where(File.Exists))
                 {
                     using var m = SkyrimMod.CreateFromBinaryOverlay(file, SkyrimRelease.SkyrimSE);
                     foreach (var f in m.Factions.Where(f => f.FormKey.ModKey == m.ModKey)) byName.Add((f.Name?.String ?? f.EditorID ?? "", Path.GetFileName(file), f.FormKey));
                     foreach (var rec in m.EnumerateMajorRecords())
                         foreach (var link in rec.EnumerateFormLinks())
                             if (skyrimGuilds.TryGetValue(link.FormKey, out var g)) { links++; Console.WriteLine($"  {Path.GetFileName(file)}: {rec.EditorID} -> Skyrim's {g}"); }
+                    var npcs = m.Npcs.ToDictionary(n => n.FormKey);
+                    var lists = m.LeveledNpcs.ToDictionary(n => n.FormKey);
+                    var memo = new Dictionary<FormKey, HashSet<FormKey>>();
+                    HashSet<FormKey> CrimeOf(FormKey key, int depth)
+                    {
+                        if (memo.TryGetValue(key, out var hit)) return hit;
+                        var found = memo[key] = [];
+                        if (depth > 12) return found;
+                        if ((npcs.TryGetValue(key, out var n) ? n : vanillaNpcs.GetValueOrDefault(key)) is { } npc)
+                        {
+                            bool inherits = (npc.Configuration.TemplateFlags & NpcConfiguration.TemplateFlag.Factions) != 0 && !npc.Template.IsNull;
+                            if (inherits) found.UnionWith(CrimeOf(npc.Template.FormKey, depth + 1));
+                            else
+                            {
+                                if (skyrimCrime.ContainsKey(npc.CrimeFaction.FormKey)) found.Add(npc.CrimeFaction.FormKey);
+                                foreach (var r in npc.Factions.Where(r => r.Rank >= 0 && skyrimCrime.ContainsKey(r.Faction.FormKey))) found.Add(r.Faction.FormKey);
+                            }
+                        }
+                        else if ((lists.TryGetValue(key, out var l) ? l : vanillaLists.GetValueOrDefault(key)) is { } list)
+                            foreach (var e in list.Entries ?? [])
+                                if (e.Data?.Reference.FormKey is { } refKey) found.UnionWith(CrimeOf(refKey, depth + 1));
+                        return found;
+                    }
+                    foreach (var npc in m.Npcs.Where(n => n.FormKey.ModKey == m.ModKey))
+                        if (CrimeOf(npc.FormKey, 0) is { Count: > 0 } crimes)
+                        {
+                            if (crimeActors++ < 40) Console.WriteLine($"  {Path.GetFileName(file)}: {npc.EditorID} answers to Skyrim's {string.Join(", ", crimes.Select(c => skyrimCrime[c]))}");
+                        }
+                    var own = m.Factions.Where(f => f.FormKey.ModKey == m.ModKey && (f.Flags & Faction.FactionFlag.TrackCrime) != 0).ToList();
+                    Console.WriteLine($"  {Path.GetFileName(file)}: {own.Count} crime factions of its own ({string.Join(", ", own.Take(4).Select(f => f.EditorID))}{(own.Count > 4 ? ", ..." : "")}), "
+                        + $"{own.Count(f => !f.ExteriorJailMarker.IsNull && !f.PlayerInventoryContainer.IsNull && !f.StolenGoodsContainer.IsNull)} with a jail; "
+                        + $"{m.Npcs.Count(n => n.FormKey.ModKey == m.ModKey && own.Any(f => f.FormKey == n.CrimeFaction.FormKey))} actors answer to them");
                 }
+                foreach (var v in vanillaMods) v.Dispose();
                 foreach (var g in byName.GroupBy(n => n.Name.Replace("The ", ""), StringComparer.OrdinalIgnoreCase).Where(g => g.Select(x => x.Plugin).Distinct().Count() > 1))
                     Console.WriteLine($"  \"{g.Key}\": {string.Join("; ", g.Select(x => $"{x.Plugin} {x.Key.ID:X6}"))} (separate records)");
-                Console.WriteLine($"links to Skyrim's guild factions: {links}");
-                return links == 0 ? 0 : 2;
+                Console.WriteLine($"links to Skyrim's guild factions: {links}; actors answering to Skyrim's crime factions: {crimeActors}");
+                return links == 0 && crimeActors == 0 ? 0 : 2;
             }
             case "progression-build":
             {
@@ -1632,6 +1676,13 @@ static class Program
                     if (witches > 0 || summon is not null) Console.WriteLine($"covens: {witches} witches in coven factions; the summoning topic answers {summonFactions} coven factions");
                     Console.WriteLine(DfQuestBuilder.CheckScriptProperties(mod, Path.Combine(AppContext.BaseDirectory, "Papyrus")));
                 }
+                // The law (DfLaw): who answers to which region's crime faction, and the interiors that are someone's.
+                var crimeIds = mod.Factions.Where(f => f.EditorID?.StartsWith("DFCrime") == true).ToDictionary(f => f.FormKey, f => f.EditorID!);
+                var allCells = mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(s => s.Cells).ToList();
+                Console.WriteLine($"law: {crimeIds.Count} region crime factions ({string.Join(", ", crimeIds.Values.Order())}); "
+                    + $"{townBuilder.Placed.Count(p => crimeIds.ContainsKey(p.Npc.CrimeFaction.FormKey) && p.Npc.Factions.Any(r => r.Faction.FormKey == p.Npc.CrimeFaction.FormKey))} of {townBuilder.Placed.Count} townsfolk answer to one; "
+                    + $"{allCells.Count(c => crimeIds.ContainsKey(c.Owner.FormKey))} of {allCells.Count} interiors owned by one; "
+                    + $"{mod.Npcs.Count(n => !n.CrimeFaction.IsNull && !crimeIds.ContainsKey(n.CrimeFaction.FormKey))} actors with another crime faction");
                 var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
                 TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
                 mod.WriteToBinary(Path.Combine(outDir, "DaggerfallTownTest.esp"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
@@ -1753,6 +1804,18 @@ static class Program
                     catch (Exception e) { failures++; Console.WriteLine($"  {loc.Name}: FAILED {e.Message}"); if (opts.ContainsKey("trace")) Console.WriteLine(e); }
                 }
                 Console.WriteLine($"total: {refs} refs, {tris} navmesh triangles, {failures} failed, {sw.Elapsed.TotalSeconds:F0}s, working set {Environment.WorkingSet / 1048576} MB");
+                if (opts.ContainsKey("prison"))
+                {
+                    // --prison: Daggerfall's prison and every region's jail (DfLaw.BuildPrison) as Daggerfall.esm makes them.
+                    var regionCrime = Enumerable.Range(0, DfLaw.Regions).Select(r => DfLaw.Region(mod, r)).ToList();
+                    var exteriors = Enumerable.Range(0, DfLaw.Regions).Select(r =>
+                        CrimeFactions.Exterior(mod, overland.TopCell!, new Noggog.P3Float(r * 512, 0, 0), 0, $"DFJail{r:00}Exterior")).ToArray();
+                    var prison = DfLaw.BuildPrison(mod, arena2, outDir, props, spells, dungeons.Navmeshes, every, exteriors);
+                    int jailed = regionCrime.Count(f => !f.ExteriorJailMarker.IsNull && !f.PlayerInventoryContainer.IsNull && !f.StolenGoodsContainer.IsNull && !f.FollowerWaitMarker.IsNull);
+                    var prisonMarkers = prison.Cell.Persistent.OfType<PlacedObject>().Count(p => p.Base.FormKey == CrimeFactions.PrisonMarker);
+                    Console.WriteLine($"prison: {prison.Cell.EditorID} \"{prison.Cell.Name}\" from {prison.From}: {prison.Cell.Persistent.Count + prison.Cell.Temporary.Count} refs, {prisonMarkers} prison markers; "
+                        + $"{jailed} of {regionCrime.Count} crime factions with jail, wait marker, evidence and stolen-goods chests; exit door locked: {prison.Cell.Persistent.OfType<PlacedObject>().Any(p => p.EditorID?.StartsWith("DFExitDoor") == true && p.Lock is not null && p.TeleportDestination is null)}");
+                }
                 if (opts.ContainsKey("write"))
                 {
                     var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
@@ -3578,6 +3641,17 @@ static class Program
                 string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
                 var world = Morrowind.MwWorld.Load(dataFiles);
                 var dlg = Morrowind.MwDialogue.Load(world.Plugins);
+                if (opts.TryGetValue("grep", out var dgrep))
+                {
+                    // The responses whose text or result script matches --grep (regex), with their filters.
+                    var drx = new System.Text.RegularExpressions.Regex(dgrep, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    foreach (var t in dlg.Topics.Values)
+                        foreach (var i in t.Infos.Where(i => drx.IsMatch(i.Text) || drx.IsMatch(i.Result ?? "")))
+                            Console.WriteLine($"[{t.Type}] {t.Name} | actor {i.Actor} class {i.Class} faction {i.Faction} pcfaction {i.PcFaction}:{i.PcRank} | "
+                                + string.Join(", ", i.Conditions.Select(c => $"{c.Kind}{c.Function} {c.Name} {c.Compare} {c.Value}"))
+                                + $"\n    \"{i.Text}\"\n    result: {(i.Result ?? "").Replace("\r", "").Replace("\n", " / ")}");
+                    return 0;
+                }
                 foreach (var g in dlg.Topics.Values.GroupBy(t => t.Type))
                     Console.WriteLine($"{g.Key}: {g.Count()} topics, {g.Sum(t => t.Infos.Count)} responses, {g.Sum(t => t.Infos.Sum(i => i.Text.Length))} chars");
                 var infos = dlg.Topics.Values.Where(t => t.Type != Morrowind.MwDialogue.TopicType.Journal).SelectMany(t => t.Infos).ToList();

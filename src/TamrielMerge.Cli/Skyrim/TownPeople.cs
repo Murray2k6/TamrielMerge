@@ -243,8 +243,8 @@ public sealed class TownPeople(SkyrimMod mod, VanillaActors vanilla, DfFactions 
         npc.ShortName = null;
         npc.VirtualMachineAdapter = null;
         npc.Factions.Clear();
-        // The vanilla look's crime faction too: each game's people answer to their own factions, never Skyrim's.
-        npc.CrimeFaction.Clear();
+        // Not the vanilla look's crime faction: Daggerfall's people answer to their region's law (DfLaw), never Skyrim's.
+        CrimeFactions.MakeResident(npc, DfLaw.Region(mod, loc.Region).ToLink<IFactionGetter>());
         npc.Items = null;
         npc.SleepingOutfit.Clear();
         npc.DeathItem.Clear();

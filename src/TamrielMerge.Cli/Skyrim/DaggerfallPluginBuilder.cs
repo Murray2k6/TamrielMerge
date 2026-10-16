@@ -68,6 +68,10 @@ public static class DaggerfallPluginBuilder
         var people = new TownPeople(mod, new VanillaActors(skyrimData), DfFactions.Load(arena2), DfNames.Load(arena2));
         // Daggerfall's quest global variables (dungeon set-global actions and the quests), at fixed numbers.
         DfQuestGlobals.AddAll(mod);
+        // Each region's law (DfLaw): its crime faction and the street doors' crime report, at fixed numbers; each
+        // region's jail exterior by its largest town on the overland (also fixed; the prison itself is built last).
+        DfLaw.AddAll(mod);
+        var jailExteriors = DfLaw.PlaceExteriors(mod, world, markers);
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer) { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, FixedPropKeys = true, BackgroundInteriors = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
         var hold = locations.First(l => l.Name == "Privateer's Hold" && l.DungeonBlocks.Count > 0);
         var holdCell = dungeons.Build(hold, world, LocationPlacer.WorldPosition(field, hold.PixelX + 0.5, hold.PixelY + 0.5));
@@ -195,6 +199,20 @@ public static class DaggerfallPluginBuilder
         foreach (var tile in tiles) tile.Climate = world.Climate;
         Console.WriteLine($"Music: {songs.Count} Daggerfall songs ({songs.Values.Sum() / 60:F0} min), {mod.MusicTypes.Count} music types, {mod.MusicTracks.Count} tracks");
         Console.WriteLine($"Regions: {string.Join(", ", regionAreas.Select(r => $"{r.Key} {r.Value} areas"))}");
+        // Last of the records (what it makes takes the next numbers): Daggerfall's prison, every region's jail, read by
+        // the court (TMDfLaw).
+        var prison = DfLaw.BuildPrison(mod, arena2, outDir, propReplacer, spells, dungeons.Navmeshes, locations, jailExteriors);
+        prison.Cell.Location = iliacBay.ToNullableLink<ILocationGetter>();
+        if (questBuilder.Machine!.VirtualMachineAdapter!.Scripts.FirstOrDefault(s => s.Name == "TMDfLaw") is { } law)
+        {
+            var jailMarkers = new ScriptObjectListProperty { Name = "JailMarker" };
+            foreach (var m in prison.Markers) jailMarkers.Objects.Add(new ScriptObjectProperty { Object = m.ToLink<ISkyrimMajorRecordGetter>() });
+            var exteriors = new ScriptObjectListProperty { Name = "JailExterior" };
+            foreach (var e in jailExteriors) exteriors.Objects.Add(new ScriptObjectProperty { Object = e.ToLink<ISkyrimMajorRecordGetter>() });
+            law.Properties.Add(jailMarkers);
+            law.Properties.Add(exteriors);
+        }
+        Console.WriteLine($"Law: {DfLaw.Regions} regions' crime factions; prison {prison.Cell.EditorID} from {prison.From}'s entrance, {prison.Cell.Persistent.Count + prison.Cell.Temporary.Count} references");
 
         // Masters in load order (Mutagen's default is alphabetical, which would list the DLCs before Skyrim.esm).
         var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();

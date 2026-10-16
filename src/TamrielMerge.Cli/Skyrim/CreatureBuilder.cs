@@ -211,9 +211,11 @@ public sealed class CreatureBuilder
             vm.Scripts.RemoveAll(sc => PartnerScripts.Contains(sc.Name));
             if (vm.Scripts.Count == 0) copy.VirtualMachineAdapter = null;
         }
-        // People of Daggerfall's own (the City Watch) keep none of the vanilla soldier's Skyrim factions.
+        // People of Daggerfall's own (the City Watch) keep none of the vanilla soldier's Skyrim factions, not even through
+        // the template's "use factions"; TMDfLaw gives the Watch it sends the region's crime faction.
         if (Table.TryGetValue(mobile.Id, out var map) && map.OwnFactions)
         {
+            CrimeFactions.OwnFactions(copy);
             copy.Factions.Clear();
             copy.CrimeFaction.Clear();
             copy.Factions.Add(new RankPlacement { Faction = TownNights.Guards(mod, "DF").ToLink<IFactionGetter>(), Rank = 0 });
