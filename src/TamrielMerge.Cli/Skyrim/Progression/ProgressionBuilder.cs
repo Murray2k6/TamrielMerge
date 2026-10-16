@@ -17,6 +17,8 @@ namespace TamrielMerge.Skyrim.Progression;
 /// <item>The TMProgression quest (with the player alias that re-registers the menu key after loading), the "Tamriel"
 /// lesser power and the "Tamriel Menu" control (U, rebindable in Settings > Controls) that open the menu, and the menu
 /// itself (Interface\TamrielMerge\tamriel.swf).</item>
+/// <item>The new skills (ProgressionSkills, TMSkills) of the games converted, with their perk trees, and the passive web
+/// (PassiveWeb, TMPassives); the menu's Skills and Passives tabs draw them from data the build writes into the menu.</item>
 /// </list>
 /// </summary>
 public static class ProgressionBuilder
@@ -33,7 +35,8 @@ public static class ProgressionBuilder
     ];
 
     public sealed record FactionEntry(string Plugin, uint Id, string Name, string Game, string[] Ranks);
-    public sealed record Report(IReadOnlyList<FactionEntry> Factions, string Menu, string Path);
+    public sealed record Report(IReadOnlyList<FactionEntry> Factions, string Menu, string Path, IReadOnlyList<SkillDef> Skills,
+        int Perks, int DaggerfallSkills, PassiveWeb.Web Web, IReadOnlyList<ProgressionSkills.Listed> Listed);
 
     /// <summary>Each converted game's joinable factions: its own records with three or more titled ranks.</summary>
     public static List<FactionEntry> Registry(string dir)
@@ -88,10 +91,14 @@ public static class ProgressionBuilder
         return list;
     }
 
-    public static Report Build(string dir, string skyrimData)
+    /// <summary>Builds the plugin and the menu into <paramref name="dir"/> from the converted games' plugins in
+    /// <paramref name="games"/> (by default <paramref name="dir"/> itself, where a conversion writes them).</summary>
+    public static Report Build(string dir, string skyrimData, string? games = null, Action<string>? log = null)
     {
         var mod = new SkyrimMod(ModKey.FromFileName(PluginName), SkyrimRelease.SkyrimSE);
         using var skyrim = SkyrimMod.CreateFromBinaryOverlay(System.IO.Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+        string outDir = dir;
+        dir = games ?? dir;
         var factions = Registry(dir);
 
         var quest = new Quest(mod)
@@ -234,13 +241,30 @@ public static class ProgressionBuilder
             ],
         });
 
-        // The menu.
-        string source = File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Interface", "tamriel.as"));
-        string menu = System.IO.Path.Combine(dir, "Interface", "TamrielMerge", "tamriel.swf");
-        Ui.FlashMenus.Compile(source, menu);
-        WriteControls(dir, skyrimData);
+        // The new skills (TMSkills) and the passive web (TMPassives).
+        var skills = ProgressionSkills.Converted(dir);
+        var listed = ProgressionSkills.FindListed(dir, skills, log);
+        var built = ProgressionSkills.Prepare(mod, skills);
+        var perks = new ProgressionPerks(mod, skyrim, built.Lists.ToDictionary(kv => kv.Key, kv => kv.Value.FormKey), built.Globals);
+        ProgressionSkills.Build(mod, skyrim, perks, built);
+        built.HitEffect.VirtualMachineAdapter = new VirtualMachineAdapter
+        {
+            Scripts = [new ScriptEntry { Name = "TMSkillHitEffect", Properties = [new ScriptObjectProperty { Name = "Skills", Object = quest.ToLink<ISkyrimMajorRecordGetter>() }] }],
+        };
+        var dfSkills = ProgressionSkills.DaggerfallSkills(dir);
+        quest.VirtualMachineAdapter.Scripts.Add(SkillsScript(built, listed, dfSkills));
+        var web = PassiveWeb.Build(mod, perks, factions);
+        quest.VirtualMachineAdapter.Scripts.Add(WebScript(web, skyrim, dir));
 
-        string path = System.IO.Path.Combine(dir, PluginName);
+        // The menu, with the build's skills and web written into it.
+        string source = File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Interface", "tamriel.as"));
+        if (!source.Contains(MenuDataLine)) throw new InvalidDataException($"tamriel.as has no line \"{MenuDataLine}\" for the build's data");
+        source = source.Replace(MenuDataLine, MenuData(built, dfSkills, web, factions));
+        string menu = System.IO.Path.Combine(outDir, "Interface", "TamrielMerge", "tamriel.swf");
+        Ui.FlashMenus.Compile(source, menu);
+        WriteControls(outDir, skyrimData);
+
+        string path = System.IO.Path.Combine(outDir, PluginName);
         // A light plugin (ESL) when its records fit one's FormIDs (0x800-0xFFF), so it takes no full plugin slot.
         if (mod.ModHeader.Stats.NextFormID <= 0x1000) mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
         TopicSubtypes.Fill(mod);
@@ -249,7 +273,154 @@ public static class ProgressionBuilder
             MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(
                 new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray()),
         });
-        return new Report(factions, menu, path);
+        return new Report(factions, menu, path, skills, built.Tree.Count, dfSkills.Count, web, listed);
+    }
+
+    static ScriptObjectProperty Obj(string name, FormKey key) => new() { Name = name, Object = new FormLink<ISkyrimMajorRecordGetter>(key) };
+    static ScriptObjectListProperty Objs(string name, IEnumerable<FormKey?> keys)
+    {
+        var p = new ScriptObjectListProperty { Name = name };
+        foreach (var k in keys) p.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(k ?? FormKey.Null) });
+        return p;
+    }
+    static ScriptIntListProperty Ints(string name, IEnumerable<int> values) => new() { Name = name, Data = [.. values] };
+    static ScriptFloatListProperty Floats(string name, IEnumerable<float> values) => new() { Name = name, Data = [.. values] };
+    static ScriptStringListProperty Texts(string name, IEnumerable<string> values) => new() { Name = name, Data = [.. values] };
+
+    /// <summary>TMSkills: each skill's globals, curve, ability and effect perk with how they grow, its perk tree, the
+    /// records the form lists are filled with, and Daggerfall's own skills (DFSkill&lt;name&gt; in Daggerfall.esm).</summary>
+    static ScriptEntry SkillsScript(ProgressionSkills.Built b, List<ProgressionSkills.Listed> listed, List<(string Name, uint Id)> dfSkills)
+    {
+        var s = b.Skills;
+        var abilityFirst = new List<int>();
+        var abilityPerLevel = new List<float>();
+        var entryFirst = new List<int>();
+        var entryBase = new List<float>();
+        var entryPerLevel = new List<float>();
+        foreach (var d in s)
+        {
+            abilityFirst.Add(abilityPerLevel.Count);
+            abilityPerLevel.AddRange(d.Avs.Select(a => a.PerLevel));
+            entryFirst.Add(entryBase.Count);
+            entryBase.AddRange(d.Entries.Select(e => e.Base));
+            entryPerLevel.AddRange(d.Entries.Select(e => e.PerLevel));
+        }
+        // Stamped by content, so TMSkills fills its lists again when a new build lists other records.
+        int stamp = listed.Aggregate(17, (h, l) => unchecked(h * 31 + l.Plugin.GetHashCode(StringComparison.OrdinalIgnoreCase) * 7 + (int)l.Id * 3 + l.List));
+        return new ScriptEntry
+        {
+            Name = "TMSkills",
+            Properties =
+            [
+                Obj("PlayerRef", PlayerRef),
+                Texts("SkillNames", s.Select(d => d.Name)),
+                Texts("SkillIds", s.Select(d => d.Id)),
+                Objs("Levels", b.Levels.Select(g => (FormKey?)g.FormKey)),
+                Objs("Experience", b.Xp.Select(g => (FormKey?)g.FormKey)),
+                Floats("ImproveMult", s.Select(d => d.ImproveMult)),
+                Floats("ImproveOffset", s.Select(d => d.ImproveOffset)),
+                Floats("UseExperience", s.Select(d => d.Use)),
+                Objs("Abilities", b.Abilities.Select(a => a?.FormKey)),
+                Ints("AbilityFirst", abilityFirst),
+                Floats("AbilityPerLevel", abilityPerLevel),
+                Objs("EffectPerks", b.EffectPerks.Select(p => p?.FormKey)),
+                Ints("EntryFirst", entryFirst),
+                Ints("EntryCount", s.Select(d => d.Entries.Length)),
+                Floats("EntryBase", entryBase),
+                Floats("EntryPerLevel", entryPerLevel),
+                Objs("TreePerks", b.Tree.Select(t => (FormKey?)t.Perk.FormKey)),
+                Ints("TreeSkill", b.Tree.Select(t => t.Skill)),
+                Ints("TreeLevel", b.Tree.Select(t => t.Level)),
+                Ints("TreeAfter", b.Tree.Select(t => t.After)),
+                Objs("Lists", ProgressionSkills.ListNames.Select(n => (FormKey?)b.Lists[n].FormKey)),
+                Texts("ListPlugins", listed.Select(l => l.Plugin)),
+                Ints("ListIds", listed.Select(l => (int)l.Id)),
+                Ints("ListOf", listed.Select(l => l.List)),
+                new ScriptIntProperty { Name = "ListStamp", Data = stamp },
+                Obj("MediumWorn", b.Globals["TMMediumArmorWorn"]),
+                Obj("UnarmoredOn", b.Globals["TMUnarmored"]),
+                Obj("HitPerk", b.HitPerk.FormKey),
+                Obj("Gold", Sk(0x00000F)),
+                Obj("ArmorLight", Sk(0x06BBD3)),
+                Obj("ArmorHeavy", Sk(0x06BBD2)),
+                Texts("DfSkillNames", dfSkills.Select(d => d.Name)),
+                Ints("DfSkillIds", dfSkills.Select(d => (int)d.Id)),
+            ],
+        };
+    }
+
+    /// <summary>TMPassives: the web's nodes (kind, stat, perk, gate), links, the sign starts with Skyrim's standing stones
+    /// (Morrowind's signs give the same ones) and Oblivion's sign numbers (TMObState's), the stats ability, and each
+    /// registry faction's gate group.</summary>
+    static ScriptEntry WebScript(PassiveWeb.Web web, ISkyrimModGetter skyrim, string dir)
+    {
+        var stones = PassiveWeb.Signs.Select(n => skyrim.Spells.FirstOrDefault(s => s.EditorID == $"doom{n}Ability")?.FormKey).ToList();
+        var (obQuest, obSigns) = OblivionSigns(dir);
+        return new ScriptEntry
+        {
+            Name = "TMPassives",
+            Properties =
+            [
+                Obj("PlayerRef", PlayerRef),
+                Ints("NodeKind", web.Nodes.Select(n => (int)n.Kind)),
+                Ints("NodeStat", web.Nodes.Select(n => n.Stat)),
+                Floats("NodeAmount", web.Nodes.Select(n => n.Amount)),
+                Objs("NodePerks", web.Nodes.Select(n => n.Perk?.FormKey)),
+                Ints("NodeGate", web.Nodes.Select(n => n.Gate)),
+                Ints("NodeGateRank", web.Nodes.Select(n => n.GateRank)),
+                Ints("LinkA", web.Links.Select(l => l.A)),
+                Ints("LinkB", web.Links.Select(l => l.B)),
+                Ints("SignStart", web.Starts),
+                Objs("SignStones", stones),
+                Ints("FactionGroup", web.FactionGroup),
+                Ints("ObSigns", obSigns),
+                new ScriptIntProperty { Name = "ObStateId", Data = (int)obQuest },
+                Obj("StatsAbility", web.Stats.FormKey),
+            ],
+        };
+    }
+
+    /// <summary>Oblivion's TMObState quest and, for each sign in its birthsign menu's order, which of the 13 it is.</summary>
+    static (uint Quest, int[] Signs) OblivionSigns(string dir)
+    {
+        string path = System.IO.Path.Combine(dir, "Oblivion.esm");
+        if (!File.Exists(path)) return (0, []);
+        using var m = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+        if (m.Quests.FirstOrDefault(q => q.FormKey.ModKey == m.ModKey && q.EditorID == "TMObState") is not { } quest) return (0, []);
+        var lists = quest.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == "TMObState")?.Properties
+            .OfType<IScriptObjectListPropertyGetter>().FirstOrDefault(p => p.Name == "BirthsignSpells");
+        var signs = (lists?.Objects ?? []).Select(o => m.FormLists.FirstOrDefault(l => l.FormKey == o.Object.FormKey)?.EditorID ?? "")
+            .Select(e => Array.FindIndex(PassiveWeb.Signs, s => e.Contains(s, StringComparison.OrdinalIgnoreCase))).ToArray();
+        return (quest.FormKey.ID, signs);
+    }
+
+    /// <summary>The line of tamriel.as the build replaces with its data (the menu compiled on its own draws the empty
+    /// states).</summary>
+    public const string MenuDataLine = "var built = null; // the build's skills and passive web (ProgressionBuilder.MenuData)";
+
+    static string Q(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    static string F(float f) => f.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>The skills (names, where from, what they do, their perk trees), Daggerfall's own skills, the stats and the
+    /// web's nodes and links, as an ActionScript object for the menu.</summary>
+    static string MenuData(ProgressionSkills.Built b, List<(string Name, uint Id)> dfSkills, PassiveWeb.Web web, List<FactionEntry> factions)
+    {
+        var games = new Dictionary<string, string> { ["DF"] = "Daggerfall", ["MW"] = "Morrowind", ["OB"] = "Oblivion" };
+        var sb = new System.Text.StringBuilder("var built = {\n");
+        sb.Append("  skills: [").AppendJoin(", ", b.Skills.Select(s =>
+            $"{{n: {Q(s.Name)}, f: {Q(string.Join(", ", s.Games.Select(g => games[g])))}, r: {Q(s.Rises)}, e: {Q(s.Effect)}}}")).Append("],\n");
+        sb.Append("  perks: [").AppendJoin(", ", b.Tree.Select(t =>
+            $"[{t.Skill}, {t.Level}, {t.After}, {Q(t.Name)}, {t.Rank}, {t.Ranks}, {Q(t.Description)}]")).Append("],\n");
+        sb.Append("  df: [").AppendJoin(", ", dfSkills.Select(d => Q(d.Name))).Append("],\n");
+        sb.Append("  stats: [").AppendJoin(", ", PassiveWeb.Stats.Select(s => Q(ProgressionPerks.AvName(s.Av)))).Append("],\n");
+        sb.Append("  signs: [").AppendJoin(", ", PassiveWeb.Signs.Select(Q)).Append("],\n");
+        sb.Append("  nodes: [").AppendJoin(",\n    ", web.Nodes.Select(n =>
+            $"[{F(n.X)}, {F(n.Y)}, {(int)n.Kind}, {Q(n.Name)}, {Q(n.Description)}, {Q(n.GateText)}, {n.Sign}, {n.Stat}, {F(n.Amount)}]")).Append("],\n");
+        sb.Append("  links: [").AppendJoin(", ", web.Links.Select(l => $"{l.A}, {l.B}")).Append("],\n");
+        sb.Append("  cx: ").Append(F(PassiveWeb.CentreX)).Append(", cy: ").Append(F(PassiveWeb.CentreY)).Append(",\n");
+        sb.Append("  factions: ").Append(factions.Count).Append('\n');
+        sb.Append("};");
+        return sb.ToString();
     }
 
     /// <summary>The menu key as a Skyrim control: the vanilla PC control map (read from the player's own Interface

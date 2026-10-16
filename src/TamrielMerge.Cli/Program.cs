@@ -605,10 +605,16 @@ static class Program
             case "progression-build":
             {
                 // "TamrielMerge Progression.esp" and the Tamriel menu, from the converted games in --dir.
+                // --games DIR reads the converted games' plugins from there instead (e.g. Skyrim's Data, building into a
+                // scratch --dir).
                 string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
-                var r = Skyrim.Progression.ProgressionBuilder.Build(dir, skyrimData);
+                string? games = opts.TryGetValue("games", out var gamesDir) ? Path.GetFullPath(gamesDir) : null;
+                var r = Skyrim.Progression.ProgressionBuilder.Build(dir, skyrimData, games, Console.WriteLine);
                 foreach (var g in r.Factions.GroupBy(f => f.Game))
                     Console.WriteLine($"  {g.Key}: {g.Count()} factions ({string.Join(", ", g.Take(8).Select(f => $"{f.Name} [{f.Ranks.Length}]"))}{(g.Count() > 8 ? ", ..." : "")})");
+                Console.WriteLine($"  skills: {string.Join(", ", r.Skills.Select(s => s.Name))}; {r.Perks} perk ranks; Daggerfall's own skills listed: {r.DaggerfallSkills}");
+                var gated = r.Web.Nodes.Where(n => n.Gate >= 0).ToList();
+                Console.WriteLine($"  passive web: {r.Web.Nodes.Count} nodes, {r.Web.Links.Count} links, {r.Web.Nodes.Count(n => n.Perk is not null)} notables and keystones, {gated.Count} gated by a faction ({string.Join(", ", gated.Select(n => $"{n.Name}: {Skyrim.Progression.PassiveWeb.Groups[n.Gate].Name} {n.GateRank}"))})");
                 Console.WriteLine($"Progression: {r.Factions.Count} joinable factions; menu {r.Menu}; wrote {r.Path}");
                 return 0;
             }
