@@ -74,6 +74,13 @@ Models, licences and credits: `tools\creatures\<creature>\`, `tools\creatures\CR
   (vanilla's without Havok and Ragdoll: no ragdoll bodies). `creature-skeleton-fix [--dir]` adds them to creatures built
   before. `actor-models --cell <name> --plugins <a;b>` lists what draws each actor a cell can hold (race, skeleton,
   body for the race's armor race, files there or not).
+- **Animation data from the single files** (2026-10-16, user: "fix the imp and scorpion not showing"): the imp, giant
+  scorpion, giant bat and dragonling were built on Dawnguard's chaurus hunter and Dragonborn's ash hopper, whose
+  animation data the game keeps only in `meshes\animationdatasinglefile.txt` and `animationsetdatasinglefile.txt` (no
+  `animationdata\<project>.txt` of their own), so CreatureBehavior wrote none for them and the game drew none of them.
+  It now takes a template's data, motion and set files from the single files when it has no files of its own
+  (`creature-animdata-check`: 300 of the 323 projects that have both read the same; the rest differ in content, the
+  single files being the newer).
 - **In the conversion** (2026-10-11): `convert` has a "Creature models" step after the main menu. Every creature in
   tools\creatures whose game was converted is built into the output (`creature-build`; Morrowind's from the user's own
   game, remastered only with `--gpu`, else `--no-remaster`), then `creature-plugin` writes one light plugin per game
