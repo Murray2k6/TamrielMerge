@@ -536,7 +536,7 @@ static class Program
                 Console.WriteLine($"Converted into {outDir}. Enable these plugins, in this order, after Skyrim's own:");
                 foreach (var p in plugins) Console.WriteLine($"  {p}");
                 if (failed.Count > 0) Console.WriteLine($"Failed: {string.Join(", ", failed)} (the others work without them)");
-                Console.WriteLine("Optional: SKSE + Address Library for SKSE Plugins make the date show the era of the time you're in (SKSE/Plugins/TamrielMergeEra.dll).");
+                Console.WriteLine("Needed: SKSE and Address Library for SKSE Plugins. They run the Tamriel menu, the guide, Daggerfall's seamless overland (SKSE/Plugins/TamrielMergeSeamless.dll: physics past 64 cells) and the era in the date (TamrielMergeEra.dll).");
                 if (opts.ContainsKey("install"))
                 using (Begin("Installing"))
                 {
