@@ -62,7 +62,7 @@ public sealed partial class MwPluginBuilder
         if (vanillaNpcs is null)
         {
             Vanilla<IWeaponGetter>("IronSword");   // opens Skyrim.esm
-            dragonbornEsm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(SkyrimData!, "Dragonborn.esm"), SkyrimRelease.SkyrimSE);
+            dragonbornEsm ??= SkyrimMod.CreateFromBinaryOverlay(Path.Combine(SkyrimData!, "Dragonborn.esm"), SkyrimRelease.SkyrimSE);
             vanillaNpcs = new(StringComparer.OrdinalIgnoreCase);
             foreach (var n in skyrimEsm!.Npcs.Concat(dragonbornEsm.Npcs.Where(n => n.FormKey.ModKey == dragonbornEsm.ModKey)))
                 if (n.EditorID is { } e) vanillaNpcs.TryAdd(e, n);

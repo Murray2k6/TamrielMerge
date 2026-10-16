@@ -296,6 +296,7 @@ public sealed partial class MwPluginBuilder
             Temporary = [],
         };
         if (source.HasWater && source.WaterHeight is { } wh) cell.WaterHeight = wh;
+        if (source.HasWater) cell.Water = MwWater().ToNullableLink<IWaterGetter>();
         var solid = new List<Vector3[]>();
         var visible = new List<(string Model, Vector3[] Tri)>();
         foreach (var r in source.Refs)
@@ -488,8 +489,9 @@ public sealed partial class MwPluginBuilder
     /// <summary>
     /// Builds Morrowind's exterior (Vvardenfell and Solstheim) as one worldspace: each Morrowind cell's terrain as
     /// 2x2 Skyrim cells (<see cref="MwTerrain"/>) and every exterior reference in the Skyrim cell its position falls
-    /// in. Doors are persistent and live in the worldspace's persistent cell, as Skyrim keeps them. Climate and water
-    /// are Skyrim's for now. Returns the worldspace.
+    /// in. Doors are persistent and live in the worldspace's persistent cell, as Skyrim keeps them. Weather, climate
+    /// and water are Morrowind's own (<see cref="MwWeathers"/>, <see cref="MwClimate"/>, <see cref="MwWater"/>): each
+    /// region its climate and weather chances, the sea Morrowind's water at its sea level 0. Returns the worldspace.
     /// </summary>
     public Worldspace BuildExteriors(string skyrimData)
     {
@@ -591,13 +593,26 @@ public sealed partial class MwPluginBuilder
             }
 
         int minX = cells.Keys.Min(k => k.X), maxX = cells.Keys.Max(k => k.X), minY = cells.Keys.Min(k => k.Y), maxY = cells.Keys.Max(k => k.Y);
+        // The worldspace's climate (where no region's weather applies): Morrowind's weathers by how much of the land
+        // each region's chances cover.
+        var mixed = new int[WeatherKinds.Length];
+        int regionCells = 0;
+        foreach (var c in world.Exteriors.Values)
+            if (c.Region is { } rn && world.Objects.TryGetValue(rn, out var rr) && rr.Type == "REGN")
+            {
+                var ch = Chances(rr);
+                for (int i = 0; i < Math.Min(ch.Length, mixed.Length); i++) mixed[i] += ch[i];
+                regionCells++;
+            }
+        var wsClimate = MwClimate("MWClimateVvardenfell", regionCells > 0 ? mixed.Select(m => (int)Math.Round(m / (double)regionCells)).ToArray() : [100]);
+        var water = MwWater();
         var ws = new Worldspace(mod)
         {
             EditorID = "MWVvardenfell",
             Name = "Vvardenfell",
-            Climate = tamriel.Climate.AsNullable(),
-            Water = tamriel.Water.AsNullable(),
-            LodWater = tamriel.LodWater.AsNullable(),
+            Climate = wsClimate.ToNullableLink<IClimateGetter>(),
+            Water = water.ToNullableLink<IWaterGetter>(),
+            LodWater = water.ToNullableLink<IWaterGetter>(),
             LodWaterHeight = 0,
             LandDefaults = new WorldspaceLandDefaults { DefaultLandHeight = -2048, DefaultWaterHeight = 0 },
             ObjectBoundsMin = new P2Float(minX, minY),
@@ -662,30 +677,16 @@ public sealed partial class MwPluginBuilder
     public int ExteriorNavmeshes { get; private set; }
     public int ExteriorEdgeLinks { get; private set; }
 
-    /// <summary>Morrowind weather (REGN WEAT chances, in order) -> Skyrim weather; ash and blight storms are Solstheim's
-    /// ash storm from Dragonborn.</summary>
-    static readonly FormKey[] RegionWeathers =
-    [
-        new(ModKey.FromFileName("Skyrim.esm"), 0x00081A),      // clear: SkyrimClear
-        new(ModKey.FromFileName("Skyrim.esm"), 0x012F89),      // cloudy: SkyrimCloudy
-        new(ModKey.FromFileName("Skyrim.esm"), 0x0C821E),      // foggy: SkyrimFog
-        new(ModKey.FromFileName("Skyrim.esm"), 0x012F89),      // overcast: SkyrimCloudy
-        new(ModKey.FromFileName("Skyrim.esm"), 0x0C821F),      // rain: SkyrimOvercastRain
-        new(ModKey.FromFileName("Skyrim.esm"), 0x0C8220),      // thunder: SkyrimStormRain
-        new(ModKey.FromFileName("Dragonborn.esm"), 0x032336),  // ash storm: DLC02VolcanicAshStorm01
-        new(ModKey.FromFileName("Dragonborn.esm"), 0x032336),  // blight storm
-        new(ModKey.FromFileName("Skyrim.esm"), 0x04D7FB),      // snow: SkyrimOvercastSnow
-        new(ModKey.FromFileName("Skyrim.esm"), 0x0C8221),      // blizzard: SkyrimStormSnow
-    ];
-
     /// <summary>
-    /// Each Morrowind region (REGN) as a Skyrim region over the cells that name it (RGNN), with Morrowind's weather
-    /// chances; each cell also lists its region, as the Creation Kit does. Based on a vanilla region record so its
-    /// header is valid; its areas, objects, grass, sounds and map data are replaced or cleared.
+    /// Each Morrowind region (REGN) as a Skyrim region over the cells that name it (RGNN), with Morrowind's own
+    /// weathers (<see cref="MwWeathers"/>) at its chances, and a climate of its own (MWClimate&lt;region&gt;) holding the
+    /// same; each cell also lists its region, as the Creation Kit does. Based on a vanilla region record so its header
+    /// is valid; its areas, objects, grass, sounds and map data are replaced or cleared.
     /// </summary>
     void AddRegions(ISkyrimModGetter skyrim, Worldspace ws, Dictionary<(int X, int Y), Cell> cells)
     {
         var template = skyrim.Regions.First(r => r.Weather is { Weathers.Count: > 0 });
+        var weathers = MwWeathers();
         var byRegion = world.Exteriors.Values.Where(c => c.Region is not null).GroupBy(c => c.Region!, StringComparer.OrdinalIgnoreCase);
         foreach (var group in byRegion)
         {
@@ -700,15 +701,11 @@ public sealed partial class MwPluginBuilder
             region.Land = null;
             region.Map = null;
             if (rec.Get("CNAM") is { } color) region.MapColor = System.Drawing.Color.FromArgb(color.Data[0], color.Data[1], color.Data[2]);
-            var chances = rec.Get("WEAT")?.Data ?? [];
+            var chances = Chances(rec);
             region.Weather!.Weathers = [];
-            for (int i = 0; i < Math.Min(chances.Length, RegionWeathers.Length); i++)
-            {
-                if (chances[i] == 0) continue;
-                var existing = region.Weather.Weathers.FirstOrDefault(w => w.Weather.FormKey == RegionWeathers[i]);
-                if (existing is not null) existing.Chance += chances[i];
-                else region.Weather.Weathers.Add(new WeatherType { Weather = new FormLink<IWeatherGetter>(RegionWeathers[i]), Chance = chances[i] });
-            }
+            for (int i = 0; i < Math.Min(chances.Length, weathers.Length); i++)
+                if (chances[i] > 0) region.Weather.Weathers.Add(new WeatherType { Weather = weathers[i].ToLink<IWeatherGetter>(), Chance = chances[i] });
+            MwClimate("MWClimate" + Sanitize(group.Key), chances);
             // One area per run of neighbouring cells in a row (Morrowind cells, 8192 units).
             foreach (var row in group.GroupBy(c => c.GridY))
             {
@@ -738,8 +735,8 @@ public sealed partial class MwPluginBuilder
     /// Makes Morrowind's teleporting doors Skyrim load doors. Morrowind stores only where a door takes you (DODT:
     /// position and rotation, DNAM: the interior cell, absent for the outside); Skyrim also needs the door on the other
     /// side. That is the door in the destination cell that leads back to this one, nearest the arrival point (else the
-    /// nearest door there). The player arrives at Morrowind's own spot. Doors to cells not built yet (the exterior,
-    /// for now) stay closed. Returns (linked, unlinked).
+    /// nearest door there). The player arrives at Morrowind's own spot. Doors to cells that weren't built (a test build's
+    /// --cells or --no-exterior) stay closed. Returns (linked, unlinked).
     /// </summary>
     public (int Linked, int Unlinked) LinkDoors()
     {

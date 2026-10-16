@@ -334,7 +334,15 @@ public sealed partial class MwPluginBuilder
             case "weather":
             {
                 var parts = id.Split(':');
-                return parts.Length == 2 && int.TryParse(parts[1], out int type) && type >= 0 && type < RegionWeathers.Length ? RegionWeathers[type] : null;
+                return parts.Length == 2 && int.TryParse(parts[1], out int type) && type >= 0 && type < WeatherKinds.Length ? MwWeathers()[type].FormKey : null;
+            }
+            case "weathers":
+            {
+                // Morrowind's weathers in its own numbering (GetCurrentWeather's 0 clear .. 9 blizzard).
+                var list = new FormList(mod) { EditorID = "MWWeatherList" };
+                foreach (var w in MwWeathers()) list.Items.Add(w.ToLink<ISkyrimMajorRecordGetter>());
+                mod.FormLists.Add(list);
+                return list.FormKey;
             }
             case "message": return ScriptMessage(id);
             case "say": return SayTopic(id);

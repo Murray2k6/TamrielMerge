@@ -153,7 +153,7 @@ arguments) map to Papyrus and SKSE. Where Skyrim has no counterpart the nearest 
 | FadeIn, FadeOut, FadeTo | Game.FadeOutGame |
 | PlayBink | Morrowind's own Bink video, copied to Data\Video\TamrielMerge_MW_… |
 | PlayGroup, LoopGroup | the model's sequence of that name on objects; on people, Skyrim's nearest idle for knockouts |
-| ChangeWeather, GetCurrentWeather | Skyrim's weather for Morrowind's weather type (the regions' table) |
+| ChangeWeather, GetCurrentWeather | Morrowind's own weather records (MWWeather*, docs/morrowind-weather.md); GetCurrentWeather is the weather's place in MWWeatherList (Morrowind's numbering), Skyrim's classification for another world's weather |
 | BecomeWerewolf, UndoWerewolf, IsWerewolf, GetWerewolfKills | Skyrim's beast form (its change spell, its shift-back timer, its race, its stat) |
 | HasSoulGem, RemoveSoulGem, AddSoulGem | Skyrim's soul gems hold a size, not a creature: filled gems carried; Morrowind's gem as Skyrim's filled gem of that size |
 | MenuMode, GetSecondsPassed, Random, GetSquareRoot, Xbox | Utility.IsInMenuMode, the time since the script last ran, RandomInt, Math.Sqrt, 0 |

@@ -177,11 +177,13 @@ public sealed partial class MwPluginBuilder
     }
 
     /// <summary>A Morrowind sound (SOUN: FNAM under Data Files\Sound) as a Skyrim sound descriptor playing its file,
-    /// set up like Skyrim's conjuration release sound.</summary>
-    SoundDescriptor? Sound(string soundId)
+    /// set up like Skyrim's conjuration release sound, or like the vanilla descriptor <paramref name="template"/> (a
+    /// weather loop, thunder) when given; those get the template's name part as a suffix.</summary>
+    SoundDescriptor? Sound(string soundId, string template = "MAGConjureFireSD")
     {
-        if (sounds.TryGetValue(soundId, out var hit)) return hit;
-        sounds[soundId] = null;
+        string key = template == "MAGConjureFireSD" ? soundId : soundId + "|" + template;
+        if (sounds.TryGetValue(key, out var hit)) return hit;
+        sounds[key] = null;
         if (!world.Objects.TryGetValue(soundId, out var rec) || rec.Type != "SOUN" || rec.Str("FNAM") is not { Length: > 0 } file) return null;
         var bytes = data.Read(@"sound\" + file);
         if (bytes is null) { Problems.Add($"sound {soundId}: {file} not found"); return null; }
@@ -189,12 +191,12 @@ public sealed partial class MwPluginBuilder
         string target = Path.Combine(modOutDir, "Sound", rel);
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         File.WriteAllBytes(target, bytes);
-        var template = skyrimEsm!.SoundDescriptors.First(s => s.EditorID == "MAGConjureFireSD");
-        var sound = mod.SoundDescriptors.DuplicateInAsNewRecord(template);
-        sound.EditorID = "MWSound" + Sanitize(soundId);
+        var like = SkyrimEsm.SoundDescriptors.First(s => s.EditorID == template);
+        var sound = mod.SoundDescriptors.DuplicateInAsNewRecord(like);
+        sound.EditorID = "MWSound" + Sanitize(soundId) + (key == soundId ? "" : Sanitize(template.Replace("AMBWeather", "")));
         sound.SoundFiles.Clear();
         sound.SoundFiles.Add(new Mutagen.Bethesda.Plugins.Assets.AssetLink<Mutagen.Bethesda.Skyrim.Assets.SkyrimSoundAssetType>(rel));
-        return sounds[soundId] = sound;
+        return sounds[key] = sound;
     }
 
     // ---- Intervention ----

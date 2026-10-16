@@ -1,4 +1,4 @@
-﻿using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Skyrim;
 using TamrielMerge.Daggerfall;
 using TamrielMerge.Skyrim;
@@ -3102,8 +3102,12 @@ static class Program
                 // Upscaled textures (tools/upscale/out, from upscale-textures, or --upscaled DIR) replace the originals where present.
                 string upscaled = opts.GetValueOrDefault("upscaled", UpscaleFolder(Game.Morrowind));
                 if (Directory.Exists(upscaled) && !opts.ContainsKey("no-upscale")) Morrowind.MwTextures.UpscaleCache = Path.GetFullPath(upscaled);
-                // Builds Morrowind.esm (ours) from the original install into --out. For now: the interior cells whose
-                // names match --cells (regex).
+                // Builds Morrowind.esm (ours) from the original install (plus the selected mods) into --out: every
+                // interior (or those whose names match --cells, a regex) with its navmesh; the exterior worldspace
+                // MWVvardenfell (Vvardenfell and Solstheim: terrain, references, regions with Morrowind's weathers and
+                // climates, its water, navmeshes, terrain LOD; --no-exterior skips it, --exterior-box limits it); load
+                // doors linked; items, containers, NPCs, creatures, worn armour and clothing; dialogue (--no-dialogue)
+                // and translated scripts (--no-scripts); the start marker. Models and textures go under --out too.
                 string dataFiles = GameInstalls.DataDir(Game.Morrowind) ?? throw new DirectoryNotFoundException("Morrowind isn't installed through Steam or GOG");
                 string outDir = opts.GetValueOrDefault("out", "out/mwmod");
                 var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -3114,6 +3118,15 @@ static class Program
                 foreach (var note in modProblems) Console.WriteLine($"  mods: {note}");
                 var world = Morrowind.MwWorld.Load(dataFiles, mwPlugins);
                 Console.WriteLine($"Loaded {string.Join(", ", world.Plugins.Select(p => p.FileName))}: {world.Objects.Count} objects, {world.Interiors.Count} interiors, {world.Exteriors.Count} exterior cells ({sw.Elapsed.TotalSeconds:F0}s)");
+                // --exterior-box "x0,y0,x1,y1" (Morrowind cell grid): only those exterior cells, for test builds.
+                if (opts.TryGetValue("exterior-box", out var box))
+                {
+                    var b = box.Split(',').Select(int.Parse).ToArray();
+                    bool Inside((int X, int Y) g) => g.X >= b[0] && g.Y >= b[1] && g.X <= b[2] && g.Y <= b[3];
+                    foreach (var g in world.Exteriors.Keys.Where(g => !Inside(g)).ToList()) world.Exteriors.Remove(g);
+                    foreach (var g in world.Lands.Keys.Where(g => !Inside(g)).ToList()) world.Lands.Remove(g);
+                    Console.WriteLine($"  exterior box {box}: {world.Exteriors.Count} exterior cells");
+                }
                 var builder = new Morrowind.MwPluginBuilder(world, Morrowind.Tes3Data.Open(dataFiles, mwPlugins), outDir);
                 builder.SkyrimData = skyrimData;
                 // Scripts are translated first: the references they name are placed persistent, scripted activators are
@@ -3124,6 +3137,9 @@ static class Program
                     builder.PrepareScripts();
                     Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%) ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
+                // Worn armour and clothing meshes, all at once in parallel (the records come with the items later).
+                var (wornMade, wornFailed) = builder.PrepareWorn();
+                Console.WriteLine($"  worn meshes: {wornMade} items re-rigged to Skyrim's skeleton, {wornFailed} failed ({sw.Elapsed.TotalSeconds:F0}s)");
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cells", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 int cells = 0, refs = 0;
                 foreach (var cell in world.Interiors.Values.Where(c => rx.IsMatch(c.Name)))
@@ -3144,6 +3160,7 @@ static class Program
                 {
                     var ws = builder.BuildExteriors(skyrimData);
                     Console.WriteLine($"  exterior {ws.EditorID}: {ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Count()} cells, {ws.TopCell!.Persistent.Count} doors, {builder.ExteriorNavmeshes} navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  weather: {builder.WeatherCount} Morrowind weathers, {builder.ClimateCount} climates (one per region + the worldspace's), {builder.Mod.Regions.Count} regions, water {builder.Mod.Waters.FirstOrDefault()?.EditorID}");
                 }
                 var missing = builder.MissingTextures.ToList();
                 Console.WriteLine($"  missing textures: {missing.Count}{(missing.Count > 0 ? " (" + string.Join(", ", missing.Take(15)) + ")" : "")}");
@@ -3183,6 +3200,7 @@ static class Program
                 Console.WriteLine($"  records: {m.Statics.Count} statics, {m.Doors.Count} doors, {m.Activators.Count} swinging doors, {m.Lights.Count} lights, {m.Containers.Count} containers, " +
                     $"{m.MiscItems.Count} misc, {m.Keys.Count} keys, {m.Books.Count} books, {m.Weapons.Count} weapons, {m.Ammunitions.Count} ammo, {m.Armors.Count} armour/clothing, " +
                     $"{m.Ingestibles.Count} potions, {m.Ingredients.Count} ingredients, {m.LeveledItems.Count} leveled lists, {m.Npcs.Count} actors, {m.LeveledNpcs.Count} leveled actor lists");
+                Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Morrowind's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
                 builder.Write();
                 Console.WriteLine($"  barks: {builder.BarkCount} recorded lines in {builder.BarkTopicCount} voice topics (Morrowind's own recordings)");
                 var problems = builder.Problems.Distinct().ToList();
@@ -3499,6 +3517,9 @@ static class Program
                     builder.PrepareScripts();
                     Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%) ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
+                // Worn armour and clothing meshes, all at once in parallel (the records come with the items later).
+                var (obWornMade, obWornFailed) = builder.PrepareWorn();
+                Console.WriteLine($"  worn meshes: {obWornMade} model sets re-rigged to Skyrim's skeleton, {obWornFailed} failed ({sw.Elapsed.TotalSeconds:F0}s)");
                 if (opts.TryGetValue("cells", out var only))
                     foreach (var id in only.Split(','))
                     {
@@ -3532,6 +3553,7 @@ static class Program
                 Console.WriteLine($"  records: {m.Statics.Count} statics, {m.Doors.Count} doors, {m.Activators.Count} swinging doors, {m.Lights.Count} lights, {m.LandscapeTextures.Count} landscape textures, " +
                     $"{m.Containers.Count} containers, {m.MiscItems.Count} misc, {m.Keys.Count} keys, {m.Books.Count} books, {m.Weapons.Count} weapons, {m.Ammunitions.Count} ammo, {m.Armors.Count} armour/clothing, " +
                     $"{m.Ingestibles.Count} potions, {m.Ingredients.Count} ingredients, {m.SoulGems.Count} soul gems, {m.LeveledItems.Count} leveled lists, {m.Npcs.Count} actors, {m.LeveledNpcs.Count} leveled actor lists; {builder.Navmeshes} navmeshes ({builder.NavmeshTriangles} triangles)");
+                Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Oblivion's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
                 builder.Write();
                 var problems = builder.Problems.Distinct().ToList();
                 File.WriteAllLines(Path.Combine(outDir, "problems.txt"), problems);
@@ -3693,6 +3715,237 @@ static class Program
                     if (r.DoorDestination is { } d && r.DoorDestinationCell is { } dc && !cellsWithDoors.Contains(dc))
                         Console.WriteLine($"{r.BaseId} ({world.Objects.GetValueOrDefault(r.BaseId)?.Type}) in {from} at {r.Position} -> \"{dc}\" at {d.Position}; cell exists: {world.Interiors.ContainsKey(dc)}");
                 return 0;
+            }
+            case "mw-files":
+            {
+                // Dev aid: Morrowind data files (loose and archived) whose path matches --match (a regex).
+                var data = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var folder in new[] { "meshes", "textures", "sound", "icons", "bookart" })
+                    foreach (var n in data.List(folder).Where(n => rx.IsMatch(n)).Take(400)) Console.WriteLine(n);
+                return 0;
+            }
+            case "mw-nif":
+            {
+                // Dev aid: a Morrowind model's node tree (--model a;b): nodes with their world position, shapes with
+                // vertex counts and textures, skins with their bones, particle controllers with their texture.
+                var data = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                foreach (var model in opts["model"].Split(';'))
+                {
+                    string path = model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
+                    var nif = Morrowind.Nif4.Read(data.Read(path) ?? throw new FileNotFoundException(path), path);
+                    Console.WriteLine($"== {path}: {nif.Blocks.Count} blocks");
+                    string Tex(Morrowind.NiNode n) => string.Join(",", n.Properties.Select(nif.Get<Morrowind.NifBlock>).OfType<Morrowind.NiTexturingProperty>()
+                        .Select(t => t.Base is { } b ? nif.Get<Morrowind.NiSourceTexture>(b.Source)?.FileName : null).Where(s => s is not null));
+                    void Walk(int i, Morrowind.NifTransform parent, int depth)
+                    {
+                        if (nif.Get<Morrowind.NiNode>(i) is not { } n) return;
+                        var w = n.Transform.Then(parent);
+                        string extra = "";
+                        if (n is Morrowind.NiTriShape s && nif.Get<Morrowind.NiGeometryData>(s.Data) is { } d)
+                        {
+                            extra = $" verts {d.Vertices.Length} tex [{Tex(n)}]";
+                            if (nif.Get<Morrowind.NiSkinInstance>(s.Skin) is { } sk)
+                                extra += $" SKIN root {nif.Get<Morrowind.NiNode>(sk.SkeletonRoot)?.Name} bones {string.Join("|", sk.Bones.Select(b => nif.Get<Morrowind.NiNode>(b)?.Name))}";
+                        }
+                        else if (Tex(n) is { Length: > 0 } t) extra = $" tex [{t}]";
+                        Console.WriteLine($"{new string(' ', depth * 2)}{n.Type} \"{n.Name}\"{(n.Hidden ? " hidden" : "")} at {w.Translation:F1} s {w.Scale:F2}{extra}");
+                        foreach (var c in n.Children) Walk(c, w, depth + 1);
+                    }
+                    foreach (var r in nif.Roots) Walk(r, Morrowind.NifTransform.Identity, 0);
+                    foreach (var c in nif.Blocks.OfType<Morrowind.NiParticleSystemController>())
+                        Console.WriteLine($"  particles: target {nif.Get<Morrowind.NiNode>(c.Target)?.Name} size {c.InitialSize} speed {c.Speed} life {c.Lifetime} rate {c.BirthRate} n {c.NumParticles} dims {c.EmitterDimensions}");
+                }
+                return 0;
+            }
+            case "worn-bones":
+            {
+                // Dev aid: how a Morrowind skeleton's Bip01 bones line up with Skyrim's for worn armour (--model: a skinned
+                // body part, whose own skeleton is its bind pose; default base_anim.nif; --female).
+                var data = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                bool female = opts.ContainsKey("female");
+                var assets = new Skyrim.Meshes.SkyrimCharacterAssets(skyrimData);
+                var source = new Morrowind.MwWornSource(data, new Morrowind.MwTextures(data, Path.GetTempPath()));
+                var problems = new List<string>();
+                var from = opts.TryGetValue("model", out var model) ? source.Part(model, int.Parse(opts.GetValueOrDefault("part", "3")), female, problems).Skeleton : source.CharacterSkeleton(female);
+                foreach (var line in Skyrim.Meshes.WornMesh.Report(from, assets.Skeleton(female))) Console.WriteLine(line);
+                foreach (var p in problems) Console.WriteLine("problem: " + p);
+                return 0;
+            }
+            case "ob-worn":
+            {
+                // Dev aid: Oblivion armour and clothing (EditorID matching --match, --take n) with their worn look converted
+                // into --out, and those records written as --out\Oblivion.esm.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed through Steam or GOG");
+                string outDir = opts.GetValueOrDefault("out", "out/obworn");
+                using var builder = new Oblivion.ObPluginBuilder(new Oblivion.ObData(dataDir), outDir) { SkyrimData = skyrimData };
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                foreach (var line in builder.ConvertWorn(new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase), int.Parse(opts.GetValueOrDefault("take", "20"))))
+                    Console.WriteLine(line);
+                Console.WriteLine($"worn looks: {builder.WornConverted} Oblivion's, {builder.WornFallbacks} template fallbacks in {sw.Elapsed.TotalSeconds:F1}s");
+                var masterOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                Directory.CreateDirectory(outDir);
+                builder.Mod.WriteToBinary(Path.Combine(outDir, Oblivion.ObPluginBuilder.PluginName), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(masterOrder),
+                });
+                return 0;
+            }
+            case "worn-check":            {
+                // Dev aid: a written worn NIF (--file a;b) read back on Skyrim's skeleton (--female): per shape its bounds,
+                // bones, and how much of it lies inside Skyrim's naked --part (body/hands/feet) at --weight (0/1).
+                bool female = opts.ContainsKey("female");
+                var assets = new Skyrim.Meshes.SkyrimCharacterAssets(skyrimData);
+                var skeleton = assets.Skeleton(female);
+                var surface = assets.Surface(opts.GetValueOrDefault("part", "body"), female, int.Parse(opts.GetValueOrDefault("weight", "1")));
+                // The naked part's normals should point out of the body: on the torso, away from the body's centre line.
+                foreach (var b in assets.Naked(opts.GetValueOrDefault("part", "body"), female, int.Parse(opts.GetValueOrDefault("weight", "1"))))
+                {
+                    var torso = Enumerable.Range(0, b.V.Length).Where(i => MathF.Abs(b.V[i].X) < 10 && b.V[i].Z > 80 && b.V[i].Z < 110 && b.N.Length == b.V.Length).ToList();
+                    if (torso.Count > 0)
+                        Console.WriteLine($"naked {b.Name}: torso normals outward {torso.Average(i => System.Numerics.Vector3.Dot(b.N[i], System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(b.V[i].X, b.V[i].Y + 2, 0)))):F2} (1 = all out)");
+                }
+                // --png out.png: every file's shapes drawn together, front and side, flat-shaded (skin tan, the rest by file).
+                var drawn = new List<(Skyrim.Meshes.WornShape Shape, int File)>();
+                int fileIndex = 0;
+                foreach (var file in opts["file"].Split(';'))
+                {
+                    using var nif = new nifly.NifFile();
+                    if (nif.Load(file) != 0) { Console.WriteLine($"{file}: unreadable"); continue; }
+                    Console.WriteLine($"== {Path.GetFileName(file)}");
+                    fileIndex++;
+                    foreach (var s in Skyrim.Meshes.WornMesh.ReadSkinned(nif, skeleton))
+                    {
+                        drawn.Add((s, fileIndex));
+                        var lo = s.V.Aggregate(System.Numerics.Vector3.Min); var hi = s.V.Aggregate(System.Numerics.Vector3.Max);
+                        int inside = 0; float deepest = 0;
+                        foreach (var v in s.V)
+                            if (surface.Nearest(v) is { } hit)
+                            {
+                                float d = System.Numerics.Vector3.Dot(v - hit.Point, hit.Normal);
+                                if (d < 0) { inside++; deepest = MathF.Min(deepest, d); }
+                            }
+                        var bones = s.Weights.SelectMany(w => w.Select(x => x.Bone)).Distinct().ToList();
+                        Console.WriteLine($"  {s.Name,-28} {s.V.Length,5} verts  {lo:F0} .. {hi:F0}  inside {inside} (deepest {deepest:F1})  {bones.Count} bones: {string.Join(", ", bones.Take(8))}{(bones.Count > 8 ? " ..." : "")}");
+                    }
+                }
+                if (opts.TryGetValue("png", out var png) && drawn.Count > 0)
+                {
+                    // Two orthographic views side by side: front (looking along +Y at the body's front, x right) and the
+                    // left side (looking along +X); a z-buffer and light from the viewer's upper left.
+                    const int size = 512;
+                    var rgb = new byte[size * 2 * size * 3];
+                    var depth = new float[size * 2 * size];
+                    Array.Fill(depth, float.MaxValue);
+                    for (int i = 0; i < rgb.Length; i++) rgb[i] = 40;
+                    float zmin = -2, zmax = 160, scale = size / (zmax - zmin);
+                    System.Numerics.Vector3[] palette = [new(0.55f, 0.6f, 0.75f), new(0.75f, 0.55f, 0.45f), new(0.5f, 0.7f, 0.5f), new(0.7f, 0.7f, 0.4f), new(0.6f, 0.5f, 0.75f)];
+                    foreach (var (s, f) in drawn)
+                        for (int view = 0; view < 2; view++)
+                        {
+                            // Screen x, screen y (down), depth towards the viewer negative.
+                            (float X, float Y, float D) P(System.Numerics.Vector3 v) => view == 0
+                                ? (size / 2 + v.X * scale, size - (v.Z - zmin) * scale, v.Y)
+                                : (size + size / 2 - v.Y * scale, size - (v.Z - zmin) * scale, -v.X);
+                            var colour = s.IsSkin ? new System.Numerics.Vector3(0.85f, 0.68f, 0.55f) : palette[(f - 1) % palette.Length];
+                            var eye = view == 0 ? new System.Numerics.Vector3(0, -1, 0) : new System.Numerics.Vector3(1, 0, 0);
+                            var light = System.Numerics.Vector3.Normalize(eye * 2 + new System.Numerics.Vector3(-0.5f, 0, 1));
+                            for (int t = 0; t + 2 < s.Tris.Length; t += 3)
+                            {
+                                var a = s.V[s.Tris[t]]; var b = s.V[s.Tris[t + 1]]; var c = s.V[s.Tris[t + 2]];
+                                var n = System.Numerics.Vector3.Cross(b - a, c - a);
+                                if (n.LengthSquared() < 1e-10f) continue;
+                                n = System.Numerics.Vector3.Normalize(n);
+                                float shade = 0.25f + 0.75f * MathF.Abs(System.Numerics.Vector3.Dot(n, light));
+                                var (ax, ay, ad) = P(a); var (bx, by, bd) = P(b); var (cx, cy, cd) = P(c);
+                                int x0 = (int)MathF.Max(view * size, MathF.Floor(MathF.Min(ax, MathF.Min(bx, cx)))), x1 = (int)MathF.Min(view * size + size - 1, MathF.Ceiling(MathF.Max(ax, MathF.Max(bx, cx))));
+                                int y0 = (int)MathF.Max(0, MathF.Floor(MathF.Min(ay, MathF.Min(by, cy)))), y1 = (int)MathF.Min(size - 1, MathF.Ceiling(MathF.Max(ay, MathF.Max(by, cy))));
+                                float area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+                                if (MathF.Abs(area) < 1e-6f) continue;
+                                for (int y = y0; y <= y1; y++)
+                                    for (int x = x0; x <= x1; x++)
+                                    {
+                                        float px = x + 0.5f, py = y + 0.5f;
+                                        float w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / area;
+                                        float w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / area;
+                                        float w2 = 1 - w0 - w1;
+                                        if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+                                        float d = w0 * ad + w1 * bd + w2 * cd;
+                                        int k = y * size * 2 + x;
+                                        if (d >= depth[k]) continue;
+                                        depth[k] = d;
+                                        rgb[k * 3] = (byte)(255 * colour.X * shade); rgb[k * 3 + 1] = (byte)(255 * colour.Y * shade); rgb[k * 3 + 2] = (byte)(255 * colour.Z * shade);
+                                    }
+                            }
+                        }
+                    Util.Png.WriteRgb(png, size * 2, size, rgb);
+                    Console.WriteLine($"wrote {png}");
+                }
+                return 0;
+            }
+            case "mw-worn":
+            {
+                // Dev aid: Morrowind items' worn look (--items id,id,...) converted into --out with their records; writes
+                // --out\MorrowindWornTest.esp holding just those records.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                string outDir = opts.GetValueOrDefault("out", "out/mwworn");
+                var world = Morrowind.MwWorld.Load(dataFiles);
+                var builder = new Morrowind.MwPluginBuilder(world, Morrowind.Tes3Data.Open(dataFiles), outDir) { SkyrimData = skyrimData };
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                // --items id,id or --match regex (ARMO/CLOT ids; --take n, default 20).
+                var ids = opts.TryGetValue("items", out var itemList) ? itemList.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList()
+                    : world.Objects.Values.Where(o => o.Type is "ARMO" or "CLOT" && System.Text.RegularExpressions.Regex.IsMatch(o.Id, opts.GetValueOrDefault("match", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        .Select(o => o.Id).Take(int.Parse(opts.GetValueOrDefault("take", "20"))).ToList();
+                foreach (var line in builder.ConvertWorn(ids)) Console.WriteLine(line);
+                Console.WriteLine($"worn looks: {builder.WornConverted} Morrowind's, {builder.WornFallbacks} template fallbacks in {sw.Elapsed.TotalSeconds:F1}s");
+                var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                Directory.CreateDirectory(outDir);
+                builder.Mod.WriteToBinary(Path.Combine(outDir, "Morrowind.esm"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
+                });
+                return 0;
+            }
+            case "esm-dump":
+            {
+                // Dev aid: every field of the records of --plugin (default Skyrim.esm) whose editor ID matches --edid.
+                string plugin = Path.Combine(skyrimData, opts.GetValueOrDefault("plugin", "Skyrim.esm"));   // a file name is in Skyrim's Data
+                var re = new System.Text.RegularExpressions.Regex(opts["edid"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                using var m = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
+                foreach (var r in m.EnumerateMajorRecords().Where(r => r.EditorID is { } e && re.IsMatch(e)
+                             && (!opts.TryGetValue("type", out var t) || r.Registration.Name.Equals(t, StringComparison.OrdinalIgnoreCase))).Take(int.Parse(opts.GetValueOrDefault("max", "4"))))
+                {
+                    Console.WriteLine($"== {r.Registration.Name} {r.EditorID} {r.FormKey}");
+                    DumpFields(r, "  ", 0);
+                }
+                return 0;
+                static void DumpFields(object? o, string indent, int depth)
+                {
+                    if (o is null || depth > 4) return;
+                    foreach (var p in o.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+                    {
+                        if (p.GetIndexParameters().Length > 0 || p.Name is "Registration" or "StaticRegistration" or "EditorID" or "FormKey" or "ContainedFormLinks" or "EnumerateFormLinks") continue;
+                        object? v;
+                        try { v = p.GetValue(o); } catch { continue; }
+                        if (v is null) { Console.WriteLine($"{indent}{p.Name}: null"); continue; }
+                        var vt = v.GetType();
+                        if (vt.IsPrimitive || vt.IsEnum || v is string || v is System.Drawing.Color || vt.Name.StartsWith("FormLink") || vt.Name.StartsWith("AssetLink") || vt.Name.StartsWith("P3") || vt.Name.StartsWith("P2") || vt.Name is "Percent" or "TimeOnly" or "FormKey")
+                            Console.WriteLine($"{indent}{p.Name}: {v}");
+                        else if (v is System.Collections.IEnumerable list && v is not string)
+                        {
+                            int i = 0;
+                            foreach (var item in list)
+                            {
+                                if (i++ >= 40) { Console.WriteLine($"{indent}  ..."); break; }
+                                var it = item?.GetType();
+                                if (it is null || it.IsPrimitive || item is string || it.Name.StartsWith("FormLink") || it.Name.StartsWith("AssetLink")) Console.WriteLine($"{indent}{p.Name}[{i - 1}]: {item}");
+                                else { Console.WriteLine($"{indent}{p.Name}[{i - 1}]:"); DumpFields(item, indent + "  ", depth + 1); }
+                            }
+                        }
+                        else if (vt.Namespace?.StartsWith("Mutagen") == true || vt.Namespace?.StartsWith("Noggog") == true) { Console.WriteLine($"{indent}{p.Name}:"); DumpFields(v, indent + "  ", depth + 1); }
+                        else Console.WriteLine($"{indent}{p.Name}: {v}");
+                    }
+                }
             }
             case "mw-fx-census":
             {
@@ -5059,7 +5312,7 @@ static class Program
             {
                 // Dev aid: records of --plugin (default Skyrim.esm) whose editor ID matches --edid (a regex), with type and
                 // form ID; --type limits the record type (e.g. SoundDescriptor).
-                string plugin = opts.GetValueOrDefault("plugin", Path.Combine(skyrimData, "Skyrim.esm"));
+                string plugin = Path.Combine(skyrimData, opts.GetValueOrDefault("plugin", "Skyrim.esm"));   // a file name is in Skyrim's Data
                 var re = new System.Text.RegularExpressions.Regex(opts["edid"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 using var m = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
                 foreach (var r in m.EnumerateMajorRecords().Where(r => r.EditorID is { } e && re.IsMatch(e)

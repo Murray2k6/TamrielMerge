@@ -240,8 +240,9 @@ public sealed partial class ObPluginBuilder
         return ammo;
     }
 
-    /// <summary>The Skyrim slot template for an Oblivion biped part; parts Skyrim has no slot for (greaves) take an
-    /// unused slot with no worn look.</summary>
+    /// <summary>The vanilla template an Oblivion biped part's record is based on (keywords, sounds, armour type), and
+    /// the slot it falls back to if its worn look can't be made: greaves, which Skyrim has no slot for, an unused one,
+    /// drawing nothing. The worn look itself and its slots: ObWorn.</summary>
     static (string Heavy, string Light, BipedObjectFlag? Slot) ArmorTemplate(Ob.BipedFlag f) =>
         f.HasFlag(Ob.BipedFlag.UpperBody) ? ("ArmorIronCuirass", "ArmorLeatherCuirass", null)
         : f.HasFlag(Ob.BipedFlag.Head) || f.HasFlag(Ob.BipedFlag.Hair) ? ("ArmorIronHelmet", "ArmorLeatherHelmet", null)
@@ -256,7 +257,8 @@ public sealed partial class ObPluginBuilder
         var flags = a.ClothingFlags?.BipedFlags ?? 0;
         bool heavy = a.ClothingFlags?.GeneralFlags.HasFlag(Ob.EquipmentFlag.HeavyArmor) == true;
         var (h, l, slot) = ArmorTemplate(flags);
-        return Wearable(Vanilla.Get<IArmorGetter>(heavy ? h : l)!, edid, a.Name, a.MaleWorldModel?.File, a.Data?.Weight ?? 0, a.Data?.Value ?? 0, (a.Data?.ArmorValue ?? 0) / 100f * 1.5f, slot);
+        return Wearable(Vanilla.Get<IArmorGetter>(heavy ? h : l)!, edid, a.Name, a.MaleWorldModel?.File, a.Data?.Weight ?? 0, a.Data?.Value ?? 0, (a.Data?.ArmorValue ?? 0) / 100f * 1.5f, slot,
+            (a.MaleBipedModel?.File, a.FemaleBipedModel?.File, flags, true));
     }
 
     IMajorRecord ClothingItem(string edid, Ob.IClothingGetter c)
@@ -271,10 +273,14 @@ public sealed partial class ObPluginBuilder
             : f.HasFlag(Ob.BipedFlag.Head) || f.HasFlag(Ob.BipedFlag.Hair) ? ("ClothesFarmHat", null)
             : ("ClothesFarmClothes01", VanillaActors.Slot(52));
         var vanilla = Vanilla.Get<IArmorGetter>(template) ?? Vanilla.Get<IArmorGetter>("ClothesFarmClothes01")!;
-        return Wearable(vanilla, edid, c.Name, c.MaleWorldModel?.File, c.Data?.Weight ?? 0, c.Data?.Value ?? 0, 0, slot);
+        return Wearable(vanilla, edid, c.Name, c.MaleWorldModel?.File, c.Data?.Weight ?? 0, c.Data?.Value ?? 0, 0, slot,
+            (c.MaleBipedModel?.File, c.FemaleBipedModel?.File, f, false));
     }
 
-    IMajorRecord Wearable(IArmorGetter template, string edid, string? name, string? model, float weight, uint value, float rating, BipedObjectFlag? slot)
+    /// <param name="worn">Oblivion's worn models (male, female) and biped flags (ObWorn: its own worn look).</param>
+    /// <param name="slot">The slot used if the worn look can't be made, for parts Skyrim has no slot for.</param>
+    IMajorRecord Wearable(IArmorGetter template, string edid, string? name, string? model, float weight, uint value, float rating, BipedObjectFlag? slot,
+        (string? Male, string? Female, Ob.BipedFlag Flags, bool Armour) worn)
     {
         var a = mod.Armors.DuplicateInAsNewRecord(template);
         a.EditorID = edid;
@@ -283,12 +289,7 @@ public sealed partial class ObPluginBuilder
         a.Value = value;
         a.Weight = weight;
         a.ArmorRating = rating;
-        if (slot is { } s)
-        {
-            a.BodyTemplate ??= new BodyTemplate();
-            a.BodyTemplate.FirstPersonFlags = s;
-            a.Armature.Clear();
-        }
+        ApplyWornLook(a, worn.Male, worn.Female, worn.Flags, worn.Armour, template, slot);
         if (ItemMesh(model, weight) is { } mesh)
         {
             var world = new ArmorModel { Model = new Model { File = SkyrimModelPath(mesh.Path) } };

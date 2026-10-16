@@ -10,7 +10,7 @@ namespace TamrielMerge.Morrowind;
 /// Morrowind's items and containers as Skyrim records. Each item type is based on a similar vanilla record (a
 /// longsword on the Iron Sword, a cuirass on Iron Armor, ...) so every field Skyrim needs is valid, then given
 /// Morrowind's name, model, value, weight and stats. Loose items' models get dynamic physics. Worn armour and
-/// clothing look like their Skyrim template for now: Morrowind's are fitted to Morrowind's skeleton.
+/// clothing wear Morrowind's own body parts, re-rigged onto Skyrim's skeleton and fitted over its body (MwWorn).
 /// </summary>
 public sealed partial class MwPluginBuilder
 {
@@ -24,14 +24,20 @@ public sealed partial class MwPluginBuilder
 
     T Vanilla<T>(string editorId) where T : class, IMajorRecordGetter
     {
-        if (vanilla is null)
-        {
-            skyrimEsm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(SkyrimData ?? throw new InvalidOperationException("SkyrimData not set"), "Skyrim.esm"), SkyrimRelease.SkyrimSE);
-            vanilla = new(StringComparer.OrdinalIgnoreCase);
-            foreach (var r in skyrimEsm.EnumerateMajorRecords())
-                if (r.EditorID is { } e && r is IWeaponGetter or IArmorGetter or IAmmunitionGetter or IMagicEffectGetter or IContainerGetter) vanilla.TryAdd(e, r);
-        }
-        return vanilla[editorId] as T ?? throw new KeyNotFoundException($"vanilla {typeof(T).Name} {editorId}");
+        LoadVanilla();
+        return vanilla![editorId] as T ?? throw new KeyNotFoundException($"vanilla {typeof(T).Name} {editorId}");
+    }
+
+    /// <summary>Skyrim.esm (opened on first use).</summary>
+    ISkyrimModDisposableGetter SkyrimEsm { get { LoadVanilla(); return skyrimEsm!; } }
+
+    void LoadVanilla()
+    {
+        if (vanilla is not null) return;
+        skyrimEsm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(SkyrimData ?? throw new InvalidOperationException("SkyrimData not set"), "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+        vanilla = new(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in skyrimEsm.EnumerateMajorRecords())
+            if (r.EditorID is { } e && r is IWeaponGetter or IArmorGetter or IAmmunitionGetter or IMagicEffectGetter or IContainerGetter) vanilla.TryAdd(e, r);
     }
 
     static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
@@ -292,8 +298,9 @@ public sealed partial class MwPluginBuilder
         return w;
     }
 
-    /// <summary>Morrowind armour part -> vanilla template and the Skyrim slot it takes. Parts Skyrim has no slot for
-    /// (pauldrons, greaves, left gauntlets and bracers) take unused slots and have no worn look.</summary>
+    /// <summary>Morrowind armour part -> the vanilla template its record is based on (keywords, sounds, armour type),
+    /// and the slot it falls back to if its worn look can't be made: parts Skyrim has no slot for (pauldrons, greaves,
+    /// left gauntlets and bracers) an unused one, drawing nothing. The worn look itself and its slots: MwWorn.</summary>
     static (string Template, BipedObjectFlag? Slot) ArmorTemplate(int type) => type switch
     {
         0 => ("ArmorIronHelmet", null), 1 => ("ArmorIronCuirass", null), 2 => ("ArmorIronCuirass", Slot(57)),
@@ -323,7 +330,8 @@ public sealed partial class MwPluginBuilder
             return a;
         }
         var (template, slot) = ArmorTemplate(type);
-        return Wearable(Vanilla<IArmorGetter>(template), edid, name, model, weight, value, rating * 1.5f, slot);
+        bool coversHead = WornParts(rec).Any(p => p.Index == 0);
+        return Wearable(Vanilla<IArmorGetter>(template), rec, edid, name, model, weight, value, rating * 1.5f, ArmorLook(type, coversHead), slot);
     }
 
     Skyrim.VanillaActors? canonForms;
@@ -390,8 +398,8 @@ public sealed partial class MwPluginBuilder
         return null;
     }
 
-    /// <summary>Morrowind clothing -> vanilla clothes of the same kind (shirts and robes as farm clothes, shoes as
-    /// boots, rings and amulets as jewellery); pants, belts, skirts and gloves take unused slots.</summary>
+    /// <summary>Morrowind clothing on a record of vanilla clothes of the same kind (shirts and robes on farm clothes,
+    /// shoes on boots, rings and amulets on jewellery), wearing Morrowind's own look in its slots (MwWorn).</summary>
     IMajorRecord ClothingItem(Tes3Record rec, string edid, string? name, string? model)
     {
         var d = rec.Get("CTDT")!.Value;
@@ -407,10 +415,13 @@ public sealed partial class MwPluginBuilder
             6 => ("ClothesJarlGloves", Slot(60)),   // left glove; the right one is Skyrim's hands
             _ => ("ClothesJarlGloves", null),
         };
-        return Wearable(Vanilla<IArmorGetter>(template), edid, name, model, weight, value, 0, slot);
+        return Wearable(Vanilla<IArmorGetter>(template), rec, edid, name, model, weight, value, 0, ClothingLook(type), slot);
     }
 
-    IMajorRecord Wearable(IArmorGetter template, string edid, string? name, string? model, float weight, int value, float rating, BipedObjectFlag? slot)
+    /// <param name="look">Morrowind's worn look (MwWorn); null for items Morrowind draws nothing for when worn.</param>
+    /// <param name="slot">The slot used if the worn look can't be made, for parts Skyrim has no slot of its own for
+    /// (those then draw nothing); null keeps the template's slots and look.</param>
+    IMajorRecord Wearable(IArmorGetter template, Tes3Record rec, string edid, string? name, string? model, float weight, int value, float rating, WornLook? look, BipedObjectFlag? slot)
     {
         var a = mod.Armors.DuplicateInAsNewRecord(template);
         a.EditorID = edid;
@@ -419,13 +430,7 @@ public sealed partial class MwPluginBuilder
         a.Value = (uint)Math.Max(0, value);
         a.Weight = weight;
         a.ArmorRating = rating;
-        if (slot is { } s)
-        {
-            // A part Skyrim has no slot for: its own unused slot, nothing drawn when worn.
-            a.BodyTemplate ??= new BodyTemplate();
-            a.BodyTemplate.FirstPersonFlags = s;
-            a.Armature.Clear();
-        }
+        ApplyWornLook(a, rec, look, template, slot);
         if (ItemMesh(model, weight) is { } mesh)
         {
             var world = new ArmorModel { Model = new Model { File = SkyrimModelPath(mesh.Path) } };

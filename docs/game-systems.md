@@ -85,6 +85,7 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 |---|---|---|
 | Interiors, exteriors, terrain, doors | done | |
 | Items, containers, leveled lists | done | |
+| Worn armour and clothing look | done, untested in game | Morrowind's own body parts re-rigged onto Skyrim's skeleton and fitted over its body (2026-10-15; they had looked like their Skyrim template); Skyrim's remakes of the canon sets kept; docs/worn-armour.md |
 | NPCs and creatures | done | |
 | Dialogue, journal, greetings | done | |
 | Disposition, persuasion (admire/intimidate/taunt/bribe) | done | |
@@ -106,7 +107,7 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | Diseases, blight, corprus | missing | |
 | Vampirism (3 clans), werewolves (Bloodmoon) | missing | |
 | Strongholds, Raven Rock colony | partial | their scripts run (docs/morrowind-scripts.md); not checked in game |
-| Weather: ash and blight storms, snow | missing | |
+| Weather: ash and blight storms, snow; climates; water | done, untested in game | Morrowind's ten weathers from Morrowind.ini (sky, fog, light, clouds, rain/snow drawn with its drops and flakes, its ash/blight/blizzard storm models, its sounds), a climate per region, its water at sea level 0 (2026-10-15; they had been Skyrim's); docs/morrowind-weather.md |
 | Rest rules, sleep interruption from region lists | missing | |
 | Tribunal Museum of Artifacts, mercenaries | partial | their scripts run (docs/morrowind-scripts.md); not checked in game |
 
@@ -116,6 +117,7 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 |---|---|---|
 | World, interiors, terrain, doors | done | moving parts (secret walls, gates, levers, drawbridges) keep their animation; doors with Open/Close sequences open by it |
 | Items, containers, leveled lists | done | |
+| Worn armour and clothing look | done, untested in game | Oblivion's own biped models re-rigged onto Skyrim's skeleton and fitted over its body (2026-10-15; they had looked like their Skyrim template); docs/worn-armour.md |
 | Dialogue, voices, quests | done | |
 | Game scripts | done | translator (vanilla and OBSE): every statement translated (46,945 of 46,945 in the official plugins), MenuMode, OnAlarm, script packages, crimes, misc stats, gates through TMObState; see [oblivion-scripts.md](oblivion-scripts.md) |
 | Disposition | done | |
