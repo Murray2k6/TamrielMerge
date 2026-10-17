@@ -2456,6 +2456,36 @@ static class Program
                 }
                 return failed == 0 ? 0 : 2;
             }
+            case "df-stair-lintels":
+            {
+                // Every dungeon block's flights whose 44-degree ramp would have run on under a low lintel (FlightRamp now ends
+                // them before it, steeper): the block, the flight, and how many dungeons use the block (user, 2026-10-17: "do
+                // any of the other dungeons have the same issue" as Privateer's Hold's first stairs).
+                var models = DfModel.LoadAll(arena2);
+                var bsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                float gentle = 1 / MathF.Tan(44 * MathF.PI / 180);
+                var hit = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                int blocksSeen = 0, flightsSeen = 0;
+                foreach (var e in bsa.Entries.Where(e => e.Name.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase)))
+                {
+                    DfDungeonBlock b;
+                    try { b = DfDungeonBlock.Load(bsa, e.Name); } catch { continue; }
+                    blocksSeen++;
+                    foreach (var (top, down, n, height, run, free, lip) in Skyrim.Meshes.BlockMeshBuilder.FlightReport(b, models))
+                    {
+                        flightsSeen++;
+                        if (run >= height * gentle - 1 && lip < 0.5f) continue;
+                        hit[b.Name] = hit.GetValueOrDefault(b.Name) + 1;
+                        if (opts.ContainsKey("list"))
+                            Console.WriteLine($"  {b.Name}: flight at {top.X:F0},{top.Y:F0},{top.Z:F0} down ({down.X:F2},{down.Y:F2}), {n} steps, {height:F0} high: ramp {run:F0} instead of {height * gentle:F0} ({MathF.Atan((height - lip) / run) * 180 / MathF.PI:F1} deg){(lip > 0.5f ? $", from {lip:F0} under the top nosing" : "")}");
+                    }
+                }
+                var dungeons = DfLocations.LoadAll(arena2).Where(l => l.DungeonBlocks.Count > 0)
+                    .Where(l => l.DungeonBlocks.Any(db => hit.ContainsKey(db.BlockName))).ToList();
+                Console.WriteLine($"{blocksSeen} dungeon blocks, {flightsSeen} flights: {hit.Values.Sum()} flights in {hit.Count} blocks end before a low lintel ({string.Join(", ", hit.OrderByDescending(h => h.Value).Select(h => $"{h.Key} {h.Value}"))})");
+                Console.WriteLine($"{dungeons.Count} dungeons use those blocks, e.g. {string.Join(", ", dungeons.Take(12).Select(l => l.Name))}");
+                return 0;
+            }
             case "df-stairs":
             {
                 // Dev aid: Daggerfall's stair risers over the dungeon blocks: rise against the tread in front, as a histogram
@@ -2538,8 +2568,8 @@ static class Program
                         if (opts.ContainsKey("flights"))
                         {
                             var place = flightOrigins.GetValueOrDefault(block.Name);
-                            foreach (var (top, down, n, height, run, free) in Skyrim.Meshes.BlockMeshBuilder.FlightReport(block, models))
-                                Console.WriteLine($"  flight at {top.X + place.X:F0},{top.Y + place.Y:F0},{top.Z + place.Z:F0} down ({down.X:F2},{down.Y:F2}): {n} steps, {height:F0} high, ramp run {run:F0}, free floor {free:F0}{(run > free + 8 ? "  <-- ramp runs into a wall" : "")}");
+                            foreach (var (top, down, n, height, run, free, lip) in Skyrim.Meshes.BlockMeshBuilder.FlightReport(block, models))
+                                Console.WriteLine($"  flight at {top.X + place.X:F0},{top.Y + place.Y:F0},{top.Z + place.Z:F0} down ({down.X:F2},{down.Y:F2}): {n} steps, {height:F0} high, ramp run {run:F0}{(lip > 0.5f ? $" from {lip:F0} under the top" : "")}, free floor {free:F0}{(run > free + 8 ? "  <-- ramp runs into a wall" : "")}");
                         }
                     }
                     if (opts.ContainsKey("name"))

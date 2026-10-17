@@ -241,7 +241,7 @@ public static class BlockMeshBuilder
     /// Daggerfall dungeon block as the converter sees it - its top step's middle (block mesh units), the way down,
     /// steps, height, the ramp's run, and the free floor beyond its last step before a wall at knee height.
     /// </summary>
-    public static List<(Vector3 Top, Vector2 Down, int Steps, float Height, float RampRun, float Free)> FlightReport(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models)
+    public static List<(Vector3 Top, Vector2 Down, int Steps, float Height, float RampRun, float Free, float Lip)> FlightReport(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models)
     {
         var polys = Polygons(block, models);
         var solid = polys.Where(p => p.Solid).ToList();
@@ -260,16 +260,18 @@ public static class BlockMeshBuilder
         }
         steps.AddRange(EdgeSteps(treads, rules));
         var walls = solid.Where(p => MathF.Abs(p.N.Z) < 0.5f).ToList();
-        var report = new List<(Vector3, Vector2, int, float, float, float)>();
+        var report = new List<(Vector3, Vector2, int, float, float, float, float)>();
         foreach (var flight in Flights(steps).Where(f => f.Count >= rules.MinFlight))
         {
             var ramp = FlightRamp(flight, treads, solid.Where(p => p.N.Z < -0.3f).ToList());
-            // The ramp's run to the floor (its corners run on RampSink further, under it).
-            float run = Vector2.Dot(new Vector2(ramp.Pts[0].X, ramp.Pts[0].Y) - flight[0].Mid, flight[0].Out) * (flight[0].Top - flight[^1].Foot) / (flight[0].Top - flight[^1].Foot + RampSink);
+            // The ramp's run to the floor (its corners run on RampSink further, under it), and how far under the top nosing
+            // it starts.
+            float lip = flight[0].Top - ramp.Pts[2].Z, rampHeight = flight[0].Top - lip - flight[^1].Foot;
+            float run = Vector2.Dot(new Vector2(ramp.Pts[0].X, ramp.Pts[0].Y) - flight[0].Mid, flight[0].Out) * rampHeight / (rampHeight + RampSink);
             var last = flight[^1];
             var foot = last.Mid + last.Out * 2;
             float free = WallDistance(walls, foot, last.Out, last.Foot + 40, 4000) + Vector2.Dot(foot - flight[0].Mid, flight[0].Out);
-            report.Add((new Vector3(flight[0].Mid, flight[0].Top), flight[0].Out, flight.Count, flight[0].Top - last.Foot, run, free));
+            report.Add((new Vector3(flight[0].Mid, flight[0].Top), flight[0].Out, flight.Count, flight[0].Top - last.Foot, run, free, lip));
         }
         return report;
     }
@@ -347,6 +349,8 @@ public static class BlockMeshBuilder
     static readonly float SteepRunPerRise = 1 / MathF.Tan(SteepRampDegrees * MathF.PI / 180);
     /// <summary>Head room a ramp's run-out must leave under a lintel or ceiling (a person, with room to spare).</summary>
     const float RampHeadRoom = 150f;
+    /// <summary>The most a ramp may start below its top nosing: a stair-material step the player climbs (~24, measured).</summary>
+    const float MaxRampLip = 24f;
 
     static (Vector3[] Pts, Vector3 N, Tex Tex, bool Solid) FlightRamp(List<Step> flight, List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)> treads,
         List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)>? overhead = null)
@@ -367,6 +371,9 @@ public static class BlockMeshBuilder
         // first stairs, 504 high over 488, end in a doorway whose lintel is 180 up; at 44 degrees the ramp ran 59 on through
         // it, 41 over its floor, and the player couldn't fit under): it ends where the low lintel begins instead, as steep as
         // that needs, up to vanilla's 47 (there, 46).
+        // Where even 47 degrees would run on under it (short flights of two 40-unit steps), the ramp starts below the top
+        // nosing instead, by up to MaxRampLip: the top step's riser stays stair material, which the player steps up.
+        float lip = 0;
         if (overhead is { Count: > 0 } && run > natural + 4)
         {
             float? lintel = null;
@@ -376,8 +383,17 @@ public static class BlockMeshBuilder
                 foreach (var c in overhead)
                     if (FloorHeight(c.Pts, q) is { } h && h > last.Foot && h - last.Foot < RampHeadRoom + 60) { lintel = t; break; }
             }
-            if (lintel is { } at) run = Math.Clamp(at, height * SteepRunPerRise, run);
+            if (lintel is { } at)
+            {
+                run = Math.Clamp(at, height * SteepRunPerRise, run);
+                if (at < height * SteepRunPerRise)
+                {
+                    lip = MathF.Min(height - at / SteepRunPerRise, MaxRampLip);
+                    run = (height - lip) * SteepRunPerRise;
+                }
+            }
         }
+        height -= lip;
         // Across: as wide as the widest step of the flight.
         float lo = float.MaxValue, hi = float.MinValue;
         foreach (var st in flight)
@@ -396,7 +412,7 @@ public static class BlockMeshBuilder
         // player doesn't step up plain edges. Continued at its own slope until RampSink below the foot, the part under the
         // floor hidden in it, the floor runs into the ramp.
         float sinkRun = RampSink * run / MathF.Max(height, 1);
-        Vector3[] ramp = [At(lo, run + sinkRun, last.Foot - RampSink), At(hi, run + sinkRun, last.Foot - RampSink), At(hi, 0, top.Top), At(lo, 0, top.Top)];
+        Vector3[] ramp = [At(lo, run + sinkRun, last.Foot - RampSink), At(hi, run + sinkRun, last.Foot - RampSink), At(hi, 0, top.Top - lip), At(lo, 0, top.Top - lip)];
         var n = Vector3.Normalize(Vector3.Cross(ramp[1] - ramp[0], ramp[2] - ramp[0]));
         if (n.Z < 0) n = -n;
         return (ramp, n, top.Tex with { Stairs = false }, true);
