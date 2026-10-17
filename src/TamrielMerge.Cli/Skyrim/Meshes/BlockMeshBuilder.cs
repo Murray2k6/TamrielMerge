@@ -170,7 +170,9 @@ public static class BlockMeshBuilder
                 FloorHeight(p.Pts, st.Mid + st.Out * 6) is { } down && MathF.Abs(down - st.Foot) < 3);
             result.Add(stair ? (p.Pts, p.N, p.Tex with { Stairs = true }, true) : p);
         }
-        foreach (var flight in flights) result.Add(FlightRamp(flight, treads));
+        // Lintels and ceilings (any face turned down) the ramps' run-outs must stay clear under.
+        var overhead = solid.Where(p => p.N.Z < -0.3f).ToList();
+        foreach (var flight in flights) result.Add(FlightRamp(flight, treads, overhead));
         return result;
     }
 
@@ -261,8 +263,9 @@ public static class BlockMeshBuilder
         var report = new List<(Vector3, Vector2, int, float, float, float)>();
         foreach (var flight in Flights(steps).Where(f => f.Count >= rules.MinFlight))
         {
-            var ramp = FlightRamp(flight, treads);
-            float run = Vector2.Dot(new Vector2(ramp.Pts[0].X, ramp.Pts[0].Y) - flight[0].Mid, flight[0].Out);
+            var ramp = FlightRamp(flight, treads, solid.Where(p => p.N.Z < -0.3f).ToList());
+            // The ramp's run to the floor (its corners run on RampSink further, under it).
+            float run = Vector2.Dot(new Vector2(ramp.Pts[0].X, ramp.Pts[0].Y) - flight[0].Mid, flight[0].Out) * (flight[0].Top - flight[^1].Foot) / (flight[0].Top - flight[^1].Foot + RampSink);
             var last = flight[^1];
             var foot = last.Mid + last.Out * 2;
             float free = WallDistance(walls, foot, last.Out, last.Foot + 40, 4000) + Vector2.Dot(foot - flight[0].Mid, flight[0].Out);
@@ -339,7 +342,14 @@ public static class BlockMeshBuilder
     /// last step, along the flight's nosings (or, for one step, to the end of the tread below it, one to two rises out),
     /// or at MaxRampDegrees if that is gentler. Plain material, as vanilla's ramps.
     /// </summary>
-    static (Vector3[] Pts, Vector3 N, Tex Tex, bool Solid) FlightRamp(List<Step> flight, List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)> treads)
+    /// <summary>The steepest a ramp is laid where a gentler one would run out under a low lintel: vanilla's steepest.</summary>
+    const float SteepRampDegrees = 47f;
+    static readonly float SteepRunPerRise = 1 / MathF.Tan(SteepRampDegrees * MathF.PI / 180);
+    /// <summary>Head room a ramp's run-out must leave under a lintel or ceiling (a person, with room to spare).</summary>
+    const float RampHeadRoom = 150f;
+
+    static (Vector3[] Pts, Vector3 N, Tex Tex, bool Solid) FlightRamp(List<Step> flight, List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)> treads,
+        List<(Vector3[] Pts, Vector3 N, Tex Tex, bool Solid)>? overhead = null)
     {
         var top = flight[0]; var last = flight[^1];
         float height = top.Top - last.Foot;
@@ -353,6 +363,21 @@ public static class BlockMeshBuilder
             natural = height / MathF.Max(slope, 1e-3f);
         }
         float run = MathF.Max(natural, height * RampRunPerRise);
+        // The gentle ramp's run-out beyond the foot of the stairs under a doorway's lintel (2026-10-17: Privateer's Hold's
+        // first stairs, 504 high over 488, end in a doorway whose lintel is 180 up; at 44 degrees the ramp ran 59 on through
+        // it, 41 over its floor, and the player couldn't fit under): it ends where the low lintel begins instead, as steep as
+        // that needs, up to vanilla's 47 (there, 46).
+        if (overhead is { Count: > 0 } && run > natural + 4)
+        {
+            float? lintel = null;
+            for (float t = natural; t <= run && lintel is null; t += 4)
+            {
+                var q = top.Mid + top.Out * t;
+                foreach (var c in overhead)
+                    if (FloorHeight(c.Pts, q) is { } h && h > last.Foot && h - last.Foot < RampHeadRoom + 60) { lintel = t; break; }
+            }
+            if (lintel is { } at) run = Math.Clamp(at, height * SteepRunPerRise, run);
+        }
         // Across: as wide as the widest step of the flight.
         float lo = float.MaxValue, hi = float.MinValue;
         foreach (var st in flight)

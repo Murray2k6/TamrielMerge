@@ -378,17 +378,18 @@ public static class DungeonCheck
         void FloorGrid(Vector3 centre, Vector3 facing, float sill)
         {
             var across = new Vector3(facing.Y, -facing.X, 0);
+            float step = float.TryParse(Environment.GetEnvironmentVariable("TM_CHECK_GRID_STEP"), out var gs) ? gs : 24;
             for (int ti = 8; ti >= -8; ti--)
             {
                 var row = new List<string>();
                 for (int si = -8; si <= 8; si++)
                 {
-                    var q = centre + facing * (ti * 24) + across * (si * 24);
+                    var q = centre + facing * (ti * step) + across * (si * step);
                     var fl = FloorBelow(q.X, q.Y, sill + 300);
                     var ce = fl is { } ff ? CeilingAbove(q.X, q.Y, ff + 16) : null;
                     row.Add(fl is null ? "   .   " : $"{fl - sill,4:F0}/{(ce is { } cc ? (cc - fl!.Value).ToString("F0") : "-"),-3}");
                 }
-                Console.WriteLine($"    t {ti * 24,4}: " + string.Join(" ", row));
+                Console.WriteLine($"    t {ti * step,5:F0}: " + string.Join(" ", row));
             }
         }
         if (Environment.GetEnvironmentVariable("TM_CHECK_GRID_AT") is { } gat && gat.Split(',') is [var gc, .. var gv] && gc == cellName && gv.Length == 5)
@@ -396,6 +397,20 @@ public static class DungeonCheck
             var g = gv.Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
             Console.WriteLine($"  grid at {g[0]},{g[1]},{g[2]} facing {g[3]},{g[4]}");
             FloorGrid(new Vector3(g[0], g[1], g[2]), Vector3.Normalize(new Vector3(g[3], g[4], 0)), g[2]);
+        }
+
+        // Debugging (TM_CHECK_DOORS): each knapsack (Daggerfall's random treasure) and the door nearest it, to find a place a
+        // player describes by them.
+        if (Environment.GetEnvironmentVariable("TM_CHECK_DOORS") == cellName)
+        {
+            var doorRefs = refs.OfType<IPlacedObjectGetter>().Where(d => bases.TryGetValue(d.Base.FormKey, out var db) && db.Type == "Door" && d.Placement is not null).ToList();
+            foreach (var k in refs.OfType<IPlacedObjectGetter>().Where(k => bases.TryGetValue(k.Base.FormKey, out var kb) && kb.EditorId == "TreasKnapsack"))
+            {
+                var kp = k.Placement!.Position;
+                var nd = doorRefs.OrderBy(d => (d.Placement!.Position.X - kp.X) * (d.Placement.Position.X - kp.X) + (d.Placement.Position.Y - kp.Y) * (d.Placement.Position.Y - kp.Y) + (d.Placement.Position.Z - kp.Z) * (d.Placement.Position.Z - kp.Z)).FirstOrDefault();
+                var dp = nd?.Placement!.Position;
+                Console.WriteLine($"  knapsack {k.FormKey} at {kp.X:F0},{kp.Y:F0},{kp.Z:F0}; nearest door {nd?.FormKey} {bases[nd!.Base.FormKey].EditorId} at {dp?.X:F0},{dp?.Y:F0},{dp?.Z:F0}");
+            }
         }
 
         // Doorways (DoorPlacer's Skyrim doors): the way through, 96 units either side of the doorway, must leave a person
@@ -417,6 +432,20 @@ public static class DungeonCheck
             float room = float.MaxValue, roomAt = 0, step = 0, stepAt = 0;
             bool trace = Environment.GetEnvironmentVariable("TM_CHECK_DOORS") == cellName;
             if (trace) Console.WriteLine($"  door {r.FormKey} at {centre.X:F0},{centre.Y:F0} sill {sill:F0} facing {facing.X:F2},{facing.Y:F2} scale {sc:F2} lintel {lintel:F0}");
+            if (trace)
+            {
+                // Stairs near the doorway: the floor's highest and lowest within 200 units (by 16), near the sill's height,
+                // and how near the nearest rise of over 16 is.
+                float hi = sill, lo = sill, nearest = float.MaxValue;
+                for (float dx = -200; dx <= 200; dx += 16)
+                    for (float dy = -200; dy <= 200; dy += 16)
+                        if (FloorBelow(centre.X + dx, centre.Y + dy, sill + 160) is { } fl && fl > sill - 160)
+                        {
+                            hi = MathF.Max(hi, fl); lo = MathF.Min(lo, fl);
+                            if (MathF.Abs(fl - sill) > 16) nearest = MathF.Min(nearest, MathF.Sqrt(dx * dx + dy * dy));
+                        }
+                if (hi - lo > 24) Console.WriteLine($"    STAIRS? floor {lo - sill:F0}..{hi - sill:F0} round the sill, the nearest step {nearest:F0} from the doorway's middle");
+            }
             if (trace && Environment.GetEnvironmentVariable("TM_CHECK_DOOR_GRID") is { } gid && r.FormKey.ID.ToString("X6") == gid) FloorGrid(centre, facing, sill);
             foreach (int side in new[] { 1, -1 })
             {
