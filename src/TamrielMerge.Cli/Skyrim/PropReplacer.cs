@@ -241,7 +241,10 @@ public sealed class PropReplacer
     public (Vector3 Min, Vector3 Max, Vector2 Back) SkyrimShape(FormKey key)
     {
         if (skyrimShapes.TryGetValue(key, out var shape)) return shape;
-        return SkyrimShape(skyrim.EnumerateMajorRecords().First(r => r.FormKey == key));
+        // Not Skyrim's and not registered (AddShape): no shape, rather than failing the dungeon (2026-10-17: Daggerfall's
+        // own items on dungeon floors failed 18% of the dungeons when their clutter was settled).
+        if (skyrim.EnumerateMajorRecords().FirstOrDefault(r => r.FormKey == key) is { } record) return SkyrimShape(record);
+        lock (skyrimShapes) return skyrimShapes[key] = (Vector3.Zero, Vector3.Zero, Vector2.Zero);
     }
 
     /// <summary><see cref="SkyrimShape(FormKey)"/> for a record already in hand (any plugin's).</summary>

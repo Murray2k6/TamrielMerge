@@ -102,7 +102,13 @@ public static class DaggerfallDungeons
                 if (iliacBay is { } l) b.Cell.Location.SetTo(l);
                 inFlight.Enqueue((loc, b));
             }
-            catch (Exception e) { failed++; Console.WriteLine($"  {loc.Name}: {e.Message}"); }
+            catch (Exception e)
+            {
+                failed++;
+                // Where in the converter it failed (the innermost of its own frames).
+                string? at = e.StackTrace?.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Contains("TamrielMerge."));
+                Console.WriteLine($"  {loc.Name}: {e.Message}{(at is null ? "" : $" ({at})")}");
+            }
             while (inFlight.Count > window) FinishOldest();
         }
         double waitStart = clock.Elapsed.TotalSeconds;

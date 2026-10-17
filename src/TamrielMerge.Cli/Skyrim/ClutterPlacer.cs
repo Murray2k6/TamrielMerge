@@ -109,6 +109,7 @@ public sealed class ClutterPlacer
         if (dfItems is not null && o.TextureArchive == 207 && DfItems.FloorSprites.TryGetValue(o.TextureRecord, out var kinds)
             && dfItems($"{(hash / 11 % 3 == 0 ? "Steel" : "Iron")} {kinds[hash / 7 % (uint)kinds.Length]}") is { } item)
         {
+            shapes.AddShape(item.Key, item.Min, item.Max);   // for settling (Daggerfall.esm's items aren't Skyrim's)
             yield return new Placement(item.Key, new Vector3(centreSkyrim.X, centreSkyrim.Y, anchorZ - item.Min.Z + 1), new Vector3(0, 0, heading), 1, true,
                 "daggerfall item", Mount.Floor);
             yield break;
@@ -157,7 +158,12 @@ public sealed class ClutterPlacer
     Form? Resolve(string id, uint hash)
     {
         if (id == Book)
-            return dfBooks.Count == 0 ? null : new Form(dfBooks[(int)(hash % (uint)dfBooks.Count)], new Vector3(-9, -11, -2), new Vector3(9, 11, 2), true);
+        {
+            if (dfBooks.Count == 0) return null;
+            var book = new Form(dfBooks[(int)(hash % (uint)dfBooks.Count)], new Vector3(-9, -11, -2), new Vector3(9, 11, 2), true);
+            shapes.AddShape(book.Key, book.Min, book.Max);   // for settling (Daggerfall.esm's books aren't Skyrim's)
+            return book;
+        }
         if (forms.GetValueOrDefault(id) is not { } f) return null;
         var (min, max, _) = shapes.SkyrimShape(f.Key);
         return f with { Min = min, Max = max };
