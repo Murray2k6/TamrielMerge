@@ -14,8 +14,11 @@ namespace TamrielMerge.Oblivion;
 public sealed partial class ObMeshConverter
 {
     const string OldHeader = "NetImmerse File Format, Version 10.0.1.2\n";
+    /// <summary>The oldest of Oblivion's models (2026-10-17: a scythe, an oar, a trapdoor): as 10.0.1.2, but its header
+    /// has no user version or export info.</summary>
+    const string OlderHeader = "NetImmerse File Format, Version 10.0.1.0\n";
 
-    static bool IsOldNif(byte[] b) => b.Length > OldHeader.Length && Encoding.ASCII.GetString(b, 0, OldHeader.Length) == OldHeader;
+    static bool IsOldNif(byte[] b) => b.Length > OldHeader.Length && Encoding.ASCII.GetString(b, 0, OldHeader.Length) is OldHeader or OlderHeader;
 
     sealed class OldReader(byte[] b)
     {
@@ -49,14 +52,49 @@ public sealed partial class ObMeshConverter
         public List<(ushort, ushort, ushort)> Tris = [];
     }
 
-    /// <summary>The pieces of a 10.0.1.2 model, or null when it uses a block this doesn't read.</summary>
+    /// <summary>A 10.0.1.2 model's block types, in the order its header lists them (a dev aid: what a model needs read).</summary>
+    public static List<string>? OldBlockTypes(byte[] bytes)
+    {
+        if (!IsOldNif(bytes)) return null;
+        var r = new OldReader(bytes) { Pos = OldHeader.Length };
+        r.U32(); r.U32();
+        if (Encoding.ASCII.GetString(bytes, 0, OldHeader.Length) == OldHeader) { r.U32(); for (int i = 0; i < 3; i++) r.ShortS(); }
+        return Enumerable.Range(0, r.U16()).Select(_ => r.S()).ToList();
+    }
+
+    /// <summary>What <see cref="ReadOldNif"/> makes of a model (a dev aid): its pieces with vertex and triangle counts,
+    /// bounds and texture, or why not.</summary>
+    public static string OldNifSummary(byte[] bytes)
+    {
+        if (ReadOldNif(bytes) is not { } pieces) return "not readable";
+        if (pieces.Count == 0) return "no pieces";
+        var pts = pieces.SelectMany(p => p.Verts).ToList();
+        return $"{pieces.Count} pieces, {pts.Count} vertices, {pieces.Sum(p => p.Tris.Count)} triangles, bounds {pts.Aggregate(V3.Min)} .. {pts.Aggregate(V3.Max)}; "
+            + string.Join("; ", pieces.Select(p => $"{p.Name}: {p.Verts.Count}v {p.Tris.Count}t {p.Texture}"));
+    }
+
+    /// <summary>Block types whose first field (after the zero word) is their name: where reading can pick up again.</summary>
+    static bool Named(string type) => type is "NiNode" or "NiTriShape" or "NiTriStrips" or "NiTexturingProperty" or "NiSourceTexture" or "NiAlphaProperty"
+        or "NiVertexColorProperty" or "NiMaterialProperty" or "NiStencilProperty" or "NiBinaryExtraData" or "NiStringExtraData" or "BSXFlags" or "NiIntegerExtraData";
+
+    /// <summary>The pieces of a 10.0.1.0 or 10.0.1.2 model, or null when it can't be read.</summary>
     static List<Piece>? ReadOldNif(byte[] bytes)
     {
+        try { return ReadOldNifBlocks(bytes); }
+        catch (Exception e) when (e is ArgumentException or IndexOutOfRangeException or ArgumentOutOfRangeException) { return null; }
+    }
+
+    static List<Piece>? ReadOldNifBlocks(byte[] bytes)
+    {
         var r = new OldReader(bytes) { Pos = OldHeader.Length };
+        bool v1012 = Encoding.ASCII.GetString(bytes, 0, OldHeader.Length) == OldHeader;
         r.U32();                                   // version
         int count = (int)r.U32();
-        r.U32();                                   // unknown
-        for (int i = 0; i < 3; i++) r.ShortS();   // export info: creator, two lines
+        if (v1012)
+        {
+            r.U32();                               // user version
+            for (int i = 0; i < 3; i++) r.ShortS();   // export info: creator, two lines
+        }
         var types = Enumerable.Range(0, r.U16()).Select(_ => r.S()).ToList();
         var index = Enumerable.Range(0, count).Select(_ => (int)r.U16()).ToList();
         r.U32();                                   // groups
@@ -78,9 +116,19 @@ public sealed partial class ObMeshConverter
         for (int k = 0; k < count; k++)
         {
             var d = new OldBlock { Type = types[index[k]] };
+            int start = r.Pos;
             r.U32();                               // the zero word before each block
             switch (d.Type)
             {
+                case "NiBinaryExtraData":
+                    d.Name = r.S(); r.Skip((int)r.U32());
+                    break;
+                case "NiStringExtraData":
+                    d.Name = r.S(); r.S();
+                    break;
+                case "BSXFlags" or "NiIntegerExtraData":
+                    d.Name = r.S(); r.U32();
+                    break;
                 case "NiNode":
                     AvObject(d);
                     d.Children = Enumerable.Range(0, (int)r.U32()).Select(_ => r.I32()).ToList();
@@ -155,7 +203,32 @@ public sealed partial class ObMeshConverter
                     break;
                 }
                 default:
-                    return null;
+                {
+                    // A block this doesn't read (Havok collision: no sizes are stored to step over it), and any after it up
+                    // to the next block that starts with its name: found by its start (the zero word, the name's length,
+                    // the name, and for a node, shape or property an extra-data count), the blocks between kept empty.
+                    int next = Enumerable.Range(k + 1, count - k - 1).FirstOrDefault(j => Named(types[index[j]]), -1);
+                    if (next < 0) return null;
+                    string nextType = types[index[next]];
+                    bool avOrProp = !nextType.Contains("ExtraData") && nextType != "BSXFlags";
+                    int found = -1;
+                    for (int p = start + 4; p + 12 <= bytes.Length && found < 0; p++)
+                    {
+                        if (BitConverter.ToUInt32(bytes, p) != 0) continue;
+                        uint len = BitConverter.ToUInt32(bytes, p + 4);
+                        if (len > 128 || p + 8 + len + 4 > bytes.Length) continue;
+                        bool printable = true;
+                        for (int c = 0; c < len && printable; c++) printable = bytes[p + 8 + c] is >= 0x20 and < 0x7F;
+                        if (!printable || (len == 0 && avOrProp)) continue;
+                        if (avOrProp && BitConverter.ToUInt32(bytes, p + 8 + (int)len) > 64) continue;
+                        found = p;
+                    }
+                    if (found < 0) return null;
+                    for (int j = k; j < next; j++) blocks.Add(new OldBlock { Type = types[index[j]] });
+                    r.Pos = found;
+                    k = next - 1;
+                    continue;
+                }
             }
             blocks.Add(d);
         }

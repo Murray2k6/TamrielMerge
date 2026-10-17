@@ -119,11 +119,17 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         if (IsOldNif(bytes))
         {
             // NetImmerse 10.0.1.2 (Oblivion's grass), which nifly can't read: still geometry, no collision.
-            var old = ReadOldNif(bytes) ?? throw new InvalidDataException($"{source}: a NetImmerse 10.0.1.2 block this can't read");
+            var old = ReadOldNif(bytes) ?? throw new InvalidDataException($"{source}: a NetImmerse 10.0.1.0/10.0.1.2 model this can't read");
             string oldRel = OutputPath(model, moving, itemMass);
-            Write(old, [], Path.Combine(modOutDir, oldRel), moving, itemMass);
+            // Their own Havok collision isn't read (it is stepped over): solid as their triangles, but plants (the
+            // land's grass) walked through as before.
+            var oldSolid = ObData.Normalize(source).StartsWith(@"meshes\plants\", StringComparison.OrdinalIgnoreCase) ? []
+                : old.SelectMany(p => p.Tris.Select(t => (Pts: new[] { p.Verts[t.Item1], p.Verts[t.Item2], p.Verts[t.Item3] }, Tri: t)))
+                    .Select(x => (x.Pts, N: V3.Cross(x.Pts[1] - x.Pts[0], x.Pts[2] - x.Pts[0])))
+                    .Where(x => x.N.LengthSquared() > 1e-8f).Select(x => (x.Pts, V3.Normalize(x.N))).ToList();
+            Write(old, oldSolid, Path.Combine(modOutDir, oldRel), moving, itemMass);
             var pts = old.SelectMany(p => p.Verts).ToList();
-            return new Result(oldRel, old.Count, 0,
+            return new Result(oldRel, old.Count, oldSolid.Count,
                 pts.Count > 0 ? pts.Aggregate(new V3(float.MaxValue), V3.Min) : V3.Zero,
                 pts.Count > 0 ? pts.Aggregate(new V3(float.MinValue), V3.Max) : V3.Zero, false, []);
         }

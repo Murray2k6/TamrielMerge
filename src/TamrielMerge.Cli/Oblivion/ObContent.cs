@@ -367,7 +367,7 @@ public sealed partial class ObPluginBuilder
         ("hound", "EncWolf"), ("auroran", "EncDremoraMelee"), ("umaril", "EncDremoraWarlock"), ("kastav", "EncDremoraMelee"),
         ("failedexperiment", "EncDraugr"), ("failed experiment", "EncDraugr"), ("rockhorror", "EncFrostbiteSpiderGiant"), ("uderfrykte", "EncFrostbiteSpiderGiant"),
         ("combatant", "EncDraugr"), ("uncleleo", "EncSkeever"), ("jyggalag", "EncDwarvenCenturion01"), ("cremator", "EncDraugr"),
-        ("spirit", "EncSkeleton01"), ("deadlover", "EncSkeleton01"), ("mehrunesdagon", "EncGiant01"), ("ayleid", "EncDraugr"),
+        ("spirit", "EncSkeleton01"), ("ancestor", "EncSkeleton01"), ("deadlover", "EncSkeleton01"), ("mehrunesdagon", "EncGiant01"), ("ayleid", "EncDraugr"),
     ];
 
     IMajorRecord? Actor(FormKey key)

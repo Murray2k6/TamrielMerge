@@ -28,9 +28,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     SkyrimMod Mod => mod;
 
     /// <summary>Recast settings in Skyrim units: actor ~128 tall, 24 radius, steps up to 32 (stairs arrive as ramps), slopes to 50 degrees (Daggerfall's steepest stairs are 45).</summary>
-    static RcConfig Config(RcPartition partition = RcPartition.WATERSHED) => new(
+    static RcConfig Config(RcPartition partition = RcPartition.WATERSHED, float coarse = 1) => new(
         partition,
-        cellSize: Env("CS", 8f), cellHeight: Env("CH", 4f),
+        cellSize: Env("CS", 8f) * coarse, cellHeight: Env("CH", 4f) * coarse,
         agentMaxSlope: Env("SLOPE", 50f), agentHeight: Env("HEIGHT", 128f), agentRadius: Env("RADIUS", 24f), agentMaxClimb: Env("CLIMB", 32f),
         regionMinSize: 8, regionMergeSize: 20,
         edgeMaxLen: 600f, edgeMaxError: 2f,
@@ -54,29 +54,32 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// prints that, so each region's outline area is compared with the area of the polygons made from it, and a
     /// mesh missing any is made again with layer partitioning, then monotone (whose regions can't overlap). A retry
     /// can fail where watershed didn't (2026-10-16: layers threw "rcBuildContours: Multiple outlines for region 13" in
-    /// The Abbey of Asmiameusessa), so the mesh covering the most is kept.
+    /// The Abbey of Asmiameusessa), so the mesh covering the most is kept. Watershed can also throw ("rcBuildContours:
+    /// Bad outline for region n, contour simplification is likely too aggressive": an Oblivion house and two exterior
+    /// cells, 2026-10-17), and a column of more than 62 stacked surfaces can't be built at all ("Heightfield has too many
+    /// layers"); last, the voxels are made twice as coarse, which joins surfaces closer than a voxel.
     /// </summary>
-    static RcPolyMesh? BuildMesh(IRcInputGeomProvider geom, Func<RcPartition, RcBuilderConfig> config)
+    static RcPolyMesh? BuildMesh(IRcInputGeomProvider geom, Func<RcPartition, float, RcBuilderConfig> config)
     {
-        var first = new RcBuilder().Build(geom, config(RcPartition.WATERSHED), true);
-        if (first.Mesh is null || first.ContourSet is null) return first.Mesh;
-        double cover = Coverage(first.ContourSet, first.Mesh);
-        if (cover >= 1) return first.Mesh;
-        var best = first.Mesh;
-        foreach (var partition in new[] { RcPartition.LAYERS, RcPartition.MONOTONE })
+        RcPolyMesh? best = null;
+        double cover = -1;
+        Exception? error = null;
+        bool firstTry = true;
+        foreach (var (partition, coarse) in new[] { (RcPartition.WATERSHED, 1f), (RcPartition.LAYERS, 1f), (RcPartition.MONOTONE, 1f), (RcPartition.WATERSHED, 2f), (RcPartition.MONOTONE, 2f) })
         {
+            if (best is not null && coarse > 1) break;   // coarser voxels only when nothing could be built
             try
             {
-                var retry = new RcBuilder().Build(geom, config(partition), true);
-                if (retry.Mesh is null || retry.ContourSet is null) continue;
-                double c = Coverage(retry.ContourSet, retry.Mesh);
-                if (c > cover) { cover = c; best = retry.Mesh; }
+                var r = new RcBuilder().Build(geom, config(partition, coarse), true);
+                if (r.Mesh is null || r.ContourSet is null) { if (firstTry) return r.Mesh; continue; }
+                double c = Coverage(r.ContourSet, r.Mesh);
+                if (c > cover) { cover = c; best = r.Mesh; if (!firstTry) Interlocked.Increment(ref retriangulated); }
                 if (c >= 1) break;
             }
-            catch (Exception) { }
+            catch (Exception e) { error ??= e; }
+            firstTry = false;
         }
-        if (best != first.Mesh) Interlocked.Increment(ref retriangulated);
-        return best;
+        return best ?? throw error ?? new InvalidOperationException("Recast made no mesh");
     }
 
     /// <summary>How much of its outline the least covered region's polygons fill, 1 when all are (voxel units, both on
@@ -299,6 +302,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         // the same buildings as other parts', 2026-10-15: a fifth of a town part's work).
         var (outVerts, tris) = SharedExteriors is { } dir ? SharedInterior(dir, polygons) : RecastInterior(polygons);
         (outVerts, tris) = PruneIslands(outVerts, tris, doorList.Select(d => d.Placement!.Position).Append(keepAround ?? default).Concat(keepAlso ?? []).ToList());
+        // Nothing walkable (an Oblivion test cell, a room of models the converter can't read): said plainly, not as the
+        // grid's "Sequence contains no elements" (2026-10-17).
+        if (tris.Count == 0) throw new InvalidOperationException("no floor to walk on (nothing for a navmesh)");
         if (tris.Count > short.MaxValue || outVerts.Count > short.MaxValue)
             throw new InvalidOperationException($"navmesh too large for one NAVM: {tris.Count} triangles, {outVerts.Count} vertices");
 
@@ -383,7 +389,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             }
         }
         var geom = new RcSampleInputGeomProvider(verts.ToArray(), faces.ToArray());
-        var pmesh = BuildMesh(geom, p => new RcBuilderConfig(Config(p), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()))!;
+        var pmesh = BuildMesh(geom, (p, coarse) => new RcBuilderConfig(Config(p, coarse), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()))!;
 
         // Poly mesh vertices are voxel coordinates; convert back to Skyrim space.
         var outVerts = new List<P3Float>(pmesh.nverts);
@@ -620,11 +626,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
 
     /// <summary>Recast settings for exteriors: 16-unit voxels (terrain vertices are 128 apart), one 4096-unit tile per
     /// cell with a border, so the agent radius doesn't erode the mesh back from the cell's edges.</summary>
-    static RcConfig ExteriorConfig(bool open = false, RcPartition partition = RcPartition.WATERSHED)
+    static RcConfig ExteriorConfig(bool open = false, RcPartition partition = RcPartition.WATERSHED, float coarse = 1)
     {
         // Open country (open: Daggerfall's overland, smooth land and little on it) in coarser voxels and longer, looser
         // edges: a quarter of the triangles over 87,000 cells, as vanilla's wilds are meshed in big triangles too.
-        float cs = open ? 32f : 16f, ch = open ? 8f : 4f, radius = 24f;
+        float cs = (open ? 32f : 16f) * coarse, ch = (open ? 8f : 4f) * coarse, radius = 24f;
         int tile = (int)(CellUnits / cs);
         return new RcConfig(true, tile, tile, RcConfig.CalcBorder(radius, cs), partition,
             cs, ch, agentMaxSlope: 50f, agentHeight: 128f, agentRadius: radius, agentMaxClimb: open ? 48f : 32f,
@@ -674,7 +680,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var geom = new RcSampleInputGeomProvider(verts, faces);
         var bmin = new RcVec3f(cx * CellUnits, minZ - 16, -(cy + 1) * CellUnits);
         var bmax = new RcVec3f((cx + 1) * CellUnits, maxZ + 256, -cy * CellUnits);
-        var pmesh = BuildMesh(geom, p => new RcBuilderConfig(ExteriorConfig(open, p), bmin, bmax, 0, 0));
+        var pmesh = BuildMesh(geom, (p, coarse) => new RcBuilderConfig(ExteriorConfig(open, p, coarse), bmin, bmax, 0, 0));
         if (pmesh is null || pmesh.npolys == 0) return null;
         var outVerts = new List<P3Float>(pmesh.nverts);
         for (int i = 0; i < pmesh.nverts; i++)

@@ -10,8 +10,40 @@ static class Program
     /// <summary>The main menu's intro video frames (tools/menu/intro.py upscale and pack).</summary>
     const string MenuVideoSize = "2560x1440";
 
+    static bool parentWatched;
+
+    /// <summary>
+    /// A converter started by another (convert's game builds, the town and dungeon parts) ends when that one is gone
+    /// (2026-10-17: a convert stopped by its process id left its part builds running on, and the PC choked until it was
+    /// restarted). Each converter passes its own id and start time down in TAMRIELMERGE_PARENT; a child checks every five
+    /// seconds that the process it names is still the one that started it.
+    /// </summary>
+    static void WatchParent()
+    {
+        if (parentWatched) return;
+        parentWatched = true;
+        if (Environment.GetEnvironmentVariable("TAMRIELMERGE_PARENT") is { } v && v.Split(':') is [var id, var ticks]
+            && int.TryParse(id, out int pid) && long.TryParse(ticks, out long started))
+            new Thread(() =>
+            {
+                while (true)
+                {
+                    Thread.Sleep(5000);
+                    bool alive;
+                    try { using var p = System.Diagnostics.Process.GetProcessById(pid); alive = !p.HasExited && p.StartTime.ToUniversalTime().Ticks == started; }
+                    catch (Exception) { alive = false; }
+                    if (alive) continue;
+                    Console.WriteLine("The converter that started this one has ended: stopping too");
+                    Environment.Exit(3);
+                }
+            }) { IsBackground = true, Name = "parent watch" }.Start();
+        using var me = System.Diagnostics.Process.GetCurrentProcess();
+        Environment.SetEnvironmentVariable("TAMRIELMERGE_PARENT", $"{me.Id}:{me.StartTime.ToUniversalTime().Ticks}");
+    }
+
     static int Main(string[] args)
     {
+        WatchParent();
         var opts = ParseOptions(args.Skip(1));
         // Only games installed through a store they were bought from (Steam, GOG) are converted; a game that isn't
         // installed is simply left out (see GameInstalls).
@@ -3711,6 +3743,33 @@ static class Program
                     catch (Exception e) { bad++; Console.WriteLine($"  FAIL {e.Message}"); }
                 }
                 Console.WriteLine($"{ok} read, {bad} failed");
+                return 0;
+            }
+            case "ob-nif-head":
+            {
+                // Dev aid: Oblivion models' (--file a;b, data-relative) version line and, for NetImmerse 10.0.1.2 ones, the
+                // block types their header lists; Ob10Nif's reason when nifly can't read them.
+                var data = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion)!);
+                foreach (var f in opts["file"].Split(';').Select(f => f.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? f : @"meshes\" + f))
+                {
+                    var bytes = data.Read(f);
+                    if (bytes is null)
+                    {
+                        string name = Path.GetFileName(f);
+                        var like = data.List("meshes").Where(m => m.Contains(Path.GetFileNameWithoutExtension(name), StringComparison.OrdinalIgnoreCase)).Take(5).ToList();
+                        Console.WriteLine($"{f}: not found{(like.Count > 0 ? "; similar: " + string.Join(", ", like) : "; nothing of that name in the game's meshes")}");
+                        continue;
+                    }
+                    string head = System.Text.Encoding.ASCII.GetString(bytes, 0, Math.Min(60, bytes.Length)).Split('\n')[0];
+                    if (head.EndsWith("10.0.1.0")) Console.WriteLine("  bytes: " + Convert.ToHexString(bytes, 0, Math.Min(400, bytes.Length)));
+                    string why = Oblivion.Ob10Nif.IsUnreadableByNifly(bytes, out string w) ? w : "nifly should read it";
+                    Console.WriteLine($"{f}: {head}; {why}");
+                    if (Oblivion.ObMeshConverter.OldBlockTypes(bytes) is { } types)
+                    {
+                        Console.WriteLine("  blocks: " + string.Join(", ", types));
+                        Console.WriteLine("  read: " + Oblivion.ObMeshConverter.OldNifSummary(bytes));
+                    }
+                }
                 return 0;
             }
             case "ob-nif":
