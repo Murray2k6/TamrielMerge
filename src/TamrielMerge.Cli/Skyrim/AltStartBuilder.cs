@@ -490,14 +490,21 @@ public static class AltStartBuilder
         if (left.Count > 0)
             throw new InvalidOperationException($"Papyrus compile failed for {string.Join(", ", left.Select(Path.GetFileNameWithoutExtension))}:\n{output}");
         Console.WriteLine($"Compiled {sources.Length} scripts");
-        // Keep the compiled copies beside the sources (in the source tree, when running from it) up to date.
+        // Keep the compiled copies beside the sources (in the source tree, when running from it) up to date. In the source
+        // tree only those whose source is the tree's own: an app built earlier and run from inside the repository (out\gui)
+        // compiles its own older sources, and copied back they replaced newer compiled scripts (2026-10-16: the start's
+        // gear refresh and the city bounties went back to their earlier builds).
         foreach (var dir in new[] { precompiled, RepoPapyrusCompiled() }.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
         {
             Directory.CreateDirectory(dir);
+            bool repo = !Path.GetFullPath(dir).Equals(Path.GetFullPath(precompiled), StringComparison.OrdinalIgnoreCase);
             foreach (var psc in sources)
             {
                 string pex = Path.Combine(scriptsOut, Path.ChangeExtension(Path.GetFileName(psc), ".pex"));
-                if (File.Exists(pex)) File.Copy(pex, Path.Combine(dir, Path.GetFileName(pex)), overwrite: true);
+                if (!File.Exists(pex)) continue;
+                string repoSource = Path.Combine(Path.GetDirectoryName(dir)!, Path.GetFileName(psc));
+                if (repo && (!File.Exists(repoSource) || !File.ReadAllBytes(repoSource).AsSpan().SequenceEqual(File.ReadAllBytes(psc)))) continue;
+                File.Copy(pex, Path.Combine(dir, Path.GetFileName(pex)), overwrite: true);
             }
         }
     }
