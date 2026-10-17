@@ -66,6 +66,11 @@ static class Program
                 // change"): Daggerfall.esm with its land, and every finished town and dungeon part already in --out, are
                 // kept as they are and only the rest is built.
                 if (skyrimData.Length == 0) { Console.Error.WriteLine("Skyrim Special Edition isn't installed through Steam or GOG."); return 1; }
+                // Below normal priority, which every process it starts inherits (Windows passes it on), so the PC stays usable
+                // while it works (user, 2026-10-17: "way to much strain so the pc is unusable"); --full-priority keeps normal.
+                if (!opts.ContainsKey("full-priority"))
+                    try { using var self = System.Diagnostics.Process.GetCurrentProcess(); self.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal; }
+                    catch (Exception) { }
                 string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/convert"));
                 var skip = opts.GetValueOrDefault("skip", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var found = GameInstalls.Detect();
@@ -324,7 +329,10 @@ static class Program
                     // which once the parts took a minute or two held a town part to two a minute: 84 parts, 42 minutes
                     // at the least; 2026-10-15), and a few seconds go between starts.
                     bool fixedCount = opts.TryGetValue("parts-at-once", out var pa);
-                    int atOnce = fixedCount ? Math.Max(1, int.Parse(pa!)) : Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 2 : 4));
+                    // Half what it had been (user, 2026-10-17: "way to much strain so the pc is unusable" - eight town or four
+                    // dungeon parts at once, the other games beside them, choked the PC until it was restarted): a quarter of
+                    // the cores for town parts, an eighth for dungeon parts (each makes up to 8 navmeshes at once).
+                    int atOnce = fixedCount ? Math.Max(1, int.Parse(pa!)) : Math.Max(1, Environment.ProcessorCount / (command == "df-towns" ? 4 : 8));
                     if (pending.Count > 0) Console.WriteLine($"{plugin}: {pending.Count} parts, up to {atOnce} at a time as the memory allows");
                     int running = 0, mostAtOnce = 0;
                     var lastStart = DateTime.MinValue;

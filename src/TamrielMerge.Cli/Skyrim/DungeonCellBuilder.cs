@@ -704,6 +704,8 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 if (top <= bottom + 48 && p.X >= corners.Min(v => v.X) && p.X <= corners.Max(v => v.X) && p.Y >= corners.Min(v => v.Y) && p.Y <= corners.Max(v => v.Y)
                     && (support is null || top > support)) support = top;
             }
+            if (Environment.GetEnvironmentVariable("TM_SETTLE_TRACE") is { } st && st.Split(',') is [var sx, var sy] && MathF.Abs(p.X - float.Parse(sx)) < 4 && MathF.Abs(p.Y - float.Parse(sy)) < 4)
+                Console.WriteLine($"  settle {r.Base.FormKey} at {p} bottom {bottom:F0}: support {support} ({floors.Count} floors, {done.Count} props to rest on)");
             if (support is { } sz && MathF.Abs(sz - bottom) > 2 && MathF.Abs(sz - bottom) < 400 && !(downOnly && sz > bottom))
             {
                 r.Placement.Position = new P3Float(p.X, p.Y, p.Z + (sz - bottom));
