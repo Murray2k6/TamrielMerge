@@ -1942,7 +1942,7 @@ static class Program
                     }
                     catch (Exception e) { failures++; Console.WriteLine($"  {loc.Name}: FAILED {e.Message}"); if (opts.ContainsKey("trace")) Console.WriteLine(e); }
                 }
-                Console.WriteLine($"total: {refs} refs, {tris} navmesh triangles, {failures} failed, {sw.Elapsed.TotalSeconds:F0}s, working set {Environment.WorkingSet / 1048576} MB");
+                Console.WriteLine($"total: {refs} refs, {tris} navmesh triangles ({Skyrim.Navmesh.NavmeshBuilder.Retriangulated} made again by layers), {failures} failed, {sw.Elapsed.TotalSeconds:F0}s, working set {Environment.WorkingSet / 1048576} MB");
                 if (opts.ContainsKey("prison"))
                 {
                     // --prison: Daggerfall's prison and every region's jail (DfLaw.BuildPrison) as Daggerfall.esm makes them.
