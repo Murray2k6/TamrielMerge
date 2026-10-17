@@ -1,5 +1,7 @@
 # TamrielMerge
 
+https://www.nexusmods.com/skyrimspecialedition/mods/195263
+
 **The Elder Scrolls games you own, as one Skyrim Special Edition playthrough.**
 
 TamrielMerge converts Daggerfall, Redguard, Morrowind and Oblivion into Skyrim Special Edition. Each becomes a world
