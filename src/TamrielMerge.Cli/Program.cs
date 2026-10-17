@@ -2662,6 +2662,31 @@ static class Program
                 }
                 return 0;
             }
+            case "df-surfaces":
+            {
+                // Dev aid: Daggerfall's own surfaces over and under a Skyrim-space point (--at x,y) in a location's dungeon
+                // (--location): height (Skyrim units), which way each faces, its model, and whether the block meshes have it
+                // (doors, moving parts and models Skyrim props stand in for are left out of them).
+                var bsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                var loc = DfLocations.LoadAll(arena2).First(l => l.Name.Equals(opts["location"], StringComparison.OrdinalIgnoreCase) && l.DungeonBlocks.Count > 0);
+                var at = opts["at"].Split(',').Select(s => float.Parse(s, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                float S = Skyrim.Meshes.BlockMeshBuilder.Scale;
+                var models = DfModel.LoadAll(arena2);
+                var dungeon = DfDungeon.Load(loc, bsa, []);
+                static string Key(DfPlacedPolygon q) => $"{q.ModelId}:{q.Points[0]}:{q.Points[1]}";
+                var inShell = dungeon.Polygons(models, o => !Skyrim.Meshes.BlockMeshBuilder.IsDoor(o) && o.ModelId != Skyrim.Meshes.BlockMeshBuilder.ExitDoorModel && !o.HasAction && !Skyrim.PropReplacer.IsReplaced(o.ModelId)).Select(Key).ToHashSet();
+                float x = at[0] / S, z = at[1] / S;
+                var hits = new List<(float H, string Line)>();
+                foreach (var q in dungeon.Polygons(models))
+                    for (int i = 1; i + 1 < q.Points.Length; i++)
+                        if (Skyrim.DungeonCellBuilder.HeightInTriangle(q.Points[0], q.Points[i], q.Points[i + 1], x, z) is { } y)
+                        {
+                            hits.Add((y * S, $"  {y * S,7:F0}  normal y {q.Normal.Y,5:F2}  model {q.ModelId}{(inShell.Contains(Key(q)) ? "" : "  (not in the block meshes)")}"));
+                            break;
+                        }
+                foreach (var h in hits.OrderBy(h => h.H)) Console.WriteLine(h.Line);
+                return 0;
+            }
             case "df-action-census":
             {
                 // The actions of the given dungeon models (--models 61032,54000): how many of each (type, axis, magnitude,
@@ -5519,7 +5544,9 @@ static class Program
                 // misplaced people (Skyrim/DungeonCheck); --limit N cells, --cells A,B by editor ID; every problem to --out (CSV).
                 string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
                 var cellNames = opts.GetValueOrDefault("cells", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                var found = Skyrim.DungeonCheck.Run(dir, skyrimData, Console.WriteLine, int.Parse(opts.GetValueOrDefault("limit", "0")), cellNames);
+                // --plugins a.esp;b.esp checks other plugins in --dir (a df-dungeon-test --write's DaggerfallDungeonTest.esp).
+                var checkPlugins = opts.GetValueOrDefault("plugins", "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                var found = Skyrim.DungeonCheck.Run(dir, skyrimData, Console.WriteLine, int.Parse(opts.GetValueOrDefault("limit", "0")), cellNames, checkPlugins);
                 foreach (var g in found.GroupBy(f => f.Kind))
                     foreach (var f in g.Take(3)) Console.WriteLine($"    e.g. {f.Kind}: {f.Cell} {f.Ref} {f.Base} at ({f.X:F0},{f.Y:F0},{f.Z:F0}) {f.Detail}");
                 if (opts.TryGetValue("out", out var csv))

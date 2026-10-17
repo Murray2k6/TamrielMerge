@@ -23,7 +23,7 @@ public sealed class ClutterPlacer
     public sealed record Spec(string Label, Mount Mount, bool FitHeight, Part[] Parts, string[]? Variants = null);
 
     /// <summary>A Skyrim reference to place. Z is filled in by the caller from the floor or ceiling.</summary>
-    public sealed record Placement(FormKey Base, Vector3 PositionSkyrim, Vector3 Rotation, float Scale, bool IsItem, string Label, Mount Mount);
+    public sealed record Placement(FormKey Base, Vector3 PositionSkyrim, Vector3 Rotation, float Scale, bool IsItem, string Label, Mount Mount, bool OnTop = false);
 
     sealed record Form(FormKey Key, Vector3 Min, Vector3 Max, bool IsItem);
 
@@ -149,7 +149,7 @@ public sealed class ClutterPlacer
             float pz = part.OnTop
                 ? (spec.Mount == Mount.Ceiling ? z + main.Min.Z * scale - f.Min.Z + 2 : top - f.Min.Z)
                 : anchorZ - f.Min.Z + (f.IsItem ? 1 : 0);
-            yield return new Placement(f.Key, new Vector3(pos.X + offset.X, pos.Y + offset.Y, pz), new Vector3(0, 0, heading), 1, f.IsItem, spec.Label, spec.Mount);
+            yield return new Placement(f.Key, new Vector3(pos.X + offset.X, pos.Y + offset.Y, pz), new Vector3(0, 0, heading), 1, f.IsItem, spec.Label, spec.Mount, part.OnTop);
         }
     }
 

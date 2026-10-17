@@ -37,10 +37,10 @@ public static class DungeonCheck
     /// <summary>Things checked for floating, by base editor ID (the last run's).</summary>
     static readonly Dictionary<string, int> Checked = new(StringComparer.OrdinalIgnoreCase);
 
-    public static List<Problem> Run(string dir, string skyrimData, Action<string> log, int limit = 0, IReadOnlyCollection<string>? onlyCells = null)
+    public static List<Problem> Run(string dir, string skyrimData, Action<string> log, int limit = 0, IReadOnlyCollection<string>? onlyCells = null, IReadOnlyList<string>? plugins = null)
     {
         Checked.Clear();
-        var pluginNames = new[] { "Daggerfall.esm", DaggerfallTowns.PluginName, DaggerfallDungeons.PluginName };
+        var pluginNames = plugins is { Count: > 0 } ? plugins.ToArray() : new[] { "Daggerfall.esm", DaggerfallTowns.PluginName, DaggerfallDungeons.PluginName };
         var mods = new List<ISkyrimModDisposableGetter>();
         foreach (var m in new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(m => Path.Combine(skyrimData, m)).Where(File.Exists))
             mods.Add(SkyrimMod.CreateFromBinaryOverlay(m, SkyrimRelease.SkyrimSE));
@@ -101,6 +101,18 @@ public static class DungeonCheck
                 }
                 return blockGeometry[model] = g;
             }
+
+            // Daggerfall's props by their meshes too, as the builder settles things on them (2026-10-16: candles 12 units
+            // over a prop whose record's bounds stop short of its mesh's top).
+            int propShapes = 0;
+            foreach (var (key, b) in bases.Where(kv => kv.Value.EditorId.StartsWith("DFProp") && kv.Value.Model is not null).ToList())
+                if (Geometry(b.Model!.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? b.Model : Path.Combine("meshes", b.Model)) is { Count: > 0 } g)
+                {
+                    var pts = g.SelectMany(t => new[] { t.A, t.B, t.C }).ToList();
+                    bases[key] = b with { Min = pts.Aggregate(Vector3.Min), Max = pts.Aggregate(Vector3.Max) };
+                    propShapes++;
+                }
+            log($"{propShapes} of Daggerfall's props by their meshes' shapes");
 
             int cells = 0;
             var counts = new Dictionary<string, int>();
@@ -210,7 +222,7 @@ public static class DungeonCheck
             foreach (var r in refs.OfType<IPlacedObjectGetter>())
                 if (r.Placement is { } q && MathF.Abs(q.Position.X - float.Parse(nx)) < 1200 && MathF.Abs(q.Position.Y - float.Parse(ny)) < 1200)
                     Console.WriteLine($"  near: {(bases.TryGetValue(r.Base.FormKey, out var nb) ? $"{nb.Type} {nb.EditorId} {nb.Model} {nb.Min}..{nb.Max}" : r.Base.FormKey.ToString())} at {q.Position} rot {q.Rotation} scale {r.Scale}");
-        var floors = new Grid(); var ceilings = new Grid(); var walls = new Grid(); var mounts = new Grid(); var all = new Grid();
+        var floors = new Grid(); var ceilings = new Grid(); var walls = new Grid(); var mounts = new Grid(); var all = new Grid(); var overhead = new Grid();
         foreach (var b in blocks)
         {
             if (b.Placement is not { } pl || bases[b.Base.FormKey].Model is not { } model) continue;
@@ -227,6 +239,9 @@ public static class DungeonCheck
                 if (MathF.Abs(w.N.Z) >= 0.5f) { floors.Add(w); ceilings.Add(w); }
                 else walls.Add(w);
                 if (MathF.Abs(w.N.Z) < 0.75f) mounts.Add(w);
+                // What hung things hang from: every downward face, slanted ones too, as the builder hangs them
+                // (DungeonCellBuilder's ceilingPolys).
+                if (w.N.Z < -0.05f) overhead.Add(w);
             }
         }
         if (Environment.GetEnvironmentVariable("TM_CHECK_NEAR") is { Length: > 0 } near2 && near2.Split(',') is [var c2, var x2, var y2] && c2 == cellName)
@@ -250,6 +265,8 @@ public static class DungeonCheck
             Console.WriteLine("  flat faces right under it: " + string.Join(", ", floors.Near(qx, qy, qx, qy).Select(t => (t, h: HeightAt(t, qx, qy))).Where(x => x.h is not null)
                 .Select(x => $"{x.h:F0} (n.z {x.t.N.Z:F2})").Distinct()));
             foreach (var t in all.Near(qx - 32, qy - 32, qx + 32, qy + 32).Take(8)) Console.WriteLine($"  any near: {t.A} {t.B} {t.C} n {t.N}");
+            Console.WriteLine("  every face over or under it: " + string.Join(", ", all.Near(qx, qy, qx, qy).Select(t => (t, h: HeightAt(t, qx, qy))).Where(x => x.h is not null)
+                .OrderBy(x => x.h).Select(x => $"{x.h:F0} (n.z {x.t.N.Z:F2})").Distinct()));
         }
         // Solid objects' boxes (turned about z), for what things rest on and what people stand in.
         var boxes = new List<Box>();
@@ -441,7 +458,7 @@ public static class DungeonCheck
                 if (WallDistance(chest, 12) < 12) Add("NPC: in a wall", "");
                 if (boxes.FirstOrDefault(b => chest.Z > b.Bottom + 8 && chest.Z < b.Top - 8 && Inside(b, p.X, p.Y, 6)) is { } inBox)
                     Add("NPC: inside an object", refs.FirstOrDefault(x => x.FormKey == inBox.Key) is IPlacedObjectGetter ib && bases.TryGetValue(ib.Base.FormKey, out var ibb) ? ibb.EditorId : "");
-                if (!OnNavmesh(cell, p)) Add("NPC: off the navmesh", "");
+                if (!OnNavmesh(cell, p)) Add("NPC: off the navmesh", NearestNavmesh(cell, p));
                 continue;
             }
             if (bi is null || !Rests.Contains(bi.Type) || bi.EditorId.StartsWith("DFDunBlk") || bi.EditorId.StartsWith("DFAct") || r is not IPlacedObjectGetter obj) continue;
@@ -476,10 +493,28 @@ public static class DungeonCheck
             if (gap <= 12) continue;
             // Hung from a ceiling or fixed to a wall: not floating.
             if (CeilingAbove(p.X, p.Y, top) is { } ceil && ceil - top < 32) continue;
+            if (overhead.Near(p.X, p.Y, p.X, p.Y).Any(t => HeightAt(t, p.X, p.Y) is { } h && h >= top - 8 && h - top < 32)) continue;
             float reach = MathF.Max(bi.Max.X - bi.Min.X, bi.Max.Y - bi.Min.Y) * sc + 32;
             if (WallDistance(new Vector3(p.X, p.Y, (bottom + top) / 2), reach, mounts) < reach) continue;
             Add(under is null ? "Floating: nothing under it" : "Floating", under is null ? "" : $"{gap:F0} units up");
         }
+    }
+
+    /// <summary>How far the nearest navmesh vertex is from p: across and up or down (or that the cell has none).</summary>
+    static string NearestNavmesh(ICellGetter cell, Vector3 p)
+    {
+        float best = float.MaxValue, dz = 0;
+        int count = 0;
+        foreach (var navm in cell.NavigationMeshes)
+            if (navm.Data is { } data)
+                foreach (var v in data.Vertices)
+                {
+                    count++;
+                    float d = (v.X - p.X) * (v.X - p.X) + (v.Y - p.Y) * (v.Y - p.Y) + (v.Z - p.Z) * (v.Z - p.Z);
+                    if (d < best) { best = d; dz = v.Z - p.Z; }
+                }
+        if (count == 0) return "the cell has no navmesh";
+        return $"nearest navmesh vertex {MathF.Sqrt(MathF.Max(0, best - dz * dz)):F0} across and {dz:F0} up";
     }
 
     static bool OnNavmesh(ICellGetter cell, Vector3 p)

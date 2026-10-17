@@ -251,11 +251,21 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         var fixtureCounts = new Dictionary<string, int>();
         var placedProps = new List<PlacedObject>();
         var surfaceCandles = new List<PlacedObject>();
+        var spriteClutter = new List<PlacedObject>();
+        var spriteRiders = new Dictionary<PlacedObject, List<PlacedObject>>();
+        var hungClutter = new List<PlacedObject>();
+        var standingLights = new List<PlacedObject>();
         var campfireRefs = new List<PlacedObject>();
         var actions = new ActionObjectBuilder(mod, models, modOutDir, Spells) { Text = text ??= DfText.Load(arena2), Riddles = riddles, QuestGlobal = QuestGlobal };
         var floorPolys = dungeon.Polygons(models).Where(q => q.Normal.Y > 0.7f).ToList();
         // Slanted ones too (a cove, a vault): hung things hang from them (2026-10-16: 186 chains hung from nothing).
-        var ceilingPolys = dungeon.Polygons(models).Where(q => q.Normal.Y < -0.3f).ToList();
+        // Hung things hang from the dungeon's own shell as the block meshes have it: not from a door, a moving part or a
+        // model a Skyrim prop stands in for (2026-10-16: chains and roots hung from Daggerfall beams that aren't there).
+        var shellPolys = dungeon.Polygons(models, o => !BlockMeshBuilder.IsDoor(o) && o.ModelId != BlockMeshBuilder.ExitDoorModel && !o.HasAction && !PropReplacer.IsReplaced(o.ModelId)).ToList();
+        // Any face turned down, however steep (a cave's roof at 75 degrees held hanging roots 256 units under it).
+        var ceilingPolys = shellPolys.Where(q => q.Normal.Y < -0.05f).ToList();
+        // Every upward face, sloped too: what a hung thing must stay clear of.
+        var groundPolys = dungeon.Polygons(models).Where(q => q.Normal.Y > 0.3f).ToList();
         var clutterObstacles = new List<PlacedObject>();
         var rooms = new RoomFacing(dungeon.Polygons(models));
         var spawnPoints = new List<P3Float>();
@@ -308,7 +318,10 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                             Placement = new Placement { Position = new P3Float(fp.X, fp.Y, fp.Z + lift.Value), Rotation = new P3Float(0, 0, f.HeadingRadians) },
                         };
                         cell.Temporary.Add(fixture);
+                        // Candles and candelabras onto what is under them: a table Daggerfall's floor test took for the floor
+                        // is settled itself, and a candle left at its old top floated 12 units (2026-10-16).
                         if (f.Kind == LightFixturePlacer.SurfaceCandle) surfaceCandles.Add(fixture);
+                        else if (f.Kind is "candle" or "candelabra" or "tall candelabra") standingLights.Add(fixture);
                         if (f.Kind == "campfire") campfireRefs.Add(fixture);
                         fixtureCounts[f.Kind] = fixtureCounts.GetValueOrDefault(f.Kind) + 1;
                         if (f.Kind == "campfire") campfires.Add(ToSkyrim(f.PositionDf));
@@ -409,7 +422,8 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 }
                 else if (Clutter is { } clutter && clutter.Covers(o))
                 {
-                    foreach (var p in PlaceSprite(clutter, o, origin + o.Position, floorPolys, ceilingPolys, rooms))
+                    PlacedObject? firstPart = null;
+                    foreach (var p in PlaceSprite(clutter, o, origin + o.Position, floorPolys, ceilingPolys, rooms, groundPolys))
                     {
                         var r = new PlacedObject(mod)
                         {
@@ -418,6 +432,15 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                         };
                         if (MathF.Abs(p.Scale - 1) > 0.01f) r.Scale = p.Scale;
                         cell.Temporary.Add(r);
+                        // Standing things settle onto what is under each (a group's parts spread past a ledge's edge
+                        // floated: 2026-10-16, 101 bloody bones 77 units up); one on top of another rides along with it.
+                        if (p.Mount != ClutterPlacer.Mount.Floor) hungClutter.Add(r);
+                        if (p.Mount == ClutterPlacer.Mount.Floor)
+                        {
+                            if (p.OnTop && firstPart is not null) (spriteRiders.TryGetValue(firstPart, out var riding) ? riding : spriteRiders[firstPart] = []).Add(r);
+                            else spriteClutter.Add(r);
+                        }
+                        firstPart ??= r;
                         if (!p.IsItem && p.Mount == ClutterPlacer.Mount.Floor) clutterObstacles.Add(r);
                         fixtureCounts["clutter: " + p.Label] = fixtureCounts.GetValueOrDefault("clutter: " + p.Label) + 1;
                     }
@@ -569,11 +592,47 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         }
         int settled = SettleProps(placedProps, walkable);
         if (settled > 0) fixtureCounts["props settled onto supports"] = settled;
+        // A prop with nothing at all under it (2026-10-16: a chair 1,800 units over the dungeon's bottom in 94 dungeons,
+        // over a flooded pit whose floor the block doesn't have): left out.
+        var walkFloors = walkable.Where(q => q.Normal.Z > 0.3f).ToList();
+        foreach (var r in placedProps.Where(r => !walkFloors.Any(f => Enumerable.Range(1, f.Points.Length - 2)
+                     .Any(i => HeightInTriangleXY(f.Points[0], f.Points[i], f.Points[i + 1], r.Placement!.Position.X, r.Placement.Position.Y) is { } z && z <= r.Placement.Position.Z + 48))).ToList())
+        {
+            cell.Temporary.Remove(r);
+            cell.Persistent.Remove(r);
+            placedProps.Remove(r);
+            fixtureCounts["prop left out: nothing under it"] = fixtureCounts.GetValueOrDefault("prop left out: nothing under it") + 1;
+        }
         // Candles and treasure that lay on Daggerfall's tables, shelves and crates, onto the Skyrim ones in their place
         // (other heights; 2026-10-16: 682 knapsacks floated up to 200 units).
         int candles = SettleProps(surfaceCandles, walkable, placedProps);
         if (candles > 0) fixtureCounts["candles and treasure settled onto tables"] = candles;
-        int pushed = PushActorsOut(cell, placedProps.Concat(campfireRefs));
+        // Candles and candelabras standing on what Daggerfall's floor test took for the floor (a table's top) follow it
+        // down when it settles (2026-10-16: candles 12 units over tables); never up, onto a prop beside them.
+        int lowered = SettleProps(standingLights, walkable, placedProps, downOnly: true);
+        if (lowered > 0) fixtureCounts["standing lights lowered with their table"] = lowered;
+        // The sprites' clutter onto the floor or prop under each part, and what sits on a part moved with it.
+        var before = spriteRiders.Keys.ToDictionary(k => k, k => k.Placement!.Position.Z);
+        int clutterSettled = SettleProps(spriteClutter, walkable, placedProps);
+        foreach (var (part, riders) in spriteRiders)
+            if (part.Placement!.Position.Z - before[part] is var dz && MathF.Abs(dz) > 0.01f)
+                foreach (var rider in riders) rider.Placement!.Position = new P3Float(rider.Placement.Position.X, rider.Placement.Position.Y, rider.Placement.Position.Z + dz);
+        if (clutterSettled > 0) fixtureCounts["clutter settled onto what is under it"] = clutterSettled;
+        // Actors stood on Daggerfall's floor where the Skyrim one is higher (a step made a ramp): up onto it (2026-10-16:
+        // 67 actors 48 units inside a floor read as 720 over the one below).
+        int lifted = 0;
+        foreach (var npc in cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>())
+        {
+            var p = npc.Placement!.Position;
+            float? floor = null;
+            foreach (var f in walkFloors)
+                for (int i = 1; i + 1 < f.Points.Length; i++)
+                    if (HeightInTriangleXY(f.Points[0], f.Points[i], f.Points[i + 1], p.X, p.Y) is { } z && z <= p.Z + 64 && (floor is null || z > floor)) floor = z;
+            if (floor is { } fz && fz > p.Z - 2) { npc.Placement.Position = new P3Float(p.X, p.Y, fz + 4); lifted++; }
+        }
+        if (lifted > 0) fixtureCounts["actors lifted onto the floor"] = lifted;
+        // Out of props, campfires and what hangs down to them (2026-10-16: 65 actors inside giant's hanging bones).
+        int pushed = PushActorsOut(cell, placedProps.Concat(campfireRefs).Concat(hungClutter));
         if (pushed > 0) fixtureCounts["actors moved out of props"] = pushed;
         // Props are obstacles for pathing: add each one's box so the navmesh goes around it.
         foreach (var r in placedProps) walkable.AddRange(PropBox(r));
@@ -625,7 +684,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     /// </summary>
     /// <param name="onto">Settled props to rest <paramref name="placed"/> on (candles on tables), else the placed rest on
     /// each other as they settle.</param>
-    int SettleProps(List<PlacedObject> placed, List<(Vector3[] Points, Vector3 Normal)> walkable, IReadOnlyList<PlacedObject>? onto = null)
+    int SettleProps(List<PlacedObject> placed, List<(Vector3[] Points, Vector3 Normal)> walkable, IReadOnlyList<PlacedObject>? onto = null, bool downOnly = false)
     {
         var floors = walkable.Where(p => p.Normal.Z > 0.7f).ToList();
         var done = new List<PlacedObject>(onto ?? []);
@@ -645,7 +704,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 if (top <= bottom + 48 && p.X >= corners.Min(v => v.X) && p.X <= corners.Max(v => v.X) && p.Y >= corners.Min(v => v.Y) && p.Y <= corners.Max(v => v.Y)
                     && (support is null || top > support)) support = top;
             }
-            if (support is { } sz && MathF.Abs(sz - bottom) > 2 && MathF.Abs(sz - bottom) < 400)
+            if (support is { } sz && MathF.Abs(sz - bottom) > 2 && MathF.Abs(sz - bottom) < 400 && !(downOnly && sz > bottom))
             {
                 r.Placement.Position = new P3Float(p.X, p.Y, p.Z + (sz - bottom));
                 moved++;
@@ -736,16 +795,27 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     /// stood on the floor under its base or hung from the ceiling over its top; statues turned into the room.
     /// </summary>
     internal IEnumerable<ClutterPlacer.Placement> PlaceSprite(ClutterPlacer clutter, DfRdbObject o, Vector3 c,
-        List<DfPlacedPolygon> floorPolys, List<DfPlacedPolygon> ceilingPolys, RoomFacing rooms)
+        List<DfPlacedPolygon> floorPolys, List<DfPlacedPolygon> ceilingPolys, RoomFacing rooms, List<DfPlacedPolygon>? groundPolys = null)
     {
         float h = SpriteHeight(o.TextureArchive, o.TextureRecord);
         bool hangs = clutter.MountFor(o) != ClutterPlacer.Mount.Floor;
-        float anchor = hangs ? SurfaceY(ceilingPolys, c.X, c.Z, c.Y + h / 2 - 24, above: true) ?? c.Y + h / 2
+        // Hung from the ceiling over its middle: from its top, a sprite reaching into the ceiling found the face above that
+        // instead (2026-10-16: hanging roots 53 units into the rock and 129 over the floor).
+        float anchor = hangs ? SurfaceY(ceilingPolys, c.X, c.Z, c.Y, above: true) ?? c.Y + h / 2
                              : SurfaceY(floorPolys, c.X, c.Z, c.Y - h / 2 + 24, above: false) ?? c.Y - h / 2;
         var facing = ClutterPlacer.IsStatue(o) && !hangs ? StatueFacing(rooms, c.X, anchor, c.Z) : null;
         var pos = ToSkyrim(c);
-        // Hung things no longer than the room is high (2026-10-16: 188 giant's hanging bones reached through the floor).
-        float? clearance = hangs && SurfaceY(floorPolys, c.X, c.Z, anchor - 1, above: false) is { } floor ? (anchor - floor) * BlockMeshBuilder.Scale : null;
+        // Hung things no longer than the room is high (2026-10-16: 188 giant's hanging bones reached through the floor),
+        // over the floor under any part of them (half the sprite's width around its centre), sloped floors too (276 hanging
+        // roots reached 35 units into cave floors steeper than the walkable ones).
+        float? clearance = null;
+        if (hangs)
+        {
+            float r = SpriteWidth(o.TextureArchive, o.TextureRecord) / 2;
+            foreach (var (dx, dz) in new[] { (0f, 0f), (r, 0f), (-r, 0f), (0f, r), (0f, -r) })
+                if (SurfaceY(groundPolys ??= floorPolys, c.X + dx, c.Z + dz, anchor - 1, above: false) is { } floor)
+                    clearance = MathF.Min(clearance ?? float.MaxValue, (anchor - floor) * BlockMeshBuilder.Scale);
+        }
         return clutter.Place(o, new Vector3(pos.X, pos.Y, pos.Z), h * BlockMeshBuilder.Scale, anchor * BlockMeshBuilder.Scale,
             facing, SpriteWidth(o.TextureArchive, o.TextureRecord) * BlockMeshBuilder.Scale, clearance);
     }
@@ -836,7 +906,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         return best == float.MinValue ? p.Y : best;
     }
 
-    static float? HeightInTriangle(Vector3 a, Vector3 b, Vector3 c, float x, float z)
+    internal static float? HeightInTriangle(Vector3 a, Vector3 b, Vector3 c, float x, float z)
     {
         float d = (b.Z - c.Z) * (a.X - c.X) + (c.X - b.X) * (a.Z - c.Z);
         if (MathF.Abs(d) < 1e-6f) return null;

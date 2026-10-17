@@ -58,9 +58,10 @@ public sealed class LightFixturePlacer
         walls = polys.Where(p => MathF.Abs(p.Normal.Y) < 0.3f).ToList();
         anyUp = polys.Where(p => p.Normal.Y > 0.3f).ToList();
         anyDown = polys.Where(p => p.Normal.Y < -0.3f).ToList();
+        downAll = polys.Where(p => p.Normal.Y < -0.05f).ToList();
     }
 
-    readonly List<DfPlacedPolygon> anyUp = [], anyDown = [];
+    readonly List<DfPlacedPolygon> anyUp = [], anyDown = [], downAll = [];
 
     /// <summary>
     /// A point no room holds (Daggerfall units, Y up): nothing at all under it, or the nearest thing under it more
@@ -72,7 +73,24 @@ public sealed class LightFixturePlacer
     {
         if (anyUp.Count == 0 && anyDown.Count == 0) return false;   // no room given (the streets' fires)
         if (Surface(anyUp, p, below: true) is not { } under) return true;
+        // Over a room's ceiling with no floor between, however steep the ceiling (an overhang): in the stone above that room
+        // (2026-10-16: hanging roots and chains stored 300-500 units over a room's ceiling, or over a cave's overhang, were
+        // hung in the rock). Nothing at all over it: outside the dungeon's shell, where its rooms all have a ceiling.
+        if (Strictly(downAll, p, below: true) is { } shell && shell > under + 1) return true;
+        if (Strictly(downAll, p, below: false) is null) return true;
         return p.Y - under > 512 && (Surface(anyDown, p, below: false) is not { } over || over - p.Y > 512);
+    }
+
+    /// <summary>The nearest face of <paramref name="polys"/> strictly under p, without Surface's 16-unit allowance.</summary>
+    static float? Strictly(List<DfPlacedPolygon> polys, Vector3 p, bool below)
+    {
+        float? best = null;
+        foreach (var poly in polys)
+            for (int i = 1; i + 1 < poly.Points.Length; i++)
+                if (HeightInTriangle(poly.Points[0], poly.Points[i], poly.Points[i + 1], p.X, p.Z) is { } y
+                    && (below ? y < p.Y - 4 && (best is null || y > best) : y > p.Y + 4 && (best is null || y < best)))
+                    best = y;
+        return best;
     }
 
     public sealed record Placement(FormKey Base, Vector3 PositionDf, float HeadingRadians, string Kind);

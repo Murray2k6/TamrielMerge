@@ -191,10 +191,42 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 float d = (q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y) + 16 * dz * dz;
                 if (d < best) { best = d; at = q + ((a + b + c) / 3 - q) * 0.2f; }
             }
-            if (on || at is not { } to) continue;
-            // Its own height when the mesh is level with it (the mesh floats over the floor; set on it, an actor stood 36
-            // units up), else the mesh's.
-            pl.Position = new P3Float(to.X, to.Y, MathF.Abs(to.Z - p.Z) <= 48 ? p.Z : to.Z + 4);
+            if (on) continue;
+            bool sameLevel = at is not null;
+            // Nothing on its level (Daggerfall's flying monsters at their markers in mid-air, and actors on a lift or bridge
+            // whose model stands elsewhere in Skyrim, 720 units over the floor): dropped onto the mesh under it, as it
+            // would fall, the nearest across first.
+            if (at is null)
+            {
+                float across = 256f * 256f;
+                foreach (var t in tris)
+                {
+                    Vector3 a = V(verts[t.Vertices.X]), b = V(verts[t.Vertices.Y]), c = V(verts[t.Vertices.Z]);
+                    var q = ClosestOnTriangle(new Vector3(p.X, p.Y, (a.Z + b.Z + c.Z) / 3), a, b, c);
+                    if (q.Z > p.Z) continue;
+                    float d = (q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y) + (p.Z - q.Z) * 0.01f;
+                    if (d < across) { across = d; at = q + ((a + b + c) / 3 - q) * 0.2f; }
+                }
+            }
+            // Nothing on its level or under it (in a passage too steep for the mesh): the nearest mesh, any level.
+            if (at is null)
+            {
+                float any = 1024f * 1024f;
+                foreach (var t in tris)
+                {
+                    Vector3 a = V(verts[t.Vertices.X]), b = V(verts[t.Vertices.Y]), c = V(verts[t.Vertices.Z]);
+                    var q = ClosestOnTriangle(p, a, b, c);
+                    float d = Vector3.DistanceSquared(p, q);
+                    if (d < any) { any = d; at = q + ((a + b + c) / 3 - q) * 0.2f; }
+                }
+            }
+            if (at is not { } to) continue;
+            // On its level, its own height, or the mesh's where that is higher: never lower, as the mesh has no detail heights
+            // and inside a big polygon lies up to 50 under the floor (2026-10-16: actors set 48 units into a floor). Fallen
+            // or moved to another level, the mesh's.
+            pl.Position = new P3Float(to.X, to.Y, sameLevel ? MathF.Max(p.Z, to.Z - 28) : to.Z + 4);
+            if (MathF.Abs(to.Z - p.Z) > 48 && Environment.GetEnvironmentVariable("TM_SNAP_TRACE") is not null)
+                Console.WriteLine($"  snap: {npc.FormKey} {p.X:F0},{p.Y:F0},{p.Z:F0} -> {to.X:F0},{to.Y:F0},{to.Z:F0}");
             moved++;
         }
         return moved;

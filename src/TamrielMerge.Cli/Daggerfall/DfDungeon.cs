@@ -39,12 +39,13 @@ public sealed class DfDungeon
     public static Matrix4x4 UnityRotX(float a) => new(1, 0, 0, 0, 0, MathF.Cos(a), MathF.Sin(a), 0, 0, -MathF.Sin(a), MathF.Cos(a), 0, 0, 0, 0, 1);
     public static Matrix4x4 UnityRotZ(float a) => new(MathF.Cos(a), MathF.Sin(a), 0, 0, -MathF.Sin(a), MathF.Cos(a), 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
 
-    public IEnumerable<DfPlacedPolygon> Polygons(IReadOnlyDictionary<uint, DfModel> models)
+    /// <summary>Every model's polygons, placed; <paramref name="include"/> picks which models.</summary>
+    public IEnumerable<DfPlacedPolygon> Polygons(IReadOnlyDictionary<uint, DfModel> models, Func<DfRdbObject, bool>? include = null)
     {
         foreach (var (block, placement) in Blocks)
         {
             var origin = BlockOrigin(placement);
-            foreach (var o in block.Objects.Where(o => o.Type == DfRdbObjectType.Model))
+            foreach (var o in block.Objects.Where(o => o.Type == DfRdbObjectType.Model && (include is null || include(o))))
             {
                 if (!models.TryGetValue(o.ModelId, out var model)) continue;
                 var m = ObjectTransform(o, origin);
