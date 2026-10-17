@@ -85,6 +85,9 @@ public sealed partial class ObPluginBuilder
             Ob.AIPackageLocation.LocationType.NearCurrentLocation => new LocationFallback { Type = LocationTargetRadius.LocationType.NearPackageStart },
             Ob.AIPackageLocation.LocationType.ObjectID when l.LocationReference.FormKeyNullable is { } o && (Item(o) ?? Base(o)) is { } obj =>
                 new LocationObjectId { Link = new FormLink<IObjectIdGetter>(obj.FormKey) },
+            // Near a kind of object: the type's code where a form would be (read as a form link).
+            Ob.AIPackageLocation.LocationType.ObjectType when l.LocationReference.FormKeyNullable is { } code && ObjectTypeOf((int)code.ID) is { } kind =>
+                new LocationObjectType { Type = kind },
             _ => new LocationFallback { Type = LocationTargetRadius.LocationType.NearEditorLocation },
         };
         return new LocationTargetRadius { Target = where, Radius = (uint)radius };
@@ -94,8 +97,14 @@ public sealed partial class ObPluginBuilder
     APackageTarget? PackageTarget(Ob.IAIPackageGetter p)
     {
         if (p.Target is not { } t || t.Object == 0) return null;
-        if ((uint)t.Object == 0x14) return new PackageTargetSpecificReference { Reference = new FormLink<IPlacedGetter>(PlayerRefKey) };
-        var key = new FormKey(p.FormKey.ModKey, (uint)t.Object & 0xFFFFFF);
+        // A kind of object, not a form (2026-10-17: read as forms they were "unknown base 00000D:Oblivion.esm", Agronak's
+        // and Bruscus Dannus's weapons, and "00000C:Knights.esp", the Knights' praying at furniture).
+        if (t.ObjectType == Ob.AIPackageTarget.ObjectTypes.ObjectType)
+            return ObjectTypeOf(t.Object) is { } kind ? new PackageTargetObjectType { Type = kind, CountOrDistance = t.Count } : null;
+        if (((uint)t.Object & 0xFFFFFF) == 0x14) return new PackageTargetSpecificReference { Reference = new FormLink<IPlacedGetter>(PlayerRefKey) };
+        var key = ResolveRaw(p, (uint)t.Object);
+        // The player's base (form 7; "000007:Knights.esp", a minion attacking the player): the player.
+        if (key.ID == 7) return new PackageTargetSpecificReference { Reference = new FormLink<IPlacedGetter>(PlayerRefKey) };
         if (placedBySource.TryGetValue(key, out var placed))
             return new PackageTargetSpecificReference { Reference = new FormLink<IPlacedGetter>(placed.FormKey), CountOrDistance = t.Count };
         if ((Item(key) ?? Base(key) ?? Actor(key)) is { } obj)
@@ -104,10 +113,59 @@ public sealed partial class ObPluginBuilder
     }
 
     /// <summary>The references an Oblivion package names (placed persistent, so the package can point at them).</summary>
-    static IEnumerable<FormKey> PackageRefs(Ob.IAIPackageGetter p)
+    IEnumerable<FormKey> PackageRefs(Ob.IAIPackageGetter p)
     {
         if (p.Location?.LocationReference.FormKeyNullable is { } l) yield return l;
-        if (p.Target is { } t && (uint)t.Object is var raw and not 0) yield return new FormKey(p.FormKey.ModKey, raw & 0xFFFFFF);
+        if (p.Target is { ObjectType: not Ob.AIPackageTarget.ObjectTypes.ObjectType } t && (uint)t.Object is var raw and not 0) yield return ResolveRaw(p, raw);
+    }
+
+    /// <summary>
+    /// Oblivion's object types (a package's target) as Skyrim's: Oblivion's list has apparatus (2) and soul gems (17),
+    /// which Skyrim's hasn't (as misc items here), so the rest are one or two further on (Oblivion's 12 furniture is
+    /// Skyrim's 11, 13 any weapon 12, 30 any actor 28).
+    /// </summary>
+    static TargetObjectType? ObjectTypeOf(int oblivion) => oblivion switch
+    {
+        1 => TargetObjectType.Activators,
+        2 or 10 or 17 => TargetObjectType.Misc,   // apparatus, misc, soul gems
+        3 => TargetObjectType.Armor,
+        4 => TargetObjectType.Books,
+        5 => TargetObjectType.Clothing,
+        6 => TargetObjectType.Containers,
+        7 => TargetObjectType.Doors,
+        8 => TargetObjectType.Ingredients,
+        9 => TargetObjectType.Lights,
+        11 => TargetObjectType.Flora,
+        12 => TargetObjectType.Furniture,
+        13 => TargetObjectType.AnyWeapons,
+        14 => TargetObjectType.Ammo,
+        15 => TargetObjectType.Npcs,
+        16 => TargetObjectType.Creatures,
+        18 => TargetObjectType.Keys,
+        19 => TargetObjectType.Alchemy,
+        20 => TargetObjectType.Food,
+        21 => TargetObjectType.AllCombatWearable,
+        22 => TargetObjectType.AllWearable,
+        23 => TargetObjectType.RangedWeapons,
+        24 => TargetObjectType.MeleeWeapons,
+        25 => TargetObjectType.NoWeapons,
+        26 => TargetObjectType.AnyActorEffects,
+        27 => TargetObjectType.TargetActorEffects,
+        28 => TargetObjectType.TouchActorEffects,
+        29 => TargetObjectType.SelfActorEffects,
+        30 => TargetObjectType.AnyActors,
+        _ => null,
+    };
+
+    /// <summary>A package's raw FormID (its target, written as a number): the top byte indexes the masters of the plugin
+    /// whose version of the package wins, then that plugin itself.</summary>
+    FormKey ResolveRaw(Ob.IAIPackageGetter p, uint raw)
+    {
+        var source = plugins.LastOrDefault(pl => pl.AIPackages.ContainsKey(p.FormKey));
+        if (source is null) return new FormKey(p.FormKey.ModKey, raw & 0xFFFFFF);
+        int index = (int)(raw >> 24);
+        var masters = source.ModHeader.MasterReferences;
+        return new FormKey(index < masters.Count ? masters[index].Master : source.ModKey, raw & 0xFFFFFF);
     }
 
     // ---- sounds ----

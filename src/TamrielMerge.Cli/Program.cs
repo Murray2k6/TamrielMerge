@@ -3745,6 +3745,47 @@ static class Program
                 Console.WriteLine($"{ok} read, {bad} failed");
                 return 0;
             }
+            case "ob-find":
+            {
+                // Dev aid: Oblivion's files (loose and in its archives) under --folder (default meshes) whose path contains
+                // any of --text a;b (case ignored).
+                var data = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion)!);
+                var words = opts["text"].Split(';', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var f in data.List(opts.GetValueOrDefault("folder", "meshes")).Where(f => words.Any(w => f.Contains(w, StringComparison.OrdinalIgnoreCase))).Take(60))
+                    Console.WriteLine(f);
+                return 0;
+            }
+            case "ob-form":
+            {
+                // Dev aid: the records of Oblivion's plugins (--plugins, default Oblivion.esm;Knights.esp) whose form ID (hex,
+                // without the plugin) is one of --ids a,b: type, editor ID, name, plugin.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var ids = opts["ids"].Split(',').Select(s => Convert.ToUInt32(s, 16)).ToHashSet();
+                foreach (var p in opts.GetValueOrDefault("plugins", "Oblivion.esm;Knights.esp").Split(';'))
+                {
+                    using var m = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, p), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                    foreach (var r in m.EnumerateMajorRecords().Where(r => ids.Contains(r.FormKey.ID)))
+                        Console.WriteLine($"{p}: {r.FormKey} {r.Registration.Name} {r.EditorID} \"{(r as Mutagen.Bethesda.Plugins.Aspects.INamedGetter)?.Name}\"");
+                    // Who places them: references in this plugin whose base is one of the ids (any plugin).
+                    int shown = 0;
+                    foreach (var r in m.EnumerateMajorRecords().OfType<Mutagen.Bethesda.Oblivion.IPlacedObjectGetter>().Where(r => ids.Contains(r.Base.FormKey.ID)))
+                        if (shown++ < 10) Console.WriteLine($"  {p}: reference {r.FormKey} {r.EditorID} base {r.Base.FormKey} at {r.Location?.Position}");
+                    foreach (var r in m.EnumerateMajorRecords().OfType<Mutagen.Bethesda.Oblivion.IPlacedNpcGetter>().Where(r => ids.Contains(r.Base.FormKey.ID)))
+                        if (shown++ < 20) Console.WriteLine($"  {p}: actor {r.FormKey} {r.EditorID} base {r.Base.FormKey} at {r.Location?.Position}");
+                    // Packages whose target is one of the ids, by kind (a reference, an object, a type of object).
+                    foreach (var pk in m.AIPackages.Where(pk => pk.Target is { } t && ids.Contains((uint)t.Object & 0xFFFFFF)))
+                        if (shown++ < 30) Console.WriteLine($"  {p}: package {pk.FormKey} {pk.EditorID} target {pk.Target!.ObjectType} {pk.Target.Object:X} count {pk.Target.Count}");
+                    foreach (var pk in m.AIPackages.Where(pk => pk.Location?.LocationReference.FormKeyNullable is { } lr && ids.Contains(lr.ID)))
+                        if (shown++ < 40) Console.WriteLine($"  {p}: package {pk.FormKey} {pk.EditorID} location {pk.Location!.Type} {pk.Location.LocationReference.FormKey} radius {pk.Location.Radius}");
+                    // --links PLUGIN: any record linking to one of the ids as that plugin's own form (a low id under a plugin
+                    // that isn't the one defining it).
+                    if (opts.TryGetValue("links", out var linkPlugin))
+                        foreach (var r in m.EnumerateMajorRecords())
+                            foreach (var l in r.EnumerateFormLinks().Where(l => ids.Contains(l.FormKey.ID) && l.FormKey.ModKey.FileName.String.Equals(linkPlugin, StringComparison.OrdinalIgnoreCase)))
+                                if (shown++ < 40) Console.WriteLine($"  {p}: {r.Registration.Name} {r.FormKey} {r.EditorID} links {l.FormKey} ({l.Type.Name})");
+                }
+                return 0;
+            }
             case "ob-nif-head":
             {
                 // Dev aid: Oblivion models' (--file a;b, data-relative) version line and, for NetImmerse 10.0.1.2 ones, the

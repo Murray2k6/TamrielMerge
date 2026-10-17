@@ -45,14 +45,32 @@ public sealed class ObData
             .ToList();
     }
 
-    public bool Exists(string path) => files.ContainsKey(Normalize(path)) || File.Exists(Path.Combine(DataDir, Normalize(path)));
+    public bool Exists(string path) => files.ContainsKey(Normalize(path)) || File.Exists(Path.Combine(DataDir, Normalize(path))) || StandIns.ContainsKey(Normalize(path));
 
     public byte[]? Read(string path)
     {
         if (files.TryGetValue(Normalize(path), out var bsa)) return bsa.Read(path);
         string loose = Path.Combine(DataDir, Normalize(path));
-        return File.Exists(loose) ? File.ReadAllBytes(loose) : null;
+        if (File.Exists(loose)) return File.ReadAllBytes(loose);
+        return StandIns.TryGetValue(Normalize(path), out var standIn) ? Read(standIn) : null;
     }
+
+    /// <summary>
+    /// Files Oblivion's records name that its data doesn't have (2026-10-17, in no archive and not loose), and what stands
+    /// in for each: the female upper-class shirt's real file (the record's path is a typo for it), the madness rocks'
+    /// one rock, the same quest's fringe plant for the dermis membrane, and a Xivilai's death cry for the Dremora's.
+    /// Keys with and without the folder, as callers ask either way.
+    /// </summary>
+    static readonly Dictionary<string, string> StandIns = new[]
+    {
+        (@"meshes\clothes\upperclass\02\shirt02f.nif", @"meshes\clothes\upperclass\02\f\shirt.nif"),
+        (@"meshes\clutter\madnessrocks\madnessrockv3clutter.nif", @"meshes\clutter\madnessrocks\madnessrockv3.nif"),
+        (@"meshes\clutter\madnessrocks\madnessrockv3clutter2.nif", @"meshes\clutter\madnessrocks\madnessrockv3.nif"),
+        (@"meshes\clutter\madnessrocks\madnessrockv3mini.nif", @"meshes\clutter\madnessrocks\madnessrockv3.nif"),
+        (@"meshes\plants\fringe\se09dermismembrane.nif", @"meshes\plants\fringe\se09boneplant01.nif"),
+        (@"sound\fx\dremora\voc_dremoradeath_02.wav", @"sound\fx\npc\xivilai\death\npc_xivilai_death_02.wav"),
+    }.SelectMany(p => new[] { (p.Item1, p.Item2), (p.Item1[(p.Item1.IndexOf('\\') + 1)..], p.Item2) })
+     .ToDictionary(p => p.Item1, p => p.Item2, StringComparer.OrdinalIgnoreCase);
 
     public IEnumerable<string> List(string folder)
     {
