@@ -98,8 +98,12 @@ other from any of your games; *Textures & PBR…* changes its textures and makes
    can pause it at any time. A stopped conversion can be carried on from where it stopped with
    `TamrielMerge.Cli.exe convert --resume` (the same options as before).
 4. With *Install* ticked, the result goes into Skyrim's Data folder and its plugins are switched on, in Skyrim's own
-   plugin list and in your Mod Organizer 2 profile. Otherwise copy the output folder into Data yourself, or add it to
-   your mod manager as a mod.
+   plugin list and in your Mod Organizer 2 profile. Its meshes, textures and scripts go in compressed archives (BSA),
+   its sounds and voices in plain ones, each game's named after its plugin, so Data holds a few archives instead of
+   hundreds of thousands of loose files. Installing also clears out what an earlier install left that this one doesn't
+   have: older loose copies (loose files would win over the new archives), stale files in TamrielMerge's own folders,
+   and plugins it no longer makes, which also come off the plugin lists. The output folder keeps its loose files.
+   Otherwise copy the output folder into Data yourself, or add it to your mod manager as a mod.
 5. Start a **new game** in Skyrim. The first story begins with its intro, which you can watch or skip.
 
 Optional:
@@ -118,6 +122,7 @@ The app runs `TamrielMerge.Cli.exe`, which can be used on its own:
 TamrielMerge.Cli.exe setup                    install the tools the conversion needs
 TamrielMerge.Cli.exe convert [--out DIR] [--install] [--gpu] [--skip Morrowind,Voices,...] [--resume] [--no-staging]
 TamrielMerge.Cli.exe lod --dir DIR [--only terrain,objects,trees] [--install]
+TamrielMerge.Cli.exe install [--dir DIR]       install a finished conversion into Skyrim's Data folder
 TamrielMerge.Cli.exe voices --out DIR [--gpu]
 TamrielMerge.Cli.exe drives                   where a conversion would be built
 ```
@@ -171,6 +176,8 @@ Built with:
 - [Mutagen](https://github.com/Mutagen-Modding/Mutagen) (GPL-3.0): reading and writing Bethesda plugins.
 - [nifly / niflysharp](https://github.com/ousnius/nifly) (GPL-3.0): NIF meshes.
 - [DotRecast](https://github.com/ikpil/DotRecast) (zlib): navmeshes.
+- [K4os.Compression.LZ4](https://github.com/MiloszKrajewski/K4os.Compression.LZ4) (MIT): compressing the installed
+  archives.
 - [HKX2Library](https://github.com/krenyy/HKX2Library) (MIT), in `src/ThirdParty`: Havok skeletons and animations.
 - [TripoSR](https://github.com/VAST-AI-Research/TripoSR) (MIT), in `tools/model3d/TripoSR`: models from sprites.
 - [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (BSD-3-Clause): upscaling, its models downloaded by setup.

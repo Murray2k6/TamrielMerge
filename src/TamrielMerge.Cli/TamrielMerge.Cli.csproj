@@ -11,6 +11,8 @@
 
   <ItemGroup>
     <PackageReference Include="DotRecast.Recast" Version="2026.3.1" />
+    <!-- LZ4 for compressed archives (BsaWriter.Pack); Mutagen reads them with the same library. -->
+    <PackageReference Include="K4os.Compression.LZ4.Streams" Version="1.3.8" />
     <PackageReference Include="Mutagen.Bethesda.Oblivion" Version="0.54.4" />
     <PackageReference Include="Mutagen.Bethesda.Skyrim" Version="0.54.4" />
     <PackageReference Include="NAudio" Version="2.2.1" />

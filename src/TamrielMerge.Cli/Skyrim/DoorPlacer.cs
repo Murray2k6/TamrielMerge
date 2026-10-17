@@ -21,13 +21,17 @@ public static class DoorPlacer
     // ImpWoodDoorSingleSmall01.nif, 2026-10-10). Placed with the origin on the floor it sank 36 x scale, the frame
     // stopping short of the doorway's top and the leaf barely an NPC tall (user: "some doors are too small for npcs
     // too", "the door frames dont match some of the doors").
-    static readonly FormKey SingleDoor = Sk(0x4DFD9);
-    const float SingleHeight = 228, SingleLeafOffset = 72;
+    internal static readonly FormKey SingleDoor = Sk(0x4DFD9);
+    const float SingleHeight = 228;
+    internal const float SingleLeafOffset = 72;
     internal const float SingleBottom = -36;
+    /// <summary>The single door's opening: the leaf's height (-37..172), the head room its frame leaves.</summary>
+    internal const float SingleOpening = 209;
     // ImpDoorDouble01: 292 wide, 309 tall, leaves ~264 units along +Y from its origin; its threshold's bottom is 4
     // above the origin (ImpWoodDoorDouble01.nif).
-    static readonly FormKey DoubleDoor = Sk(0x439C2);
-    const float DoubleWidth = 292, DoubleLeafOffset = 264;
+    internal static readonly FormKey DoubleDoor = Sk(0x439C2);
+    const float DoubleWidth = 292;
+    internal const float DoubleLeafOffset = 264;
     internal const float DoubleBottom = 4;
 
     /// <summary>Base doors used for Daggerfall doors, for effects that look for the nearest one (Open, Wizard Lock).</summary>

@@ -356,6 +356,74 @@ public static class DungeonCheck
         }
         static float Wrap(float deg) { while (deg > 180) deg -= 360; while (deg < -180) deg += 360; return deg; }
 
+        // Debugging (TM_CHECK_DOOR_GRID, TM_CHECK_GRID_AT=cell,x,y,z,fx,fy): floor heights over a spot, relative to it, and
+        // the head room over each (rows along the facing, columns across it), 24 units apart.
+        void FloorGrid(Vector3 centre, Vector3 facing, float sill)
+        {
+            var across = new Vector3(facing.Y, -facing.X, 0);
+            for (int ti = 8; ti >= -8; ti--)
+            {
+                var row = new List<string>();
+                for (int si = -8; si <= 8; si++)
+                {
+                    var q = centre + facing * (ti * 24) + across * (si * 24);
+                    var fl = FloorBelow(q.X, q.Y, sill + 300);
+                    var ce = fl is { } ff ? CeilingAbove(q.X, q.Y, ff + 16) : null;
+                    row.Add(fl is null ? "   .   " : $"{fl - sill,4:F0}/{(ce is { } cc ? (cc - fl!.Value).ToString("F0") : "-"),-3}");
+                }
+                Console.WriteLine($"    t {ti * 24,4}: " + string.Join(" ", row));
+            }
+        }
+        if (Environment.GetEnvironmentVariable("TM_CHECK_GRID_AT") is { } gat && gat.Split(',') is [var gc, .. var gv] && gc == cellName && gv.Length == 5)
+        {
+            var g = gv.Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            Console.WriteLine($"  grid at {g[0]},{g[1]},{g[2]} facing {g[3]},{g[4]}");
+            FloorGrid(new Vector3(g[0], g[1], g[2]), Vector3.Normalize(new Vector3(g[3], g[4], 0)), g[2]);
+        }
+
+        // Doorways (DoorPlacer's Skyrim doors): the way through, 96 units either side of the doorway, must leave a person
+        // room to stand (128 units, the navmesh's agent height), under the room's ceiling and, in the frame, the
+        // Skyrim door's own lintel, and no rise taller than a step (user, 2026-10-16: Privateer's Hold's first doorway
+        // "the stairs are too close too the door so the player cant fit").
+        foreach (var r in refs.OfType<IPlacedObjectGetter>())
+        {
+            if (r.Placement is not { } dp) continue;
+            bool single = r.Base.FormKey == DoorPlacer.SingleDoor;
+            if (!single && r.Base.FormKey != DoorPlacer.DoubleDoor) continue;
+            float sc = r.Scale ?? 1, hd = dp.Rotation.Z;
+            var facing = new Vector3(MathF.Sin(hd), MathF.Cos(hd), 0);
+            var pos = new Vector3(dp.Position.X, dp.Position.Y, dp.Position.Z);
+            // DoorPlacer put the origin off the doorway's centre by the leaf's offset, and its floor on the doorway's.
+            var centre = pos + facing * ((single ? -DoorPlacer.SingleLeafOffset : DoorPlacer.DoubleLeafOffset) * sc);
+            float sill = pos.Z + (single ? DoorPlacer.SingleBottom : DoorPlacer.DoubleBottom) * sc;
+            float? lintel = single ? sill + DoorPlacer.SingleOpening * sc : null;
+            float room = float.MaxValue, roomAt = 0, step = 0, stepAt = 0;
+            bool trace = Environment.GetEnvironmentVariable("TM_CHECK_DOORS") == cellName;
+            if (trace) Console.WriteLine($"  door {r.FormKey} at {centre.X:F0},{centre.Y:F0} sill {sill:F0} facing {facing.X:F2},{facing.Y:F2} scale {sc:F2} lintel {lintel:F0}");
+            if (trace && Environment.GetEnvironmentVariable("TM_CHECK_DOOR_GRID") is { } gid && r.FormKey.ID.ToString("X6") == gid) FloorGrid(centre, facing, sill);
+            foreach (int side in new[] { 1, -1 })
+            {
+                float last = sill;
+                var profile = new List<string>();
+                for (float t = 0; t <= 96; t += 8)
+                {
+                    var q = centre + facing * (t * side);
+                    if (FloorBelow(q.X, q.Y, last + 48) is not { } f) { profile.Add($"{t * side}:none"); break; }   // past the edge of the floor
+                    // Up only: a drop beyond the doorway is a ledge, not a step one can't climb.
+                    if (f - last > step) { step = f - last; stepAt = t * side; }
+                    last = f;
+                    float top = CeilingAbove(q.X, q.Y, f + 16) ?? float.MaxValue;
+                    if (lintel is { } l && t <= 24 * sc) top = MathF.Min(top, l);
+                    if (top - f < room) { room = top - f; roomAt = t * side; }
+                    profile.Add($"{t * side}:{f:F0}/{(top == float.MaxValue ? "-" : (top - f).ToString("F0"))}");
+                }
+                if (trace) Console.WriteLine($"    side {side}: " + string.Join(" ", profile));
+            }
+            void FlagDoor(string kind, string detail) => problems.Add(new Problem(kind, cellName, r.FormKey.ToString(), single ? "ImpDoorExtSingleSmall01" : "ImpDoorDouble01", centre.X, centre.Y, sill, detail));
+            if (room < 128) FlagDoor("Doorway: too low to pass", $"{room:F0} units of head room {roomAt:F0} from the doorway (door scale {sc:F2})");
+            if (step > 48) FlagDoor("Doorway: a step too high", $"{step:F0} units {stepAt:F0} from the doorway");
+        }
+
         foreach (var r in refs)
         {
             if (r.Placement is not { } pl) continue;

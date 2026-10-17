@@ -588,19 +588,7 @@ static class Program
                 Console.WriteLine("Needed: SKSE and Address Library for SKSE Plugins. They run the Tamriel menu, the guide, Daggerfall's seamless overland (SKSE/Plugins/TamrielMergeSeamless.dll: physics past 64 cells) and the era in the date (TamrielMergeEra.dll).");
                 if (opts.ContainsKey("install"))
                 using (Begin("Installing"))
-                {
-                    foreach (var file in Directory.EnumerateFiles(outDir, "*", SearchOption.AllDirectories))
-                    {
-                        string rel = Path.GetRelativePath(outDir, file);
-                        if (rel.Equals("problems.txt", StringComparison.OrdinalIgnoreCase) || rel.EndsWith(".voicemap.json", StringComparison.OrdinalIgnoreCase)) continue;
-                        string target = Path.Combine(skyrimData, rel);
-                        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                        File.Copy(file, target, overwrite: true);
-                    }
-                    Console.WriteLine($"Installed into {skyrimData}");
-                    // Switched on where Skyrim reads its plugin list (its own, and Mod Organizer 2's profile; --mo2 DIR).
-                    foreach (var line in Setup.PluginList.Enable(plugins, opts.GetValueOrDefault("mo2"))) Console.WriteLine($"  {line}");
-                }
+                    InstallInto(outDir, skyrimData, plugins, opts.GetValueOrDefault("mo2"));
                 // Last, as it takes days: Morrowind's dialogue spoken in Skyrim's voices (the voice generator; the app can
                 // pause it, and running it again resumes). --skip VoiceGen leaves it for later.
                 if (voices && plugins.Contains("Morrowind.esm") && !skip.Contains("VoiceGen"))
@@ -613,6 +601,49 @@ static class Program
                     }
                 Progress.Report(1, failed.Count == 0 ? "Done" : $"Done; failed: {string.Join(", ", failed)}");
                 return failed.Count == 0 ? 0 : 2;
+            }
+            case "bsa-verify":
+            {
+                // Reads archives (--bsa a.bsa;b.bsa, or every .bsa in --data) back with Mutagen's reader and compares each
+                // file with the one it was packed from in --dir: a check of BsaWriter's compressed and plain archives.
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                var bsas = opts.TryGetValue("bsa", out var list) ? list.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                    : Directory.GetFiles(Path.GetFullPath(opts["data"]), "*.bsa");
+                int files = 0, wrong = 0, missing = 0;
+                foreach (var bsa in bsas)
+                {
+                    var reader = Mutagen.Bethesda.Archives.Archive.CreateReader(Mutagen.Bethesda.GameRelease.SkyrimSE, bsa);
+                    int here = 0;
+                    foreach (var f in reader.Files)
+                    {
+                        here++; files++;
+                        string src = Path.Combine(dir, f.Path);
+                        if (!File.Exists(src)) { if (++missing <= 5) Console.WriteLine($"  {Path.GetFileName(bsa)}: {f.Path} has no source"); continue; }
+                        if (!f.GetBytes().AsSpan().SequenceEqual(File.ReadAllBytes(src))) { if (++wrong <= 10) Console.WriteLine($"  {Path.GetFileName(bsa)}: {f.Path} differs"); }
+                    }
+                    Console.WriteLine($"{Path.GetFileName(bsa)}: {here:N0} files read back");
+                }
+                Console.WriteLine($"{files:N0} files: {files - wrong - missing:N0} the same as their source, {wrong} different, {missing} without a source");
+                return wrong == 0 && missing == 0 ? 0 : 2;
+            }
+            case "install":
+            {
+                // A finished conversion (--dir, default out/convert) installed into Skyrim's Data folder as convert --install
+                // does (Skyrim/DataArchives); --data DIR installs into another folder instead (a test: no plugin lists
+                // touched). The plugins enabled are the conversion's, in the order convert lists them.
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                bool other = opts.TryGetValue("data", out var dataDir);
+                string data = other ? Path.GetFullPath(dataDir!) : skyrimData;
+                Directory.CreateDirectory(data);
+                string[] order = ["Daggerfall.esm", .. Skyrim.Terrain.OverlandTiles.LandPluginNames, "Daggerfall Towns.esm", "Daggerfall Dungeons.esm",
+                    "Redguard.esm", "Morrowind.esm", "Oblivion.esm", "Daggerfall Creatures.esp", "Redguard Creatures.esp", "Morrowind Creatures.esp", "Oblivion Creatures.esp",
+                    "TamrielMerge Menu.esp", "Daggerfall Overland Doors.esp", "TamrielMerge Start.esp", "TamrielMerge Travel.esp", "TamrielMerge Progression.esp"];
+                var plugins = order.Where(p => File.Exists(Path.Combine(dir, p)))
+                    .Concat(Directory.EnumerateFiles(dir).Select(Path.GetFileName).Where(f => f!.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase)).Select(f => f!)
+                        .Where(f => !order.Contains(f, StringComparer.OrdinalIgnoreCase)).Order(StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+                InstallInto(dir, data, plugins, opts.GetValueOrDefault("mo2"), lists: !other);
+                return 0;
             }
             case "drives":
             {
@@ -9279,6 +9310,19 @@ static class Program
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
         File.WriteAllText(tmp, text);
         File.Move(tmp, full, overwrite: true);
+    }
+
+    /// <summary>A conversion in <paramref name="outDir"/> installed into Skyrim's Data folder (Skyrim/DataArchives: its
+    /// assets in archives, the stale removed), its plugins switched on where Skyrim reads its plugin list (its own, and
+    /// Mod Organizer 2's profile) and those gone taken off.</summary>
+    static void InstallInto(string outDir, string data, IReadOnlyList<string> plugins, string? mo2, bool lists = true)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var r = Skyrim.DataArchives.Install(outDir, data, plugins, Console.WriteLine);
+        Console.WriteLine($"Installed into {data} in {sw.Elapsed.TotalMinutes:F1} min: {r.Archives.Count} archives, {r.Raw / (double)(1L << 30):F1} GB of files in {r.Stored / (double)(1L << 30):F1} GB");
+        if (!lists) return;
+        foreach (var line in Setup.PluginList.Remove(r.Gone, mo2)) Console.WriteLine($"  {line}");
+        foreach (var line in Setup.PluginList.Enable(r.Plugins, mo2)) Console.WriteLine($"  {line}");
     }
 
     /// <summary>About how much a convert writes while it builds, by the games it converts (2026-10-13: Daggerfall's land,

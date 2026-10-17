@@ -59,6 +59,29 @@ public static class PluginList
         return done;
     }
 
+    /// <summary>Takes <paramref name="plugins"/> (gone from Data: stale or retired) off every list; returns what was done.</summary>
+    public static List<string> Remove(IReadOnlyList<string> plugins, string? mo2 = null)
+    {
+        var done = new List<string>();
+        if (plugins.Count == 0) return done;
+        void Drop(string file)
+        {
+            if (!File.Exists(file)) return;
+            var lines = File.ReadAllLines(file).ToList();
+            int before = lines.Count;
+            lines.RemoveAll(l => plugins.Contains(l.TrimStart('*').Trim(), StringComparer.OrdinalIgnoreCase));
+            if (lines.Count != before) File.WriteAllLines(file, lines, new UTF8Encoding(false));
+        }
+        Drop(OwnList);
+        done.Add($"{string.Join(", ", plugins)} taken off {OwnList}");
+        var profiles = Mo2Profiles(mo2).ToList();
+        if (profiles.Count > 0 && Process.GetProcessesByName("ModOrganizer").Length > 0)
+            done.Add("Mod Organizer 2 is open: close it and install again to take them off its profile too");
+        else
+            foreach (var profile in profiles) { Drop(Path.Combine(profile, "plugins.txt")); Drop(Path.Combine(profile, "loadorder.txt")); }
+        return done;
+    }
+
     /// <summary>Whether a plugin is switched on: in Mod Organizer 2's profile when MO2 manages the game, else in
     /// Skyrim's own list.</summary>
     public static bool IsEnabled(string plugin, string? mo2 = null)
