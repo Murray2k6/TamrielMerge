@@ -5,6 +5,7 @@ using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Skyrim;
 using Noggog;
+using System.Text;
 using Vector3 = System.Numerics.Vector3;
 
 namespace TamrielMerge.Skyrim.Navmesh;
@@ -28,12 +29,12 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     SkyrimMod Mod => mod;
 
     /// <summary>Recast settings in Skyrim units: actor ~128 tall, 24 radius, steps up to 32 (stairs arrive as ramps), slopes to 50 degrees (Daggerfall's steepest stairs are 45).</summary>
-    static RcConfig Config(RcPartition partition = RcPartition.WATERSHED, float coarse = 1) => new(
+    static RcConfig Config(RcPartition partition = RcPartition.WATERSHED, float coarse = 1, float outline = 1) => new(
         partition,
         cellSize: Env("CS", 8f) * coarse, cellHeight: Env("CH", 4f) * coarse,
         agentMaxSlope: Env("SLOPE", 50f), agentHeight: Env("HEIGHT", 128f), agentRadius: Env("RADIUS", 24f), agentMaxClimb: Env("CLIMB", 32f),
         regionMinSize: 8, regionMergeSize: 20,
-        edgeMaxLen: 600f, edgeMaxError: 2f,
+        edgeMaxLen: 600f, edgeMaxError: 2f * outline,
         vertsPerPoly: 6,
         detailSampleDist: 6f, detailSampleMaxError: 1f,
         filterLowHangingObstacles: Env("LOWHANG", 1f) > 0, filterLedgeSpans: Env("LEDGE", 1f) > 0, filterWalkableLowHeightSpans: Env("LOWHEIGHT", 1f) > 0,
@@ -43,43 +44,135 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     static float Env(string name, float fallback) =>
         float.TryParse(Environment.GetEnvironmentVariable("TM_NAV_" + name), System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
 
-    /// <summary>Meshes Recast's watershed partitioning couldn't fully triangulate, made again by layers (or monotone).</summary>
+    /// <summary>Meshes Recast's first try couldn't fully triangulate, made again (another partitioning, a finer outline or coarser voxels).</summary>
     public static int Retriangulated => retriangulated;
     static int retriangulated;
 
+    /// <summary>Meshes still not fully triangulated after every retry (their Recast warnings are printed).</summary>
+    public static int Untriangulated => untriangulated;
+    static int untriangulated;
+
+    /// <summary>The tries in order: partitioning, voxel size (times the config's) and outline error (times the config's).</summary>
+    static readonly (RcPartition Partition, float Coarse, float Error)[] Tries =
+    [
+        (RcPartition.WATERSHED, 1, 1), (RcPartition.LAYERS, 1, 1), (RcPartition.MONOTONE, 1, 1),
+        (RcPartition.WATERSHED, 1, 0.5f), (RcPartition.LAYERS, 1, 0.5f), (RcPartition.MONOTONE, 1, 0.5f),
+        (RcPartition.LAYERS, 1, 0), (RcPartition.MONOTONE, 1, 0),
+        (RcPartition.WATERSHED, 2, 1), (RcPartition.LAYERS, 2, 1), (RcPartition.MONOTONE, 2, 1), (RcPartition.LAYERS, 2, 0), (RcPartition.MONOTONE, 2, 0),
+    ];
+
     /// <summary>
     /// Recast's polygon mesh for the geometry, every region filled. Watershed partitioning (the best-shaped triangles)
-    /// can leave a region's outline twisted ("rcBuildRegions: overlapping regions"); Recast then triangulates only part
-    /// of it ("BuildPolyMesh: Bad triangulation Contour n") and the rest of that floor gets no navmesh. Recast only
-    /// prints that, so each region's outline area is compared with the area of the polygons made from it, and a
-    /// mesh missing any is made again with layer partitioning, then monotone (whose regions can't overlap). A retry
-    /// can fail where watershed didn't (2026-10-16: layers threw "rcBuildContours: Multiple outlines for region 13" in
-    /// The Abbey of Asmiameusessa), so the mesh covering the most is kept. Watershed can also throw ("rcBuildContours:
-    /// Bad outline for region n, contour simplification is likely too aggressive": an Oblivion house and two exterior
-    /// cells, 2026-10-17), and a column of more than 62 stacked surfaces can't be built at all ("Heightfield has too many
-    /// layers"); last, the voxels are made twice as coarse, which joins surfaces closer than a voxel.
+    /// can leave a region's outline twisted ("rcBuildRegions: overlapping regions"), and simplifying an outline to
+    /// within edgeMaxError voxels can fold it over itself where two walls of a region run close together; Recast then
+    /// triangulates only part of it ("BuildPolyMesh: Bad triangulation Contour n", its own comment: "the contour is
+    /// messed up. This sometimes happens if the contour simplification is too aggressive") and the rest of that floor
+    /// gets no navmesh. A try is good when Recast warned of no bad triangulation or unmerged hole, no region lies over
+    /// itself (<see cref="Overlapping"/>) and each region's polygons fill its outline; otherwise the mesh is made again: layer partitioning, then monotone (whose regions
+    /// can't overlap), then the same with half the outline error and with none (the outline follows the voxels'
+    /// edges, which can't cross). A retry can fail where watershed didn't (2026-10-16: layers threw "rcBuildContours:
+    /// Multiple outlines for region 13" in The Abbey of Asmiameusessa), so with no good try the mesh covering the most
+    /// is kept. Watershed can also throw ("rcBuildContours: Bad outline for region n, contour simplification is likely
+    /// too aggressive": an Oblivion house and two exterior cells, 2026-10-17), and a column of more than 62 stacked
+    /// surfaces can't be built at all ("Heightfield has too many layers"); last, the voxels are made twice as coarse,
+    /// which joins surfaces closer than a voxel. DotRecast prints its warnings straight to the console, so each try's
+    /// are kept (<see cref="RecastOutput"/>) and printed only for a mesh no try could make whole.
     /// </summary>
-    static RcPolyMesh? BuildMesh(IRcInputGeomProvider geom, Func<RcPartition, float, RcBuilderConfig> config)
+    static RcPolyMesh? BuildMesh(IRcInputGeomProvider geom, Func<RcPartition, float, float, RcBuilderConfig> config)
     {
         RcPolyMesh? best = null;
         double cover = -1;
+        int bestBad = int.MaxValue;
+        string bestWarnings = "";
         Exception? error = null;
-        bool firstTry = true;
-        foreach (var (partition, coarse) in new[] { (RcPartition.WATERSHED, 1f), (RcPartition.LAYERS, 1f), (RcPartition.MONOTONE, 1f), (RcPartition.WATERSHED, 2f), (RcPartition.MONOTONE, 2f) })
+        for (int t = 0; t < Tries.Length; t++)
         {
-            if (best is not null && coarse > 1) break;   // coarser voxels only when nothing could be built
+            var (partition, coarse, outline) = Tries[t];
             try
             {
-                var r = new RcBuilder().Build(geom, config(partition, coarse), true);
-                if (r.Mesh is null || r.ContourSet is null) { if (firstTry) return r.Mesh; continue; }
+                var r = RecastOutput.Keep(() => new RcBuilder().Build(geom, config(partition, coarse, outline), true), out var warnings);
+                if (r.Mesh is null || r.ContourSet is null) { if (t == 0) return r.Mesh; continue; }
                 double c = Coverage(r.ContourSet, r.Mesh);
-                if (c > cover) { cover = c; best = r.Mesh; if (!firstTry) Interlocked.Increment(ref retriangulated); }
-                if (c >= 1) break;
+                int overlapping = r.CompactHeightfield is { } chf ? Overlapping(chf) : 0;
+                if (overlapping > 0) warnings += $"{overlapping} regions lie over themselves ({partition}){Environment.NewLine}";
+                int bad = RecastOutput.Bad(warnings) + overlapping;
+                if (c >= 1 && bad == 0)
+                {
+                    if (t > 0) Interlocked.Increment(ref retriangulated);
+                    return r.Mesh;
+                }
+                if (c > cover || (c == cover && bad < bestBad)) (cover, bestBad, best, bestWarnings) = (c, bad, r.Mesh, warnings);
             }
             catch (Exception e) { error ??= e; }
-            firstTry = false;
         }
-        return best ?? throw error ?? new InvalidOperationException("Recast made no mesh");
+        if (best is null) throw error ?? new InvalidOperationException("Recast made no mesh");
+        Interlocked.Increment(ref untriangulated);
+        Console.Write($"Recast, still after every retry ({cover:P0} of the least covered region filled):{Environment.NewLine}{bestWarnings}");
+        return best;
+    }
+
+    /// <summary>
+    /// Console output that, on a thread building a Recast mesh, is kept for that try instead of written: DotRecast's
+    /// RcContext writes its warnings with Console.WriteLine and can't be given another log. Installed over
+    /// Console.Out the first time a mesh is built; other threads' output passes straight through.
+    /// </summary>
+    sealed class RecastOutput(TextWriter inner) : TextWriter
+    {
+        [ThreadStatic] static StringBuilder? capture;
+        static readonly object Gate = new();
+        static bool installed;
+
+        public override Encoding Encoding => inner.Encoding;
+        public override void Write(char value) { if (capture is { } c) c.Append(value); else inner.Write(value); }
+        public override void Write(string? value) { if (capture is { } c) c.Append(value); else inner.Write(value); }
+        public override void Write(char[] buffer, int index, int count) { if (capture is { } c) c.Append(buffer, index, count); else inner.Write(buffer, index, count); }
+        public override void WriteLine(string? value) { if (capture is { } c) c.Append(value).Append(Environment.NewLine); else inner.WriteLine(value); }
+        public override void Flush() => inner.Flush();
+
+        /// <summary>Runs <paramref name="build"/> with this thread's console output kept in <paramref name="warnings"/>.</summary>
+        public static T Keep<T>(Func<T> build, out string warnings)
+        {
+            lock (Gate)
+                if (!installed) { Console.SetOut(new RecastOutput(Console.Out)); installed = true; }
+            var outer = capture;
+            var kept = capture = new StringBuilder();
+            T result;
+            try { result = build(); }
+            finally { capture = outer; }
+            warnings = kept.ToString();
+            return result;
+        }
+
+        /// <summary>How many of Recast's warnings mean part of a floor got no polygons: a contour it triangulated only
+        /// partly, or a hole it couldn't join to its outline.</summary>
+        public static int Bad(string warnings)
+        {
+            int n = 0;
+            foreach (var line in warnings.Split('\n'))
+                if (line.Contains("Bad triangulation", StringComparison.Ordinal) || line.Contains("Failed to find merge points", StringComparison.Ordinal)) n++;
+            return n;
+        }
+    }
+
+    /// <summary>
+    /// How many regions lie over themselves: a column of the heightfield with two of its spans in the same region, as
+    /// where a stair turns back over its own foot or a ledge hangs over the floor it rose from. Recast's watershed
+    /// only warns of these ("rcBuildRegions: n overlapping regions"; the split its comment promises isn't there) and
+    /// monotone doesn't say, but the region's outline then runs over both floors and crosses itself, so a part of
+    /// one of them gets no polygons or the outline can't be traced at all. Layer partitioning keeps such floors apart.
+    /// </summary>
+    static int Overlapping(RcCompactHeightfield chf)
+    {
+        HashSet<int>? over = null;
+        foreach (var c in chf.cells)
+            for (int i = c.index, end = c.index + c.count; i < end; i++)
+            {
+                int r = chf.spans[i].reg;
+                if (r == 0 || (r & RcRecast.RC_BORDER_REG) != 0) continue;
+                for (int j = i + 1; j < end; j++)
+                    if (chf.spans[j].reg == r) (over ??= []).Add(r);
+            }
+        return over?.Count ?? 0;
     }
 
     /// <summary>How much of its outline the least covered region's polygons fill, 1 when all are (voxel units, both on
@@ -389,7 +482,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             }
         }
         var geom = new RcSampleInputGeomProvider(verts.ToArray(), faces.ToArray());
-        var pmesh = BuildMesh(geom, (p, coarse) => new RcBuilderConfig(Config(p, coarse), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()))!;
+        var pmesh = BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(Config(p, coarse, outline), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()))!;
 
         // Poly mesh vertices are voxel coordinates; convert back to Skyrim space.
         var outVerts = new List<P3Float>(pmesh.nverts);
@@ -626,7 +719,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
 
     /// <summary>Recast settings for exteriors: 16-unit voxels (terrain vertices are 128 apart), one 4096-unit tile per
     /// cell with a border, so the agent radius doesn't erode the mesh back from the cell's edges.</summary>
-    static RcConfig ExteriorConfig(bool open = false, RcPartition partition = RcPartition.WATERSHED, float coarse = 1)
+    static RcConfig ExteriorConfig(bool open = false, RcPartition partition = RcPartition.WATERSHED, float coarse = 1, float outline = 1)
     {
         // Open country (open: Daggerfall's overland, smooth land and little on it) in coarser voxels and longer, looser
         // edges: a quarter of the triangles over 87,000 cells, as vanilla's wilds are meshed in big triangles too.
@@ -634,7 +727,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         int tile = (int)(CellUnits / cs);
         return new RcConfig(true, tile, tile, RcConfig.CalcBorder(radius, cs), partition,
             cs, ch, agentMaxSlope: 50f, agentHeight: 128f, agentRadius: radius, agentMaxClimb: open ? 48f : 32f,
-            minRegionArea: 8 * cs * cs, mergeRegionArea: 20 * cs * cs, edgeMaxLen: open ? 1600f : 600f, edgeMaxError: open ? 4f : 2f, vertsPerPoly: 6,
+            minRegionArea: 8 * cs * cs, mergeRegionArea: 20 * cs * cs, edgeMaxLen: open ? 1600f : 600f, edgeMaxError: (open ? 4f : 2f) * outline, vertsPerPoly: 6,
             detailSampleDist: 6f, detailSampleMaxError: 1f, filterLowHangingObstacles: true, filterLedgeSpans: true, filterWalkableLowHeightSpans: true,
             walkableAreaMod: new RcAreaModification(0x3f), buildMeshDetail: false);
     }
@@ -680,7 +773,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var geom = new RcSampleInputGeomProvider(verts, faces);
         var bmin = new RcVec3f(cx * CellUnits, minZ - 16, -(cy + 1) * CellUnits);
         var bmax = new RcVec3f((cx + 1) * CellUnits, maxZ + 256, -cy * CellUnits);
-        var pmesh = BuildMesh(geom, (p, coarse) => new RcBuilderConfig(ExteriorConfig(open, p, coarse), bmin, bmax, 0, 0));
+        var pmesh = BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(ExteriorConfig(open, p, coarse, outline), bmin, bmax, 0, 0));
         if (pmesh is null || pmesh.npolys == 0) return null;
         var outVerts = new List<P3Float>(pmesh.nverts);
         for (int i = 0; i < pmesh.nverts; i++)
