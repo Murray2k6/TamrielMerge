@@ -307,6 +307,16 @@ public sealed partial class MwPluginBuilder
             if (world.Model(r.BaseId) is { Length: > 0 } model && converted.GetValueOrDefault(model) is { } mesh)
             {
                 solid.AddRange(mesh.Solid.Select(t => t.Select(v => ToWorld(v, r)).ToArray()));
+                if (Environment.GetEnvironmentVariable("TM_MW_PROBE")?.Split(',') is [var pc, var px, var py] && pc == "MW" + Sanitize(source.Name)
+                    && float.TryParse(px, out var qx) && float.TryParse(py, out var qy))
+                    foreach (var w in mesh.Solid.Select(t => t.Select(v => ToWorld(v, r)).ToArray()))
+                    {
+                        float d = (w[1].Y - w[2].Y) * (w[0].X - w[2].X) + (w[2].X - w[1].X) * (w[0].Y - w[2].Y);
+                        if (MathF.Abs(d) < 1e-6f) continue;
+                        float a = ((w[1].Y - w[2].Y) * (qx - w[2].X) + (w[2].X - w[1].X) * (qy - w[2].Y)) / d, bb = ((w[2].Y - w[0].Y) * (qx - w[2].X) + (w[0].X - w[2].X) * (qy - w[2].Y)) / d;
+                        if (a < 0 || bb < 0 || a + bb > 1) continue;
+                        Console.WriteLine($"  probe object {r.BaseId} {model} (collision node: {mesh.FromCollisionNode}): height {a * w[0].Z + bb * w[1].Z + (1 - a - bb) * w[2].Z:F0}, normal z {Vector3.Normalize(Vector3.Cross(w[1] - w[0], w[2] - w[0])).Z:F2}");
+                    }
                 visible.AddRange(mesh.Visible.Select(t => (model, t.Select(v => ToWorld(v, r)).ToArray())));
             }
             if (b is Npc actor)
@@ -422,6 +432,10 @@ public sealed partial class MwPluginBuilder
     }
 
     Skyrim.Navmesh.NavmeshBuilder? navmeshes;
+
+    /// <summary>Interior actors checked against their navmesh, and those within 64 units of it.</summary>
+    public int ActorsChecked { get; private set; }
+    public int ActorsOnNavmesh { get; private set; }
     public int Navmeshes { get; private set; }
     public int NavmeshTriangles { get; private set; }
 
@@ -433,17 +447,39 @@ public sealed partial class MwPluginBuilder
     void BuildNavmesh(Cell cell, List<Vector3[]> solid)
     {
         if (solid.Count == 0) return;
+        if (Environment.GetEnvironmentVariable("TM_MW_WINDING") == "1") Console.WriteLine($"  winding {cell.EditorID}: {Skyrim.Navmesh.NavmeshBuilder.Winding(solid)}");
+        // TM_MW_PROBE=<EditorID>,x,y: every collision triangle over that point, its height there and which way it faces.
+        if (Environment.GetEnvironmentVariable("TM_MW_PROBE")?.Split(',') is [var pc, var px, var py] && pc == cell.EditorID && float.TryParse(px, out var qx) && float.TryParse(py, out var qy))
+            foreach (var w in solid)
+            {
+                float d = (w[1].Y - w[2].Y) * (w[0].X - w[2].X) + (w[2].X - w[1].X) * (w[0].Y - w[2].Y);
+                if (MathF.Abs(d) < 1e-6f) continue;
+                float a = ((w[1].Y - w[2].Y) * (qx - w[2].X) + (w[2].X - w[1].X) * (qy - w[2].Y)) / d, b = ((w[2].Y - w[0].Y) * (qx - w[2].X) + (w[0].X - w[2].X) * (qy - w[2].Y)) / d;
+                if (a < 0 || b < 0 || a + b > 1) continue;
+                Console.WriteLine($"  probe {cell.EditorID} {qx},{qy}: height {a * w[0].Z + b * w[1].Z + (1 - a - b) * w[2].Z:F0}, normal z {Vector3.Normalize(Vector3.Cross(w[1] - w[0], w[2] - w[0])).Z:F2}");
+            }
         navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod);
-        var polygons = solid.Select(t => (t, Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])))).Where(p => !float.IsNaN(p.Item2.X))
-            .Select(p => (p.t, p.Item2.Z < 0 ? -p.Item2 : p.Item2)).ToList();   // collision winding is either way; walkable faces point up
+        // Each face as wound (a ceiling or an underside is an obstacle, not a floor; Morrowind's collision is wound
+        // consistently, 2026-10-19, all 1,335 interiors: 10,784,047 edges shared oppositely, 4,339 the same way), or
+        // every face turned up where that puts more actors on the navmesh (NavmeshBuilder.BuildInterior).
+        var polygons = solid.Select(t => (t, Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])))).Where(p => !float.IsNaN(p.Item2.X)).ToList();
+        var turnedUp = polygons.Select(p => (p.t, p.Item2.Z < 0 ? -p.Item2 : p.Item2)).ToList();
         // Every persistent placed object here except the start marker is a load door (linked to its partner later).
         var loadDoors = cell.Persistent.OfType<PlacedObject>().Where(d => d != StartMarker && !scriptPersistent.Contains(d)).Cast<IPlacedObjectGetter>().ToList();
         var actorsHere = cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
         try
         {
-            var r = navmeshes.BuildInterior(cell, polygons, loadDoors, keepAround: StartMarker.Placement is { } sp && cell.Persistent.Contains(StartMarker) ? sp.Position : null, keepAlso: actorsHere);
+            var r = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp && cell.Persistent.Contains(StartMarker) ? sp.Position : null, actorsHere);
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
+            // Who stands on it: the cell's actors within 64 units of a navmesh triangle.
+            if (r.Navmesh.Data is { } nd)
+                foreach (var a in actorsHere)
+                {
+                    float far = Skyrim.Navmesh.NavmeshBuilder.Distance(nd, a);
+                    ActorsChecked++;
+                    if (far <= 64) ActorsOnNavmesh++;
+                }
         }
         catch (Exception e) { Problems.Add($"navmesh {cell.EditorID}: {e.Message}"); }
     }

@@ -1176,6 +1176,7 @@ static class Program
                 if (builder.Problems.Count > 40) Console.WriteLine($"  ... {builder.Problems.Count - 40} more problems");
                 Console.WriteLine($"  terrain LOD chunks: {builder.TerrainLodChunks}; Skyrim water surfaces: {builder.WaterSurfaces}; ships: {builder.Ships}");
                 Console.WriteLine($"  records: {builder.Mod.Statics.Count} statics, {builder.Mod.Lights.Count} lights, {builder.Mod.Worldspaces.Count} worldspaces, {builder.Mod.Cells.Records.Sum(b => b.SubBlocks.Sum(sb => sb.Cells.Count))} interiors, {builder.Mod.LandscapeTextures.Count} land textures");
+                Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 builder.Write();
                 Console.WriteLine($"Wrote {Path.GetFullPath(Path.Combine(outDir, Redguard.RgPluginBuilder.PluginName))} in {sw.Elapsed.TotalSeconds:F0}s");
                 return 0;
@@ -1825,7 +1826,10 @@ static class Program
                 // "banks:N:Region": the N smallest towns there with a bank.
                 bool HasBank(DfLocation l) => l.ExteriorBlocks.Select(n => DfTownBlock.Resolve(testBsa, n) is { } r ? DfTownBlock.Load(testBsa, r) : null).OfType<DfTownBlock>()
                     .SelectMany(b => b.Buildings).Any(b => b.Data.Type == DfBuildingType.Bank);
-                var picked = spec.StartsWith("smallest:") || spec.StartsWith("dungeon:") || spec.StartsWith("guilds:") || spec.StartsWith("banks:")
+                // "every:N": every Nth place with an exterior of its own, of every kind (a sample across the map).
+                var picked = spec.StartsWith("every:")
+                    ? locs.Where(l => l.ExteriorBlocks.Length > 0).Where((_, i) => i % int.Parse(spec[6..]) == 0).ToList()
+                    : spec.StartsWith("smallest:") || spec.StartsWith("dungeon:") || spec.StartsWith("guilds:") || spec.StartsWith("banks:")
                     ? locs.Where(l => l.ExteriorBlocks.Length > 0 && l.Type is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage
                             && l.RegionName.Equals(spec.Split(':')[2], StringComparison.OrdinalIgnoreCase) && (!spec.StartsWith("dungeon:") || l.DungeonBlocks.Count > 0))
                         .OrderBy(l => l.ExteriorBlocks.Length).ThenBy(l => l.Name)
@@ -1899,6 +1903,7 @@ static class Program
                 {
                     MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
                 });
+                Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 Console.WriteLine($"Wrote {Path.Combine(outDir, "DaggerfallTownTest.esp")} ({new FileInfo(Path.Combine(outDir, "DaggerfallTownTest.esp")).Length / 1048576.0:F1} MB) in {sw.Elapsed.TotalSeconds:F0}s");
                 return 0;
             }
@@ -1936,6 +1941,7 @@ static class Program
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var r = Skyrim.DaggerfallTowns.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts));
                 Console.WriteLine($"Towns batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.People} people ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
+                Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 Console.WriteLine($"  time: setup {r.SetupSeconds:F0} s, towns {r.TownsSeconds:F0} s, talk and guilds {r.TalkSeconds:F0} s, writing {r.WriteSeconds:F0} s");
                 return r.Built > 0 ? 0 : 2;
             }
@@ -1948,6 +1954,7 @@ static class Program
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 var r = Skyrim.DaggerfallDungeons.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts));
                 Console.WriteLine($"Dungeons batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.References} references, {r.NavmeshTriangles} navmesh triangles, {Skyrim.Navmesh.NavmeshBuilder.InteriorsShared} navmeshes made by other parts ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
+                Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 Console.WriteLine($"  time: setup {r.SetupSeconds:F0} s, dungeons {r.LayoutSeconds:F0} s (navmeshes {r.NavmeshSeconds:F0} s of work across threads), writing {r.WriteSeconds:F0} s");
                 return r.Built > 0 ? 0 : 2;
             }
@@ -2014,6 +2021,7 @@ static class Program
                     catch (Exception e) { failures++; Console.WriteLine($"  {loc.Name}: FAILED {e.Message}"); if (opts.ContainsKey("trace")) Console.WriteLine(e); }
                 }
                 Console.WriteLine($"total: {refs} refs, {tris} navmesh triangles ({Skyrim.Navmesh.NavmeshBuilder.Retriangulated} made again, {Skyrim.Navmesh.NavmeshBuilder.Untriangulated} still not whole), {failures} failed, {sw.Elapsed.TotalSeconds:F0}s, working set {Environment.WorkingSet / 1048576} MB");
+                Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 if (opts.ContainsKey("prison"))
                 {
                     // --prison: Daggerfall's prison and every region's jail (DfLaw.BuildPrison) as Daggerfall.esm makes them.
@@ -3456,6 +3464,7 @@ static class Program
                     if (opts.ContainsKey("verbose")) Console.WriteLine($"  {cell.Name}: {built.Temporary.Count + built.Persistent.Count} references of {cell.Refs.Count} ({built.EditorID})");
                 }
                 Console.WriteLine($"  {cells} interiors, {refs} references, {builder.Navmeshes} navmeshes ({builder.NavmeshTriangles} triangles) ({sw.Elapsed.TotalSeconds:F0}s)");
+                Console.WriteLine($"  on the interiors' navmeshes (within 64 units): {builder.ActorsOnNavmesh:N0} of {builder.ActorsChecked:N0} actors");
                 // --doors <cell name>: that cell's teleporting doors and where they lead.
                 if (opts.TryGetValue("doors", out var doorCell) && world.Interiors.TryGetValue(doorCell, out var dc))
                     foreach (var r in dc.Refs.Where(r => world.Objects.GetValueOrDefault(r.BaseId)?.Type == "DOOR"))
@@ -3523,6 +3532,7 @@ static class Program
                 var problems = builder.Problems.Distinct().ToList();
                 foreach (var p in problems.Take(60)) Console.WriteLine($"  problem: {p}");
                 if (problems.Count > 60) Console.WriteLine($"  ... {problems.Count - 60} more problems");
+                Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 Console.WriteLine($"Wrote {Path.GetFullPath(Path.Combine(outDir, Morrowind.MwPluginBuilder.PluginName))} in {sw.Elapsed.TotalSeconds:F0}s");
                 return 0;
             }
@@ -3916,8 +3926,12 @@ static class Program
                 else
                 {
                     Console.WriteLine($"  {builder.BuildAllInteriors()} interiors ({sw.Elapsed.TotalSeconds:F0}s)");
-                    var (worlds, cells) = builder.BuildWorldspaces();
-                    Console.WriteLine($"  {worlds} worldspaces, {cells} exterior cells, {builder.RegionCount} regions, {builder.ExteriorNavmeshes} exterior navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
+                    // --no-exterior skips the worldspaces (faster when working on interiors).
+                    if (!opts.ContainsKey("no-exterior"))
+                    {
+                        var (worlds, cells) = builder.BuildWorldspaces();
+                        Console.WriteLine($"  {worlds} worldspaces, {cells} exterior cells, {builder.RegionCount} regions, {builder.ExteriorNavmeshes} exterior navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
+                    }
                 }
                 var (linked, unlinked) = builder.LinkDoors();
                 Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} partners not built");
@@ -3938,7 +3952,10 @@ static class Program
                 Console.WriteLine($"  records: {m.Statics.Count} statics, {m.Doors.Count} doors, {m.Activators.Count} swinging doors, {m.Lights.Count} lights, {m.LandscapeTextures.Count} landscape textures, " +
                     $"{m.Containers.Count} containers, {m.MiscItems.Count} misc, {m.Keys.Count} keys, {m.Books.Count} books, {m.Weapons.Count} weapons, {m.Ammunitions.Count} ammo, {m.Armors.Count} armour/clothing, " +
                     $"{m.Ingestibles.Count} potions, {m.Ingredients.Count} ingredients, {m.SoulGems.Count} soul gems, {m.LeveledItems.Count} leveled lists, {m.Npcs.Count} actors, {m.LeveledNpcs.Count} leveled actor lists; {builder.Navmeshes} navmeshes ({builder.NavmeshTriangles} triangles)");
+                Console.WriteLine($"  collision: {Oblivion.ObMeshConverter.PackedTriangles:N0} packed triangles read with their normals, {Oblivion.ObMeshConverter.PackedTurned:N0} turned round to face them");
+                Console.WriteLine($"  on the interiors' navmeshes (within 64 units): {builder.ActorsOnNavmesh:N0} of {builder.ActorsChecked:N0} actors, {builder.DoorsOnNavmesh:N0} of {builder.DoorsChecked:N0} load doors");
                 Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Oblivion's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
+                Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 builder.Write();
                 var problems = builder.Problems.Distinct().ToList();
                 File.WriteAllLines(Path.Combine(outDir, "problems.txt"), problems);
@@ -7262,6 +7279,89 @@ static class Program
             {
                 // Packs one .wav (--wav) with its text (--text) into a .fuz (--fuz), to test the tools.
                 Console.WriteLine(Skyrim.VoiceFiles.Pack(skyrimData, opts["wav"], opts["text"], opts["fuz"]) ? $"wrote {opts["fuz"]}" : "failed");
+                return 0;
+            }
+            case "navmesh-ground":
+            {
+                // Dev aid: every exterior navmesh of --plugin (a built plugin; --worldspace EditorID for one) against its
+                // cell's own land: each triangle sampled every 64 units, its height there against the land's (bilinear
+                // between the 128-unit height points). Above the land can be right (rocks, bridges, buildings); below it
+                // by more than a step is under the ground. Independent of Recast's heightfield.
+                string plugin = Path.GetFullPath(opts["plugin"]);
+                using var built = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
+                var only = opts.GetValueOrDefault("worldspace");
+                long samples = 0, on = 0, above = 0, farAbove = 0, below = 0, farBelow = 0; double sumAbs = 0;
+                int cellsChecked = 0;
+                var perCell = new List<(string Name, long Far, long Of)>();
+                var underCells = new List<(string Name, long Under, long Wet, long Of)>();
+                long underSteep = 0, underFlat = 0;
+                var underAt = new List<string>();
+                foreach (var ws in built.Worldspaces.Where(w => only is null || w.EditorID == only))
+                    foreach (var cell in ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                    {
+                        if (cell.Grid is null || cell.Landscape?.VertexHeightMap is not { } vh || cell.NavigationMeshes.Count == 0) continue;
+                        int cx = cell.Grid.Point.X, cy = cell.Grid.Point.Y;
+                        var hh = new float[33, 33]; float row = vh.Offset;
+                        for (int y = 0; y < 33; y++) { row += vh.HeightMap[0, y]; float v = row; hh[0, y] = v * 8; for (int x = 1; x < 33; x++) { v += vh.HeightMap[x, y]; hh[x, y] = v * 8; } }
+                        float Ground(float px, float py)
+                        {
+                            float gx = Math.Clamp((px - cx * 4096f) / 128f, 0, 32), gy = Math.Clamp((py - cy * 4096f) / 128f, 0, 32);
+                            int x0 = Math.Min((int)gx, 31), y0 = Math.Min((int)gy, 31);
+                            float fx = gx - x0, fy = gy - y0;
+                            return (hh[x0, y0] * (1 - fx) + hh[x0 + 1, y0] * fx) * (1 - fy) + (hh[x0, y0 + 1] * (1 - fx) + hh[x0 + 1, y0 + 1] * fx) * fy;
+                        }
+                        long cellFar = 0, cellSamples = 0, cellUnder = 0, cellWet = 0;
+                        float? waterZ = cell.Flags.HasFlag(Cell.Flag.HasWater) ? cell.WaterHeight ?? 0f : null;
+                        foreach (var nav in cell.NavigationMeshes)
+                        {
+                            if (nav.Data is not { } d) continue;
+                            var vs = d.Vertices;
+                            foreach (var t in d.Triangles)
+                            {
+                                var A = vs[t.Vertices.X]; var B = vs[t.Vertices.Y]; var C = vs[t.Vertices.Z];
+                                float det = (B.Y - C.Y) * (A.X - C.X) + (C.X - B.X) * (A.Y - C.Y);
+                                if (MathF.Abs(det) < 1e-3f) continue;
+                                float minX = MathF.Min(A.X, MathF.Min(B.X, C.X)), maxX = MathF.Max(A.X, MathF.Max(B.X, C.X)), minY = MathF.Min(A.Y, MathF.Min(B.Y, C.Y)), maxY = MathF.Max(A.Y, MathF.Max(B.Y, C.Y));
+                                for (float py = MathF.Ceiling(minY / 64) * 64; py <= maxY; py += 64)
+                                    for (float px = MathF.Ceiling(minX / 64) * 64; px <= maxX; px += 64)
+                                    {
+                                        float l1 = ((B.Y - C.Y) * (px - C.X) + (C.X - B.X) * (py - C.Y)) / det, l2 = ((C.Y - A.Y) * (px - C.X) + (A.X - C.X) * (py - C.Y)) / det, l3 = 1 - l1 - l2;
+                                        if (l1 < -1e-4f || l2 < -1e-4f || l3 < -1e-4f) continue;
+                                        float e = l1 * A.Z + l2 * B.Z + l3 * C.Z - Ground(px, py);
+                                        samples++; cellSamples++; sumAbs += MathF.Abs(e);
+                                        if (MathF.Abs(e) <= 32) on++;
+                                        else if (e > 128) { farAbove++; cellFar++; }
+                                        else if (e > 0) above++;
+                                        else if (e < -128)
+                                        {
+                                            farBelow++; cellFar++; cellUnder++;
+                                            // Under water: the navmesh lies below the water's surface there.
+                                            if (waterZ is { } wz && l1 * A.Z + l2 * B.Z + l3 * C.Z < wz) cellWet++;
+                                            // Steep land: the four height points round the sample more than 256 apart.
+                                            float gx = Math.Clamp((px - cx * 4096f) / 128f, 0, 32), gy = Math.Clamp((py - cy * 4096f) / 128f, 0, 32);
+                                            int sx = Math.Min((int)gx, 31), sy = Math.Min((int)gy, 31);
+                                            float lo = MathF.Min(MathF.Min(hh[sx, sy], hh[sx + 1, sy]), MathF.Min(hh[sx, sy + 1], hh[sx + 1, sy + 1]));
+                                            float hi = MathF.Max(MathF.Max(hh[sx, sy], hh[sx + 1, sy]), MathF.Max(hh[sx, sy + 1], hh[sx + 1, sy + 1]));
+                                            if (hi - lo > 256) underSteep++;
+                                            if (l1 * A.Z + l2 * B.Z + l3 * C.Z < lo - 128 && underFlat++ < 6)
+                                                underAt.Add($"{px:F0},{py:F0} navmesh {l1 * A.Z + l2 * B.Z + l3 * C.Z:F0} land {lo:F0}..{hi:F0}");
+                                        }
+                                        else below++;
+                                    }
+                            }
+                        }
+                        cellsChecked++;
+                        perCell.Add(($"{ws.EditorID} {cx},{cy}", cellFar, cellSamples));
+                        if (cellUnder > 0) underCells.Add(($"{ws.EditorID} {cx},{cy}", cellUnder, cellWet, cellSamples));
+                    }
+                string Pct(long n) => $"{100.0 * n / Math.Max(1, samples):F2}%";
+                Console.WriteLine($"{Path.GetFileName(plugin)}: {cellsChecked:N0} exterior cells with land and a navmesh, {samples:N0} samples (64 units apart); mean {sumAbs / Math.Max(1, samples):F0} units from the land");
+                Console.WriteLine($"  within 32 units of the land {Pct(on)}; above it 32-128 {Pct(above)}, over 128 {Pct(farAbove)}; below it 32-128 {Pct(below)}, over 128 {Pct(farBelow)}");
+                foreach (var c in perCell.OrderByDescending(c => c.Far).Take(8)) Console.WriteLine($"  {c.Name}: {c.Far} of {c.Of} samples over 128 units off");
+                Console.WriteLine($"  over 128 under the land: {underCells.Sum(c => c.Under):N0} samples in {underCells.Count} cells, {underCells.Sum(c => c.Wet):N0} of them under the cell's water, " +
+                    $"{underSteep:N0} where the land's four height points round it are more than 256 apart (a cliff), {underFlat:N0} further under than the land's lowest point there by 128");
+                foreach (var c in underCells.OrderByDescending(c => c.Under).Take(8)) Console.WriteLine($"    {c.Name}: {c.Under} of {c.Of} samples ({c.Wet} under water)");
+                foreach (var a in underAt) Console.WriteLine($"    under the land's lowest point at {a}");
                 return 0;
             }
             case "df-navmesh-test":

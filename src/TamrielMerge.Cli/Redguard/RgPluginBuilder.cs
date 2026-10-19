@@ -827,6 +827,11 @@ public sealed partial class RgPluginBuilder
         navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod);
         if (scene.Interior is { } cell)
         {
+            // Every face turned up. Redguard's maps are wound consistently (2026-10-19, its 21 interiors: 13 of some
+            // 257,000 shared edges run the same way), but a floor can face down: the Necromancer's Tower's load door
+            // stands 120 over a face wound down at 1192 with the next face, also down, at 1620. As wound, six of the 21
+            // lost the navmesh by a door (the tower's from 112 units to 221), and its interiors have no actors to choose
+            // between the two by (as Morrowind's and Oblivion's do).
             var solid = new List<(Vector3[] Points, Vector3 Normal)>();
             foreach (var w in Solids(cell.Temporary.OfType<PlacedObject>()))
             {

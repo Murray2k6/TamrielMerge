@@ -606,28 +606,77 @@ public sealed partial class ObPluginBuilder
         }
     }
 
+    /// <summary>Interior actors and load doors checked against their navmesh, and those within 64 units of it.</summary>
+    public int ActorsChecked, ActorsOnNavmesh, DoorsChecked, DoorsOnNavmesh;
+
     void BuildNavmesh(Cell cell)
     {
         var solid = new List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)>();
+        var turnedUp = new List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)>();
         foreach (var w in Solids(cell.Temporary.OfType<PlacedObject>().Concat(cell.Persistent.OfType<PlacedObject>())))
         {
             var n = System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0]);
             if (n.LengthSquared() < 1e-6f) continue;
             n = System.Numerics.Vector3.Normalize(n);
-            solid.Add((w, n.Z < 0 ? -n : n));
+            // Each face as wound: a ceiling or an underside is an obstacle, not a floor. Oblivion's collision is wound
+            // consistently (2026-10-18: Weatherleah's 35 models, 5,870 edges shared oppositely, none the same way, every
+            // closed model's volume positive; the Shivering Isles' Root pieces once their packed triangles face their
+            // stored normals, 30,980 to 65). Turned up, every underside under enough headroom was a floor: Fain's tower
+            // stacked 68 of them in one column, past Recast's 62, and got no navmesh. Every face turned up only where
+            // that puts more actors on the navmesh (NavmeshBuilder.BuildInterior).
+            solid.Add((w, n));
+            turnedUp.Add((w, n.Z < 0 ? -n : n));
         }
+        // TM_OB_PROBE=<EditorID>,x,y: every collision triangle over that point, its height there, which way it faces as
+        // wound, and the object it is of.
+        if (Environment.GetEnvironmentVariable("TM_OB_PROBE")?.Split(',') is [var pc, var px, var py] && pc == cell.EditorID && float.TryParse(px, out var qx) && float.TryParse(py, out var qy))
+            foreach (var placed in cell.Temporary.OfType<PlacedObject>().Concat(cell.Persistent.OfType<PlacedObject>()))
+                foreach (var w in Solids([placed]))
+                {
+                    float d = (w[1].Y - w[2].Y) * (w[0].X - w[2].X) + (w[2].X - w[1].X) * (w[0].Y - w[2].Y);
+                    if (MathF.Abs(d) < 1e-6f) continue;
+                    float a = ((w[1].Y - w[2].Y) * (qx - w[2].X) + (w[2].X - w[1].X) * (qy - w[2].Y)) / d, b = ((w[2].Y - w[0].Y) * (qx - w[2].X) + (w[0].X - w[2].X) * (qy - w[2].Y)) / d;
+                    if (a < 0 || b < 0 || a + b > 1) continue;
+                    var nz = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0])).Z;
+                    var rec = mod.EnumerateMajorRecords().FirstOrDefault(r => r.FormKey == placed.Base.FormKey);
+                    Console.WriteLine($"  probe {cell.EditorID} {qx},{qy}: height {a * w[0].Z + b * w[1].Z + (1 - a - b) * w[2].Z:F0}, normal z {nz:F2}, {rec?.EditorID} {(rec as IModeledGetter)?.Model?.File}");
+                }
+        // TM_OB_SOLIDS=<EditorID>: what each placed object gives that cell's navmesh (triangles, those facing up).
+        if (Environment.GetEnvironmentVariable("TM_OB_SOLIDS") is { Length: > 0 } traced && cell.EditorID == traced)
+            foreach (var g in cell.Temporary.OfType<PlacedObject>().Concat(cell.Persistent.OfType<PlacedObject>()).GroupBy(p => p.Base.FormKey))
+            {
+                var tris = Solids(g).ToList();
+                int up = tris.Count(w => System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0]) is var c && c.LengthSquared() > 1e-6f && System.Numerics.Vector3.Normalize(c).Z > 0.64f);
+                var rec = mod.EnumerateMajorRecords().FirstOrDefault(r => r.FormKey == g.Key);
+                string name = rec is null ? g.Key.ToString() : $"{rec.GetType().Name} {rec.EditorID} {(rec as IModeledGetter)?.Model?.File}";
+                Console.WriteLine($"  solids {cell.EditorID}: {g.Count()} x {name}: {(meshByBase.TryGetValue(g.Key, out var mb) ? $"{tris.Count} triangles, {up} facing up; winding: {Skyrim.Navmesh.NavmeshBuilder.Winding(mb.Solid)}" : "no collision mesh")}");
+            }
         if (solid.Count == 0) return;
         navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod);
         var loadDoors = cell.Persistent.OfType<PlacedObject>().Where(d => d != StartMarker && placedDoors.ContainsValue(d)).Cast<IPlacedObjectGetter>().ToList();
         try
         {
-            var r = navmeshes.BuildInterior(cell, solid, loadDoors,
-                keepAround: cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null,
-                keepAlso: cell.Temporary.OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList());
+            var actors = cell.Temporary.OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
+            var r = navmeshes.BuildInterior(cell, solid, turnedUp, loadDoors,
+                cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors);
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
+            // Who stands on it: the cell's actors and load doors within 64 units of a navmesh triangle.
+            if (r.Navmesh.Data is { } nd)
+                foreach (var (p, door) in actors.Select(a => (a, false)).Concat(loadDoors.Select(d => (d.Placement!.Position, true))))
+                {
+                    float far = Skyrim.Navmesh.NavmeshBuilder.Distance(nd, p);
+                    bool on = far <= 64;
+                    if (door) { DoorsChecked++; if (on) DoorsOnNavmesh++; }
+                    else { ActorsChecked++; if (on) ActorsOnNavmesh++; }
+                }
         }
-        catch (Exception e) { Problems.Add($"navmesh {cell.EditorID}: {e.Message}"); }
+        catch (Exception e)
+        {
+            // Where in the converter it failed (the innermost of its own frames).
+            string? at = e.StackTrace?.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Contains("TamrielMerge."));
+            Problems.Add($"navmesh {cell.EditorID}: {e.Message}{(at is null ? "" : $" ({at})")}");
+        }
     }
 
     /// <summary>Load doors: Oblivion names each door's partner, as Skyrim does. Returns (linked, unlinked).</summary>

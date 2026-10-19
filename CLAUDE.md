@@ -10,3 +10,8 @@
   in the code that `convert` runs (so a fresh conversion reproduces it), any data it needs must ship with the tool
   (csproj `None Include`), and the app is rebuilt into out/gui (`dotnet build src/TamrielMerge.Gui -c Release -o
   out/gui`) at the end of each piece of work.
+- Evidence, not guesses (user, 2026-10-18: "we need evidence not guesses"). Never call something fixed, a false
+  alarm, harmless or the cause of a bug from reasoning alone. Before saying it, measure it directly on the real data
+  (the output itself: the navmesh over the floor, the mesh in the cell, the record in the plugin), not a proxy for it,
+  and give the numbers and where they came from. Until it is measured, say "not yet checked" or "a hypothesis", and
+  say what would check it. When a check could be fooled (bookkeeping, counters, a heuristic), check what it stands for.

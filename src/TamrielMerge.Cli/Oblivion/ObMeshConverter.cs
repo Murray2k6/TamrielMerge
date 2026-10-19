@@ -420,12 +420,28 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             case "hkPackedNiTriStripsData":
             {
                 var data = (hkPackedNiTriStripsData)block;
-                var verts = data.compressedVertData.Select(v => xf(new V3(v.x, v.y, v.z) * HavokScale)).ToList();
-                // Oblivion's (uncompressed) packed data keeps its triangles with their normals (triNormData).
-                var triangles = data.triData.Count > 0 ? data.triData.Select(t => t.tri).ToList() : data.triNormData.Select(t => t.tri).ToList();
-                foreach (var t in triangles)
-                    if (t.p1 < verts.Count && t.p2 < verts.Count && t.p3 < verts.Count)
-                        output.Add((target, [verts[t.p1], verts[t.p2], verts[t.p3]]));
+                var raw = data.compressedVertData.Select(v => new V3(v.x, v.y, v.z)).ToList();
+                var verts = raw.Select(v => xf(v * HavokScale)).ToList();
+                // Oblivion's (uncompressed) packed data keeps its triangles with their normals (triNormData). The
+                // corners' order doesn't always agree with the normal: a triangle whose turn points against it is turned
+                // round, so its winding says which way it faces.
+                if (data.triData.Count > 0)
+                {
+                    foreach (var t in data.triData.Select(t => t.tri))
+                        if (t.p1 < verts.Count && t.p2 < verts.Count && t.p3 < verts.Count)
+                            output.Add((target, [verts[t.p1], verts[t.p2], verts[t.p3]]));
+                    return true;
+                }
+                foreach (var tn in data.triNormData)
+                {
+                    var t = tn.tri;
+                    if (t.p1 >= verts.Count || t.p2 >= verts.Count || t.p3 >= verts.Count) continue;
+                    var turn = V3.Cross(raw[t.p2] - raw[t.p1], raw[t.p3] - raw[t.p1]);
+                    bool against = V3.Dot(turn, new V3(tn.normal.x, tn.normal.y, tn.normal.z)) < 0;
+                    if (against) Interlocked.Increment(ref packedTurned);
+                    Interlocked.Increment(ref packedTriangles);
+                    output.Add((target, against ? [verts[t.p1], verts[t.p3], verts[t.p2]] : [verts[t.p1], verts[t.p2], verts[t.p3]]));
+                }
                 return true;
             }
             case "bhkPackedNiTriStripsShape":
@@ -441,6 +457,11 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
                 return false;   // anything else: fall back to the visible geometry
         }
     }
+
+    /// <summary>Packed collision triangles read with their normals, and those turned round to face their normal.</summary>
+    public static long PackedTriangles => Interlocked.Read(ref packedTriangles);
+    public static long PackedTurned => Interlocked.Read(ref packedTurned);
+    static long packedTriangles, packedTurned;
 
     static bool IsEditorMarker(string? name) => name?.StartsWith("EditorMarker", StringComparison.OrdinalIgnoreCase) == true;
 

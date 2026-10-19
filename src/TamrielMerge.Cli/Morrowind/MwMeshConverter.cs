@@ -30,6 +30,9 @@ public sealed class MwMeshConverter(Tes3Data data, MwTextures textures)
     {
         /// <summary>The model's particle emitters (flames, smoke, mist), which Skyrim gets as vanilla effects placed there.</summary>
         public List<Skyrim.EffectStandIns.Emitter> Emitters { get; init; } = [];
+
+        /// <summary>Whether <see cref="Solid"/> is the model's RootCollisionNode (never drawn) rather than its drawn geometry.</summary>
+        public bool FromCollisionNode { get; init; }
     }
 
     /// <summary>The Skyrim data-relative path a Morrowind model converts to; <paramref name="moving"/> variants (keyframed
@@ -124,7 +127,7 @@ public sealed class MwMeshConverter(Tes3Data data, MwTextures textures)
         return new Result(rel, pieces.Count, solid.Count,
             pts.Count > 0 ? pts.Aggregate(new Vector3(float.MaxValue), Vector3.Min) : Vector3.Zero,
             pts.Count > 0 ? pts.Aggregate(new Vector3(float.MinValue), Vector3.Max) : Vector3.Zero, animated, skinned, solid.Select(t => t.Pts).ToList(), allGeometry.Select(t => t.Pts).ToList())
-        { Emitters = Emitters(nif) };
+        { Emitters = Emitters(nif), FromCollisionNode = hasCollisionNode && !noCollision };
     }
 
     /// <summary>
