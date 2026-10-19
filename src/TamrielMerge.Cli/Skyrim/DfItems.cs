@@ -6,6 +6,8 @@ using Mutagen.Bethesda.Plugins.Cache;
 using Mutagen.Bethesda.Skyrim;
 using Noggog;
 
+using TamrielMerge.Skyrim.Meshes;
+
 namespace TamrielMerge.Skyrim;
 
 /// <summary>
@@ -124,9 +126,48 @@ public sealed class DfItems
     public DfItems(SkyrimMod mod, IEnumerable<ISkyrimModGetter> skyrimMasters, string skyrimData, string outDir)
     {
         this.mod = mod;
+        this.outDir = outDir;
+        skyrimDataDir = skyrimData;
         sources = skyrimMasters.ToList();
         cache = sources.ToImmutableLinkCache();
         recolour = new ItemRecolour(skyrimData, outDir, NextKey);
+    }
+
+    readonly string outDir;
+    DfWornParts? wornParts;
+    readonly string skyrimDataDir = "";
+
+    /// <summary>The made greaves' and pauldrons' checks, and the pieces that couldn't be made (with why).</summary>
+    public IReadOnlyList<string> WornChecks => wornParts?.Checks ?? [];
+    public List<string> WornMissing { get; } = [];
+
+    /// <summary>A worn part for a greave or pauldron made over <paramref name="cuirassName"/>'s worn look (DfWornParts),
+    /// with the cuirass part's races; null when it can't be made (WornMissing says why).</summary>
+    ArmorAddon? WornPieceOver(string cuirassName, string edid, string piece, BipedObjectFlag slot, int partition)
+    {
+        if (!Items.TryGetValue(cuirassName, out var cuirassKey) || !mod.Armors.TryGetValue(cuirassKey, out var cuirass) || cuirass.Armature.Count == 0)
+        { WornMissing.Add($"{edid}: no {cuirassName} to fit over"); return null; }
+        var link = cuirass.Armature[0].FormKey;
+        IArmorAddonGetter? part = mod.ArmorAddons.TryGetValue(link, out var ours) ? ours : cache.TryResolve<IArmorAddonGetter>(link, out var theirs) ? theirs : null;
+        if (part?.WorldModel?.Male?.File.DataRelativePath.Path is not { Length: > 0 } male) { WornMissing.Add($"{edid}: {cuirassName}'s worn part has no model"); return null; }
+        wornParts ??= new DfWornParts(new SkyrimCharacterAssets(skyrimDataDir), outDir);
+        var problems = new List<string>();
+        var paths = wornParts.Make(edid, piece, male, part.WorldModel.Female?.File.DataRelativePath.Path, partition, problems);
+        WornMissing.AddRange(problems);
+        if (paths is null) return null;
+        var aa = new ArmorAddon(NextKey(), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = edid + "AA",
+            BodyTemplate = new BodyTemplate { FirstPersonFlags = slot, ArmorType = part.BodyTemplate?.ArmorType ?? ArmorType.LightArmor },
+            Race = part.Race.FormKeyNullable is { } r ? r.ToNullableLink<IRaceGetter>() : new FormLinkNullable<IRaceGetter>(),
+            WorldModel = new GenderedItem<Model?>(new Model { File = paths[(false, false)] }, new Model { File = paths.TryGetValue((true, false), out var f) ? f : paths[(false, false)] }),
+            Priority = new GenderedItem<byte>(1, 1),
+            WeightSliderEnabled = new GenderedItem<bool>(true, true),
+            FootstepSound = part.FootstepSound.FormKeyNullable is { } fs ? fs.ToNullableLink<IFootstepSetGetter>() : new FormLinkNullable<IFootstepSetGetter>(),
+        };
+        foreach (var extra in part.AdditionalRaces) aa.AdditionalRaces.Add(extra.FormKey);
+        mod.ArmorAddons.Add(aa);
+        return aa;
     }
 
     FormKey? Keyword(string editorId) =>
@@ -214,11 +255,20 @@ public sealed class DfItems
                 if (p.Kind == "ArmorShield") rating *= ShieldScale(p.Name);
                 if (p.Kind is null)
                 {
-                    // Greaves and pauldrons: a share of a cuirass's rating, on a slot of their own, nothing to see.
+                    // Greaves and pauldrons: a share of a cuirass's rating, on a slot of their own, made to be seen over
+                    // this material's cuirass (DfWornParts).
                     rating = MathF.Round(arm.ArmorRating * p.Share);
+                    var slot = (BipedObjectFlag)(1u << (p.Slot - 30));
                     arm.Armature.Clear();
-                    if (arm.BodyTemplate is { } body) body.FirstPersonFlags = (BipedObjectFlag)(1u << (p.Slot - 30));
+                    if (arm.BodyTemplate is { } body) body.FirstPersonFlags = slot;
                     arm.WorldModel = null;
+                    if (WornPieceOver($"{ArmorMaterialName(a)} Cuirass", arm.EditorID!, p.Name, slot, p.Slot) is { } made) arm.Armature.Add(made.ToLink<IArmorAddonGetter>());
+                    else
+                    {
+                        // Couldn't be made (logged in WornMissing, so it stays on the open list): a part drawing nothing.
+                        var races = sources.SelectMany(s => s.ArmorAddons).First(x => x.EditorID == "IronCuirassAA");
+                        arm.Armature.Add(WornNothing.Addon(mod, outDir, arm.EditorID + "AA", slot, races, NextKey()).ToLink<IArmorAddonGetter>());
+                    }
                 }
                 arm.ArmorRating = MathF.Round(rating);
                 if (tinted && a >= 2 && Tint((Material)(a - 2)) is { } tint && p.Kind is not null) recolour.Armor(arm, tpl, ArmorMaterialName(a), tint, mod, cache);

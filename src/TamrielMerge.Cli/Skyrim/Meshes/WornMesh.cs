@@ -780,6 +780,30 @@ public sealed class SkyrimCharacterAssets(string skyrimData)
         return parts[path] = WithNif(bytes, nif => WornMesh.ReadSkinned(nif, skeleton));
     }
 
+    /// <summary>A skinned armour NIF's shapes (its bytes) in the bind space of the male or female skeleton.</summary>
+    public IReadOnlyList<WornShape> Skinned(byte[] bytes, bool female)
+    {
+        var skeleton = Skeleton(female);
+        return WithNif(bytes, nif => WornMesh.ReadSkinned(nif, skeleton));
+    }
+
+    HashSet<string>? vanillaTextures;
+
+    /// <summary>Whether a texture (data-relative, textures\...) is in Skyrim's Data or its texture archives.</summary>
+    public bool HasTexture(string path)
+    {
+        path = path.Replace('/', '\\');
+        if (File.Exists(Path.Combine(skyrimData, path))) return true;
+        if (vanillaTextures is null)
+        {
+            var all = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var bsa in Directory.GetFiles(skyrimData, "Skyrim - Textures*.bsa"))
+                foreach (var f in Archive.CreateReader(GameRelease.SkyrimSE, bsa).Files) all.Add(f.Path.Replace('/', '\\'));
+            vanillaTextures = all;
+        }
+        return vanillaTextures.Contains(path);
+    }
+
     readonly Dictionary<string, WornSurface> surfaces = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The naked part as a surface to fit worn shapes outside of (built once).</summary>

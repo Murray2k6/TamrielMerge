@@ -164,6 +164,8 @@ public sealed partial class RgPluginBuilder
         }
     }
 
+    Skyrim.BookLooks? bookLooks;
+
     FormKey MakeItem(ItemDef d)
     {
         string name = ItemName(d), description = ItemDescription(d), edid = $"RGItem{d.Id:D2}{Sanitize(name)}";
@@ -235,11 +237,12 @@ public sealed partial class RgPluginBuilder
                 Description = description,
                 Value = 0,
                 Weight = 0.5f,
-                Type = upper.Contains("BOOK") || upper.Contains("JOURNAL") ? Book.BookType.BookOrTome : Book.BookType.NoteOrScroll,
                 Teaches = new BookTeachesNothing(),
                 ObjectBounds = BoundsOf(mesh),
                 Model = model,
             };
+            // Read as Skyrim's own books and notes are (Skyrim.BookLooks); a letter, map or note as a note.
+            (bookLooks ??= new Skyrim.BookLooks(SkyrimEsm.Books)).Apply(book, note: !(upper.Contains("BOOK") || upper.Contains("JOURNAL")));
             mod.Books.Add(book);
             return book.FormKey;
         }

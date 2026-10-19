@@ -115,9 +115,11 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         var letter = new Book(mod)
         {
             EditorID = "DFQuestLetter", Name = "Letter", ObjectBounds = new ObjectBounds(), Model = new Model { File = @"Clutter\Common\Letter01.nif" },
-            BookText = "<p align=\"center\">(Its words appear as you read it.)</p>", Description = "", Value = 0, Weight = 0.1f, Type = Book.BookType.NoteOrScroll,
-            Teaches = new BookTeachesNothing(), InventoryArt = new FormLinkNullable<IStaticGetter>(),
+            BookText = "<p align=\"center\">(Its words appear as you read it.)</p>", Description = "", Value = 0, Weight = 0.1f,
+            Teaches = new BookTeachesNothing(),
         };
+        // Read as Skyrim's own notes are (BookLooks).
+        new BookLooks(masters[0].Books).Apply(letter, note: true);
         mod.Books.Add(letter);
 
         // Items: Skyrim's or stand-ins, and random lists per Daggerfall item group.

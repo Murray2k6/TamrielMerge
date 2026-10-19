@@ -72,8 +72,25 @@ public sealed partial class MwPluginBuilder
         _ => null,
     };
 
-    /// <summary>An item's body parts: (part index, male BODY id, female BODY id), in record order.</summary>
-    static List<(int Index, string? Male, string? Female)> WornParts(Tes3Record rec)
+    /// <summary>
+    /// An item's body parts, or, when it has none, those of an item of the same kind and type with the same model
+    /// (2026-10-19: Gambolpuddy, a right glove with no body parts, so nothing worn in Morrowind, has the extravagant
+    /// glove's model, whose right glove wears c_glove_extravagant1 on the right hand and wrist).
+    /// </summary>
+    List<(int Index, string? Male, string? Female)> WornParts(Tes3Record rec)
+    {
+        var own = OwnWornParts(rec);
+        if (own.Count > 0 || rec.Str("MODL") is not { Length: > 0 } model) return own;
+        string typeField = rec.Type == "ARMO" ? "AODT" : "CTDT";
+        int type = rec.Get(typeField) is { } d ? d.Int(0) : -1;
+        var like = world.Objects.Values.Where(o => o != rec && o.Type == rec.Type && string.Equals(o.Str("MODL"), model, StringComparison.OrdinalIgnoreCase)
+                && (o.Get(typeField) is { } od ? od.Int(0) : -2) == type)
+            .Select(OwnWornParts).Where(p => p.Count > 0).OrderByDescending(p => p.Count).FirstOrDefault();
+        return like ?? own;
+    }
+
+    /// <summary>An item's own body parts: (part index, male BODY id, female BODY id), in record order.</summary>
+    static List<(int Index, string? Male, string? Female)> OwnWornParts(Tes3Record rec)
     {
         var parts = new List<(int, string?, string?)>();
         foreach (var f in rec.Fields)
@@ -150,6 +167,83 @@ public sealed partial class MwPluginBuilder
         }
     }
 
+    /// <summary>The checks of the worn pieces made here (BodySleeve.Check), one line each.</summary>
+    public List<string> MadeWornChecks { get; } = [];
+
+    /// <summary>
+    /// A belt's worn meshes, made: Morrowind's belts have no body parts, so Morrowind draws nothing for one worn (user,
+    /// 2026-10-19: "i need models made for the missing"). A band round Skyrim's waist (BodySleeve: on the body, with its
+    /// weights), from just over the pelvis bone, in the belt's own texture repeated round it at the texture's own
+    /// proportions, with the belt's buckle (its smallest piece) at the front. Paths as WornMeshes gives them; null when
+    /// the belt has no model or the band can't be made (logged).
+    /// </summary>
+    Dictionary<(bool Female, bool FirstPerson), string>? MadeBelt(Tes3Record rec, WornLook look, List<string> problems)
+    {
+        if (rec.Str("MODL") is not { Length: > 0 } model) { problems.Add($"worn {rec.Id}: a belt without a model"); return null; }
+        characterAssets ??= new SkyrimCharacterAssets(SkyrimData!);
+        wornSource ??= new MwWornSource(data, textures);
+        List<WornShape> pieces;
+        lock (wornSourceLock) pieces = wornSource!.Pieces(model);
+        static float Across(WornShape s) => s.V.Length == 0 ? 0 : MathF.Max(s.V.Max(p => p.X) - s.V.Min(p => p.X), s.V.Max(p => p.Y) - s.V.Min(p => p.Y));
+        if (pieces.Count == 0) { problems.Add($"worn {rec.Id}: {model} has no shapes"); return null; }
+        var strap = pieces.MaxBy(p => p.V.Length * Across(p))!;
+        var buckle = pieces.Where(p => p != strap && Across(p) < 6).MinBy(Across);
+        // The strap's own part of the texture (an atlas can hold the strap beside the belt's other pieces), at its own
+        // proportions round the waist: as long per repeat as its part is long against its width, repeated.
+        const float BandWidth = 3.5f;
+        var span = BodySleeve.TextureSpan.Of(strap);
+        float texAspect = DdsAspect(strap.Textures.FirstOrDefault()) ?? 1;
+        float partLong = (span.AlongV ? span.V1 - span.V0 : span.U1 - span.U0) * (span.AlongV ? 1 : texAspect);
+        float partWide = (span.AlongV ? span.U1 - span.U0 : span.V1 - span.V0) * (span.AlongV ? texAspect : 1);
+        float aspect = partWide > 0 ? partLong / partWide : 1;
+        string folder = $@"{MwMeshConverter.OutFolder}\worn\{Sanitize(rec.Id).ToLowerInvariant()}";
+        var paths = new Dictionary<(bool Female, bool FirstPerson), string>();
+        foreach (bool female in new[] { false, true })
+        {
+            var skeleton = characterAssets!.Skeleton(female);
+            float bottom = skeleton.World["NPC Pelvis [Pelv]"].Translation.Z + 0.5f;
+            List<System.Numerics.Vector3> Slice(int weight) => characterAssets.Naked("body", female, weight).SelectMany(s => s.V)
+                .Where(p => MathF.Abs(p.Z - (bottom + BandWidth / 2)) < 1.5f).ToList();
+            // The repeats once for both weights (by the thin body's waist): the weight slider blends the two meshes vertex
+            // by vertex, so they must have the same vertices in the same order.
+            var thin = Slice(0);
+            float repeats = MathF.Max(1, MathF.Round(2 * MathF.PI * (thin.Max(p => p.X) - thin.Min(p => p.X)) / 2 / (BandWidth * aspect)));
+            int? columnsAt0 = null;
+            foreach (int weight in new[] { 0, 1 })
+            {
+                var body = characterAssets.Naked("body", female, weight);
+                // The waist's middle at that height (its slice's extent), so the rays start inside the body.
+                var slice = Slice(weight);
+                var centre = new System.Numerics.Vector3((slice.Min(p => p.X) + slice.Max(p => p.X)) / 2, (slice.Min(p => p.Y) + slice.Max(p => p.Y)) / 2, 0);
+                var band = BodySleeve.Make(body, centre with { Z = bottom }, centre with { Z = bottom + BandWidth }, System.Numerics.Vector3.UnitY,
+                    3, 32, look.Margin, 25, strap.Name, strap.Textures, repeats, span, out int columns);
+                if (band is null) { problems.Add($"worn {rec.Id}: no waist for the band ({(female ? "female" : "male")} {weight}: {BodySleeve.LastFailure})"); return null; }
+                if (columnsAt0 is { } c0 && c0 != columns) { problems.Add($"worn {rec.Id}: the two weights' bands differ ({c0} and {columns} columns)"); return null; }
+                columnsAt0 = columns;
+                band.Flags1 = strap.Flags1; band.Flags2 = strap.Flags2; band.Glossiness = strap.Glossiness; band.SpecularStrength = strap.SpecularStrength;
+                var shapes = new List<WornShape> { band };
+                if (buckle is not null) shapes.Add(BodySleeve.Attach(band, 3, columns, buckle, 0.4f));
+                string name = $@"{folder}\{(female ? "f" : "m")}_{weight}.nif";
+                SkyrimCharacterAssets.Locked(() => WornMesh.Write(Path.Combine(modOutDir, name), shapes, skeleton, look.Partition));
+                lock (MadeWornChecks)
+                    MadeWornChecks.Add($"{rec.Id} {(female ? "f" : "m")}_{weight}: " + BodySleeve.Check(shapes, body, skeleton, t => File.Exists(Path.Combine(modOutDir, t))));
+            }
+            paths[(female, false)] = $@"{folder}\{(female ? "f" : "m")}_1.nif";
+        }
+        return paths;
+    }
+
+    /// <summary>A converted texture's width over its height (its DDS header), null when it isn't there.</summary>
+    float? DdsAspect(string? texture)
+    {
+        if (texture is not { Length: > 0 } || !File.Exists(Path.Combine(modOutDir, texture))) return null;
+        using var f = File.OpenRead(Path.Combine(modOutDir, texture));
+        var head = new byte[20];
+        if (f.Read(head, 0, 20) < 20) return null;
+        int height = BitConverter.ToInt32(head, 12), width = BitConverter.ToInt32(head, 16);
+        return height > 0 ? width / (float)height : null;
+    }
+
     /// <summary>The look an item gets (null: none drawn, or a canon Skyrim remake that keeps Skyrim's).</summary>
     WornLook? LookOf(Tes3Record rec)
     {
@@ -201,7 +295,13 @@ public sealed partial class MwPluginBuilder
         characterAssets ??= new SkyrimCharacterAssets(SkyrimData!);
         wornSource ??= new MwWornSource(data, textures);
         if (!wornMeshes.TryGetValue(rec.Id, out var paths)) wornMeshes[rec.Id] = paths = WornMeshes(rec, look, Problems);
-        if (paths is null) return null;
+        return paths is null ? null : AddonsFrom(paths, edid, look, template);
+    }
+
+    /// <summary>Skyrim armor addons wearing <paramref name="paths"/> (one per addon of the vanilla template, keeping its
+    /// races, sounds and priorities).</summary>
+    List<ArmorAddon> AddonsFrom(Dictionary<(bool Female, bool FirstPerson), string> paths, string edid, WornLook look, IArmorGetter template)
+    {
         string Model(bool female, bool firstPerson) => SkyrimModelPath(paths[(female, firstPerson)]);
         // One addon per template addon (races: human, Argonian, Khajiit variants), all wearing Morrowind's model.
         var templates = template.Armature.Select(l => SkyrimEsm.ArmorAddons.FirstOrDefault(a => a.FormKey == l.FormKey)).OfType<IArmorAddonGetter>().ToList();
@@ -227,20 +327,26 @@ public sealed partial class MwPluginBuilder
     }
 
     /// <summary>Gives an item (already its template's copy) Morrowind's worn look, or keeps the template's when that
-    /// fails. <paramref name="look"/> null: the item has no worn model in Morrowind (rings, amulets) and draws none.</summary>
+    /// fails. <paramref name="look"/> null: the item has no worn model in Morrowind (rings, amulets) and keeps its
+    /// vanilla template's (a ring's or amulet's), as every Skyrim armour has worn parts (Skyrim.WornNothing).</summary>
     void ApplyWornLook(Armor a, Tes3Record rec, WornLook? look, IArmorGetter template, BipedObjectFlag? fallbackSlot)
     {
         a.BodyTemplate ??= new BodyTemplate();
-        if (look is null)
-        {
-            a.Armature.Clear();
-            return;
-        }
+        if (look is null) return;
         if (WornParts(rec).Count == 0)
         {
-            // No body parts: Morrowind draws nothing for it when worn (belts, some rings of armour); it keeps its slot.
+            // No body parts: Morrowind draws nothing for it when worn (belts). A belt's worn look is made (MadeBelt).
             a.Armature.Clear();
             a.BodyTemplate.FirstPersonFlags = look.Slots;
+            if (look.Partition == 48 && MadeBelt(rec, look, Problems) is { } made)
+            {
+                foreach (var aa in AddonsFrom(made, a.EditorID!, look, template)) a.Armature.Add(aa.ToLink<IArmorAddonGetter>());
+                WornConverted++;
+                return;
+            }
+            // Anything else without body parts (logged below, so it stays on the open list): a part that draws nothing.
+            Problems.Add($"worn {rec.Id}: no body parts and no made look for slot {look.Partition} (it draws nothing)");
+            a.Armature.Add(Skyrim.WornNothing.Addon(mod, modOutDir, a.EditorID + "AA", look.Slots, SkyrimEsm.ArmorAddons.First(x => x.EditorID == "IronCuirassAA")).ToLink<IArmorAddonGetter>());
             return;
         }
         if (WornAddons(rec, a.EditorID!, look, template) is { } addons)
@@ -258,6 +364,7 @@ public sealed partial class MwPluginBuilder
         {
             a.BodyTemplate.FirstPersonFlags = s;
             a.Armature.Clear();
+            a.Armature.Add(Skyrim.WornNothing.Addon(mod, modOutDir, a.EditorID + "AA", s, SkyrimEsm.ArmorAddons.First(x => x.EditorID == "IronCuirassAA")).ToLink<IArmorAddonGetter>());
         }
     }
 

@@ -82,7 +82,8 @@ public sealed partial class ObPluginBuilder
     {
         var mesh = ItemMesh(model, weight);
         var misc = new MiscItem(mod) { EditorID = edid, Name = name, Value = value, Weight = weight, ObjectBounds = Bounds(mesh) };
-        if (mesh is not null) misc.Model = new Model { File = SkyrimModelPath(mesh.Path) };
+        // No model in Oblivion (a script token, a quest item): a vanilla one of its kind (Skyrim.ModelStandIns).
+        misc.Model = new Model { File = mesh is not null ? SkyrimModelPath(mesh.Path) : StandIns.Misc(name, edid) };
         mod.MiscItems.Add(misc);
         return misc;
     }
@@ -112,6 +113,10 @@ public sealed partial class ObPluginBuilder
         return gem;
     }
 
+    Skyrim.BookLooks? bookLooks;
+    Skyrim.ModelStandIns StandIns => standIns ??= new Skyrim.ModelStandIns(Vanilla.Skyrim);
+    Skyrim.ModelStandIns? standIns;
+
     Book BookItem(string edid, Ob.IBookGetter b)
     {
         var mesh = ItemMesh(b.Model?.File, b.Data?.Weight ?? 0);
@@ -122,11 +127,12 @@ public sealed partial class ObPluginBuilder
             BookText = VanillaActors.BookText(b.Description ?? ""),
             Value = (uint)Math.Max(0, b.Data?.Value ?? 0),
             Weight = b.Data?.Weight ?? 0,
-            Type = b.Data?.Flags.HasFlag(Ob.Book.BookFlag.Scroll) == true ? Book.BookType.NoteOrScroll : Book.BookType.BookOrTome,
             Teaches = new BookTeachesNothing(),
             ObjectBounds = Bounds(mesh),
         };
-        if (mesh is not null) book.Model = new Model { File = SkyrimModelPath(mesh.Path) };
+        // Read as Skyrim's own books and notes are (Skyrim.BookLooks); a scroll as a note.
+        (bookLooks ??= new Skyrim.BookLooks(Vanilla.Skyrim.Books)).Apply(book, note: b.Data?.Flags.HasFlag(Ob.Book.BookFlag.Scroll) == true);
+        book.Model = new Model { File = mesh is not null ? SkyrimModelPath(mesh.Path) : StandIns.Book };
         mod.Books.Add(book);
         return book;
     }
@@ -171,7 +177,7 @@ public sealed partial class ObPluginBuilder
             ConsumeSound = new FormLink<ISoundDescriptorGetter>(Sk(0x0B6435)), Effects = [],
         };
         AddEffects(potion.Effects, p.Effects);
-        if (mesh is not null) potion.Model = new Model { File = SkyrimModelPath(mesh.Path) };
+        potion.Model = new Model { File = mesh is not null ? SkyrimModelPath(mesh.Path) : StandIns.Potion };
         mod.Ingestibles.Add(potion);
         return potion;
     }

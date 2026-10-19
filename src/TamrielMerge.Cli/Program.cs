@@ -2310,6 +2310,14 @@ static class Program
                 foreach (var name in new[] { "Leather Cuirass", "Chain Cuirass", "Iron Helm", "Mithril Cuirass", "Adamantium Gauntlets", "Daedric Tower Shield", "Steel Greaves" })
                     if (items.Items.TryGetValue(name, out var k) && mod.Armors.FirstOrDefault(x => x.FormKey == k) is { } a)
                         Console.WriteLine($"  {name}: rating {a.ArmorRating}, weight {a.Weight}, value {a.Value}, pieces {a.Armature.Count}");
+                // The made greaves and pauldrons: their checks, and any that couldn't be made.
+                Console.WriteLine($"  made greaves and pauldrons: {items.WornChecks.Count} meshes; couldn't be made: {items.WornMissing.Count}");
+                foreach (var c in items.WornChecks.Where(c => opts.ContainsKey("all") || !c.Contains(" 0 weights not") || !c.Contains(" 0 on bones") || !c.Contains(" 0 textures"))) Console.WriteLine($"    {c}");
+                if (items.WornChecks.Count > 0)
+                    Console.WriteLine($"    farthest vertex from the body: {items.WornChecks.Max(c => float.Parse(System.Text.RegularExpressions.Regex.Match(c, @"farthest ([\d.]+)").Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)):F1} units");
+                if (items.WornChecks.Count > 0)
+                    Console.WriteLine($"    longest edge against the median: {items.WornChecks.Max(c => float.Parse(System.Text.RegularExpressions.Regex.Match(c, @"longest edge ([\d.]+)x").Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)):F1}x; points put back: {items.WornChecks.Sum(c => int.Parse(System.Text.RegularExpressions.Regex.Match(c, @": (\d+) points put back").Groups[1].Value))}");
+                foreach (var m in items.WornMissing.Take(20)) Console.WriteLine($"    not made: {m}");
                 mod.WriteToBinary(Path.Combine(outDir, "DaggerfallItemsTest.esp"));
                 foreach (var m in masters) (m as IDisposable)?.Dispose();
                 return 0;
@@ -3517,6 +3525,14 @@ static class Program
                     $"{m.MiscItems.Count} misc, {m.Keys.Count} keys, {m.Books.Count} books, {m.Weapons.Count} weapons, {m.Ammunitions.Count} ammo, {m.Armors.Count} armour/clothing, " +
                     $"{m.Ingestibles.Count} potions, {m.Ingredients.Count} ingredients, {m.LeveledItems.Count} leveled lists, {m.Npcs.Count} actors, {m.LeveledNpcs.Count} leveled actor lists");
                 Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Morrowind's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
+                // The made worn pieces (belts), checked: the farthest vertex from the body, and the weights, bones and textures.
+                var madeChecks = builder.MadeWornChecks.ToList();
+                if (madeChecks.Count > 0)
+                {
+                    var far = madeChecks.Select(c => float.Parse(System.Text.RegularExpressions.Regex.Match(c, @"farthest ([\d.]+)").Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)).ToList();
+                    Console.WriteLine($"  made worn pieces: {madeChecks.Count} meshes; farthest vertex from the body {far.Max():F1} units; with a bad weight, bone or texture: {madeChecks.Count(c => !c.Contains(" 0 weights not") || !c.Contains(" 0 on bones") || !c.Contains(" 0 textures"))}");
+                    foreach (var c in madeChecks.Where(c => !c.Contains(" 0 weights not") || !c.Contains(" 0 on bones") || !c.Contains(" 0 textures")).Take(5)) Console.WriteLine($"    {c}");
+                }
                 builder.Write();
                 Console.WriteLine($"  barks: {builder.BarkCount} recorded lines in {builder.BarkTopicCount} voice topics (Morrowind's own recordings)");
                 // Morrowind's law (MwLaw): its crime faction and jail, who answers to it, the arrest greetings, TMMwLaw's markers.
@@ -4300,6 +4316,8 @@ static class Program
                         .Select(o => o.Id).Take(int.Parse(opts.GetValueOrDefault("take", "20"))).ToList();
                 foreach (var line in builder.ConvertWorn(ids)) Console.WriteLine(line);
                 Console.WriteLine($"worn looks: {builder.WornConverted} Morrowind's, {builder.WornFallbacks} template fallbacks in {sw.Elapsed.TotalSeconds:F1}s");
+                foreach (var c in builder.MadeWornChecks) Console.WriteLine($"  made: {c}");
+                foreach (var p in builder.Problems.Where(p => p.StartsWith("worn"))) Console.WriteLine($"  problem: {p}");
                 var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
                 Directory.CreateDirectory(outDir);
                 builder.Mod.WriteToBinary(Path.Combine(outDir, "Morrowind.esm"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
@@ -5812,6 +5830,401 @@ static class Program
                 foreach (var r in m.EnumerateMajorRecords().Where(r => r.EditorID is { } e && re.IsMatch(e)
                              && (!opts.TryGetValue("type", out var t) || r.Registration.Name.Equals(t, StringComparison.OrdinalIgnoreCase))).Take(60))
                     Console.WriteLine($"{r.FormKey.ID:X6} {r.Registration.Name,-18} {r.EditorID}");
+                return 0;
+            }
+            case "nif-slivers":
+            {
+                // Dev aid: a NIF's (--file) shapes, their bounds, and their thinnest triangles (longest edge squared over twice
+                // the area: a needle is high) with their corners, as written.
+                using var nif = new nifly.NifFile();
+                if (nif.Load(opts["file"]) != 0) { Console.WriteLine("can't read it"); return 1; }
+                foreach (var shape in nif.GetShapes())
+                {
+                    var v = nif.GetVertsForShape(shape).Select(p => new System.Numerics.Vector3(p.x, p.y, p.z)).ToList();
+                    using var t3 = new nifly.vectorTriangle();
+                    shape.GetTriangles(t3);
+                    var tris = t3.Select(t => (A: (int)t.p1, B: (int)t.p2, C: (int)t.p3)).ToList();
+                    var lo = v.Aggregate(new System.Numerics.Vector3(float.MaxValue), System.Numerics.Vector3.Min); var hi = v.Aggregate(new System.Numerics.Vector3(float.MinValue), System.Numerics.Vector3.Max);
+                    Console.WriteLine($"{shape.name.get()}: {v.Count} vertices, {tris.Count} triangles, bounds ({lo.X:F1},{lo.Y:F1},{lo.Z:F1})..({hi.X:F1},{hi.Y:F1},{hi.Z:F1})");
+                    var worst = tris.Select(t =>
+                    {
+                        var (a, b, c) = (v[t.A], v[t.B], v[t.C]);
+                        float area = System.Numerics.Vector3.Cross(b - a, c - a).Length() / 2;
+                        float longest = MathF.Max(System.Numerics.Vector3.Distance(a, b), MathF.Max(System.Numerics.Vector3.Distance(b, c), System.Numerics.Vector3.Distance(c, a)));
+                        return (t, Ratio: area > 1e-6f ? longest * longest / (2 * area) : float.PositiveInfinity, longest);
+                    }).OrderByDescending(x => x.Ratio).Take(4);
+                    foreach (var (t, ratio, longest) in worst)
+                        Console.WriteLine($"  {ratio:F1} (longest {longest:F1}): {t.A} ({v[t.A].X:F1},{v[t.A].Y:F1},{v[t.A].Z:F1}) {t.B} ({v[t.B].X:F1},{v[t.B].Y:F1},{v[t.B].Z:F1}) {t.C} ({v[t.C].X:F1},{v[t.C].Y:F1},{v[t.C].Z:F1})");
+                }
+                return 0;
+            }
+            case "mw-record":
+            {
+                // Dev aid: Morrowind records by id (--ids a,b): type and fields (text shown, other data in hex); with
+                // --same-model, the armour and clothing sharing each one's model, and their body parts.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles);
+                foreach (var id in opts["ids"].Split(',', StringSplitOptions.TrimEntries))
+                {
+                    if (!world.Objects.TryGetValue(id, out var rec)) { Console.WriteLine($"{id}: not found"); continue; }
+                    Console.WriteLine($"{id} ({rec.Type}):");
+                    foreach (var f in rec.Fields)
+                        Console.WriteLine($"  {f.Type} {(f.Data.All(b => b == 0 || (b >= 32 && b < 127)) ? f.Text.TrimEnd('\0') : Convert.ToHexString(f.Data.Take(32).ToArray()))}");
+                    if (opts.ContainsKey("same-model") && rec.Str("MODL") is { } model)
+                        foreach (var o in world.Objects.Values.Where(o => o != rec && o.Type is "ARMO" or "CLOT" && string.Equals(o.Str("MODL"), model, StringComparison.OrdinalIgnoreCase)))
+                            Console.WriteLine($"  same model: {o.Id} ({o.Type}) parts {string.Join(" ", o.Fields.Where(f => f.Type is "INDX" or "BNAM" or "CNAM").Select(f => f.Type == "INDX" ? $"[{f.Data[0]}]" : f.Text.TrimEnd('\0')))}");
+                }
+                return 0;
+            }
+            case "skeleton-bones":
+            {
+                // Dev aid: Skyrim's male and female bind positions of bones whose names match --match (regex), and the naked
+                // body's extent at --z heights (a horizontal slice: its width and depth).
+                var assets = new Skyrim.Meshes.SkyrimCharacterAssets(skyrimData);
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "Pelvis|Spine|Thigh|Calf|Clavicle|UpperArm|Forearm"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (bool female in new[] { false, true })
+                {
+                    var sk = assets.Skeleton(female);
+                    foreach (var (bone, m) in sk.World.Where(kv => rx.IsMatch(kv.Key)).OrderBy(kv => kv.Value.Translation.Z))
+                        Console.WriteLine($"{(female ? "female" : "male")}\t{bone}\t{m.Translation.X:F1}\t{m.Translation.Y:F1}\t{m.Translation.Z:F1}");
+                    foreach (var s in assets.Naked("body", female, 0))
+                        Console.WriteLine($"{(female ? "female" : "male")} body_0 shape {s.Name}: {s.V.Length} vertices, z {s.V.Min(p => p.Z):F1}..{s.V.Max(p => p.Z):F1}, skin {s.IsSkin}, textures {string.Join(";", s.Textures.Where(t => t.Length > 0))}");
+                    // The upper arms' axis points (from the shoulder joint toward the twist bone) against the body at both
+                    // weights: inside the arm (an odd number of surface crossings straight up) and how far from its surface.
+                    foreach (int w in new[] { 0, 1 })
+                        foreach (var side in new[] { "L", "R" })
+                        {
+                            var joint = sk.World[$"NPC {side} UpperArm [{side}Uar]"].Translation; var down = sk.World[$"NPC {side} UpperarmTwist2 [{side}Ut2]"].Translation;
+                            var shapes = assets.Naked("body", female, w);
+                            var surf = new Skyrim.Meshes.WornSurface(shapes, 30);
+                            foreach (var f in new[] { 0.2f, 0.5f, 0.75f })
+                            {
+                                var p = joint + (down - joint) * f;
+                                int crossings = 0;
+                                foreach (var s in shapes)
+                                    for (int t = 0; t + 2 < s.Tris.Length; t += 3)
+                                    {
+                                        System.Numerics.Vector3 a = s.V[s.Tris[t]], b = s.V[s.Tris[t + 1]], c = s.V[s.Tris[t + 2]];
+                                        float d = (b.Y - c.Y) * (a.X - c.X) + (c.X - b.X) * (a.Y - c.Y);
+                                        if (MathF.Abs(d) < 1e-9f) continue;
+                                        float l1 = ((b.Y - c.Y) * (p.X - c.X) + (c.X - b.X) * (p.Y - c.Y)) / d, l2 = ((c.Y - a.Y) * (p.X - c.X) + (a.X - c.X) * (p.Y - c.Y)) / d;
+                                        if (l1 < 0 || l2 < 0 || l1 + l2 > 1) continue;
+                                        if (l1 * a.Z + l2 * b.Z + (1 - l1 - l2) * c.Z > p.Z) crossings++;
+                                    }
+                                float gap = surf.Nearest(p) is { } h ? System.Numerics.Vector3.Distance(p, h.Point) : float.NaN;
+                                Console.WriteLine($"{(female ? "female" : "male")} body_{w} {side} upper arm at {f:P0} ({p.X:F1},{p.Y:F1},{p.Z:F1}): {(crossings % 2 == 1 ? "inside" : "OUTSIDE")} the body ({crossings} crossings above), {gap:F1} from its surface");
+                            }
+                        }
+                    if (opts.TryGetValue("z", out var zs))
+                        foreach (int w in new[] { 0, 1 })
+                        {
+                            var body = assets.Naked("body", female, w).MaxBy(s => s.V.Length)!;
+                            foreach (var z in zs.Split(',').Select(float.Parse))
+                            {
+                                var slice = body.V.Where(p => MathF.Abs(p.Z - z) < 1f).ToList();
+                                if (slice.Count == 0) { Console.WriteLine($"{(female ? "female" : "male")} body_{w} z {z}: nothing"); continue; }
+                                Console.WriteLine($"{(female ? "female" : "male")} body_{w} z {z}: {slice.Count} vertices, x {slice.Min(p => p.X):F1}..{slice.Max(p => p.X):F1}, y {slice.Min(p => p.Y):F1}..{slice.Max(p => p.Y):F1}");
+                            }
+                        }
+                }
+                return 0;
+            }
+            case "mw-nif-shape":
+            {
+                // Dev aid: a Morrowind model's shapes (--model, under meshes\): each shape's triangles, its bounds after its
+                // node transforms, and its texture.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var tes3 = Morrowind.Tes3Data.Open(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                foreach (var model in opts["model"].Split(','))
+                {
+                    var nif = Morrowind.Nif4.Read(tes3.Read(@"meshes\" + model) ?? throw new FileNotFoundException(model), model);
+                    void Visit(int index, Morrowind.NifTransform parent)
+                    {
+                        if (nif.Get<Morrowind.NiNode>(index) is not { } node) return;
+                        var world = node.Transform.Then(parent);
+                        if (node is Morrowind.NiTriShape shape && nif.Get<Morrowind.NiTriShapeData>(shape.Data) is { } d)
+                        {
+                            var pts = d.Vertices.Select(world.Apply).ToList();
+                            var lo = pts.Aggregate(new System.Numerics.Vector3(float.MaxValue), System.Numerics.Vector3.Min);
+                            var hi = pts.Aggregate(new System.Numerics.Vector3(float.MinValue), System.Numerics.Vector3.Max);
+                            string tex = node.Properties.Select(nif.Get<Morrowind.NiTexturingProperty>).OfType<Morrowind.NiTexturingProperty>()
+                                .SelectMany(t => t.Textures.Where(x => x is not null)).Select(x => nif.Get<Morrowind.NiSourceTexture>(x!.Value.Source)?.FileName).FirstOrDefault() ?? "";
+                            Console.WriteLine($"{model}: {shape.Name} {d.Triangles.Length / 3} triangles, {d.Vertices.Length} vertices, uv sets {d.UVSets?.Length ?? 0}, bounds ({lo.X:F1},{lo.Y:F1},{lo.Z:F1})..({hi.X:F1},{hi.Y:F1},{hi.Z:F1}), texture {tex}");
+                        }
+                        foreach (var c in node.Children) Visit(c, world);
+                    }
+                    foreach (var root in nif.Roots) Visit(root, Morrowind.NifTransform.Identity);
+                }
+                return 0;
+            }
+            case "vanilla-find":
+            {
+                // Dev aid: Skyrim.esm's items, lights and containers whose EditorID or name contains --text: kind, name, model.
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                string text = opts["text"];
+                bool Has(string? s) => s?.Contains(text, StringComparison.OrdinalIgnoreCase) == true;
+                IEnumerable<(string Kind, string? Edid, string? Name, string? Model)> all =
+                    sk.MiscItems.Select(r => ("misc", r.EditorID, r.Name?.String, r.Model?.File.DataRelativePath.Path))
+                    .Concat(sk.Ingredients.Select(r => ("ingredient", r.EditorID, r.Name?.String, r.Model?.File.DataRelativePath.Path)))
+                    .Concat(sk.Ingestibles.Select(r => ("potion", r.EditorID, r.Name?.String, r.Model?.File.DataRelativePath.Path)))
+                    .Concat(sk.Lights.Select(r => ("light", r.EditorID, r.Name?.String, r.Model?.File.DataRelativePath.Path)))
+                    .Concat(sk.Containers.Select(r => ("container", r.EditorID, r.Name?.String, r.Model?.File.DataRelativePath.Path)));
+                foreach (var r in all.Where(r => Has(r.Edid) || Has(r.Name)).Take(int.Parse(opts.GetValueOrDefault("max", "15"))))
+                    Console.WriteLine($"{r.Kind}\t{r.Edid}\t{r.Name}\t{r.Model}");
+                return 0;
+            }
+            case "ob-model":
+            {
+                // Dev aid: Oblivion records by EditorID (--edids a,b): type, plugin, name and model, and whether the model
+                // is in Oblivion's data (loose or archived).
+                var obData = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion)!);
+                var wanted = opts["edids"].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var p in Mods.ModCatalog.Selected(Game.Oblivion, GameInstalls.DataDir(Game.Oblivion)!, []))
+                {
+                    using var ob = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(GameInstalls.DataDir(Game.Oblivion)!, p), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                    foreach (var r in ob.EnumerateMajorRecords().Where(r => r.EditorID is { } e && wanted.Contains(e)))
+                    {
+                        string? model = (r as Mutagen.Bethesda.Oblivion.IModeledGetter)?.Model?.File;
+                        Console.WriteLine($"{r.EditorID} ({r.GetType().Name.Replace("BinaryOverlay", "")}, {p}) : model {(model is { Length: > 0 } ? model + (obData.Exists(@"meshes\" + model) ? " (there)" : " (NOT in the data)") : "(none)")}");
+                    }
+                }
+                return 0;
+            }
+            case "item-check":
+            {
+                // Books and the things a player picks up or uses, in built plugins (--data, default out/convert; --plugins
+                // a;b, default the four games' main plugins), against Skyrim's own (its five masters): book text's tags
+                // and their attributes that no vanilla book has, characters the game can't show, text lengths, the book
+                // data's raw values; and every item's or usable object's model file (ours, under meshes\) that isn't
+                // there. A difference from every vanilla record is where a crash can come from.
+                string data = Path.GetFullPath(opts.GetValueOrDefault("data", Path.Combine("out", "convert")));
+                var targets = opts.GetValueOrDefault("plugins", "Daggerfall.esm;Redguard.esm;Morrowind.esm;Oblivion.esm")
+                    .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(t => File.Exists(Path.Combine(data, t))).ToList();
+                var tagRx = new System.Text.RegularExpressions.Regex(@"<\s*(/?)\s*([A-Za-z]+)([^<>]*)>");
+                var attrRx = new System.Text.RegularExpressions.Regex(@"([A-Za-z]+)\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))");
+                // The characters an English plugin's strings can hold (Windows-1252).
+                System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+                var codePage = System.Text.Encoding.GetEncoding(1252).GetString(Enumerable.Range(0, 256).Select(i => (byte)i).ToArray()).ToHashSet();
+                // Book text: tag names, tag+attribute names, font faces, stray angle brackets, odd characters, lengths.
+                (Dictionary<string, int> Tags, Dictionary<string, int> Attrs, Dictionary<string, int> Faces, int Stray, int Control, int Wide, int Max, List<string> Images) Scan(IEnumerable<IBookGetter> books)
+                {
+                    var tags = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    var attrs = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    var faces = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    int stray = 0, control = 0, wide = 0, max = 0;
+                    var images = new List<string>();
+                    foreach (var b in books)
+                    {
+                        string t = b.BookText.String ?? "";
+                        max = Math.Max(max, t.Length);
+                        foreach (System.Text.RegularExpressions.Match m in tagRx.Matches(t))
+                        {
+                            string tag = m.Groups[2].Value.ToLowerInvariant();
+                            tags[tag] = tags.GetValueOrDefault(tag) + 1;
+                            foreach (System.Text.RegularExpressions.Match a in attrRx.Matches(m.Groups[3].Value))
+                            {
+                                string key = $"{tag}.{a.Groups[1].Value.ToLowerInvariant()}";
+                                attrs[key] = attrs.GetValueOrDefault(key) + 1;
+                                string value = a.Groups[2].Success ? a.Groups[2].Value : a.Groups[3].Success ? a.Groups[3].Value : a.Groups[4].Value;
+                                if (key == "font.face") faces[value] = faces.GetValueOrDefault(value) + 1;
+                                if (key == "img.src") images.Add(value);
+                            }
+                        }
+                        string bare = tagRx.Replace(t, "");
+                        stray += bare.Count(c => c is '<' or '>');
+                        control += t.Count(c => c < ' ' && c is not '\n' and not '\t');
+                        wide += t.Count(c => !codePage.Contains(c));
+                    }
+                    return (tags, attrs, faces, stray, control, wide, max, images);
+                }
+                var vmods = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }
+                    .Select(f => SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, f), SkyrimRelease.SkyrimSE)).ToList();
+                var vBooks = vmods.SelectMany(m => m.Books).ToList();
+                var v = Scan(vBooks);
+                string Top(Dictionary<string, int> d) => string.Join(", ", d.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}"));
+                Console.WriteLine($"vanilla: {vBooks.Count} books; tags: {Top(v.Tags)}");
+                Console.WriteLine($"  attributes: {Top(v.Attrs)}");
+                Console.WriteLine($"  font faces: {Top(v.Faces)}; stray < or >: {v.Stray}; control characters: {v.Control}; longest {v.Max:N0}");
+                var vData = vBooks.GroupBy(b => $"{b.Type}/{b.Flags}/{b.Teaches?.GetType().Name}").ToDictionary(g => g.Key, g => g.Count());
+                Console.WriteLine($"  type/flags/teaches: {Top(vData)}");
+                // Notes and letters (by model): which type they are, and where vanilla's pictures point.
+                Console.WriteLine($"  notes by model: {Top(vBooks.Where(b => b.Model?.File.DataRelativePath.Path.Contains("note", StringComparison.OrdinalIgnoreCase) == true).GroupBy(b => $"{b.Type} ({b.Model!.File.DataRelativePath.Path})").ToDictionary(g => g.Key, g => g.Count()))}");
+                Console.WriteLine($"  picture sources: {string.Join(", ", v.Images.Distinct().Take(4))}; types {Top(v.Images.GroupBy(i => Path.GetExtension(i).ToLowerInvariant()).ToDictionary(g => g.Key, g => g.Count()))}");
+                // The books' DATA bytes as the file has them (not through Mutagen): flags, type, two unused, then teaches.
+                static Dictionary<string, byte[]> RawBookData(string path)
+                {
+                    var found = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+                    var bytes = File.ReadAllBytes(path);
+                    int p = 0;
+                    while (p + 24 <= bytes.Length)
+                    {
+                        string type = System.Text.Encoding.ASCII.GetString(bytes, p, 4);
+                        int size = BitConverter.ToInt32(bytes, p + 4);
+                        if (type == "GRUP")
+                        {
+                            string label = System.Text.Encoding.ASCII.GetString(bytes, p + 8, 4);
+                            int groupType = BitConverter.ToInt32(bytes, p + 12);
+                            p = groupType == 0 && label != "BOOK" ? p + size : p + 24;   // into BOOK's group only
+                            continue;
+                        }
+                        uint flags = BitConverter.ToUInt32(bytes, p + 8);
+                        if (type == "BOOK")
+                        {
+                            byte[] body = bytes[(p + 24)..(p + 24 + size)];
+                            if ((flags & 0x40000) != 0)
+                            {
+                                using var z = new System.IO.Compression.ZLibStream(new MemoryStream(body, 4, body.Length - 4), System.IO.Compression.CompressionMode.Decompress);
+                                using var ms = new MemoryStream(); z.CopyTo(ms); body = ms.ToArray();
+                            }
+                            string? edid = null; byte[]? dataField = null;
+                            for (int q = 0; q + 6 <= body.Length;)
+                            {
+                                string sub = System.Text.Encoding.ASCII.GetString(body, q, 4);
+                                int len = BitConverter.ToUInt16(body, q + 4);
+                                if (sub == "EDID") edid = System.Text.Encoding.ASCII.GetString(body, q + 6, Math.Max(0, len - 1));
+                                if (sub == "DATA") dataField = body[(q + 6)..(q + 6 + len)];
+                                q += 6 + len;
+                            }
+                            if (edid is not null && dataField is not null) found[edid] = dataField;
+                        }
+                        p += 24 + size;
+                    }
+                    return found;
+                }
+                // Inventory art: the static whose model the book menu opens (vanilla's under clutter\books\...\character assets).
+                var vCache = vmods.ToImmutableLinkCache();
+                string ArtOf(IBookGetter b) => b.InventoryArt.IsNull ? "(none)" : b.InventoryArt.TryResolve(vCache) is { } st ? st.Model?.File.DataRelativePath.Path ?? "(no model)" : "(not found)";
+                Console.WriteLine($"  inventory art: {vBooks.Count(b => !b.InventoryArt.IsNull)} of {vBooks.Count} set; most used: {Top(vBooks.GroupBy(ArtOf).OrderByDescending(g => g.Count()).Take(8).ToDictionary(g => g.Key, g => g.Count()))}");
+                // Worn parts: vanilla's without a model, and how its rings and amulets are worn.
+                foreach (var aa in vmods.SelectMany(m => m.ArmorAddons).Where(a => a.WorldModel?.Male is null && a.WorldModel?.Female is null))
+                    Console.WriteLine($"  vanilla worn part without a model: {aa.EditorID} race {aa.Race.TryResolve(vCache)?.EditorID} (+{aa.AdditionalRaces.Count}) slots {aa.BodyTemplate?.FirstPersonFlags}; used by {vmods.SelectMany(m => m.Armors).Count(r => r.Armature.Any(l => l.FormKey == aa.FormKey))} armour");
+                foreach (var name in new[] { "JewelryRingSilver", "JewelryNecklaceSilver", "ClothesBelt" })
+                    foreach (var r in vmods.SelectMany(m => m.Armors).Where(r => r.EditorID?.StartsWith(name, StringComparison.OrdinalIgnoreCase) == true).Take(1))
+                        Console.WriteLine($"  vanilla {r.EditorID}: slots {r.BodyTemplate?.FirstPersonFlags}, worn parts: {string.Join("; ", r.Armature.Select(l => l.TryResolve(vCache)).Select(a => $"{a?.EditorID} model {a?.WorldModel?.Male?.File.DataRelativePath.Path} race {a?.Race.TryResolve(vCache)?.EditorID} (+{a?.AdditionalRaces.Count})"))}");
+                var vRaw = RawBookData(Path.Combine(skyrimData, "Skyrim.esm"));
+                var vTypes = vRaw.Values.GroupBy(d => d.Length > 1 ? d[1] : -1).ToDictionary(g => $"type byte {g.Key}", g => g.Count());
+                Console.WriteLine($"  raw DATA in Skyrim.esm: {vRaw.Count} books; {Top(vTypes)}; a note's: {string.Join(" ", vBooks.Where(b => b.Model?.File.DataRelativePath.Path.Contains("note", StringComparison.OrdinalIgnoreCase) == true && b.EditorID is not null && vRaw.ContainsKey(b.EditorID)).Take(1).Select(b => $"{b.EditorID} {Convert.ToHexString(vRaw[b.EditorID!])}"))}");
+                foreach (var target in targets)
+                {
+                    using var mod = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(data, target), SkyrimRelease.SkyrimSE);
+                    var books = mod.Books.ToList();
+                    var s = Scan(books);
+                    if (books.Count > 0)
+                    {
+                        Console.WriteLine($"  inventory art: {books.Count(b => !b.InventoryArt.IsNull)} of {books.Count} set; {Top(books.Where(b => !b.InventoryArt.IsNull).GroupBy(b => b.InventoryArt.FormKey.ModKey.FileName.String).ToDictionary(g => g.Key, g => g.Count()))}");
+                        var raw = RawBookData(Path.Combine(data, target));
+                        Console.WriteLine($"  raw DATA: {Top(raw.Values.GroupBy(d => d.Length > 1 ? d[1] : -1).ToDictionary(g => $"type byte {g.Key}", g => g.Count()))}; e.g. {string.Join(", ", raw.Take(2).Select(kv => $"{kv.Key} {Convert.ToHexString(kv.Value)}"))}");
+                    }
+                    Console.WriteLine($"{target}: {books.Count} books, longest text {s.Max:N0} (vanilla's {v.Max:N0}); stray < or >: {s.Stray}; control characters: {s.Control}; characters the game's code page lacks: {s.Wide}");
+                    var newTags = s.Tags.Where(kv => !v.Tags.ContainsKey(kv.Key)).ToDictionary();
+                    var newAttrs = s.Attrs.Where(kv => !v.Attrs.ContainsKey(kv.Key)).ToDictionary();
+                    var newFaces = s.Faces.Where(kv => !v.Faces.ContainsKey(kv.Key)).ToDictionary();
+                    Console.WriteLine($"  tags: {Top(s.Tags)}; none in vanilla: {(newTags.Count > 0 ? Top(newTags) : "-")}");
+                    Console.WriteLine($"  attributes none in vanilla: {(newAttrs.Count > 0 ? Top(newAttrs) : "-")}; font faces none in vanilla: {(newFaces.Count > 0 ? Top(newFaces) : "-")}");
+                    var data2 = books.GroupBy(b => $"{b.Type}/{b.Flags}/{b.Teaches?.GetType().Name}").ToDictionary(g => g.Key, g => g.Count());
+                    var newData = data2.Where(kv => !vData.ContainsKey(kv.Key)).ToDictionary();
+                    Console.WriteLine($"  type/flags/teaches: {Top(data2)}; none in vanilla: {(newData.Count > 0 ? Top(newData) : "-")}");
+                    // Pictures: img://Textures/... must be a file there (ours) or a vanilla one.
+                    // A picture's file is its path with .dds (the books' own .png names are mapped to it).
+                    var missingImages = s.Images.Distinct().Where(src => src.StartsWith("img://", StringComparison.OrdinalIgnoreCase) && src[6..].Contains("TamrielMerge", StringComparison.OrdinalIgnoreCase)
+                        && !File.Exists(Path.ChangeExtension(Path.Combine(data, src[6..].Replace('/', '\\')), ".dds"))).ToList();
+                    Console.WriteLine($"  pictures: {s.Images.Count} ({s.Images.Distinct().Count()} files), not there: {missingImages.Count}{(missingImages.Count > 0 ? " e.g. " + string.Join(", ", missingImages.Take(3)) : "")}; picture types: {Top(s.Images.GroupBy(i => Path.GetExtension(i).ToLowerInvariant()).ToDictionary(g => g.Key, g => g.Count()))}");
+                    // The books with each oddity: how many, and three of them.
+                    var odd = new Dictionary<string, List<string>>();
+                    void Odd(string what, IBookGetter b) { if (!odd.TryGetValue(what, out var l)) odd[what] = l = []; l.Add($"{b.EditorID} \"{b.Name}\""); }
+                    foreach (var b in books)
+                    {
+                        string t = b.BookText.String ?? "";
+                        if (t.Any(c => c < ' ' && c is not '\n' and not '\t')) Odd("control characters", b);
+                        if (t.Any(c => !codePage.Contains(c))) Odd("characters the code page lacks", b);
+                        if (tagRx.Replace(t, "").Any(c => c is '<' or '>')) Odd("stray < or >", b);
+                        if (tagRx.Matches(t).Any(m => !v.Tags.ContainsKey(m.Groups[2].Value))) Odd("tags none in vanilla", b);
+                        if (t.Length > v.Max) Odd($"longer than any vanilla book", b);
+                        if (t.Trim().Length == 0) Odd("no text", b);
+                        if (b.Model is null) Odd("no model", b);
+                    }
+                    foreach (var (what, list) in odd) Console.WriteLine($"    {what}: {list.Count}, e.g. {string.Join("; ", list.Take(3))}");
+                    // Where the stray brackets are: a few words round each.
+                    foreach (var b in books)
+                    {
+                        string bare = tagRx.Replace(b.BookText.String ?? "", "\u0001");
+                        for (int i = bare.IndexOfAny(['<', '>']); i >= 0; i = bare.IndexOfAny(['<', '>'], i + 1))
+                            Console.WriteLine($"      {b.EditorID}: …{bare.Substring(Math.Max(0, i - 30), Math.Min(60, bare.Length - Math.Max(0, i - 30))).Replace('\n', ' ').Replace("\u0001", "‹tag›")}…");
+                    }
+                    // Items and usable things: a model of ours that isn't in the output.
+                    var models = new List<(string Kind, string? Edid, string File)>();
+                    void Add(string kind, Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter r, IModelGetter? m) { if (m?.File.DataRelativePath.Path is { Length: > 0 } f) models.Add((kind, r.EditorID, f)); }
+                    foreach (var r in mod.Books) Add("book", r, r.Model);
+                    foreach (var r in mod.MiscItems) Add("misc", r, r.Model);
+                    foreach (var r in mod.Keys) Add("key", r, r.Model);
+                    foreach (var r in mod.Weapons) Add("weapon", r, r.Model);
+                    foreach (var r in mod.Ammunitions) Add("ammo", r, r.Model);
+                    foreach (var r in mod.Ingestibles) Add("potion", r, r.Model);
+                    foreach (var r in mod.Ingredients) Add("ingredient", r, r.Model);
+                    foreach (var r in mod.SoulGems) Add("soul gem", r, r.Model);
+                    foreach (var r in mod.Scrolls) Add("scroll", r, r.Model);
+                    foreach (var r in mod.Lights) Add("light", r, r.Model);
+                    foreach (var r in mod.Containers) Add("container", r, r.Model);
+                    foreach (var r in mod.Activators) Add("activator", r, r.Model);
+                    foreach (var r in mod.Doors) Add("door", r, r.Model);
+                    foreach (var r in mod.Furniture) Add("furniture", r, r.Model);
+                    foreach (var r in mod.Florae) Add("flora", r, r.Model);
+                    foreach (var r in mod.Armors) Add("armour", r, r.WorldModel?.Male?.Model);
+                    foreach (var r in mod.ArmorAddons) Add("worn part", r, r.WorldModel?.Male);
+                    var ours = models.Where(m => m.File.Contains("TamrielMerge", StringComparison.OrdinalIgnoreCase)).ToList();
+                    // A model path is under meshes\ (Mutagen may give it with or without that folder).
+                    string MeshFile(string f) => f.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? Path.Combine(data, f) : Path.Combine(data, "meshes", f);
+                    var gone = ours.Where(m => !File.Exists(MeshFile(m.File))).ToList();
+                    Console.WriteLine($"  models: {models.Count:N0} on items and usable things, {ours.Count:N0} of ours; not there: {gone.Count:N0}" +
+                        (gone.Count > 0 ? " (" + Top(gone.GroupBy(g => g.Kind).ToDictionary(g => g.Key, g => g.Count())) + "), e.g. " + string.Join("; ", gone.Take(4).Select(g => $"{g.Kind} {g.Edid} {g.File}")) : ""));
+                    // What every vanilla record of a kind has (or nearly every: 99%), ours without it.
+                    void Rule<T>(string what, IEnumerable<T> ours2, IEnumerable<T> theirs, Func<T, bool> has) where T : Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter
+                    {
+                        var v2 = theirs.ToList(); var o2 = ours2.ToList();
+                        if (o2.Count == 0 || v2.Count == 0) return;
+                        double share = v2.Count(has) / (double)v2.Count;
+                        var lacking = o2.Where(r => !has(r)).ToList();
+                        Console.WriteLine($"  {what}: vanilla {share:P1} of {v2.Count}; ours {o2.Count - lacking.Count} of {o2.Count}{(lacking.Count > 0 && share >= 0.99 ? $"  <-- {lacking.Count} without, e.g. {string.Join(", ", lacking.Take(4).Select(r => r.EditorID))}" : "")}");
+                    }
+                    Rule("armour with worn parts", mod.Armors, vmods.SelectMany(m => m.Armors), r => r.Armature.Count > 0 || !r.TemplateArmor.IsNull);
+                    Rule("armour with keywords", mod.Armors, vmods.SelectMany(m => m.Armors), r => r.Keywords?.Count > 0 || !r.TemplateArmor.IsNull);
+                    Rule("worn part with a model", mod.ArmorAddons, vmods.SelectMany(m => m.ArmorAddons), r => r.WorldModel?.Male is not null || r.WorldModel?.Female is not null);
+                    Rule("worn part with a race", mod.ArmorAddons, vmods.SelectMany(m => m.ArmorAddons), r => !r.Race.IsNull);
+                    Rule("weapon with data", mod.Weapons, vmods.SelectMany(m => m.Weapons), r => r.Data is not null);
+                    Rule("weapon with critical data", mod.Weapons, vmods.SelectMany(m => m.Weapons), r => r.Critical is not null);
+                    Rule("weapon with keywords", mod.Weapons, vmods.SelectMany(m => m.Weapons), r => r.Keywords?.Count > 0 || !r.Template.IsNull);
+                    Rule("weapon with an equip slot", mod.Weapons, vmods.SelectMany(m => m.Weapons), r => !r.EquipmentType.IsNull || !r.Template.IsNull);
+                    Rule("ammunition with a projectile", mod.Ammunitions, vmods.SelectMany(m => m.Ammunitions), r => !r.Projectile.IsNull);
+                    Rule("potion with effects", mod.Ingestibles, vmods.SelectMany(m => m.Ingestibles), r => r.Effects.Count > 0);
+                    Rule("potion with a use sound", mod.Ingestibles, vmods.SelectMany(m => m.Ingestibles), r => !r.ConsumeSound.IsNull);
+                    Rule("ingredient with effects", mod.Ingredients, vmods.SelectMany(m => m.Ingredients), r => r.Effects.Count > 0);
+                    Rule("scroll with effects", mod.Scrolls, vmods.SelectMany(m => m.Scrolls), r => r.Effects.Count > 0);
+                    Rule("enchantment with effects", mod.ObjectEffects, vmods.SelectMany(m => m.ObjectEffects), r => r.Effects.Count > 0);
+                    Rule("spell with effects", mod.Spells, vmods.SelectMany(m => m.Spells), r => r.Effects.Count > 0);
+                    Rule("effect with a base effect", mod.Spells.SelectMany(s => s.Effects.Select(_ => s)), vmods.SelectMany(m => m.Spells), r => r.Effects.All(e => !e.BaseEffect.IsNull));
+                    Rule("furniture with markers", mod.Furniture, vmods.SelectMany(m => m.Furniture), r => r.Markers?.Count > 0);
+                    Rule("container with a model", mod.Containers, vmods.SelectMany(m => m.Containers), r => r.Model is not null);
+                    Rule("door with a model", mod.Doors, vmods.SelectMany(m => m.Doors), r => r.Model is not null);
+                    Rule("activator with a model", mod.Activators, vmods.SelectMany(m => m.Activators), r => r.Model is not null);
+                    Rule("flora with a harvest", mod.Florae, vmods.SelectMany(m => m.Florae), r => !r.Ingredient.IsNull);
+                    Rule("misc item with a model", mod.MiscItems, vmods.SelectMany(m => m.MiscItems), r => r.Model is not null);
+                    Rule("key with a model", mod.Keys, vmods.SelectMany(m => m.Keys), r => r.Model is not null);
+                    Rule("soul gem with a model", mod.SoulGems, vmods.SelectMany(m => m.SoulGems), r => r.Model is not null);
+                    Rule("book with a model", mod.Books, vmods.SelectMany(m => m.Books), r => r.Model is not null);
+                    Rule("book with inventory art", mod.Books, vmods.SelectMany(m => m.Books), r => !r.InventoryArt.IsNull);
+                    Rule("light carried with a model", mod.Lights.Where(l => l.Flags.HasFlag(Light.Flag.CanBeCarried)), vmods.SelectMany(m => m.Lights).Where(l => l.Flags.HasFlag(Light.Flag.CanBeCarried)), r => r.Model is not null);
+                    // Armour wearing a part that draws nothing (WornNothing): each, with its slots and its own model.
+                    var nothing = mod.ArmorAddons.Where(a => a.WorldModel?.Male?.File.DataRelativePath.Path.EndsWith(Skyrim.WornNothing.ModelPath, StringComparison.OrdinalIgnoreCase) == true).Select(a => a.FormKey).ToHashSet();
+                    var wearingNothing = mod.Armors.Where(r => r.Armature.Any(l => nothing.Contains(l.FormKey))).ToList();
+                    Console.WriteLine($"  armour wearing nothing to see: {wearingNothing.Count}");
+                    foreach (var r in wearingNothing.Take(int.Parse(opts.GetValueOrDefault("list", "12"))))
+                        Console.WriteLine($"    {r.EditorID} \"{r.Name}\" slots {r.BodyTemplate?.FirstPersonFlags}, its model {r.WorldModel?.Male?.Model?.File.DataRelativePath.Path}");
+                    var withoutModel = books.Where(b => b.Model is null).Select(r => r.EditorID).Concat(mod.MiscItems.Where(r => r.Model is null).Select(r => r.EditorID))
+                        .Concat(mod.Ingestibles.Where(r => r.Model is null).Select(r => r.EditorID)).Concat(mod.Containers.Where(r => r.Model is null).Select(r => r.EditorID)).ToList();
+                    if (withoutModel.Count > 0) Console.WriteLine($"  without a model: {string.Join(", ", withoutModel)}");
+                    var noModel = books.Count(b => b.Model is null) + mod.MiscItems.Count(r => r.Model is null) + mod.Weapons.Count(r => r.Model is null) + mod.Keys.Count(r => r.Model is null) + mod.Ingestibles.Count(r => r.Model is null) + mod.Ingredients.Count(r => r.Model is null);
+                    Console.WriteLine($"  items without a model: {noModel} (books {books.Count(b => b.Model is null)}, misc {mod.MiscItems.Count(r => r.Model is null)}, weapons {mod.Weapons.Count(r => r.Model is null)}, keys {mod.Keys.Count(r => r.Model is null)}, potions {mod.Ingestibles.Count(r => r.Model is null)}, ingredients {mod.Ingredients.Count(r => r.Model is null)})");
+                }
                 return 0;
             }
             case "plugin-check":

@@ -194,6 +194,45 @@ public sealed class MwWornSource(Tes3Data data, MwTextures textures)
             }
             mirrored = place.Rotation.GetDeterminant() * place.Scale < 0;
         }
+        return Dress(nif, shape, d, props, v, nrm, hasNormals, weights, mirrored);
+    }
+
+    /// <summary>
+    /// A model's visible shapes in its own space (each through the transforms above it in the file), with their
+    /// textures and shader settings as worn parts have them, no weights: for a worn piece made from an item's own model
+    /// (a belt's band and buckle, BodySleeve).
+    /// </summary>
+    public List<WornShape> Pieces(string model)
+    {
+        string source = model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
+        var nif = Nif4.Read(data.Read(source) ?? throw new FileNotFoundException(source), source);
+        var result = new List<WornShape>();
+        void Visit(int index, NifTransform parent, List<NiFlagProperty> props)
+        {
+            if (nif.Get<NiNode>(index) is not { } node || node.Hidden || node.Type == "RootCollisionNode") return;
+            var world = node.Transform.Then(parent);
+            var here = props.Concat(node.Properties.Select(nif.Get<NiFlagProperty>).OfType<NiFlagProperty>()).ToList();
+            if (node is NiTriShape shape)
+            {
+                if (node is NiParticles || IsMarker(shape.Name) || nif.Get<NiTriShapeData>(shape.Data) is not { Vertices.Length: > 0 } d || d.Triangles.Length < 3) return;
+                int n = d.Vertices.Length;
+                bool hasNormals = d.Normals.Length == n;
+                var v = d.Vertices.Select(world.Apply).ToArray();
+                var nrm = hasNormals ? d.Normals.Select(x => world.Rotate(x) is var r && r.LengthSquared() > 0 ? Vector3.Normalize(r) : Vector3.UnitZ).ToArray() : new Vector3[n];
+                result.Add(Dress(nif, shape, d, here, v, nrm, hasNormals, new (string, float)[n][], world.Rotation.GetDeterminant() * world.Scale < 0));
+                return;
+            }
+            foreach (var c in node.Children) Visit(c, world, here);
+        }
+        foreach (var r in nif.Roots.Count > 0 ? nif.Roots : [0]) Visit(r, NifTransform.Identity, []);
+        return result;
+    }
+
+    /// <summary>A shape's triangles (turned for a mirrored placement), UVs, textures and shader settings round its
+    /// placed vertices and weights.</summary>
+    WornShape Dress(Nif4 nif, NiTriShape shape, NiTriShapeData d, List<NiFlagProperty> props, Vector3[] v, Vector3[] nrm, bool hasNormals, (string, float)[][] weights, bool mirrored)
+    {
+        int n = d.Vertices.Length;
         var tris = new int[d.Triangles.Length / 3 * 3];
         for (int t = 0; t + 2 < d.Triangles.Length; t += 3)
         {

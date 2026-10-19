@@ -32,6 +32,9 @@ public sealed class TownShops(SkyrimMod mod, ISkyrimModGetter skyrim)
     };
 
     readonly Dictionary<FormKey, Container> chests = new();
+    /// <summary>A merchant chest's model for the chests made here, as every vanilla container has one (ModelStandIns).</summary>
+    ModelStandIns StandIns => standIns ??= new ModelStandIns(skyrim);
+    ModelStandIns? standIns;
     Container? spellChest;
     const int MagesGuild = 40;
 
@@ -41,7 +44,7 @@ public sealed class TownShops(SkyrimMod mod, ISkyrimModGetter skyrim)
     Container? SpellChest()
     {
         if (spellChest is not null || SpellTomes is not { Count: > 0 } tomes) return spellChest;
-        spellChest = new Container(mod) { EditorID = "DFShopChestSpellTomes", ObjectBounds = new ObjectBounds(), Items = [] };
+        spellChest = new Container(mod) { EditorID = "DFShopChestSpellTomes", ObjectBounds = new ObjectBounds(), Items = [], Model = new Model { File = StandIns.Container } };
         foreach (var tome in tomes)
             spellChest.Items.Add(new ContainerEntry { Item = new ContainerItem { Item = tome.ToLink<IItemGetter>(), Count = 1 } });
         mod.Containers.Add(spellChest);
@@ -74,7 +77,7 @@ public sealed class TownShops(SkyrimMod mod, ISkyrimModGetter skyrim)
         if (chests.TryGetValue(template, out var hit)) return hit;
         if (template == Sk(0x072786) && DaggerfallSmith is { } lists)
         {
-            var smith = new Container(mod) { EditorID = "DFShopChestDaggerfallSmith", ObjectBounds = new ObjectBounds(), Items = [] };
+            var smith = new Container(mod) { EditorID = "DFShopChestDaggerfallSmith", ObjectBounds = new ObjectBounds(), Items = [], Model = new Model { File = StandIns.Container } };
             smith.Items.Add(new ContainerEntry { Item = new ContainerItem { Item = lists.Weapons.ToLink<IItemGetter>(), Count = 10 } });
             smith.Items.Add(new ContainerEntry { Item = new ContainerItem { Item = lists.Armor.ToLink<IItemGetter>(), Count = 10 } });
             mod.Containers.Add(smith);

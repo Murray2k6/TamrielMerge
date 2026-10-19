@@ -145,6 +145,8 @@ public sealed partial class MwPluginBuilder
         return t.Trim();
     }
 
+    Skyrim.BookLooks? bookLooks;
+
     IMajorRecord BookItem(Tes3Record rec, string edid, string? name, string? model)
     {
         var d = rec.Get("BKDT")!.Value;
@@ -157,10 +159,11 @@ public sealed partial class MwPluginBuilder
             BookText = BookText(rec.Str("TEXT") ?? ""),
             Value = (uint)Math.Max(0, d.Int(4)),
             Weight = weight,
-            Type = d.Int(8) != 0 ? Book.BookType.NoteOrScroll : Book.BookType.BookOrTome,
             Teaches = new BookTeachesNothing(),
             ObjectBounds = Bounds(mesh),
         };
+        // Read as Skyrim's own books and notes are (Skyrim.BookLooks); a scroll (BKDT's third value) as a note.
+        (bookLooks ??= new Skyrim.BookLooks(SkyrimEsm.Books)).Apply(book, note: d.Int(8) != 0);
         if (mesh is not null) book.Model = new Model { File = SkyrimModelPath(mesh.Path) };
         mod.Books.Add(book);
         return book;

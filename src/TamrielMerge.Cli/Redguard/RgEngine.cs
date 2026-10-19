@@ -429,6 +429,7 @@ public sealed partial class RgPluginBuilder
     {
         if (StaticFor(scene, "PRRTA001") is not { } s || s.Base is null) { Problems.Add("parrot: PRRTA001 not converted"); return; }
         PlaceStatic(scene, s, o.Position, o.Rotation);
+        // A worn part drawing nothing for its race, as every Skyrim armour and skin has worn parts (Skyrim.WornNothing).
         var skin = new Armor(mod)
         {
             EditorID = "RGParrotSkin",
@@ -436,6 +437,8 @@ public sealed partial class RgPluginBuilder
             BodyTemplate = new BodyTemplate { FirstPersonFlags = BipedObjectFlag.Body },
             Armature = [],
         };
+        if (npc.Race.FormKeyNullable is { } race)
+            skin.Armature.Add(Skyrim.WornNothing.Addon(mod, modOutDir, "RGParrotSkinAA", BipedObjectFlag.Body, race).ToLink<IArmorAddonGetter>());
         mod.Armors.Add(skin);
         npc.WornArmor.SetTo(skin);
         npc.Packages.Clear();

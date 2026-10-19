@@ -36,8 +36,18 @@ public sealed class ItemRecolour(string skyrimData, string outDir, Func<FormKey>
         return files.TryGetValue(rel, out var file) ? file.GetBytes() : null;
     }
 
-    /// <summary>The recoloured copy of a model (Data-relative, without "meshes\"), or null if it can't be read.</summary>
+    /// <summary>The recoloured copy of a model (Data-relative, without "meshes\"), or null if it can't be read. A worn
+    /// model of a weight (_0 or _1) has its other weight's copied too: the game loads both for the weight slider, and the
+    /// records name only _1 (2026-10-19, measured: the recoloured armour had only its _1 meshes).</summary>
     string? Model(string model, string metal, (float R, float G, float B) tint)
+    {
+        var made = OneModel(model, metal, tint);
+        if (made is not null && System.Text.RegularExpressions.Regex.Match(model, @"_([01])\.nif$", System.Text.RegularExpressions.RegexOptions.IgnoreCase) is { Success: true } w)
+            OneModel(model[..^5] + (w.Groups[1].Value == "1" ? "0" : "1") + model[^4..], metal, tint);
+        return made;
+    }
+
+    string? OneModel(string model, string metal, (float R, float G, float B) tint)
     {
         string key = metal + "|" + model;
         if (doneMeshes.TryGetValue(key, out var hit)) return hit;

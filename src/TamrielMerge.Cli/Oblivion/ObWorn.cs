@@ -328,10 +328,14 @@ public sealed partial class ObPluginBuilder
     {
         a.BodyTemplate ??= new BodyTemplate();
         var look = LookFor(flags, armour);
-        if (look is null || (maleModel is not { Length: > 0 } && femaleModel is not { Length: > 0 }))
+        // No worn look in Oblivion (rings, amulets): the vanilla template's (a ring's or amulet's), as every Skyrim armour
+        // has worn parts; a look without models: a part drawing nothing (Skyrim.WornNothing).
+        if (look is null) return;
+        if (maleModel is not { Length: > 0 } && femaleModel is not { Length: > 0 })
         {
             a.Armature.Clear();
-            if (look is not null) a.BodyTemplate.FirstPersonFlags = look.Slots;
+            a.Armature.Add(Skyrim.WornNothing.Addon(mod, modOutDir, a.EditorID + "AA", look.Slots, Vanilla.Skyrim.ArmorAddons.First(x => x.EditorID == "IronCuirassAA")).ToLink<IArmorAddonGetter>());
+            a.BodyTemplate.FirstPersonFlags = look.Slots;
             return;
         }
         characterAssets ??= new SkyrimCharacterAssets(SkyrimData!);
@@ -341,7 +345,12 @@ public sealed partial class ObPluginBuilder
         if (paths is null)
         {
             WornFallbacks++;
-            if (fallbackSlot is { } s) { a.BodyTemplate.FirstPersonFlags = s; a.Armature.Clear(); }
+            if (fallbackSlot is { } s)
+            {
+                a.BodyTemplate.FirstPersonFlags = s;
+                a.Armature.Clear();
+                a.Armature.Add(Skyrim.WornNothing.Addon(mod, modOutDir, a.EditorID + "AA", s, Vanilla.Skyrim.ArmorAddons.First(x => x.EditorID == "IronCuirassAA")).ToLink<IArmorAddonGetter>());
+            }
             return;
         }        string Model(bool female, bool firstPerson) => SkyrimModelPath(paths[(female, firstPerson)]);
         var templates = template.Armature.Select(l => Vanilla.Skyrim.ArmorAddons.FirstOrDefault(x => x.FormKey == l.FormKey)).OfType<IArmorAddonGetter>().ToList();

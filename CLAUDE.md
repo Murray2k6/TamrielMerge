@@ -15,3 +15,7 @@
   (the output itself: the navmesh over the floor, the mesh in the cell, the record in the plugin), not a proxy for it,
   and give the numbers and where they came from. Until it is measured, say "not yet checked" or "a hypothesis", and
   say what would check it. When a check could be fooled (bookkeeping, counters, a heuristic), check what it stands for.
+- Nothing set aside on a whim (user, 2026-10-19: "dont treat and throw it aside"). A failure, a leftover or an odd case
+  is never written off as a test cell, a duplicate, "by design", "too small to matter" or "the source has none" and
+  left. Find out what it is and what uses it, and make it work; a case that truly can't be done is reported with the
+  evidence and what doing it would take, and stays on the open list until the user decides.
