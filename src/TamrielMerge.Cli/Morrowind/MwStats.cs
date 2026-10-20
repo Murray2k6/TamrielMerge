@@ -97,6 +97,42 @@ public sealed class MwStats
         return v;
     }
 
+    /// <summary>
+    /// An NPC's 27 skills (SKIL index order): its own (a full NPDT), or as Morrowind auto-calculates them from its
+    /// class, race and level (the same reckoning as the kept skills above: 25 major, 10 minor, 0 other, +5, the race's
+    /// bonus, +5 in the class's specialization, then each level 1 major, 0.5 minor, 0.1 other and 0.5 more in the
+    /// specialization; at most 100). Null for anything but an NPC.
+    /// </summary>
+    public int[]? SkillsOf(string id)
+    {
+        if (!world.Objects.TryGetValue(id, out var rec) || rec.Type != "NPC_" || rec.Get("NPDT") is not { } d) return null;
+        var v = new int[27];
+        if (d.Data.Length >= 52)
+        {
+            for (int s = 0; s < 27; s++) v[s] = d.Data[10 + s];
+            return v;
+        }
+        if (d.Data.Length < 2) return null;
+        int level = BitConverter.ToInt16(d.Data, 0);
+        var race = rec.Str("RNAM") is { } r && world.Objects.TryGetValue(r, out var rr) && rr.Type == "RACE" ? rr : null;
+        var cls = rec.Str("CNAM") is { } c && world.Objects.TryGetValue(c, out var cr) && cr.Type == "CLAS" ? cr : null;
+        var radt = race?.Get("RADT");
+        var cldt = cls?.Get("CLDT");
+        for (int skill = 0; skill < 27; skill++)
+        {
+            int major = Major(cldt, skill);
+            float value = major switch { 1 => 25, 0 => 10, _ => 0 };
+            float multiplier = major switch { 1 => 1f, 0 => 0.5f, _ => 0.1f };
+            int raceBonus = 0;
+            if (radt is { Data.Length: >= 56 } rd)
+                for (int i = 0; i < 7; i++) if (rd.Int(i * 8) == skill) raceBonus = rd.Int(i * 8 + 4);
+            int specBonus = 0;
+            if (cldt is { Data.Length: >= 12 } sd && skills.TryGetValue(skill, out var s) && s.Specialization == sd.Int(8)) { specBonus = 5; multiplier += 0.5f; }
+            v[skill] = Math.Min((int)MathF.Round(value + 5 + raceBonus + specBonus + (level - 1) * multiplier, MidpointRounding.ToEven), 100);
+        }
+        return v;
+    }
+
     /// <summary>Whether the class has the skill as a major (1) or minor (0) skill; -1 for neither.</summary>
     static int Major(Tes3Field? cldt, int skill)
     {

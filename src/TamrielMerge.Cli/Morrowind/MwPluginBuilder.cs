@@ -1057,6 +1057,9 @@ public sealed partial class MwPluginBuilder
     {
         // Every spell exists (for spell merchants and the player's start), not only those someone carries.
         foreach (var rec in world.Objects.Values.Where(o => o.Type == "SPEL").ToList()) MwSpell(rec.Id);
+        // Morrowind's levelling for the Mundus stones (its birthsigns' spell lists go into the plugin).
+        var levelling = Levelling();
+        BuildTrainers();
         FinishMagic();
         FinishLaw();
         FinishLocks();
@@ -1073,5 +1076,13 @@ public sealed partial class MwPluginBuilder
         });
         // What procedural creatures may use from Morrowind (read by the creatures step when that option is on).
         WriteCreatureCatalog(Path.Combine(modOutDir, PluginName));
+        // What the progression build offers on the Mundus stones from Morrowind.
+        levelling.Save(Path.Combine(modOutDir, PluginName));
+        LevellingSummary = $"{levelling.Classes.Count} playable classes, {levelling.Signs.Count} birthsigns, {levelling.Races.Count} races; skill rates major x{levelling.MajorRate:0.##}, "
+            + $"minor x{levelling.MinorRate:0.##}, other x{levelling.MiscRate:0.##}, specialization x{levelling.SpecialRate:0.##}; level-up multipliers {string.Join(",", levelling.LevelUp)}; "
+            + $"{trainerNpcs.Count} trainers teaching {TrainerSkills} skills; {SkillBooks} skill books";
     }
+
+    /// <summary>What <see cref="Write"/> exported for the Mundus stones.</summary>
+    public string LevellingSummary { get; private set; } = "";
 }

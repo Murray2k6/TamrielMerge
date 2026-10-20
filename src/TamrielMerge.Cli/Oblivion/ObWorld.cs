@@ -496,8 +496,9 @@ public sealed partial class ObPluginBuilder
     // ---- worldspaces ----
 
     /// <summary>Every worldspace, parents first, with its land and references (with <paramref name="only"/>, those whose
-    /// EditorID it matches: test builds).</summary>
-    public (int Worldspaces, int Cells) BuildWorldspaces(System.Text.RegularExpressions.Regex? only = null)
+    /// EditorID it matches; with <paramref name="navBox"/>, x0,y0,x1,y1 in Skyrim cells, navmeshes only for the cells
+    /// in it, the rest there as their neighbours: test builds).</summary>
+    public (int Worldspaces, int Cells) BuildWorldspaces(System.Text.RegularExpressions.Regex? only = null, (int X0, int Y0, int X1, int Y1)? navBox = null)
     {
         var tamriel = SkyrimEsm.Worldspaces.First(w => w.EditorID == "Tamriel");
         var byWorld = Merge().Where(m => m.World is not null).GroupBy(m => m.World!.FormKey).ToDictionary(g => g.Key, g => g.ToList());
@@ -624,7 +625,8 @@ public sealed partial class ObPluginBuilder
                 // Lava is swum as water is (user, 2026-10-20: "lava is swimmable though and its hazard in case you fall in"):
                 // its bed navmeshed and flagged Water, so whoever falls in can swim out; the lava itself hurts (HurtingWater).
                 c => water.TryGetValue(c, out var w) ? w : null,
-                top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true);
+                top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true,
+                only: navBox is { } nb ? (x, y) => x >= nb.X0 && y >= nb.Y0 && x <= nb.X1 && y <= nb.Y1 : null);
             ExteriorNavmeshes += navCount;
             NavmeshTriangles += navTriangles;
             // Distant terrain, for worldspaces that don't use their parent's.

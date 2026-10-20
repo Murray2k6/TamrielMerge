@@ -626,6 +626,8 @@ static class Program
                 foreach (var p in plugins) Console.WriteLine($"  {p}");
                 if (failed.Count > 0) Console.WriteLine($"Failed: {string.Join(", ", failed)} (the others work without them)");
                 Console.WriteLine("Needed: SKSE and Address Library for SKSE Plugins. They run the Tamriel menu, the guide, Daggerfall's seamless overland (SKSE/Plugins/TamrielMergeSeamless.dll: physics past 64 cells) and the era in the date (TamrielMergeEra.dll).");
+                if (plugins.Contains("Daggerfall.esm"))
+                    Console.WriteLine("For the climbing animation (Daggerfall's Climbing skill): Open Animation Replacer by Ershin (without it you climb in the falling pose).");
                 if (opts.ContainsKey("install"))
                 using (Begin("Installing"))
                     InstallInto(outDir, skyrimData, plugins, opts.GetValueOrDefault("mo2"));
@@ -675,9 +677,7 @@ static class Program
                 bool other = opts.TryGetValue("data", out var dataDir);
                 string data = other ? Path.GetFullPath(dataDir!) : skyrimData;
                 Directory.CreateDirectory(data);
-                string[] order = ["Daggerfall.esm", .. Skyrim.Terrain.OverlandTiles.LandPluginNames, "Daggerfall Towns.esm", "Daggerfall Dungeons.esm",
-                    "Redguard.esm", "Morrowind.esm", "Oblivion.esm", "Daggerfall Creatures.esp", "Redguard Creatures.esp", "Morrowind Creatures.esp", "Oblivion Creatures.esp",
-                    "TamrielMerge Menu.esp", "Daggerfall Overland Doors.esp", "TamrielMerge Start.esp", "TamrielMerge Travel.esp", "TamrielMerge Progression.esp"];
+                string[] order = ConvertPluginOrder;
                 var plugins = order.Where(p => File.Exists(Path.Combine(dir, p)))
                     .Concat(Directory.EnumerateFiles(dir).Select(Path.GetFileName).Where(f => f!.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase)).Select(f => f!)
                         .Where(f => !order.Contains(f, StringComparer.OrdinalIgnoreCase)).Order(StringComparer.OrdinalIgnoreCase))
@@ -3578,6 +3578,7 @@ static class Program
                 }
                 builder.Write();
                 Console.WriteLine($"  barks: {builder.BarkCount} recorded lines in {builder.BarkTopicCount} voice topics (Morrowind's own recordings)");
+                Console.WriteLine($"  levelling (Mundus stones): {builder.LevellingSummary}");
                 // Morrowind's law (MwLaw): its crime faction and jail, who answers to it, the arrest greetings, TMMwLaw's markers.
                 if (m.Factions.FirstOrDefault(f => f.EditorID == "MWCrimeFaction") is { } mwCrime)
                 {
@@ -3992,8 +3993,11 @@ static class Program
                     // --no-exterior skips the worldspaces (faster when working on interiors).
                     if (!opts.ContainsKey("no-exterior"))
                     {
+                        // --exterior-box x0,y0,x1,y1 (Skyrim cells): navmeshes only for those cells (test builds).
+                        var navBox = opts.TryGetValue("exterior-box", out var obBox) && obBox.Split(',').Select(int.Parse).ToArray() is [var bx0, var by0, var bx1, var by1]
+                            ? (bx0, by0, bx1, by1) : ((int, int, int, int)?)null;
                         var (worlds, cells) = builder.BuildWorldspaces(opts.TryGetValue("worldspaces", out var wsOnly)
-                            ? new System.Text.RegularExpressions.Regex(wsOnly, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null);
+                            ? new System.Text.RegularExpressions.Regex(wsOnly, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null, navBox);
                         Console.WriteLine($"  {worlds} worldspaces, {cells} exterior cells, {builder.RegionCount} regions, {builder.ExteriorNavmeshes} exterior navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
                     }
                 }
@@ -4002,6 +4006,8 @@ static class Program
                 Console.WriteLine($"  hazards: {builder.TriggersPlaced} trigger boxes for Oblivion's trigger shapes (TMObTrigger), of {builder.TriggerShapesSeen} references with one (none listening: {string.Join(", ", builder.TriggerUnheard)}); {builder.HazardCells} interiors in lava (swum over as water, flagged Water)");
                 Console.WriteLine($"  effects: {builder.EffectCount} vanilla effects standing in for particle systems");
                 Console.WriteLine($"  locks: {builder.LockCount} locked doors and containers (Oblivion lockpicking)");
+                Console.WriteLine($"  levels: {builder.LevelFits.Actors} actors follow the player's level (Oblivion's level + offset as Skyrim's multiplier), "
+                    + $"missing Oblivion's level over the player's levels 1-50 by at most {builder.LevelFits.WorstMiss} (actors by their worst miss: {string.Join(", ", builder.LevelFits.Misses.Select(m => $"{m.Key}: {m.Value}"))})");
                 if (!opts.ContainsKey("no-dialogue"))
                 {
                     builder.BuildDialogue();
@@ -4022,6 +4028,7 @@ static class Program
                 Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Oblivion's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
                 Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 builder.Write();
+                Console.WriteLine($"  levelling (Mundus stones): {builder.LevellingSummary}");
                 var problems = builder.Problems.Distinct().ToList();
                 File.WriteAllLines(Path.Combine(outDir, "problems.txt"), problems);
                 foreach (var p in problems.Take(40)) Console.WriteLine($"  problem: {p}");
@@ -6222,7 +6229,7 @@ static class Program
             }
             case "ob-where":
             {
-                // Dev aid: the interiors (EditorIDs) where Oblivion's bases --edids a,b are placed, most first.
+                // Dev aid: the interiors (EditorIDs) where Oblivion's bases --edids a,b (objects or NPCs) are placed, most first.
                 string obDir = GameInstalls.DataDir(Game.Oblivion)!;
                 var wanted = opts["edids"].Split(',', StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var where = new Dictionary<string, int>();
@@ -6232,7 +6239,9 @@ static class Program
                     var keys = ob.EnumerateMajorRecords().Where(r => r.EditorID is { } e && wanted.Contains(e)).Select(r => r.FormKey).ToHashSet();
                     foreach (var c in ob.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
                     {
-                        int n = c.Persistent.Concat(c.Temporary).OfType<Mutagen.Bethesda.Oblivion.IPlacedObjectGetter>().Count(r => keys.Contains(r.Base.FormKey));
+                        var refs = c.Persistent.Concat(c.Temporary).ToList();
+                        int n = refs.OfType<Mutagen.Bethesda.Oblivion.IPlacedObjectGetter>().Count(r => keys.Contains(r.Base.FormKey))
+                            + refs.OfType<Mutagen.Bethesda.Oblivion.IPlacedNpcGetter>().Count(r => keys.Contains(r.Base.FormKey));
                         if (n > 0) where[c.EditorID ?? c.FormKey.ToString()] = where.GetValueOrDefault(c.EditorID ?? "") + n;
                     }
                 }
@@ -8050,6 +8059,165 @@ static class Program
                 // Packs one .wav (--wav) with its text (--text) into a .fuz (--fuz), to test the tools.
                 Console.WriteLine(Skyrim.VoiceFiles.Pack(skyrimData, opts["wav"], opts["text"], opts["fuz"]) ? $"wrote {opts["fuz"]}" : "failed");
                 return 0;
+            }
+            case "ob-levelling-check":
+            {
+                // Dev aid: what Oblivion's records say for skill books (BOOK teaches) and trainers (AI services Training,
+                // the skill and level), in the selected plugins: counts by value and a few examples.
+                string obDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var books = new Dictionary<string, int>();
+                var services = new Dictionary<string, int>();
+                var trainers = new List<string>();
+                var bookIds = new List<string>();
+                foreach (var p in Mods.ModCatalog.Selected(Game.Oblivion, obDir, []))
+                {
+                    using var ob = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(obDir, p), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                    foreach (var b in ob.Books) { string k = b.Data?.Teaches.ToString() ?? "(no data)"; books[k] = books.GetValueOrDefault(k) + 1; if (k != "255" && bookIds.Count < 8) bookIds.Add($"{b.EditorID} ({k})"); }
+                    foreach (var n in ob.Npcs)
+                    {
+                        if (n.AIData is not { } ai) continue;
+                        string svc = ai.BuySellServices.ToString();
+                        foreach (var f in svc.Split(", ")) services[f] = services.GetValueOrDefault(f) + 1;
+                        if (svc.Contains("Training") && trainers.Count < 12) trainers.Add($"{n.EditorID}: teaches {ai.Teaches}, up to {ai.MaximumTrainingLevel}");
+                    }
+                }
+                Console.WriteLine("books by what they teach: " + string.Join(", ", books.OrderByDescending(b => b.Value).Select(b => $"{b.Key} x{b.Value}")));
+                Console.WriteLine("NPC services: " + string.Join(", ", services.OrderByDescending(s => s.Value).Select(s => $"{s.Key} x{s.Value}")));
+                foreach (var t in trainers) Console.WriteLine("  " + t);
+                Console.WriteLine("skill books: " + string.Join(", ", bookIds));
+                return 0;
+            }
+            case "climb-anim":
+            {
+                // The climbing animation (Skyrim/Animations/ClimbAnimation) proved offline: Skyrim's male body skinned to it
+                // at --frames (default a quarter loop apart) to --out (PNG); with --oar DIR, the OAR replacer written there
+                // too (for the climbing effect --effect "Plugin.esp:ID", default the progression plugin's first FormID).
+                var frames = opts.GetValueOrDefault("frames", "0,9,18,27").Split(',').Select(int.Parse).ToArray();
+                foreach (var line in Skyrim.Animations.ClimbAnimation.Preview(skyrimData, Path.GetFullPath(opts.GetValueOrDefault("out", "out/climb.png")), frames))
+                    Console.WriteLine(line);
+                if (opts.TryGetValue("oar", out var oarDir))
+                {
+                    var e = opts.GetValueOrDefault("effect", "TamrielMerge Progression.esp:800").Split(':');
+                    var key = new FormKey(ModKey.FromFileName(e[0]), Convert.ToUInt32(e[1], 16));
+                    foreach (var f in Skyrim.Animations.ClimbAnimation.WriteOar(Path.GetFullPath(oarDir), skyrimData, key, Console.WriteLine)) Console.WriteLine($"  {f}");
+                }
+                return 0;
+            }
+            case "df-levelling":
+            {
+                // Daggerfall's classes and level-up rule for the Mundus stones (DfLevelling), as Daggerfall's build writes
+                // them, into --dir (default out/convert) beside Daggerfall.esm, without building Daggerfall.
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                if (arena2.Length == 0) { Console.Error.WriteLine("Daggerfall isn't installed through Steam or GOG."); return 1; }
+                var problems = new List<string>();
+                var levelling = Skyrim.DfLevelling.Read(arena2, "Daggerfall.esm", problems);
+                levelling.Save(Path.Combine(dir, "Daggerfall.esm"));
+                foreach (var c in levelling.Classes)
+                    Console.WriteLine($"  {c.Name}: x{c.Advancement} advancement, {c.HitPointsPerLevel} hp/level, attributes {string.Join(" ", c.Attributes!)}; "
+                        + $"primary {string.Join(", ", c.Primary!)}; major {string.Join(", ", c.Major)}; minor {string.Join(", ", c.Minor)}");
+                foreach (var p in problems) Console.WriteLine($"  problem: {p}");
+                Console.WriteLine($"Wrote {Skyrim.Progression.GameLevelling.PathFor(Path.Combine(dir, "Daggerfall.esm"))}: {levelling.Classes.Count} classes");
+                return problems.Count == 0 ? 0 : 2;
+            }
+            case "override-check":
+            {
+                // Whether the plugins over the games' own (creatures, overland doors, travel, model replacements...) leave
+                // what the games' plugins made as they made it (user, 2026-10-20: "we need to see if the lava and hazards dont
+                // get overwrote"): every cell, worldspace, water and reference a later plugin in --dir (default Skyrim's Data)
+                // overrides, compared with the record it overrides, field by field; then the hazards as the last override
+                // leaves them: the damaging waters, the cells and worldspaces with them, the interiors showing the sky and the
+                // trigger boxes. The plugins in their load order: Skyrim's plugin list (those on) for Data, else the convert's.
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", skyrimData));
+                string listFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Skyrim Special Edition", "Plugins.txt");
+                bool isData = Path.GetFullPath(skyrimData).TrimEnd('\\').Equals(dir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+                List<string> order = isData && File.Exists(listFile)
+                    ? File.ReadLines(listFile).Where(l => l.StartsWith('*')).Select(l => l[1..].Trim()).ToList()
+                    : [.. ConvertPluginOrder, .. Directory.EnumerateFiles(dir).Select(f => Path.GetFileName(f)).Where(f => f.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase))
+                        .Where(f => !ConvertPluginOrder.Contains(f, StringComparer.OrdinalIgnoreCase)).Order(StringComparer.OrdinalIgnoreCase)];
+                order = order.Where(p => File.Exists(Path.Combine(dir, p))).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                var mods = order.Select(p => SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, p), SkyrimRelease.SkyrimSE)).ToList();
+                var rank = order.Select((p, i) => (p, i)).ToDictionary(x => ModKey.FromFileName(x.p), x => x.i);
+                Console.WriteLine($"{order.Count} plugins in {dir}, in load order");
+                try
+                {
+                    // Pass 1: each plugin's overrides of an earlier plugin's records.
+                    var overrides = new List<(int Plugin, Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter Record)>();
+                    for (int i = 0; i < mods.Count; i++)
+                    {
+                        var key = mods[i].ModKey;
+                        if (mods[i].MasterReferences.Count == 0) continue;
+                        int before = overrides.Count;
+                        void Take(IEnumerable<Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter> records)
+                        {
+                            foreach (var r in records)
+                                if (r.FormKey.ModKey != key && rank.TryGetValue(r.FormKey.ModKey, out int from) && from < i) overrides.Add((i, r));
+                        }
+                        Take(mods[i].EnumerateMajorRecords<ICellGetter>());
+                        Take(mods[i].Worldspaces);
+                        Take(mods[i].Waters);
+                        Take(mods[i].EnumerateMajorRecords<IPlacedObjectGetter>());
+                        Take(mods[i].EnumerateMajorRecords<IPlacedNpcGetter>());
+                        Take(mods[i].Npcs);
+                        if (overrides.Count > before) Console.WriteLine($"  {order[i]} ({File.GetLastWriteTime(Path.Combine(dir, order[i])):yyyy-MM-dd HH:mm}): {overrides.Count - before:N0} overrides of cells, worldspaces, waters and references");
+                    }
+                    // Pass 2: the records they override, from the plugins those are from.
+                    var origin = new Dictionary<FormKey, Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter>();
+                    foreach (var g in overrides.GroupBy(o => o.Record.FormKey.ModKey))
+                    {
+                        var want = g.Select(o => o.Record.FormKey).ToHashSet();
+                        var src = mods[rank[g.Key]];
+                        foreach (var r in src.EnumerateMajorRecords<ICellGetter>().Cast<Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter>().Concat(src.Worldspaces).Concat(src.Waters)
+                                     .Concat(src.EnumerateMajorRecords<IPlacedObjectGetter>()).Concat(src.EnumerateMajorRecords<IPlacedNpcGetter>()).Concat(src.Npcs))
+                            if (want.Contains(r.FormKey)) origin[r.FormKey] = r;
+                    }
+                    int changed = 0;
+                    foreach (var byPlugin in overrides.GroupBy(o => o.Plugin))
+                        foreach (var byKind in byPlugin.GroupBy(o => o.Record switch { ICellGetter => "cells", IWorldspaceGetter => "worldspaces", IWaterGetter => "waters", IPlacedNpcGetter => "placed NPCs", INpcGetter => "NPCs", _ => "references" }))
+                        {
+                            var all = byKind.Select(o => (o.Record, Diff: origin.TryGetValue(o.Record.FormKey, out var from) ? OverrideDifferences(from, o.Record).ToList() : [("missing from its plugin", "", "")]))
+                                .Where(x => x.Diff.Count > 0).ToList();
+                            // What a plugin changes on purpose: procedural creatures switch a creature's placement off (a
+                            // spawner stands in), a creature-model plugin gives its creatures their own race, body and look.
+                            string plugin = order[byPlugin.Key];
+                            bool Intended((string Field, string From, string To) d) =>
+                                (plugin.Equals(Skyrim.CreatureSpawns.PluginName, StringComparison.OrdinalIgnoreCase) && byKind.Key == "placed NPCs"
+                                    && d.Field == "record flags" && d.To.Contains("InitiallyDisabled") && !d.From.Contains("InitiallyDisabled"))
+                                || (plugin.EndsWith(" Creatures.esp", StringComparison.OrdinalIgnoreCase) && byKind.Key == "NPCs" && d.Field is "race" or "skin" or "template" or "height" or "weight");
+                            var intended = all.Where(x => x.Diff.All(Intended)).ToList();
+                            var diffs = all.Where(x => !x.Diff.All(Intended)).ToList();
+                            changed += diffs.Count;
+                            if (intended.Count > 0)
+                                Console.WriteLine($"{plugin}: {intended.Count:N0} {byKind.Key} changed as it means to: "
+                                    + string.Join(", ", intended.SelectMany(x => x.Diff).GroupBy(d => d.Field).Select(g => $"{g.Key} x{g.Count():N0}")));
+                            Console.WriteLine($"{order[byPlugin.Key]}: {byKind.Count():N0} {byKind.Key} overridden, {diffs.Count:N0} changed" + (diffs.Count == 0 ? "" :
+                                ": " + string.Join(", ", diffs.SelectMany(x => x.Diff).GroupBy(d => d.Field).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} x{g.Count():N0}"))));
+                            foreach (var (r, d) in diffs.Take(6))
+                                Console.WriteLine($"    {r.EditorID ?? r.FormKey.ToString()} (from {r.FormKey.ModKey}): {string.Join("; ", d.Take(4).Select(x => $"{x.Field} {x.From} -> {x.To}"))}");
+                        }
+                    // The hazards as the last override leaves them, for each game plugin.
+                    var winner = new Dictionary<FormKey, Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter>();
+                    foreach (var (_, r) in overrides) winner[r.FormKey] = r;   // in load order: the last one wins
+                    T Win<T>(T r) where T : class, Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter => winner.TryGetValue(r.FormKey, out var w) && w is T t ? t : r;
+                    foreach (var mod in mods.Where(m => m.ModKey.FileName.String is "Daggerfall.esm" or "Redguard.esm" or "Morrowind.esm" or "Oblivion.esm"))
+                    {
+                        var hurting = mod.Waters.Where(w => w.Flags?.HasFlag(Water.Flag.CausesDamage) == true || w.DamagePerSecond > 0).ToList();
+                        var hurtKeys = hurting.Select(w => w.FormKey).ToHashSet();
+                        int watersKept = hurting.Count(w => Win(w) is { } x && x.Flags == w.Flags && x.DamagePerSecond == w.DamagePerSecond);
+                        var cells = mod.EnumerateMajorRecords<ICellGetter>().Where(c => c.FormKey.ModKey == mod.ModKey).ToList();
+                        int lavaCells = cells.Count(c => hurtKeys.Contains(c.Water.FormKey)), lavaCellsKept = cells.Count(c => hurtKeys.Contains(c.Water.FormKey) && Win(c).Water.FormKey == c.Water.FormKey);
+                        var worlds = mod.Worldspaces.Where(w => hurtKeys.Contains(w.Water.FormKey) || hurtKeys.Contains(w.LodWater.FormKey)).ToList();
+                        int worldsKept = worlds.Count(w => Win(w) is { } x && x.Water.FormKey == w.Water.FormKey && x.LodWater.FormKey == w.LodWater.FormKey);
+                        var sky = cells.Where(c => c.Flags.HasFlag(Cell.Flag.IsInteriorCell) && c.Flags.HasFlag(Cell.Flag.ShowSky)).ToList();
+                        int skyKept = sky.Count(c => Win(c) is { } x && x.Flags.HasFlag(Cell.Flag.ShowSky) && x.SkyAndWeatherFromRegion.FormKey == c.SkyAndWeatherFromRegion.FormKey);
+                        var boxes = mod.EnumerateMajorRecords<IPlacedObjectGetter>().Where(r => r.FormKey.ModKey == mod.ModKey && r.VirtualMachineAdapter?.Scripts.Any(s => s.Name == "TMObTrigger") == true).ToList();
+                        int boxesKept = boxes.Count(r => Win(r) is { } x && x.VirtualMachineAdapter?.Scripts.Any(s => s.Name == "TMObTrigger") == true && x.Primitive is not null);
+                        Console.WriteLine($"{mod.ModKey}: damaging waters {watersKept} of {hurting.Count} as made ({string.Join(", ", hurting.Select(w => $"{w.EditorID} {w.DamagePerSecond}/s"))}); "
+                            + $"cells with them {lavaCellsKept} of {lavaCells}; worldspaces {worldsKept} of {worlds.Count}; interiors showing the sky {skyKept} of {sky.Count}; trigger boxes {boxesKept} of {boxes.Count}");
+                    }
+                    Console.WriteLine(changed == 0 ? "No override changes what it overrides" : $"{changed:N0} overrides change what they override");
+                    return changed == 0 ? 0 : 2;
+                }
+                finally { foreach (var m in mods) m.Dispose(); }
             }
             case "trigger-check":
             {
@@ -10682,6 +10850,60 @@ static class Program
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
         File.WriteAllText(tmp, text);
         File.Move(tmp, full, overwrite: true);
+    }
+
+    /// <summary>The order the convert's plugins load in (those of them that are there; any others after them).</summary>
+    static readonly string[] ConvertPluginOrder = ["Daggerfall.esm", .. Skyrim.Terrain.OverlandTiles.LandPluginNames, "Daggerfall Towns.esm", "Daggerfall Dungeons.esm",
+        "Redguard.esm", "Morrowind.esm", "Oblivion.esm", "Daggerfall Creatures.esp", "Redguard Creatures.esp", "Morrowind Creatures.esp", "Oblivion Creatures.esp",
+        "TamrielMerge Menu.esp", "Daggerfall Overland Doors.esp", "TamrielMerge Start.esp", "TamrielMerge Travel.esp", "TamrielMerge Progression.esp"];
+
+    /// <summary>How an override (<paramref name="b"/>) of a cell, worldspace, water or reference differs from the record it
+    /// overrides (<paramref name="a"/>), in the fields that are theirs (a cell's references, land and navmeshes and a
+    /// worldspace's cells aren't: they are records of their own).</summary>
+    static IEnumerable<(string Field, string From, string To)> OverrideDifferences(Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter a, Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter b)
+    {
+        static string L(IFormLinkGetter? l) => l is null || l.IsNull ? "none" : l.FormKey.ToString();
+        static IEnumerable<(string, string, string)> Changed(params (string Field, string From, string To)[] f) => f.Where(x => x.From != x.To);
+        static string Light(ICellLightingGetter? l) => l is null ? "none" : $"{l.AmbientColor} {l.DirectionalColor} {l.FogNear} {l.FogFar} {l.FogPower} {l.Inherits}";
+        static string Scripts(IPlacedObjectGetter r) => string.Join(",", r.VirtualMachineAdapter?.Scripts.Select(s => s.Name + "(" + string.Join(" ", s.Properties.Select(p => p.Name + "=" + (p is IScriptObjectPropertyGetter o ? o.Object.FormKey.ToString() : "?"))) + ")") ?? []);
+        return (a, b) switch
+        {
+            (ICellGetter x, ICellGetter y) => Changed(("flags", x.Flags.ToString(), y.Flags.ToString()), ("name", x.Name?.String ?? "", y.Name?.String ?? ""),
+                ("water", L(x.Water), L(y.Water)), ("water height", x.WaterHeight?.ToString() ?? "none", y.WaterHeight?.ToString() ?? "none"),
+                ("sky region", L(x.SkyAndWeatherFromRegion), L(y.SkyAndWeatherFromRegion)), ("lighting template", L(x.LightingTemplate), L(y.LightingTemplate)),
+                ("image space", L(x.ImageSpace), L(y.ImageSpace)), ("acoustic space", L(x.AcousticSpace), L(y.AcousticSpace)), ("music", L(x.Music), L(y.Music)),
+                ("location", L(x.Location), L(y.Location)), ("encounter zone", L(x.EncounterZone), L(y.EncounterZone)), ("owner", L(x.Owner), L(y.Owner)),
+                ("regions", string.Join(",", (x.Regions ?? []).Select(L)), string.Join(",", (y.Regions ?? []).Select(L))),
+                ("grid", x.Grid?.Point.ToString() ?? "none", y.Grid?.Point.ToString() ?? "none"), ("lighting", Light(x.Lighting), Light(y.Lighting))),
+            (IWorldspaceGetter x, IWorldspaceGetter y) => Changed(("flags", x.Flags.ToString(), y.Flags.ToString()), ("name", x.Name?.String ?? "", y.Name?.String ?? ""),
+                ("water", L(x.Water), L(y.Water)), ("distant water", L(x.LodWater), L(y.LodWater)), ("distant water height", x.LodWaterHeight.ToString(), y.LodWaterHeight.ToString()),
+                ("climate", L(x.Climate), L(y.Climate)), ("parent", L(x.Parent?.Worldspace), L(y.Parent?.Worldspace)), ("lighting template", L(x.InteriorLighting), L(y.InteriorLighting)),
+                ("music", L(x.Music), L(y.Music)), ("location", L(x.Location), L(y.Location)), ("encounter zone", L(x.EncounterZone), L(y.EncounterZone)),
+                ("land defaults", x.LandDefaults is { } xd ? $"{xd.DefaultLandHeight} {xd.DefaultWaterHeight}" : "none", y.LandDefaults is { } yd ? $"{yd.DefaultLandHeight} {yd.DefaultWaterHeight}" : "none"),
+                ("bounds", $"{x.ObjectBoundsMin} {x.ObjectBoundsMax}", $"{y.ObjectBoundsMin} {y.ObjectBoundsMax}")),
+            (IWaterGetter x, IWaterGetter y) => Changed(("flags", x.Flags?.ToString() ?? "none", y.Flags?.ToString() ?? "none"), ("damage per second", x.DamagePerSecond.ToString(), y.DamagePerSecond.ToString()),
+                ("spell", L(x.Spell), L(y.Spell)), ("material", L(x.Material), L(y.Material)), ("opacity", x.Opacity.ToString(), y.Opacity.ToString()), ("name", x.Name?.String ?? "", y.Name?.String ?? "")),
+            (IPlacedObjectGetter x, IPlacedObjectGetter y) => Changed(("base", L(x.Base), L(y.Base)),
+                ("placement", $"{x.Placement?.Position} {x.Placement?.Rotation}", $"{y.Placement?.Position} {y.Placement?.Rotation}"), ("scale", x.Scale?.ToString() ?? "1", y.Scale?.ToString() ?? "1"),
+                ("scripts", Scripts(x), Scripts(y)), ("primitive", x.Primitive is { } xp ? $"{xp.Type} {xp.Bounds}" : "none", y.Primitive is { } yp ? $"{yp.Type} {yp.Bounds}" : "none"),
+                ("door to", L(x.TeleportDestination?.Door), L(y.TeleportDestination?.Door)), ("enable parent", L(x.EnableParent?.Reference), L(y.EnableParent?.Reference)),
+                ("record flags", x.SkyrimMajorRecordFlags.ToString(), y.SkyrimMajorRecordFlags.ToString())),
+            (IPlacedNpcGetter x, IPlacedNpcGetter y) => Changed(("base", L(x.Base), L(y.Base)),
+                ("placement", $"{x.Placement?.Position} {x.Placement?.Rotation}", $"{y.Placement?.Position} {y.Placement?.Rotation}"), ("scale", x.Scale?.ToString() ?? "1", y.Scale?.ToString() ?? "1"),
+                ("enable parent", L(x.EnableParent?.Reference), L(y.EnableParent?.Reference)), ("encounter zone", L(x.EncounterZone), L(y.EncounterZone)),
+                ("record flags", x.SkyrimMajorRecordFlags.ToString(), y.SkyrimMajorRecordFlags.ToString())),
+            (INpcGetter x, INpcGetter y) => Changed(("name", x.Name?.String ?? "", y.Name?.String ?? ""), ("race", L(x.Race), L(y.Race)), ("class", L(x.Class), L(y.Class)),
+                ("level", x.Configuration.Level switch { INpcLevelGetter l => $"L{l.Level}", IPcLevelMultGetter m => $"x{m.LevelMult}", _ => "?" } + $" [{x.Configuration.CalcMinLevel}-{x.Configuration.CalcMaxLevel}]",
+                          y.Configuration.Level switch { INpcLevelGetter l => $"L{l.Level}", IPcLevelMultGetter m => $"x{m.LevelMult}", _ => "?" } + $" [{y.Configuration.CalcMinLevel}-{y.Configuration.CalcMaxLevel}]"),
+                ("flags", x.Configuration.Flags.ToString(), y.Configuration.Flags.ToString()), ("template", L(x.Template), L(y.Template)), ("skin", L(x.WornArmor), L(y.WornArmor)),
+                ("factions", string.Join(",", x.Factions.Select(f => $"{L(f.Faction)}:{f.Rank}")), string.Join(",", y.Factions.Select(f => $"{L(f.Faction)}:{f.Rank}"))),
+                ("crime faction", L(x.CrimeFaction), L(y.CrimeFaction)), ("spells", string.Join(",", (x.ActorEffect ?? []).Select(L)), string.Join(",", (y.ActorEffect ?? []).Select(L))),
+                ("items", string.Join(",", (x.Items ?? []).Select(i => $"{L(i.Item.Item)}x{i.Item.Count}")), string.Join(",", (y.Items ?? []).Select(i => $"{L(i.Item.Item)}x{i.Item.Count}"))),
+                ("packages", string.Join(",", x.Packages.Select(L)), string.Join(",", y.Packages.Select(L))), ("outfit", L(x.DefaultOutfit), L(y.DefaultOutfit)),
+                ("scripts", string.Join(",", x.VirtualMachineAdapter?.Scripts.Select(s => s.Name) ?? []), string.Join(",", y.VirtualMachineAdapter?.Scripts.Select(s => s.Name) ?? [])),
+                ("height", x.Height.ToString(), y.Height.ToString()), ("weight", x.Weight.ToString(), y.Weight.ToString())),
+            _ => [],
+        };
     }
 
     /// <summary>A conversion in <paramref name="outDir"/> installed into Skyrim's Data folder (Skyrim/DataArchives: its

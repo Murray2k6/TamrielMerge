@@ -133,6 +133,26 @@ public static class ProgressionSkills
                                 R(50, "+10% more.", PerkFx.Plus(EP.CalculateMyCriticalHitChance, 10))),
                 new("Deadly Precision", R(75, "Critical hits do half as much damage again.", PerkFx.Times(EP.CalculateMyCriticalHitDamage, 1.5f))),
             ]),
+        // Daggerfall's Dodging takes level/4 off a foe's chance to hit (Daggerfall Unity's FormulaHelper); Skyrim's blows
+        // always land, so its share comes off the damage instead: up to 25% at 100.
+        new("Dodging", ["DF"], "being struck by weapons", "weapon blows do up to 25% less damage (Daggerfall's level/4 less chance to hit)", 25,
+            [], [new(EP.ModIncomingDamage, 1, -0.0025f)],
+            [
+                new("Sidestep", R(25, "Power attacks do 15% less to you.", PerkFx.Times(EP.ModIncomingDamage, 0.85f, new Cond(1, "powerattack"))),
+                                R(50, "Another 15% less.", PerkFx.Times(EP.ModIncomingDamage, 0.85f, new Cond(1, "powerattack")))),
+                new("Light on Your Feet", R(40, "Stamina regenerates 20% faster.", PerkFx.Raise(ActorValue.StaminaRateMult, 20))),
+                new("Untouchable", R(75, "Blows do another 10% less.", PerkFx.Times(EP.ModIncomingDamage, 0.9f))),
+            ]),
+        // Daggerfall's Climbing (Daggerfall Unity's ClimbingMotor, CalculateClimbingChance): jump at a wall and hold
+        // forward; every grip check is a use. TMClimbing does the climbing; its perks are counted there.
+        new("Climbing", ["DF"], "climbing walls (each grip check)", "surer grips: a check's chance runs from its base (start 70%, holding on 50%, "
+            + "regaining a hold 20%) up to 100% with the skill, plus a tenth of Luck", 4,
+            [], [],
+            [
+                new("Handholds", R(25, "Every climbing check +10."), R(50, "Another +10.")),
+                new("Wall Runner", R(60, "Climb 30% faster.")),
+                new("Spider", R(80, "Climbing tires you half as much.")),
+            ]),
         new("Medical", ["DF"], "recovering health", "health regenerates up to 50% faster", 0.5f,
             [new(ActorValue.HealRateMult, 0.5f)], [],
             [

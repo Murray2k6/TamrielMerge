@@ -115,6 +115,8 @@ public sealed partial class MwPluginBuilder
         // changes coin; thieves, paupers and the Thieves Guild pick pockets.
         if (rec.Get("AIDT") is { Data.Length: >= 12 } aidt && (aidt.Int(8) & 0x400) != 0)
             npc.Factions.Add(new RankPlacement { Faction = (moneyChangers ??= Skyrim.CoinTrade.Tag(mod, "MWMoneyChangers", "Money changers")).ToLink<IFactionGetter>(), Rank = 0 });
+        // Trainers (AIDT services 0x4000): taught by MwLevelling.BuildTrainers.
+        if (rec.Get("AIDT") is { Data.Length: >= 12 } trains && (trains.Int(8) & 0x4000) != 0) trainerNpcs.Add((npc, rec.Id));
         string who = ((rec.Str("CNAM") ?? "") + " " + (rec.Str("ANAM") ?? "")).ToLowerInvariant();
         // Guards may doze on night watch (TMNightDanger), and are the law's: Skyrim's guards of Morrowind's crime faction.
         if (who.Contains("guard"))

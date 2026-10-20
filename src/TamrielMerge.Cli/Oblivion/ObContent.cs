@@ -117,6 +117,9 @@ public sealed partial class ObPluginBuilder
     Skyrim.ModelStandIns StandIns => standIns ??= new Skyrim.ModelStandIns(Vanilla.Skyrim);
     Skyrim.ModelStandIns? standIns;
 
+    /// <summary>Books that teach a skill (Skyrim's book teaching or TMSkillBook).</summary>
+    public int SkillBooks { get; private set; }
+
     Book BookItem(string edid, Ob.IBookGetter b)
     {
         var mesh = ItemMesh(b.Model?.File, b.Data?.Weight ?? 0);
@@ -130,6 +133,8 @@ public sealed partial class ObPluginBuilder
             Teaches = new BookTeachesNothing(),
             ObjectBounds = Bounds(mesh),
         };
+        // A skill book raises its skill once, as Oblivion's do.
+        if (b.Data?.Teaches is { } teaches && ObSkillIds.TryGetValue(teaches.ToString(), out var skill) && Skyrim.GameTrainers.Teach(book, skill)) SkillBooks++;
         // Read as Skyrim's own books and notes are (Skyrim.BookLooks); a scroll as a note.
         (bookLooks ??= new Skyrim.BookLooks(Vanilla.Skyrim.Books)).Apply(book, note: b.Data?.Flags.HasFlag(Ob.Book.BookFlag.Scroll) == true);
         book.Model = new Model { File = mesh is not null ? SkyrimModelPath(mesh.Path) : StandIns.Book };
@@ -437,9 +442,7 @@ public sealed partial class ObPluginBuilder
         if (n.Configuration?.Flags.HasFlag(Ob.Npc.NpcFlag.Essential) == true) flags |= NpcConfiguration.Flag.Essential;
         if (n.Configuration?.Flags.HasFlag(Ob.Npc.NpcFlag.Respawn) == true) flags |= NpcConfiguration.Flag.Respawn;
         npc.Configuration.Flags = flags;
-        npc.Configuration.Level = n.Configuration?.Flags.HasFlag(Ob.Npc.NpcFlag.PCLevelOffset) == true
-            ? new PcLevelMult { LevelMult = 1 }
-            : new NpcLevel { Level = (short)Math.Clamp((int)(n.Configuration?.LevelOffset ?? 1), 1, 81) };
+        SetLevel(npc, n.Configuration?.Flags.HasFlag(Ob.Npc.NpcFlag.PCLevelOffset) == true, n.Configuration?.LevelOffset ?? 1, n.Configuration?.CalcMin ?? 0, n.Configuration?.CalcMax ?? 0);
         npc.Packages.Add(new FormLink<IPackageGetter>(Sk(0x01B217)));   // DefaultSandboxEditorLocation512
         if (npc.AIData is { } ai) ai.Aggression = (n.AIData?.Aggression ?? 0) >= 80 ? Aggression.VeryAggressive : Aggression.Unaggressive;
         AddInventory(npc, n.Items);
@@ -447,6 +450,9 @@ public sealed partial class ObPluginBuilder
         VanillaActors.WearInventory(mod, npc, outfits, "OB");
         AddFactionsAndClass(npc, n);
         AddCrime(npc, n);
+        // A trainer (AI services Training): the skill its AI data names, up to its maximum training level.
+        if (n.AIData is { } td && td.BuySellServices.ToString().Contains("Training") && ObSkillIds.TryGetValue(td.Teaches.ToString(), out var taught))
+            obTrainers.Add(new(npc, taught, td.MaximumTrainingLevel));
         return npc;
     }
 
@@ -483,6 +489,59 @@ public sealed partial class ObPluginBuilder
 
     readonly Dictionary<string, Outfit> outfits = new();
 
+    /// <summary>
+    /// An Oblivion actor's level. A fixed one is its level. One that follows the player's (PC level offset) is the
+    /// player's level plus the offset, within its calc min and max (a max of 0: none). Skyrim can only multiply the
+    /// player's level, within a min and max (vanilla: Lydia x1 [6-50], Esbern x0.75 [10-30]), so the multiplier (to
+    /// 0.01) is the one nearest Oblivion's level over the player's levels 1 to 50 (the worst miss there is counted in
+    /// <see cref="LevelFits"/>), the min the level Oblivion gives at the player's first, the max Oblivion's (or 81).
+    /// </summary>
+    void SetLevel(Npc npc, bool followsPlayer, int offset, int calcMin, int calcMax)
+    {
+        if (!followsPlayer)
+        {
+            npc.Configuration.Level = new NpcLevel { Level = (short)Math.Clamp(offset, 1, 81) };
+            return;
+        }
+        var fit = LevelFit(offset, calcMin, calcMax);
+        npc.Configuration.Level = new PcLevelMult { LevelMult = fit.Mult };
+        npc.Configuration.CalcMinLevel = fit.Min;
+        npc.Configuration.CalcMaxLevel = fit.Max;
+        LevelFits.Actors++;
+        LevelFits.WorstMiss = Math.Max(LevelFits.WorstMiss, fit.Worst);
+        LevelFits.Misses[fit.Worst] = LevelFits.Misses.GetValueOrDefault(fit.Worst) + 1;
+    }
+
+    /// <summary>The actors whose level follows the player's: how many, and by the most levels Skyrim's multiplier
+    /// misses Oblivion's level over the player's levels 1 to 50 (actors by that worst miss).</summary>
+    public (int Actors, int WorstMiss, SortedDictionary<int, int> Misses) LevelFits = (0, 0, new());
+
+    static readonly Dictionary<(int, int, int), (float Mult, short Min, short Max, int Worst)> levelFits = new();
+
+    /// <summary>The Skyrim multiplier, min and max nearest Oblivion's player level + <paramref name="offset"/> within
+    /// <paramref name="calcMin"/>..<paramref name="calcMax"/>, and its worst miss over the player's levels 1 to 50.</summary>
+    internal static (float Mult, short Min, short Max, int Worst) LevelFit(int offset, int calcMin, int calcMax)
+    {
+        lock (levelFits)
+            if (levelFits.TryGetValue((offset, calcMin, calcMax), out var known)) return known;
+        int max = calcMax > 0 ? Math.Min(calcMax, 81) : 81;
+        int Oblivion(int pc) => Math.Clamp(Math.Max(pc + offset, Math.Max(calcMin, 1)), 1, max);
+        int min = Math.Clamp(Oblivion(1), 1, max);
+        (float Mult, int Worst) best = (1, int.MaxValue);
+        for (int m = 5; m <= 400; m++)
+        {
+            float mult = m / 100f;
+            int worst = 0;
+            for (int pc = 1; pc <= 50 && worst < best.Worst; pc++)
+                worst = Math.Max(worst, Math.Abs(Math.Clamp((int)MathF.Round(mult * pc), min, max) - Oblivion(pc)));
+            // The nearest; of those as near, the one nearest 1 (the player's own pace).
+            if (worst < best.Worst || (worst == best.Worst && Math.Abs(mult - 1) < Math.Abs(best.Mult - 1))) best = (mult, worst);
+        }
+        var fit = (best.Mult, (short)min, (short)max, best.Worst);
+        lock (levelFits) levelFits[(offset, calcMin, calcMax)] = fit;
+        return fit;
+    }
+
     Npc? Creature(Ob.ICreatureGetter c)
     {
         string id = (c.EditorID ?? "").ToLowerInvariant(), name = (c.Name ?? "").ToLowerInvariant();
@@ -495,8 +554,8 @@ public sealed partial class ObPluginBuilder
         npc.Name = c.Name;
         npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.BaseData;
         if ((c.AIData?.Aggression ?? 0) < 80 && npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
-        if (npc.Configuration.Level is NpcLevel && c.Configuration?.Flags.HasFlag(Ob.Creature.CreatureFlag.PCLevelOffset) != true)
-            npc.Configuration.Level = new NpcLevel { Level = (short)Math.Clamp((int)(c.Configuration?.LevelOffset ?? 1), 1, 81) };
+        // Oblivion's level, not the stand-in's (a vanilla creature's own level or multiplier).
+        SetLevel(npc, c.Configuration?.Flags.HasFlag(Ob.Creature.CreatureFlag.PCLevelOffset) == true, c.Configuration?.LevelOffset ?? 1, c.Configuration?.CalcMin ?? 0, c.Configuration?.CalcMax ?? 0);
         AddInventory(npc, c.Items);
         AddSpells(npc, c.Spells);
         return npc;

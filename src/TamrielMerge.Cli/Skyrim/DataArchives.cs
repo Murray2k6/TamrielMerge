@@ -36,8 +36,10 @@ public static class DataArchives
     static readonly (string Game, string Plugin)[] Games =
         [("Daggerfall", "Daggerfall.esm"), ("Morrowind", "Morrowind.esm"), ("Oblivion", "Oblivion.esm"), ("Redguard", "Redguard.esm"), ("TamrielMerge Start", "TamrielMerge Start.esp")];
 
-    /// <summary>Whether a file (path under Data) goes into an archive.</summary>
-    public static bool IsPacked(string rel) => PackedFolders.Contains(Top(rel), StringComparer.OrdinalIgnoreCase);
+    /// <summary>Whether a file (path under Data) goes into an archive. Open Animation Replacer's folders stay loose: it finds them by
+    /// listing Data's folders, which can't see into an archive.</summary>
+    public static bool IsPacked(string rel) => PackedFolders.Contains(Top(rel), StringComparer.OrdinalIgnoreCase)
+        && !rel.Contains("OpenAnimationReplacer", StringComparison.OrdinalIgnoreCase);
 
     static string Top(string rel) => rel.Split('\\', '/')[0];
     static bool IsAudio(string rel) => Top(rel).Equals("sound", StringComparison.OrdinalIgnoreCase) || Top(rel).Equals("music", StringComparison.OrdinalIgnoreCase);

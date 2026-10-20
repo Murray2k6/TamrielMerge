@@ -71,6 +71,8 @@ other from any of your games; *Textures & PBR…* changes its textures and makes
 - **Windows 10 or 11, 64-bit.**
 - **Skyrim Special Edition** (Steam or GOG) with **[SKSE](https://skse.silverlock.org/)** and **Address Library
   for SKSE Plugins**.
+- **[Open Animation Replacer](https://www.nexusmods.com/skyrimspecialedition/mods/92109)** for the climbing animation
+  (Daggerfall's Climbing skill). Without it you still climb, in the falling pose.
 - **Any of the games to convert**, from Steam or GOG: The Elder Scrolls II: Daggerfall, An Elder Scrolls Legend:
   Redguard, The Elder Scrolls III: Morrowind, The Elder Scrolls IV: Oblivion. Those not installed are left out and
   the rest still work.
@@ -196,6 +198,10 @@ Built with:
 - Creature models: see [tools/creatures/CREDITS.md](tools/creatures/CREDITS.md) (CC0, CC-BY 3.0/4.0, CC-BY-SA 3.0).
 - The ship: a free model from [CGTrader](https://www.cgtrader.com/free-3d-models/watercraft/historic-watercraft/ship-8d79bbda-ccc3-45f9-8b38-ec81c5a4d0cd).
 - [SKSE](https://skse.silverlock.org/) runs the plugins; they read [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444).
+- [Open Animation Replacer](https://www.nexusmods.com/skyrimspecialedition/mods/92109) by Ershin
+  ([source](https://github.com/ersh1/OpenAnimationReplacer), GPL-3.0 with its modding exceptions): plays TamrielMerge's
+  own climbing animation while you climb (Daggerfall's Climbing skill). Needed for that animation; TamrielMerge ships
+  only its own config and animation files, nothing of OAR's.
 
 The converters are this project's own code. These projects were the references for how the games work (their
 behaviour and file formats followed, their code not included):
@@ -205,10 +211,13 @@ behaviour and file formats followed, their code not included):
   world map and climates, blocks, models, textures, flats, factions, names, text, books, spells, creatures, quests),
   its terrain generation and ground tiles, town and dungeon layouts, the rules of Daggerfall's actions, locks, traps,
   enemy senses and spawning, the quest engine (its task rules and commands, QuestListsManager's offers), reputation,
-  guilds, shops, holidays and taverns, and the songs' playlists (SongManager).
+  guilds, shops, holidays and taverns, and the songs' playlists (SongManager); its classes (DFCareer, ClassFile),
+  level-ups, skill advancement, advantages and disadvantages, racial abilities and climbing (ClimbingMotor,
+  FormulaHelper) for the levelling on the Mundus stones.
 - The [Dynamic Music](https://www.nexusmods.com/daggerfallunity/) mod for Daggerfall Unity: the combat playlist.
 - [RGUnity](https://github.com/RGUnity) (MIT) and the redguard-preservation notes: Redguard's models, scenes and scripts.
 - [OpenMW](https://openmw.org/) (GPL-3.0) and the [NifTools](https://github.com/niftools/nifxml) nif.xml: Morrowind's
   NIF format, its attributes and other formulas.
 - [xOBSE](https://github.com/llde/xOBSE): the list of OBSE's script commands, read from its source.
-- [UESP](https://en.uesp.net/) (CC BY-SA 2.5): the games' mechanics and Daggerfall's quest codes, for research.
+- [UESP](https://en.uesp.net/) (CC BY-SA 2.5): the games' mechanics and Daggerfall's quest codes, for research;
+  Oblivion's levelling (skill advancement, specialization and major-skill rates, character creation, trainers).

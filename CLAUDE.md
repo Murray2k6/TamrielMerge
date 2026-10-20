@@ -4,6 +4,9 @@
   project's own work.
 - No TESConverter (user, 2026-10-15): never use, require, recommend or copy from TESConverter (or tools built on it) for any
   conversion; the converters here are this project's own code.
+- No TES4Skyrim (user, 2026-10-20: "no tes4skyrim converter stuff in this project"): never use, require, recommend or
+  copy from TES4Skyrim (its converter, scripts, data or assets) for any conversion; the Oblivion conversion is this
+  project's own code.
 - No graphics plugin and no DLSS (user, 2026-10-15: "remove dlss and the plugin also from the tool"): the tool ships
   only TamrielMergeEra and TamrielMergeSeamless (the physics area for the seamless overland, nothing else).
 - Update the tool with every fix and implementation. A fix applied to installed files or rebuilt by hand must also be

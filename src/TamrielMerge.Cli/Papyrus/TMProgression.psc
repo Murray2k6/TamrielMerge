@@ -129,6 +129,11 @@ Event OnTamrielReady(String eventName, String strArg, Float numArg, Form sender)
     i += 1
   EndWhile
   UI.InvokeString(MenuName, "_root.ShowFactions", "")
+  ; Opened for a level's attribute gains: straight to the Passives tab's Character view.
+  TMPassives passives = (Self as Quest) as TMPassives
+  If passives
+    passives.MenuReady()
+  EndIf
 EndEvent
 
 Event OnTamrielClose(String eventName, String strArg, Float numArg, Form sender)

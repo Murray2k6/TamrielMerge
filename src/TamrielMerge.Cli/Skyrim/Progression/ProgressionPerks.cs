@@ -6,8 +6,8 @@ using Noggog;
 namespace TamrielMerge.Skyrim.Progression;
 
 /// <summary>A condition on a perk entry (Tab: 0 the perk's owner, 1 the weapon / spell / item, 2 the target) or on an
-/// ability's effect (Tab ignored).</summary>
-public sealed record Cond(int Tab, string Kind, string? Arg = null, CompareOperator Op = CompareOperator.EqualTo, float Value = 1);
+/// ability's effect (Tab ignored). <paramref name="Or"/>: OR'd with the next condition (Skyrim's own OR flag).</summary>
+public sealed record Cond(int Tab, string Kind, string? Arg = null, CompareOperator Op = CompareOperator.EqualTo, float Value = 1, bool Or = false);
 
 /// <summary>
 /// One effect of a perk: an actor value it raises (or lowers, <paramref name="Detrimental"/>) while owned, through an
@@ -47,7 +47,7 @@ public sealed class ProgressionPerks
             or APerkEntryPointEffect.EntryType.ModSpellMagnitude or APerkEntryPointEffect.EntryType.ModSpellDuration
             or APerkEntryPointEffect.EntryType.ModIncomingDamage or APerkEntryPointEffect.EntryType.ApplyCombatHitSpell
             or APerkEntryPointEffect.EntryType.ModPickpocketChance or APerkEntryPointEffect.EntryType.ModPoisonDoseCount
-            or APerkEntryPointEffect.EntryType.ModTargetDamageResistance => 3,
+            or APerkEntryPointEffect.EntryType.ModTargetDamageResistance or APerkEntryPointEffect.EntryType.ModIncomingSpellMagnitude => 3,
         APerkEntryPointEffect.EntryType.ModFallingDamage or APerkEntryPointEffect.EntryType.ModSkillUse
             or APerkEntryPointEffect.EntryType.ModRecoverArrowChance => 1,
         _ => 2,   // spell cost, prices, armour rating and weight, power attack stamina, stagger, lockpicking, detection
@@ -59,7 +59,8 @@ public sealed class ProgressionPerks
         this.lists = lists;
         this.globals = globals;
         template = skyrim.MagicEffects.First(e => e.EditorID == "AbFortifyHealth");
-        keywords = skyrim.Keywords.Where(k => k.EditorID is { } e && (e.StartsWith("WeapType") || e.StartsWith("Armor")))
+        keywords = skyrim.Keywords.Where(k => k.EditorID is { } e && (e.StartsWith("WeapType") || e.StartsWith("Armor") || e.StartsWith("ActorType")
+                || e.StartsWith("Magic") || e.StartsWith("LocType")))
             .GroupBy(k => k.EditorID!).ToDictionary(g => g.Key, g => g.First().FormKey);
     }
 
@@ -160,9 +161,17 @@ public sealed class ProgressionPerks
         return e;
     }
 
+    /// <summary>Whether Skyrim.esm has the keyword (conditions on it can be made).</summary>
+    public bool HasKeyword(string editorId) => keywords.ContainsKey(editorId);
+
+    /// <summary>The Skyrim.esm keyword of that EditorID, if any.</summary>
+    public FormKey? KeywordKey(string editorId) => keywords.TryGetValue(editorId, out var k) ? k : null;
+
     /// <summary>A condition: "list" (the subject is in one of our form lists), "global" (one of our globals compared
     /// with Value), "skill" (EPMagic_SpellHasSkill), "keyword" (HasKeyword), "fists" (nothing in the right hand),
-    /// "swimming", "undead", "sneaking".</summary>
+    /// "swimming", "undead", "sneaking"; "advskill" (the skill a use advances: Mod Skill Use, as the Guardian Stones'
+    /// perks ask), "healthpct" (the share of health left), "interior" (in an interior), "hour" (the time of day),
+    /// "random" (a 0-100 roll).</summary>
     public Condition Condition(Cond c)
     {
         ConditionData data;
@@ -198,9 +207,15 @@ public sealed class ProgressionPerks
             case "swimming": data = new IsSwimmingConditionData(); break;
             case "undead": data = new IsUndeadConditionData(); break;
             case "sneaking": data = new IsSneakingConditionData(); break;
+            case "advskill": data = new EPMagic_IsAdvanceSkillConditionData { ActorValue = Enum.Parse<ActorValue>(c.Arg!) }; break;
+            case "healthpct": data = new GetActorValuePercentConditionData { ActorValue = ActorValue.Health }; break;
+            case "interior": data = new IsInInteriorConditionData(); break;
+            case "hour": data = new GetCurrentTimeConditionData(); break;
+            case "random": data = new GetRandomPercentConditionData(); break;
+            case "powerattack": data = new IsPowerAttackingConditionData(); break;
             default: throw new ArgumentException($"condition kind {c.Kind}");
         }
-        return new ConditionFloat { CompareOperator = c.Op, ComparisonValue = c.Value, Data = data };
+        return new ConditionFloat { CompareOperator = c.Op, ComparisonValue = c.Value, Data = data, Flags = c.Or ? Mutagen.Bethesda.Skyrim.Condition.Flag.OR : 0 };
     }
 
     public static string AvName(ActorValue av) => av switch

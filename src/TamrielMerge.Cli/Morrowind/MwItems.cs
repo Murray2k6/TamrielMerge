@@ -147,6 +147,9 @@ public sealed partial class MwPluginBuilder
 
     Skyrim.BookLooks? bookLooks;
 
+    /// <summary>Books that teach a skill (Skyrim's book teaching or TMSkillBook).</summary>
+    public int SkillBooks { get; private set; }
+
     IMajorRecord BookItem(Tes3Record rec, string edid, string? name, string? model)
     {
         var d = rec.Get("BKDT")!.Value;
@@ -162,6 +165,8 @@ public sealed partial class MwPluginBuilder
             Teaches = new BookTeachesNothing(),
             ObjectBounds = Bounds(mesh),
         };
+        // A skill book (BKDT's fourth value, the skill; -1 none) raises it once, as Morrowind's do.
+        if (d.Data.Length >= 16 && d.Int(12) is >= 0 and < 27 and var skill && Skyrim.GameTrainers.Teach(book, MwSkillIds[skill])) SkillBooks++;
         // Read as Skyrim's own books and notes are (Skyrim.BookLooks); a scroll (BKDT's third value) as a note.
         (bookLooks ??= new Skyrim.BookLooks(SkyrimEsm.Books)).Apply(book, note: d.Int(8) != 0);
         if (mesh is not null) book.Model = new Model { File = SkyrimModelPath(mesh.Path) };
@@ -464,7 +469,7 @@ public sealed partial class MwPluginBuilder
             else if (f.Type == "INTV" && pending is not null)
             {
                 if (Item(pending) is { } item)
-                    list.Entries.Add(new LeveledItemEntry { Data = new LeveledItemEntryData { Level = (short)BitConverter.ToUInt16(f.Data, 0), Count = (short)StackOf(pending, 1), Reference = new FormLink<IItemGetter>(item.FormKey) } });
+                    list.Entries.Add(new LeveledItemEntry { Data = new LeveledItemEntryData { Level = Level(BitConverter.ToUInt16(f.Data, 0)), Count = (short)StackOf(pending, 1), Reference = new FormLink<IItemGetter>(item.FormKey) } });
                 pending = null;
             }
         }

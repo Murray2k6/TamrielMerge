@@ -252,14 +252,29 @@ public static class ProgressionBuilder
             Scripts = [new ScriptEntry { Name = "TMSkillHitEffect", Properties = [new ScriptObjectProperty { Name = "Skills", Object = quest.ToLink<ISkyrimMajorRecordGetter>() }] }],
         };
         var dfSkills = ProgressionSkills.DaggerfallSkills(dir);
-        quest.VirtualMachineAdapter.Scripts.Add(SkillsScript(built, listed, dfSkills));
+        var skillsEntry = SkillsScript(built, listed, dfSkills);
+        // The skill books read (TMSkillBook teaches each once).
+        var booksRead = new FormList(mod) { EditorID = "TMSkillBooksRead" };
+        mod.FormLists.Add(booksRead);
+        skillsEntry.Properties.Add(Obj("BooksRead", booksRead.FormKey));
+        quest.VirtualMachineAdapter.Scripts.Add(skillsEntry);
         var web = PassiveWeb.Build(mod, perks, factions);
-        quest.VirtualMachineAdapter.Scripts.Add(WebScript(web, skyrim, dir));
+        // The owned games' levelling on the Mundus stones: each sign's game versions (named on its start), the classes,
+        // the attributes and their gains at each level (TMPassives' Character view).
+        var stones = GameStones.Build(mod, skyrim, perks, dir, skills, log);
+        foreach (var (sign, _, _, line) in stones.SignLists)
+        {
+            int n = web.Starts[sign];
+            web.Nodes[n] = web.Nodes[n] with { Description = web.Nodes[n].Description + " " + line };
+        }
+        quest.VirtualMachineAdapter.Scripts.Add(WebScript(web, skyrim, dir, stones, skills));
+        // Daggerfall's climbing, with its animation through Open Animation Replacer.
+        if (skills.Any(s => s.Id == "Climbing")) Climbing(mod, skyrim, quest, stones, outDir, skyrimData, log);
 
         // The menu, with the build's skills and web written into it.
         string source = File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Interface", "tamriel.as"));
         if (!source.Contains(MenuDataLine)) throw new InvalidDataException($"tamriel.as has no line \"{MenuDataLine}\" for the build's data");
-        source = source.Replace(MenuDataLine, MenuData(built, dfSkills, web, factions));
+        source = source.Replace(MenuDataLine, MenuData(built, dfSkills, web, factions, stones));
         string menu = System.IO.Path.Combine(outDir, "Interface", "TamrielMerge", "tamriel.swf");
         Ui.FlashMenus.Compile(source, menu);
         WriteControls(outDir, skyrimData);
@@ -267,6 +282,7 @@ public static class ProgressionBuilder
         string path = System.IO.Path.Combine(outDir, PluginName);
         // A light plugin (ESL) when its records fit one's FormIDs (0x800-0xFFF), so it takes no full plugin slot.
         if (mod.ModHeader.Stats.NextFormID <= 0x1000) mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
+        else log?.Invoke($"progression: {mod.ModHeader.Stats.NextFormID - 0x800} records, past a light plugin's 2048: written as a full plugin");
         TopicSubtypes.Fill(mod);
         mod.WriteToBinary(path, new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
         {
@@ -352,15 +368,73 @@ public static class ProgressionBuilder
     /// <summary>TMPassives: the web's nodes (kind, stat, perk, gate), links, the sign starts with Skyrim's standing stones
     /// (Morrowind's signs give the same ones) and Oblivion's sign numbers (TMObState's), the stats ability, and each
     /// registry faction's gate group.</summary>
-    static ScriptEntry WebScript(PassiveWeb.Web web, ISkyrimModGetter skyrim, string dir)
+    static ScriptEntry WebScript(PassiveWeb.Web web, ISkyrimModGetter skyrim, string dir, GameStones.Built g, IReadOnlyList<SkillDef> skills)
     {
         var stones = PassiveWeb.Signs.Select(n => skyrim.Spells.FirstOrDefault(s => s.EditorID == $"doom{n}Ability")?.FormKey).ToList();
         var (obQuest, obSigns) = OblivionSigns(dir);
+        FormKey? Keyword(string edid) => skyrim.Keywords.FirstOrDefault(k => k.EditorID == edid)?.FormKey;
+        // The races the games' tables are for, and their vampire forms (the same attributes).
+        var raceForms = new List<FormKey?>();
+        var raceIndex = new List<int>();
+        for (int r = 0; r < GameStones.Races.Length; r++)
+            foreach (var edid in new[] { GameStones.Races[r], GameStones.Races[r].Replace("Race", "RaceVampire") })
+                if (skyrim.Races.FirstOrDefault(x => x.EditorID == edid) is { } race) { raceForms.Add(race.FormKey); raceIndex.Add(r); }
+        var counted = GameStones.CountedSkills(skills);
+        int nSkills = skills.Count;
+        var games = g.Games;
         return new ScriptEntry
         {
             Name = "TMPassives",
             Properties =
             [
+                // The games' levelling (GameStones): rules, races, governing attributes, classes, sign versions.
+                Texts("GameNames", games.Select(x => GameStones.GameName(x.Game))),
+                Ints("GameRule", games.Select(x => x.Rule == "pool" ? 1 : 0)),
+                Ints("GameLevelUp", games.SelectMany(x => Enumerable.Range(0, 11).Select(n => n < x.LevelUp.Length ? x.LevelUp[n] : 1))),
+                Ints("GameLuckGain", games.Select(x => x.LuckGain)),
+                Ints("GamePoolMin", games.Select(x => x.PoolMin)),
+                Ints("GamePoolMax", games.Select(x => x.PoolMax)),
+                Ints("GameNeutral", games.Select(x => x.Rule == "pool" ? 50 : 40)),
+                Ints("GameHealthDf", games.Select(x => x.HealthRule == "daggerfall" ? 1 : 0)),
+                Ints("GameFavoredBonus", games.Select(x => x.FavoredBonus)),
+                Ints("GameGoverning", games.SelectMany(x => counted.Select(id => x.Governing.TryGetValue(id, out int a) ? a : GameLevelling.DefaultGoverning.GetValueOrDefault(id, GameLevelling.Luck)))),
+                Ints("GameRaceAttributes", games.SelectMany(x => Enumerable.Range(0, GameStones.Races.Length).SelectMany(r =>
+                    x.Races.TryGetValue(GameStones.Races[r], out var t) ? t[0].Concat(t[1]) : Enumerable.Repeat(0, 16)))),
+                new ScriptIntProperty { Name = "DefaultGame", Data = g.DefaultGame },
+                Objs("RaceForms", raceForms),
+                Ints("RaceFormIndex", raceIndex),
+                Texts("SkyrimSkillAvs", GameLevelling.SkyrimSkills),
+                new ScriptIntProperty { Name = "ProgressionSkillCount", Data = nSkills },
+                Objs("ClassPerks", g.Classes.Select(c => (FormKey?)c.Perk.FormKey)),
+                Ints("ClassGame", g.Classes.Select(c => c.Game)),
+                Ints("ClassFavored", g.Classes.SelectMany(c => Enumerable.Range(0, 2).Select(i => i < c.Class.Favored.Length && !games[c.Game].Rule.Equals("pool") ? c.Class.Favored[i] : -1))),
+                Ints("ClassAttributes", g.Classes.SelectMany(c => c.Class.Attributes ?? Enumerable.Repeat(-1, 8).ToArray())),
+                Ints("ClassHitPoints", g.Classes.Select(c => c.Class.HitPointsPerLevel)),
+                Objs("ClassForbidden", g.Classes.Select(c => (FormKey?)c.Forbidden.FormKey)),
+                Texts("ClassForbiddenWords", g.Classes.Select(c => c.ForbiddenWords)),
+                Ints("ClassSunDamage", g.Classes.Select(c => c.Class.Traits?.SunDamage == true ? 1 : 0)),
+                Ints("ClassHolyDamage", g.Classes.Select(c => c.Class.Traits?.HolyDamage == true ? 1 : 0)),
+                Floats("ClassSkillRate", g.Classes.SelectMany(c => c.SkillRates)),
+                Ints("ClassSkillBonus", g.Classes.SelectMany(c => c.SkillBonus)),
+                Texts("ClassNames", g.Classes.Select(c => c.Class.Name)),
+                Obj("AttributeAbility", g.Attributes?.FormKey ?? FormKey.Null),
+                Ints("AttributeEffectOf", GameStones.AttributeEffects.Select(e => e.Attribute)),
+                Floats("AttributeEffectPerPoint", GameStones.AttributeEffects.Select(e => e.PerPoint)),
+                Ints("SignListSign", g.SignLists.Select(s => s.Sign)),
+                Texts("SignListPlugins", g.SignLists.Select(s => s.Plugin)),
+                Ints("SignListIds", g.SignLists.Select(s => (int)s.Id)),
+                Obj("ArmorShield", Keyword("ArmorShield") ?? FormKey.Null),
+                Obj("ArmorLight", Sk(0x06BBD3)),
+                Obj("ArmorHeavy", Sk(0x06BBD2)),
+                Obj("LocTypeTemple", Keyword("LocTypeTemple") ?? FormKey.Null),
+                Ints("RaceListRace", g.RaceLists.Select(x => x.Race)),
+                Texts("RaceListPlugins", g.RaceLists.Select(x => x.Plugin)),
+                Ints("RaceListIds", g.RaceLists.Select(x => (int)x.Id)),
+                Objs("RaceSkillAbility", g.RaceSkillAbility.Select(x => x?.FormKey)),
+                Ints("RaceSkillBonus", g.RaceSkillBonus),
+                Objs("DfRacePerks", g.DfRacePerks.Select(x => x?.FormKey)),
+                Ints("DfRaceDivisor", g.DfRaceDivisor),
+                Ints("DfRaceEntry", g.DfRaceEntry),
                 Obj("PlayerRef", PlayerRef),
                 Ints("NodeKind", web.Nodes.Select(n => (int)n.Kind)),
                 Ints("NodeStat", web.Nodes.Select(n => n.Stat)),
@@ -378,6 +452,76 @@ public static class ProgressionBuilder
                 Obj("StatsAbility", web.Stats.FormKey),
             ],
         };
+    }
+
+    /// <summary>
+    /// Daggerfall's climbing (TMClimbing, on a quest of its own: its quick loop would wake every script on the progression
+    /// quest): the hidden climbing effect and its ability (Open Animation Replacer plays the climb on it:
+    /// <see cref="Animations.ClimbAnimation"/>, written into <paramref name="outDir"/>), and the perk taking away the
+    /// fall's damage while it is on (Mod Falling Damage, as Skyrim's own perks do it).
+    /// </summary>
+    static void Climbing(SkyrimMod mod, ISkyrimModGetter skyrim, Quest progression, GameStones.Built stones, string outDir, string skyrimData, Action<string>? log)
+    {
+        var template = skyrim.MagicEffects.First(e => e.EditorID == "AbFortifyHealth");
+        var effect = template.Duplicate(mod.GetNextFormKey());
+        effect.EditorID = "TMClimbingEffect";
+        effect.Name = "Climbing";
+        effect.Archetype = new MagicEffectArchetype { Type = MagicEffectArchetype.TypeEnum.Script, ActorValue = ActorValue.None };
+        effect.Flags = MagicEffect.Flag.Recover | MagicEffect.Flag.NoDuration | MagicEffect.Flag.NoArea | MagicEffect.Flag.Painless | MagicEffect.Flag.HideInUI;
+        effect.Keywords?.Clear();
+        effect.Description = "";
+        mod.MagicEffects.Add(effect);
+        var ability = new Spell(mod)
+        {
+            EditorID = "TMClimbingAbility", Name = "Climbing", ObjectBounds = new ObjectBounds(), Type = SpellType.Ability,
+            CastType = CastType.ConstantEffect, TargetType = TargetType.Self, Description = "",
+            Effects = [new Effect { BaseEffect = effect.ToNullableLink<IMagicEffectGetter>(), Data = new EffectData { Magnitude = 0, Area = 0, Duration = 0 } }],
+        };
+        mod.Spells.Add(ability);
+        var climbing = new HasMagicEffectConditionData();
+        climbing.MagicEffect = new FormLinkOrIndex<IMagicEffectGetter>(climbing, effect.FormKey);
+        var safeFall = new Perk(mod)
+        {
+            EditorID = "TMClimbingSafeFall", Name = "Climbing", Description = "", Playable = false, Hidden = true, NumRanks = 1,
+            Effects =
+            [
+                new PerkEntryPointModifyValue
+                {
+                    EntryPoint = APerkEntryPointEffect.EntryType.ModFallingDamage, PerkConditionTabCount = ProgressionPerks.Tabs(APerkEntryPointEffect.EntryType.ModFallingDamage),
+                    Modification = PerkEntryPointModifyValue.ModificationType.Multiply, Value = 0, Rank = 0, Priority = 0,
+                    Conditions = [new PerkCondition { RunOnTabIndex = 0, Conditions = [new ConditionFloat { CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1, Data = climbing }] }],
+                },
+            ],
+        };
+        mod.Perks.Add(safeFall);
+        var races = stones.ClimbBonus.SelectMany(b => new[] { b.Race, b.Race.Replace("Race", "RaceVampire") }
+            .Select(e => (Race: skyrim.Races.FirstOrDefault(x => x.EditorID == e)?.FormKey, b.Bonus))).Where(x => x.Race is not null).ToList();
+        var quest = new Quest(mod)
+        {
+            EditorID = "TMClimbingQuest", Name = "Climbing", Flags = Quest.Flag.StartGameEnabled | Quest.Flag.RunOnce, Priority = 10, Type = Quest.TypeEnum.Misc,
+            VirtualMachineAdapter = new QuestAdapter
+            {
+                Scripts =
+                [
+                    new ScriptEntry
+                    {
+                        Name = "TMClimbing",
+                        Properties =
+                        [
+                            Obj("PlayerRef", PlayerRef),
+                            Obj("Progression", progression.FormKey),
+                            Obj("ClimbingAbility", ability.FormKey),
+                            Obj("SafeFall", safeFall.FormKey),
+                            Objs("BonusRaces", races.Select(x => x.Race)),
+                            Ints("BonusAmount", races.Select(x => x.Bonus)),
+                        ],
+                    },
+                ],
+            },
+        };
+        mod.Quests.Add(quest);
+        var files = Animations.ClimbAnimation.WriteOar(outDir, skyrimData, effect.FormKey, log);
+        log?.Invoke($"climbing: TMClimbingQuest, effect {effect.FormKey}; {files.Count} Open Animation Replacer files");
     }
 
     /// <summary>Oblivion's TMObState quest and, for each sign in its birthsign menu's order, which of the 13 it is.</summary>
@@ -398,12 +542,13 @@ public static class ProgressionBuilder
     /// states).</summary>
     public const string MenuDataLine = "var built = null; // the build's skills and passive web (ProgressionBuilder.MenuData)";
 
-    static string Q(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    // A string literal for the menu: backslashes, quotes and line breaks escaped (a raw line break ends the literal).
+    static string Q(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n") + "\"";
     static string F(float f) => f.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>The skills (names, where from, what they do, their perk trees), Daggerfall's own skills, the stats and the
     /// web's nodes and links, as an ActionScript object for the menu.</summary>
-    static string MenuData(ProgressionSkills.Built b, List<(string Name, uint Id)> dfSkills, PassiveWeb.Web web, List<FactionEntry> factions)
+    static string MenuData(ProgressionSkills.Built b, List<(string Name, uint Id)> dfSkills, PassiveWeb.Web web, List<FactionEntry> factions, GameStones.Built stones)
     {
         var games = new Dictionary<string, string> { ["DF"] = "Daggerfall", ["MW"] = "Morrowind", ["OB"] = "Oblivion" };
         var sb = new System.Text.StringBuilder("var built = {\n");
@@ -418,6 +563,11 @@ public static class ProgressionBuilder
             $"[{F(n.X)}, {F(n.Y)}, {(int)n.Kind}, {Q(n.Name)}, {Q(n.Description)}, {Q(n.GateText)}, {n.Sign}, {n.Stat}, {F(n.Amount)}]")).Append("],\n");
         sb.Append("  links: [").AppendJoin(", ", web.Links.Select(l => $"{l.A}, {l.B}")).Append("],\n");
         sb.Append("  cx: ").Append(F(PassiveWeb.CentreX)).Append(", cy: ").Append(F(PassiveWeb.CentreY)).Append(",\n");
+        // The Character view (GameStones): the attributes, the owned games and their rules, their classes.
+        sb.Append("  attrs: [").AppendJoin(", ", GameLevelling.Attributes.Select(Q)).Append("],\n");
+        sb.Append("  games: [").AppendJoin(", ", stones.Games.Select(x => $"[{Q(GameStones.GameName(x.Game))}, {(x.Rule == "pool" ? 1 : 0)}]")).Append("],\n");
+        sb.Append("  classes: [").AppendJoin(",\n    ", stones.Classes.Select(c => $"[{c.Game}, {Q(c.Class.Name)}, {Q(c.Text)}]")).Append("],\n");
+        sb.Append("  races: [").AppendJoin(", ", stones.RaceText.Select(lines => Q(string.Join("\n", lines)))).Append("],\n");
         sb.Append("  factions: ").Append(factions.Count).Append('\n');
         sb.Append("};");
         return sb.ToString();

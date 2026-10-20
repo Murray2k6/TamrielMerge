@@ -235,6 +235,7 @@ other thirteen, for the games converted (Athletics and Acrobatics also stand for
 | Swimming | 100 units swum (1.5) | +50% speed swimming; fActorSwimBreathMult up to twice Skyrim's (not verified in game) |
 | Backstabbing | a sneak attack (60) | sneak attacks twice the damage (Mod Sneak Attack Mult) |
 | Critical Strike | a critical strike (80) | Daggerfall's own: a level/4 % chance a hit strikes critically, extra damage |
+| Dodging | struck by a weapon (25) | weapon blows do 25% less (Daggerfall's level/4 off a foe's chance to hit, as damage) |
 | Medical | a point of health recovered (0.5) | +50% health regeneration |
 
 Each has a perk tree of real perks (two or three, some with two ranks; 44 ranks in all) needing 25 to 80 in the skill
@@ -267,6 +268,76 @@ Built (2026-10-15; PassiveWeb, TMPassives on the TMProgression quest), 136 nodes
 - **Effects**: the small nodes' sums go into one hidden ability (TMWebStats, a magnitude a stat); notables and keystones
   are perks (`TMWeb<Name>`: entry points, and abilities for actor values) given or taken away as nodes are taken or
   reset. What is taken is kept in TMPassives (an array, a node each), applied again after loading.
+- Not tested in game.
+
+## The games' levelling on the stones (user requests 2026-10-20)
+
+"do the not done" (each game's classes, attributes and levelling), "we add them based on what game the users own and
+to the mundus stones for perks also based on game owned" (asked, the user chose the stones carrying it all: no class
+system of its own), and "skyrim also has a level up system that needs looked at for all of this". Only the games
+converted take part: each game's builder writes `<plugin>.levelling.json` (`GameLevelling`: Morrowind's from
+`MwLevelling`, Oblivion's from `ObLevelling`, Daggerfall's from `DfLevelling`, also `df-levelling --dir`), and the
+progression build (`GameStones`) reads those there are.
+
+**Skyrim's level-up stays the base.** Every skill rise gives Skyrim's experience and the player levels in Skyrim's own
+Level Up menu (+10 health, magicka or stamina, a perk point). The games change how fast skills rise and add what
+their levels gave, each only by its difference from the game's average, so an average character is Skyrim's own:
+
+- **Signs**: each web sign's start also gives the owned games' version of it (Morrowind's birthsign spells, form lists
+  `TMMwBirthsign<id>`; Oblivion's, `TMObBirthsign<id>`), named in the start's description; Reset takes them back.
+- **Class** (the Passives tab's Character view; free, one at a time, changed whenever): the playable classes of the
+  owned games (Daggerfall's 18, Morrowind's, Oblivion's). Its perk `TMClass<game><id>` makes its skills rise as the game's
+  do through Skyrim's Mod Skill Use entry (the Guardian Stones' own): Morrowind major x1/fMajorSkillBonus (1.33), minor
+  x1/fMinorSkillBonus, others x1/fMiscSkillBonus (0.8), its specialization x1/fSpecialSkillBonus (1.25) more; Oblivion
+  major x1/0.6, specialization x1/0.75 (UESP: Oblivion keeps these in code); Daggerfall every skill x1/its advancement
+  multiplier. Its ability starts them where the game does over Skyrim's 15 (Morrowind major 30, minor 15,
+  specialization +5; Oblivion major 25, specialization +5; Daggerfall primary 31, major 21, Daggerfall Unity's rolls
+  with the 6 bonus points). The progression's own skills get the same (TMSkills.SetClass). Its favoured attributes
+  (Morrowind +10, Oblivion +5) or Daggerfall's own attributes; a Daggerfall class's advantages and disadvantages:
+  tolerances as resistances (+25 resistant, +50 immune, -25 low tolerance, -50 critical weakness), spell points as
+  magicka ((multiple - 1) x 40), light- or darkness-powered magery, rapid healing, regeneration, spell absorption (by
+  day outside, inside or at night, in water, always), acute hearing (Skyrim's Detect Life, always), athleticism,
+  adrenaline rush, no magicka regeneration, bonus to hit and phobia by kind of foe, expertise; forbidden weapons,
+  armour, shields and materials unequipped again (TMPassives.Equipped); sunlight and holy places hurt (5 health every 5
+  seconds).
+- **Attributes**: Strength, Intelligence, Willpower, Agility, Speed, Endurance, Personality, Luck: the race's (Morrowind's
+  or Oblivion's tables by sex, for the Skyrim race) or the Daggerfall class's, plus the class's favoured bonus and the
+  levels' gains, at most 100. Each point over or under the game's average (40; Daggerfall 50) works through one hidden
+  ability (`TMAttributes`): Strength 2 carry weight and 0.3% melee damage, Intelligence 1 magicka, Willpower 0.5%
+  magicka regeneration and 0.1% magic resistance, Agility 0.5% bow and 0.3% sneak, Speed 0.4% speed, Endurance 0.5
+  health and 0.5% health regeneration, Personality 0.5% prices, Luck 0.1% critical chance and 0.2% lockpicking and
+  pickpocketing. The class's game's rules apply; without a class, Oblivion's, else Morrowind's, else Daggerfall's.
+- **Each level**: when the player leaves Skyrim's skills screen after levelling, the Tamriel menu opens on the
+  Character view. Morrowind and Oblivion: three attributes picked, each raised by its multiplier from the rises of the
+  skills it governs since the last level (x1 none, x2 1-4, x3 5-7, x4 8-9, x5 10 or more; Luck +1); Daggerfall: 4-6 points
+  to share out. Health beside Skyrim's +10: Endurance / 10 against the average's (Morrowind, Oblivion), or Daggerfall's
+  roll of half to all the class's hit points against its average plus Endurance / 10 - 5. A legendary skill's reset is
+  not counted.
+- **Skill books and trainers** (`GameTrainers`): a Morrowind or Oblivion skill book raises its skill once (Skyrim's book
+  teaching; TMSkillBook for the progression's skills, `TMSkillBooksRead`). Morrowind's trainers (AIDT 0x4000) teach their
+  three best skills, Oblivion's the one their AI data names, each up to their level, through "I'd like training in
+  <skill>.": Skyrim's training menu (five a level) with a class teaching that skill to that level, or for the
+  progression's skills TMSkills.Train at 10 gold a level (iTrainingMod, fTrainingCostMult), five a level too.
+- **Races** (user: "do them"): the player's race in each owned game, like the signs. Every owned game's version gives
+  its spells (Morrowind's NPCS, Oblivion's race spells: resistances and racial powers; form lists `TMMwRace<id>`,
+  `TMObRace<id>`); the skill bonuses (Morrowind's RADT, Oblivion's skill boosts) come from the game whose rules apply
+  (`TMRace<game><race>Skills`), so they don't stack; Daggerfall's racial abilities (Daggerfall Unity: Breton +30 against
+  magic, Nord +30 against frost, High Elf immune to paralysis, Dark Elf weapons +level/4 damage, Redguard non-bow
+  weapons and Wood Elf bows +level/3, Khajiit climbing +30; its Argonians' swimming and breath are Skyrim's Argonians'
+  already) as perks `TMRaceDF<race>`, the damage set each level. Given again after the race menu. The Character view
+  shows them (hover the race).
+- **Climbing** (Daggerfall's skill; `TMClimbing` on `TMClimbingQuest`): jump at a wall you are walking into, hold
+  forward to climb; Daggerfall Unity's grip checks (start 70%, holding 50% a second, regaining 20%, towards 100% with
+  the skill, Khajiit +30, plus a tenth of Luck), each a use of the skill; stamina 4 a second; over the top a step onto
+  it; no fall damage while climbing and a moment after (`TMClimbingSafeFall`). Its perks: Handholds (+10, twice), Wall
+  Runner (30% faster), Spider (half the stamina). **The animation** (user: "if climbing is in we need a animation for
+  it too", "oar but make sure to add the credits"): Skyrim has none for people, so `ClimbAnimation` makes a 1.2-second
+  climbing loop on Skyrim's own third- and first-person skeletons (two-bone IK: hands on the wall reaching in turn,
+  elbows out and down, the opposite foot stepping up, knees out), checked offline with `climb-anim` (Skyrim's male body
+  skinned to it, PNG). Open Animation Replacer swaps it in for the unarmed jump, fall and land animations (and first
+  person's idle, walk and run) while `TMClimbingEffect` is on (`meshes\actors\character\[_1stperson\]animations\
+  OpenAnimationReplacer\TamrielMerge`, left loose: OAR doesn't look into archives). OAR is credited in the README.
+- **Not here**: Daggerfall's custom class and background questions (the web stands for them).
 - Not tested in game.
 
 ## Crime by game and area (user request 2026-10-07)

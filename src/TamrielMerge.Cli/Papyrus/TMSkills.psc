@@ -52,6 +52,8 @@ Keyword Property ArmorHeavy Auto
 String[] Property DfSkillNames Auto
 Int[] Property DfSkillIds Auto
 {Daggerfall's own skills (DFSkill<name> in Daggerfall.esm, raised by TMDfSensesControl): listed in the menu as they are.}
+FormList Property BooksRead Auto
+{The skill books already read (TMSkillBook): each teaches once.}
 Float Property BreathMult = 0.2 Auto
 {Skyrim's fActorSwimBreathMult; Swimming raises it up to twice this.}
 
@@ -72,9 +74,14 @@ Int iSwimming = -1
 Int iBackstab = -1
 Int iCritical = -1
 Int iMedical = -1
+Int iDodging = -1
 
 Int filledStamp = 0
 Bool filledAll = False
+; The class taken on the Mundus stones (TMPassives.SetClass): how fast each skill rises, and what it starts above its
+; level (as the class's game starts it; like a Skyrim fortification, it doesn't count for perks).
+Float[] classRate
+Int[] classBonus
 Float lastX
 Float lastY
 Float lastHealth = -1.0
@@ -114,6 +121,7 @@ Function Setup()
   iBackstab = Index("Backstabbing")
   iCritical = Index("CriticalStrike")
   iMedical = Index("Medical")
+  iDodging = Index("Dodging")
   FillLists()
   If HitPerk && !PlayerRef.HasPerk(HitPerk)
     PlayerRef.AddPerk(HitPerk)
@@ -133,6 +141,11 @@ Function Setup()
   RegisterForMenu("BarterMenu")
   RegisterForSleep()
   RegisterForModEvent("TM_Skills", "OnSkillsMenu")
+  ; Climbing (Daggerfall's), on a quest of its own.
+  TMClimbing climbing = Quest.GetQuest("TMClimbingQuest") as TMClimbing
+  If climbing
+    climbing.Setup()
+  EndIf
   lastX = PlayerRef.GetPositionX()
   lastY = PlayerRef.GetPositionY()
   lastHealth = PlayerRef.GetActorValue("Health")
@@ -185,10 +198,112 @@ Function AddUse(Int i, Float uses)
   EndIf
 EndFunction
 
+; Whether the player has the k-th tree perk (in order, ranks counted) of skill i.
+Bool Function TreeTaken(Int i, Int k)
+  Int n = 0
+  Int p = 0
+  While p < TreePerks.Length
+    If TreeSkill[p] == i
+      If n == k
+        Return TreePerks[p] && PlayerRef.HasPerk(TreePerks[p])
+      EndIf
+      n += 1
+    EndIf
+    p += 1
+  EndWhile
+  Return False
+EndFunction
+
+; One level more, as a rise by use is (character experience, the notification, what it does).
+Function RaiseOne(Int i)
+  Int level = Levels[i].GetValueInt()
+  If level >= MaxLevel
+    Return
+  EndIf
+  level += 1
+  Float perRank = Game.GetGameSettingFloat("fXPPerSkillRank")
+  If perRank <= 0.0
+    perRank = 1.0
+  EndIf
+  Game.SetPlayerExperience(Game.GetPlayerExperience() + level * perRank)
+  Levels[i].SetValue(level)
+  Experience[i].SetValue(0.0)
+  Debug.Notification(SkillNames[i] + " increased to " + level + ".")
+  Apply(i)
+EndFunction
+
+; A skill book read (TMSkillBook): its skill one level higher the first time, as Morrowind's and Oblivion's give.
+Function ReadBook(String id, Form akBook)
+  Int i = Index(id)
+  If i < 0 || !akBook || !BooksRead || BooksRead.HasForm(akBook)
+    Return
+  EndIf
+  BooksRead.AddForm(akBook)
+  RaiseOne(i)
+EndFunction
+
+; Training in a progression skill (TMTrainerTopic): one level for its level times the game's price, up to the trainer's
+; level in it, at most five a character level (as Oblivion's and Skyrim's trainers).
+Int trainedAtLevel = 0
+Int trainedCount = 0
+Function Train(String id, String name, Int max, Int costPerLevel, Actor trainer, Message confirm)
+  Int i = Index(id)
+  If i < 0
+    Debug.MessageBox("No one can train you in " + name + " here.")
+    Return
+  EndIf
+  Int level = Levels[i].GetValueInt()
+  If level >= max
+    Debug.MessageBox("I can teach you nothing more about " + name + ".")
+    Return
+  EndIf
+  If trainedAtLevel != PlayerRef.GetLevel()
+    trainedAtLevel = PlayerRef.GetLevel()
+    trainedCount = 0
+  EndIf
+  If trainedCount >= 5
+    Debug.MessageBox("You must gain a level before you can train again.")
+    Return
+  EndIf
+  Int cost = level * costPerLevel
+  If PlayerRef.GetItemCount(Gold) < cost
+    Debug.MessageBox("Training " + name + " to " + (level + 1) + " costs " + cost + " gold, which you don't have.")
+    Return
+  EndIf
+  If confirm && confirm.Show(cost) != 0
+    Return
+  EndIf
+  PlayerRef.RemoveItem(Gold, cost, True, trainer)
+  trainedCount += 1
+  RaiseOne(i)
+EndFunction
+
+; A skill's level (its global: what rises and what perks need), or -1 for none.
+Int Function LevelOf(Int i)
+  If i < 0 || i >= Levels.Length
+    Return -1
+  EndIf
+  Return Levels[i].GetValueInt()
+EndFunction
+
+; The class on the Mundus stones: each skill's rate and starting bonus (none: 1 and 0), applied at once.
+Function SetClass(Float[] rates, Int[] bonus)
+  classRate = rates
+  classBonus = bonus
+  Int i = 0
+  While i < SkillIds.Length
+    Apply(i)
+    i += 1
+  EndWhile
+EndFunction
+
 Function AddExperience(Int i, Float xp)
   Int level = Levels[i].GetValueInt()
   If level >= MaxLevel
     Return
+  EndIf
+  If classRate && i < classRate.Length && classRate[i] > 0.0
+    xp *= classRate[i]
   EndIf
   Float have = Experience[i].GetValue() + xp
   Float need = Needed(i, level)
@@ -219,6 +334,12 @@ EndFunction
 ; What skill i's level does: its ability's magnitudes and its effect perk's entry values.
 Function Apply(Int i)
   Float level = Levels[i].GetValue()
+  If classBonus && i < classBonus.Length
+    level += classBonus[i]
+  EndIf
+  If level > MaxLevel
+    level = MaxLevel
+  EndIf
   Spell ability = Abilities[i]
   If ability
     Int n = ability.GetNumEffects()
@@ -288,6 +409,12 @@ Event OnUpdate()
       AddUse(iMedical, health - lastHealth)
     EndIf
     lastHealth = health
+  EndIf
+  ; A Daggerfall class's harm from sunlight and holy places rides on this poll (OnUpdate reaches every script on the
+  ; quest, so TMPassives keeps no loop of its own).
+  TMPassives passives = (Self as Quest) as TMPassives
+  If passives
+    passives.Hazards(Tick)
   EndIf
   RegisterForSingleUpdate(Tick)
 EndEvent
@@ -374,6 +501,10 @@ Function Struck(ObjectReference akAggressor, Form akSource)
     Return
   EndIf
   lastStruck = now
+  ; Daggerfall's Dodging rises with the blows that come at you.
+  If iDodging >= 0
+    AddUse(iDodging, 1.0)
+  EndIf
   If MediumWorn.GetValueInt() > 0
     AddUse(iMedium, 1.0)
   ElseIf UnarmoredOn.GetValueInt() == 1

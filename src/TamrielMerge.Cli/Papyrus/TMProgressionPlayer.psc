@@ -30,6 +30,8 @@ Event OnObjectEquipped(Form akBaseObject, ObjectReference akReference)
   If akBaseObject as Armor
     (GetOwningQuest() as TMSkills).UpdateArmor()
   EndIf
+  ; A Daggerfall class's forbidden weapons, armour, shields and materials (TMPassives).
+  (GetOwningQuest() as TMPassives).Equipped(akBaseObject)
 EndEvent
 
 Event OnObjectUnequipped(Form akBaseObject, ObjectReference akReference)

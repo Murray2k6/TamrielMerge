@@ -243,6 +243,12 @@ public static class DaggerfallPluginBuilder
             catalog.Spots.Add(new(CreatureCatalog.Key(placed.FormKey), CreatureCatalog.Key(cell.FormKey), "", p.X, p.Y, p.Z, habitat, 1, 0));
         }
         catalog.Save(outPath);
+        // Daggerfall's classes and level-up rule for the Mundus stones (the progression build reads them).
+        var levellingProblems = new List<string>();
+        var levelling = DfLevelling.Read(arena2, Path.GetFileName(outPath), levellingProblems);
+        levelling.Save(outPath);
+        Console.WriteLine($"  levelling (Mundus stones): {levelling.Classes.Count} classes ({string.Join(", ", levelling.Classes.Select(c => $"{c.Name} x{c.Advancement}"))})");
+        foreach (var p in levellingProblems) Console.WriteLine($"  problem: {p}");
 
         // The start plugin finds Privateer's Hold's start marker at runtime; this plugin's own stash chest stays
         // (unused) so its FormIDs, and saves, don't shift.

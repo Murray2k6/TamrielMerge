@@ -319,8 +319,14 @@ public sealed partial class ObPluginBuilder : IDisposable
 
     public int SwingDoorTwinCount { get; private set; }
 
+    /// <summary>What <see cref="Write"/> exported for the Mundus stones.</summary>
+    public string LevellingSummary { get; private set; } = "";
+
     public void Write()
     {
+        // Oblivion's levelling for the Mundus stones (any birthsign spell list still missing goes into the plugin).
+        var levelling = Levelling();
+        BuildTrainers();
         FinishMagic();
         FinishJails();
         SwingDoorTwinCount = Skyrim.SwingDoorTwins.AddAll(mod);
@@ -329,6 +335,9 @@ public sealed partial class ObPluginBuilder : IDisposable
         mod.WriteToBinary(Path.Combine(modOutDir, PluginName));
         // What procedural creatures may use from Oblivion (read by the creatures step when that option is on).
         WriteCreatureCatalog(Path.Combine(modOutDir, PluginName));
+        // What the progression build offers on the Mundus stones from Oblivion.
+        levelling.Save(Path.Combine(modOutDir, PluginName));
+        LevellingSummary = $"{levelling.Classes.Count} playable classes, {levelling.Signs.Count} birthsigns, {levelling.Races.Count} races, {levelling.Governing.Count} skills with a governing attribute; {obTrainers.Count} trainers ({TrainerSkills} topics made); {SkillBooks} skill books";
         if (VoiceMap.Count > 0)
             File.WriteAllText(Path.Combine(modOutDir, "Oblivion.voicemap.json"), System.Text.Json.JsonSerializer.Serialize(
                 VoiceMap.Select(v => new { v.Info, v.SourcePlugin, v.OriginPlugin, v.OriginId, Lines = v.Lines.Select(l => new { l.Number, l.Text }) })));

@@ -238,7 +238,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                         }
                         sb.Append(';');
                     }
-                    Console.WriteLine(sb.ToString());
+                    RecastOutput.Say(sb.ToString());
                 }
             }
             Interlocked.Add(ref buriedSpans, cut);
@@ -357,6 +357,10 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         [ThreadStatic] static StringBuilder? capture;
         static readonly object Gate = new();
         static bool installed;
+        static TextWriter? original;
+
+        /// <summary>A line to the console as it was, past any capture (the dev traces run inside a build).</summary>
+        public static void Say(string line) { lock (Gate) (original ?? Console.Out).WriteLine(line); }
 
         public override Encoding Encoding => inner.Encoding;
         public override void Write(char value) { if (capture is { } c) c.Append(value); else inner.Write(value); }
@@ -369,7 +373,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         public static T Keep<T>(Func<T> build, out string warnings)
         {
             lock (Gate)
-                if (!installed) { Console.SetOut(new RecastOutput(Console.Out)); Console.SetError(new RecastOutput(Console.Error)); installed = true; }
+                if (!installed) { original = Console.Out; Console.SetOut(new RecastOutput(Console.Out)); Console.SetError(new RecastOutput(Console.Error)); installed = true; }
             var outer = capture;
             var kept = capture = new StringBuilder();
             T result;

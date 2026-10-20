@@ -78,7 +78,7 @@ for (var i = 0; i < tabNames.length; i++) {
         tab = this.index; page = 0;
         if (tab == 2) { trip = null; askTravel("worlds", 0); }
         if (tab == 3) skse.SendModEvent("TM_Skills", "state", 0);
-        if (tab == 4) skse.SendModEvent("TM_Web", "state", 0);
+        if (tab == 4) skse.SendModEvent("TM_Web", webView == 1 ? "char" : "state", 0);
         draw();
     };
 }
@@ -122,6 +122,7 @@ function draw() {
     else if (tab == 1) drawMoney();
     else if (tab == 2) drawTravel();
     else if (tab == 3) drawSkills();
+    else if (webView == 1) drawCharacter();
     else drawWeb();
 }
 
@@ -650,7 +651,167 @@ function drawWeb() {
     }
     var reset = button(body, "reset", 600, W - PAD - 270, H - PAD - 34, 130, 34, "Reset", null);
     reset.onRelease = function() { skse.SendModEvent("TM_Web", "reset", 0); };
+    viewButton("Character", 1);
     drawWebInfo();
+}
+
+// The Passives tab's two views: the web, and the Character view (the owned games' classes and attributes).
+var webView = 0;
+function viewButton(label, view) {
+    var v = button(body, "view", 601, W - PAD - 420, H - PAD - 34, 140, 34, label, null);
+    v.onRelease = function() {
+        webView = view;
+        skse.SendModEvent("TM_Web", view == 1 ? "char" : "state", 0);
+        draw();
+    };
+}
+
+// ---- passives: the Character view (TMPassives: the games' levelling on the Mundus stones) ----
+var chClass = -1;
+var chGame = -1;
+var chKind = 0;
+var chValues = null;
+var chGains = null;
+var chPending = 0;
+var chMults = null;
+var chPool = 0;
+var chHealth = 0;
+var chMessage = "";
+var chRace = "";
+var chRaceIndex = -1;
+var chDesc = null;
+var chDescClass = "";
+var chHover = -1;
+var chPicks = [];
+var chInfo = null;
+
+function CharState(line) {
+    var p = line.split("#");
+    chClass = Number(p[0]);
+    chGame = Number(p[1]);
+    chKind = Number(p[2]);
+    chValues = p[3].split(",");
+    chGains = p[4].split(",");
+    chPending = Number(p[5]);
+    chMults = p[6].split(",");
+    chPool = Number(p[7]);
+    chHealth = Number(p[8]);
+    chMessage = p[9];
+    chRace = p[10];
+    chRaceIndex = Number(p[11]);
+    chPicks = [];
+    if (tab == 4 && webView == 1) draw();
+}
+
+// Opened for a level's gains (TMPassives.MenuReady).
+function ShowCharacter(s) {
+    tab = 4;
+    webView = 1;
+    skse.SendModEvent("TM_Web", "char", 0);
+    draw();
+}
+
+function picked(a) {
+    for (var i = 0; i < chPicks.length; i++) if (chPicks[i] == a) return i;
+    return -1;
+}
+
+// Left: the owned games' classes, a column a game (a click takes one; the class taken gold). Right: the class, the
+// eight attributes and, when a level waits, its gains: three picks with their multipliers, or Daggerfall's points.
+function drawCharacter() {
+    viewButton("Web", 0);
+    if (built == null || built.games == undefined || built.games.length == 0) {
+        drawNote("None of the converted games has classes and attributes (Daggerfall, Morrowind and Oblivion do).");
+        return;
+    }
+    if (chValues == null) { drawNote("Reading your character..."); return; }
+    var cols = built.games.length;
+    var colW = Math.floor(700 / cols);
+    for (var g = 0; g < cols; g++) {
+        var head = text(body, "gh" + g, 10 + g, PAD + 20 + g * colW, PAD + 64, colW - 10, 24, 17, 0xD9B76A, true);
+        head.text = built.games[g][0];
+    }
+    var rows = [];
+    for (var c = 0; c < built.classes.length; c++) {
+        var cg = built.classes[c][0];
+        if (rows[cg] == undefined) rows[cg] = 0;
+        var row = rows[cg]++;
+        var b = button(body, "cl" + c, 20 + c, PAD + 20 + cg * colW, PAD + 92 + row * 22, colW - 14, 20, built.classes[c][1], null);
+        b.index = c;
+        if (c == chClass) box(b, 0, 0, colW - 14, 20, 0xD9B76A, 45);
+        b.label.setTextFormat(fmt(14, c == chClass ? 0xF0E6C8 : 0xC8C0B0));
+        b.onRelease = function() { skse.SendModEvent("TM_Web", "class:" + (this.index == chClass ? -1 : this.index), 0); };
+        b.onRollOver = function() { this._alpha = 80; chHover = this.index; drawCharInfo(); };
+        b.onRollOut = function() { this._alpha = 100; if (chHover == this.index) chHover = -1; drawCharInfo(); };
+    }
+    drawCharInfo();
+}
+
+function fmt(size, colour) {
+    var f = new TextFormat();
+    f.font = "$EverywhereFont";
+    f.size = size;
+    f.color = colour;
+    f.align = "center";
+    return f;
+}
+
+function drawCharInfo() {
+    if (chInfo != null) chInfo.removeMovieClip();
+    chInfo = body.createEmptyMovieClip("chinfo", 700);
+    var x0 = 800;
+    var w0 = W - PAD - 10 - x0;
+    var y = PAD + 64;
+    var show = chHover >= 0 ? chHover : chClass;
+    var name = text(chInfo, "cname", 1, x0, y, w0, 26, 19, 0xF0E6C8, true);
+    name.text = show >= 0 ? built.classes[show][1] + " (" + built.games[built.classes[show][0]][0] + ")" : "No class (" + (chGame >= 0 ? built.games[chGame][0] + "'s rules" : "no rules") + ")";
+    y += 28;
+    chDesc = wrapped(chInfo, "cdesc", 2, x0, y, w0, 100, 13, 0xC8C0B0);
+    chDescClass = show >= 0 ? built.classes[show][2] + (show == chClass ? "" : "\nClick to take it (free; click again to leave it).")
+        : "Choose a class from the games you own: its skills rise as that game's do, and its attributes and level-up rule are yours.";
+    chDesc.text = chDescClass;
+    y += 104;
+    // The race (hover it for what it is in the owned games) and the health the levels gave.
+    var race = button(chInfo, "race", 3, x0, y, w0, 22, chRace + (chHealth != 0 ? "; the levels gave " + (chHealth > 0 ? "+" : "") + chHealth + " health beside Skyrim's own" : ""), null);
+    race.label.setTextFormat(fmt(13, 0xA8A090));
+    race.onRollOver = function() {
+        if (chRaceIndex >= 0 && built.races != undefined)
+            chDesc.text = chRace + " in the games you own:\n" + (built.races[chRaceIndex] == "" ? "nothing more than Skyrim's own." : built.races[chRaceIndex]);
+    };
+    race.onRollOut = function() { chDesc.text = chDescClass; };
+    y += 26;
+    var waiting = chPending > 0;
+    var head = text(chInfo, "ahead", 4, x0, y, w0, 22, 15, waiting ? 0xE8C878 : 0xD9B76A, true);
+    head.text = !waiting ? "Attributes" : (chKind == 1 ? chPool + " points to share out (" + chPending + " level" + (chPending > 1 ? "s" : "") + ")"
+        : "Pick three to raise (" + chPending + " level" + (chPending > 1 ? "s" : "") + ")");
+    y += 26;
+    for (var a = 0; a < 8; a++) {
+        var label = built.attrs[a] + "  " + chValues[a] + (Number(chGains[a]) > 0 ? "  (+" + chGains[a] + " from levels)" : "");
+        if (waiting && chKind == 0) label += "   x" + chMults[a];
+        var row = button(chInfo, "at" + a, 10 + a, x0, y + a * 28, w0, 25, label, null);
+        row.index = a;
+        var on = picked(a) >= 0;
+        if (on) box(row, 0, 0, w0, 25, 0xD9B76A, 45);
+        row.label.setTextFormat(fmt(14, on ? 0xF0E6C8 : 0xC8C0B0));
+        row.onRelease = function() {
+            if (chPending <= 0) return;
+            if (chKind == 1) { skse.SendModEvent("TM_Web", "add:" + this.index, 0); return; }
+            var at = picked(this.index);
+            if (at >= 0) chPicks.splice(at, 1);
+            else if (chPicks.length < 3) chPicks.push(this.index);
+            drawCharInfo();
+        };
+    }
+    y += 8 * 28 + 6;
+    if (waiting && chKind == 0) {
+        var raise = button(chInfo, "raise", 30, x0, y, w0, 30, chPicks.length == 3 ? "Raise these three" : "Choose " + (3 - chPicks.length) + " more", null);
+        raise.onRelease = function() { if (chPicks.length == 3) skse.SendModEvent("TM_Web", "pick:" + chPicks.join(","), 0); };
+        y += 36;
+    }
+    if (chMessage != "") {
+        var m = wrapped(chInfo, "cmsg", 31, x0, y, w0, 44, 14, 0xE8C878);
+        m.text = chMessage;
+    }
 }
 
 // The right panel: points and start; the node under the mouse; or, with none, what has been taken in all.

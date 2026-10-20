@@ -33,9 +33,9 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | Spellmaker, item maker, potion maker, recharge, identify | missing | guild services by rank |
 | Guilds and ranks (Mages, Fighters, Thieves, DB, 10 knightly orders, 8 temples) | partial | TownGuilds/TMDfGuilds: join, ranks with titles, daily 28-day promotion/demotion/expulsion, TG/DB invitations, training (to 50), temple healing, Mages Guild spell tomes, temple potions; covens, repair, free rooms, armour gifts, item/spell/potion makers missing; reputation only moves once quests exist |
 | Quests (QBN/QRC, 227) and main quest | missing | time limits, courier letters, multiple endings |
-| Character creation: 18 classes, custom class, advantages/disadvantages, background questions | missing | level-speed multiplier ("difficulty dagger") |
-| 35 skills incl. 9 languages, skill-use levelling | missing | Skyrim skills stand in; language pacification of creatures missing |
-| Racial abilities (Breton/Nord resist 30%, Khajiit climb +30, …) | missing | |
+| Character creation: 18 classes, custom class, advantages/disadvantages, background questions | partial | On the Mundus stones (docs/progression.md "The games' levelling on the stones"; user 2026-10-20: no separate class system): the 18 classes from CLASS*.CFG (DfLevelling) taken in the Passives tab's Character view, with their advancement multiplier, hit points per level, attributes, starting skills and every advantage and disadvantage as perks or TMPassives checks; 4-6 attribute points a level. A custom class and the background questions are the web itself (no class menu). Untested in game |
+| 35 skills incl. 9 languages, skill-use levelling | partial | Skyrim's skills and the progression's (Medical, Swimming, Backstabbing, Critical Strike, Dodging, Thaumaturgy, Mysticism, Hand-to-Hand, Mercantile; Running and Jumping as Athletics and Acrobatics); Etiquette, Streetwise and the languages are DfSenses'. Climbing scripted (TMClimbing: Daggerfall Unity's grip checks), with our climbing animation through Open Animation Replacer |
+| Racial abilities (Breton/Nord resist 30%, Khajiit climb +30, …) | done, untested in game | GameStones' TMRaceDF<race> perks (Daggerfall Unity's numbers), Khajiit's climbing in TMClimbing |
 | Vampirism (9 bloodlines), lycanthropy (wolf/boar, moon) | missing | |
 | Diseases | missing | |
 | Banks, letters of credit, loans, buying houses and ships | banks, letters of credit and loans done (docs/progression.md); houses and ships missing | |
@@ -98,9 +98,9 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | MWScript (local, global, result scripts) | done | every object, global, start and dialogue result script translated to Papyrus (MW_, MWG_, MWR_), 33,374 / 33,374 statements, all compile; docs/morrowind-scripts.md |
 | Travel: silt striders, boats, Mages Guild guides, gondolas, Propylon chambers | missing | |
 | Mark/Recall, Divine/Almsivi Intervention | done | scripts; Intervention indoors via WorldSpot markers linked to the outside door |
-| Races (powers, resistances), birthsigns, classes, attributes | missing | |
-| 27 skills, major/minor, levelling multipliers | missing | Skyrim skills stand in |
-| Skill books (+1 on first read), trainers | missing | books teach nothing yet |
+| Races (powers, resistances), birthsigns, classes, attributes | partial | Birthsigns, classes and attributes on the Mundus stones (GameStones; the sign's Morrowind version given with the web's start, the playable classes, the 8 attributes from Morrowind's race tables). Races' powers and resistances missing (Skyrim's races' own stand in). Untested in game |
+| 27 skills, major/minor, levelling multipliers | done, untested in game | Skyrim's skills and the progression's; a class's major/minor/other skills rise at fMajorSkillBonus/fMinorSkillBonus/fMiscSkillBonus (and fSpecialSkillBonus) through Mod Skill Use, start where Morrowind starts them; each level three attributes x iLevelUp01Mult..10Mult by the skills raised |
+| Skill books (+1 on first read), trainers | done, untested in game | Books teach their skill once (Skyrim's book teaching, TMSkillBook for the progression's skills); trainers (AIDT 0x4000) teach their three best skills up to their level in Skyrim's training menu (GameTrainers), the progression's skills at iTrainingMod gold a level |
 | Mercantile/barter formula, merchant gold | missing | |
 | Crime: bounties, jail (days per 100), Thieves Guild clears 50% | missing | |
 | Pickpocket formula | missing | |
@@ -128,9 +128,9 @@ Numbers marked (u) are unverified; settings should be read from the game's own m
 | Sigil stones, Altar of Enchanting, spellmaking | missing | |
 | Alchemy apparatus (mortar, retort, calcinator, alembic), poisons | missing | |
 | Armorer repair and hammers | missing | |
-| Birthsigns, classes, attributes, +5 levelling | missing | |
+| Birthsigns, classes, attributes, +5 levelling | done, untested in game | On the Mundus stones (GameStones): the sign's Oblivion version with the web's start; the playable classes (major skills x1/0.6, specialization x1/0.75, starts 25 / +5, favoured +5); the 8 attributes from Oblivion's race tables; each level three attributes +1..+5 by the skills raised, Luck +1 |
 | 21 skills, mastery perks (power attacks, block, sneak ×6, …) | missing | |
-| Trainers (5 per level), skill books | missing | books teach nothing yet |
+| Trainers (5 per level), skill books | done, untested in game | Trainers (AI services Training) teach the skill their AI data names up to MaximumTrainingLevel through Skyrim's training menu (its five a level); books teach their skill once |
 | Crime: bounties, jail, fences, Thieves Guild doyens | partial | Skyrim's crime system: a crime faction per land (Cyrodiil, Shivering Isles) with Oblivion's values, Oblivion's guards arrest through Skyrim's guard dialogue, one jail per land from Oblivion's prisons, IsPlayerInJail kept; fences and doyens by script; see [oblivion-scripts.md](oblivion-scripts.md#crime-and-jail) |
 | Fame/Infamy | missing | |
 | Horses (7 stables), horse armour | missing | |

@@ -176,7 +176,7 @@ public sealed partial class MwPluginBuilder
         npc.Configuration.Flags = nflags;
         var npdt = rec.Get("NPDT");
         int level = npdt is { } d ? BitConverter.ToInt16(d.Data, 0) : 1;
-        npc.Configuration.Level = new NpcLevel { Level = (short)Math.Clamp((int)MathF.Round(level * 1.5f), 1, 81) };
+        npc.Configuration.Level = new NpcLevel { Level = Level(level) };
         npc.Packages.Add(new FormLink<IPackageGetter>(PackageFor(WanderDistance(rec))));
         if (npc.AIData is { } ai) ai.Aggression = Fight(rec) >= 80 ? Aggression.VeryAggressive : Aggression.Unaggressive;
         AddInventory(npc, rec);
@@ -212,11 +212,17 @@ public sealed partial class MwPluginBuilder
         if (Fight(rec) < 80 && npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
         var npdt = rec.Get("NPDT");
         int level = npdt is { } d ? d.Int(4) : 1;
-        if (npc.Configuration.Level is NpcLevel) npc.Configuration.Level = new NpcLevel { Level = (short)Math.Clamp((int)MathF.Round(level * 1.5f), 1, 81) };
+        // Morrowind's level, not the stand-in's (a vanilla creature's own level or multiplier).
+        npc.Configuration.Level = new NpcLevel { Level = Level(level) };
         AddInventory(npc, rec);
         AddSpells(npc, rec);
         return npc;
     }
+
+    /// <summary>Morrowind's levels on Skyrim's scale (x1.5, at most 81): its actors' levels and the player levels its
+    /// leveled lists (creatures and items) give their entries at, the same scale, so a list offers at a Skyrim level
+    /// what Morrowind offered at the Morrowind level it stands for.</summary>
+    internal static short Level(int morrowindLevel) => (short)Math.Clamp((int)MathF.Round(morrowindLevel * 1.5f), 1, 81);
 
     INpcGetter? listActorTemplate;
 
@@ -241,7 +247,7 @@ public sealed partial class MwPluginBuilder
             else if (f.Type == "INTV" && pending is not null)
             {
                 if (Actor(pending) is Npc member)
-                    list.Entries.Add(new LeveledNpcEntry { Data = new LeveledNpcEntryData { Level = (short)BitConverter.ToUInt16(f.Data, 0), Count = 1, Reference = new FormLink<INpcSpawnGetter>(member.FormKey) } });
+                    list.Entries.Add(new LeveledNpcEntry { Data = new LeveledNpcEntryData { Level = Level(BitConverter.ToUInt16(f.Data, 0)), Count = 1, Reference = new FormLink<INpcSpawnGetter>(member.FormKey) } });
                 pending = null;
             }
         }
