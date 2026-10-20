@@ -2,7 +2,7 @@
 
 https://www.nexusmods.com/skyrimspecialedition/mods/195263
 
-p.s this has nothing to do with tesconverter , skygerfall, skyblivion, skywind or any other converter. this was all me with ai
+p.s this has nothing to do with tes4skyrim, tesconverter, skygerfall, skyblivion, skywind or any other converter. this was all me with ai
 
 **The Elder Scrolls games you own, as one Skyrim Special Edition playthrough.**
 
