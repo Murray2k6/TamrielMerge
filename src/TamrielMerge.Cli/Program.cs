@@ -10914,6 +10914,16 @@ static class Program
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var r = Skyrim.DataArchives.Install(outDir, data, plugins, Console.WriteLine);
         Console.WriteLine($"Installed into {data} in {sw.Elapsed.TotalMinutes:F1} min: {r.Archives.Count} archives, {r.Raw / (double)(1L << 30):F1} GB of files in {r.Stored / (double)(1L << 30):F1} GB");
+        // The climbing animation plays through Open Animation Replacer: say whether it is there (in Data, or among Mod
+        // Organizer 2's mods).
+        if (Directory.Exists(Path.Combine(outDir, @"meshes\actors\character\animations\OpenAnimationReplacer")))
+        {
+            string mods = mo2 is { Length: > 0 } ? Path.Combine(mo2, "mods") : "";
+            bool oar = File.Exists(Path.Combine(data, @"SKSE\Plugins\OpenAnimationReplacer.dll"))
+                || (Directory.Exists(mods) && Directory.EnumerateDirectories(mods).Any(m => File.Exists(Path.Combine(m, @"SKSE\Plugins\OpenAnimationReplacer.dll"))));
+            Console.WriteLine(oar ? "  Open Animation Replacer found: the climbing animation will play"
+                : "  Open Animation Replacer not found: install it (Nexus mod 92109, by Ershin) for the climbing animation; without it you climb in the falling pose");
+        }
         if (!lists) return;
         foreach (var line in Setup.PluginList.Remove(r.Gone, mo2)) Console.WriteLine($"  {line}");
         foreach (var line in Setup.PluginList.Enable(r.Plugins, mo2)) Console.WriteLine($"  {line}");

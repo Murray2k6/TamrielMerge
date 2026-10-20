@@ -292,9 +292,11 @@ public sealed class MainForm : Form
             Bullet("people and creatures, their dialogue in Skyrim's dialogue menu, voiced");
             Bullet("voices the games never recorded are made for them, as a mod of their own (TamrielMerge Voices): switch it off to have the games as they were");
             Bullet("items, factions, music and the games' intro videos, remastered");
+            Bullet("each game's classes, attributes, birthsigns, races, skills and level-ups on the Mundus stones (the Tamriel menu's Passives tab), and Daggerfall's climbing");
             Bullet("a main menu of its own: a flyby over the games you converted, with its own theme", last: true);
             Heading("What you need");
-            Bullet("Skyrim Special Edition with SKSE");
+            Bullet("Skyrim Special Edition with SKSE and Address Library for SKSE Plugins");
+            Bullet("for the climbing animation (Daggerfall), Open Animation Replacer by Ershin: without it you climb in the falling pose");
             Bullet("any of the games above from Steam or GOG: those not installed are left out, and the rest still work");
             Bullet("for voices, the Creation Kit (free on Steam); for the videos, models and menu, a graphics card", last: true);
             Heading("How to use it");
