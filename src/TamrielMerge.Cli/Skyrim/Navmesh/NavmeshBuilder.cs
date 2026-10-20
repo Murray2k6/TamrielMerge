@@ -621,6 +621,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IReadOnlyList<P3Float> actors, Hazards? hazards = null, Func<P3Float, bool>? underwater = null)
     {
         var doors = loadDoors.ToList();
+        NoteDoors(doors);
         var made = Generate(cell, asWound, doors, keepAround, actors, underwater, hazards);
         int On(Generated g) => actors.Count(a => Distance(g.Data, a) <= 64);
         int on = On(made);
@@ -759,7 +760,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     }
 
     /// <summary>The point of triangle abc nearest p (Ericson, Real-Time Collision Detection 5.1.5).</summary>
-    static Vector3 ClosestOnTriangle(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
+    internal static Vector3 ClosestOnTriangle(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
     {
         Vector3 ab = b - a, ac = c - a, ap = p - a;
         float d1 = Vector3.Dot(ab, ap), d2 = Vector3.Dot(ac, ap);
@@ -790,6 +791,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         Func<P3Float, bool>? underwater, bool background, bool snapActors = false, Hazards? hazards = null)
     {
         var doors = loadDoors.ToList();
+        NoteDoors(doors);
         var keep = keepAlso?.ToList();
         var pending = new PendingInterior { Owner = this, Cell = cell, SnapActors = snapActors };
         pending.Run = () =>
@@ -842,18 +844,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 Flags = NavmeshTriangle.Flag.Found | (underwater is { } wet && wet(outVerts[tris[i].A]) && wet(outVerts[tris[i].B]) && wet(outVerts[tris[i].C]) ? NavmeshTriangle.Flag.Water : 0),
             });
 
-        // Load doors: tag the nearest triangle within 256 units of the door.
+        // Load doors: tag the triangle before each (DoorTriangleFor).
         var linked = new List<IPlacedObjectGetter>();
         foreach (var door in doorList)
         {
-            var dp = door.Placement!.Position;
-            int best = -1; float bestD = 256f * 256f;
-            for (int i = 0; i < tris.Count; i++)
-            {
-                var c = Centroid(outVerts, tris[i]);
-                float d = (c.X - dp.X) * (c.X - dp.X) + (c.Y - dp.Y) * (c.Y - dp.Y) + (c.Z - dp.Z) * (c.Z - dp.Z) / 4;
-                if (d < bestD) { bestD = d; best = i; }
-            }
+            int best = DoorTriangleFor(tris.Count, i => Corners(outVerts, tris[i]), door);
             if (best < 0) continue;
             data.DoorTriangles.Add(new DoorTriangle { TriangleBeforeDoor = (short)best, Unknown = DoorTag, Door = door.ToLink() });
             data.Triangles[best].Flags |= NavmeshTriangle.Flag.Door;
@@ -1669,16 +1664,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                     | (water is { } w && verts[tris[i].A].Z < w && verts[tris[i].B].Z < w && verts[tris[i].C].Z < w ? NavmeshTriangle.Flag.Water : 0),
             });
         var linked = new List<IPlacedObjectGetter>();
-        foreach (var door in loadDoors)
+        var doorList = loadDoors.ToList();
+        NoteDoors(doorList);
+        foreach (var door in doorList)
         {
-            var dp = door.Placement!.Position;
-            int best = -1; float bestD = 256f * 256f;
-            for (int i = 0; i < tris.Count; i++)
-            {
-                var c = Centroid(verts, tris[i]);
-                float d = (c.X - dp.X) * (c.X - dp.X) + (c.Y - dp.Y) * (c.Y - dp.Y) + (c.Z - dp.Z) * (c.Z - dp.Z) / 4;
-                if (d < bestD) { bestD = d; best = i; }
-            }
+            int best = DoorTriangleFor(tris.Count, i => Corners(verts, tris[i]), door);
             if (best < 0) continue;
             data.DoorTriangles.Add(new DoorTriangle { TriangleBeforeDoor = (short)best, Unknown = DoorTag, Door = door.ToLink() });
             data.Triangles[best].Flags |= NavmeshTriangle.Flag.Door;
@@ -2017,6 +2007,91 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var map = new NavigationMeshInfoMap(InfoMapKey, SkyrimRelease.SkyrimSE) { NavMeshVersion = NavmeshVersion, PreferredPathing = new PreferredPathing() };
         map.MapInfos.AddRange(infos);
         return map;
+    }
+
+    /// <summary>
+    /// The triangle before a load door (-1 none): the nearest on the door's own floor, within 256 across and 150 above
+    /// or below the door's origin (which sits up in the doorway: Morrowind's and Oblivion's doors a median 90 over the
+    /// floor, 2026-10-20, against vanilla's 64); else the nearest under it, within 256 across and down to 700 below (a
+    /// trapdoor in a ceiling, reached by a ladder from the floor under it: Maar Gan's and Ald'ruhn's guard towers, 507
+    /// below, had none).
+    /// </summary>
+    internal static int DoorTriangleFor(int count, Func<int, (P3Float A, P3Float B, P3Float C)> corners, IPlacedObjectGetter door)
+    {
+        int best = -1, under = -1;
+        float bestD = float.MaxValue, underD = float.MaxValue;
+        var at = door.Placement!.Position;
+        var p = new Vector3(at.X, at.Y, at.Z);
+        // The door model's own height about its origin (its object bounds, by its scale): a floor anywhere along it is the
+        // door's floor too (Legge's dark door, 1010 tall about its middle, stands 177 under the tunnel floor it closes).
+        var (low, high) = doorSpans.TryGetValue(door.Base.FormKey, out var span) ? (span.Low * (door.Scale ?? 1), span.High * (door.Scale ?? 1)) : (0f, 0f);
+        for (int i = 0; i < count; i++)
+        {
+            // Measured to the triangle's nearest point, not its middle: a hall's floor triangles can be large, their
+            // middles further than 256 across from a door beside them (Oblivion's TestingHall, 2026-10-20).
+            var (a, b, c) = corners(i);
+            var q = ClosestOnTriangle(p, new Vector3(a.X, a.Y, a.Z), new Vector3(b.X, b.Y, b.Z), new Vector3(c.X, c.Y, c.Z));
+            float across = (q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y);
+            if (across > 256f * 256f) continue;
+            float up = p.Z - q.Z;
+            if (MathF.Abs(up) <= 150 || (q.Z >= p.Z + low && q.Z <= p.Z + high - 32))
+            {
+                float d = across + up * up / 4;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            else if (up > 0 && up <= 700 && across < underD) { underD = across; under = i; }
+        }
+        return best >= 0 ? best : under;
+    }
+
+    static (P3Float A, P3Float B, P3Float C) Corners(List<P3Float> v, (int A, int B, int C) t) => (v[t.A], v[t.B], v[t.C]);
+
+    /// <summary>Door models' heights about their origins (object bounds' Z), by base door, for DoorTriangleFor.</summary>
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<FormKey, (float Low, float High)> doorSpans = new();
+
+    void NoteDoors(IEnumerable<IPlacedObjectGetter> doors)
+    {
+        foreach (var d in doors)
+            if (!doorSpans.ContainsKey(d.Base.FormKey) && mod.Doors.TryGetValue(d.Base.FormKey, out var b) && b.ObjectBounds is { } ob)
+                doorSpans[d.Base.FormKey] = (MathF.Min(ob.First.Z, ob.Second.Z), MathF.Max(ob.First.Z, ob.Second.Z));
+    }
+
+    /// <summary>Load doors given a door triangle after the navmeshes were made (a door placed later: the back of a
+    /// one-way door; or whose partner was linked later), on the cells' own navmeshes; returns how many.</summary>
+    public int AddMissingDoorTriangles(IEnumerable<Cell> cells)
+    {
+        int added = 0;
+        foreach (var cell in cells)
+        {
+            var navs = cell.NavigationMeshes.Where(n => n.Data is not null).ToList();
+            if (navs.Count == 0) continue;
+            var have = navs.SelectMany(n => n.Data!.DoorTriangles.Select(d => d.Door.FormKey)).ToHashSet();
+            foreach (var door in cell.Persistent.Concat(cell.Temporary).OfType<PlacedObject>().Where(d => d.TeleportDestination is not null && d.Placement is not null))
+            {
+                if (have.Contains(door.FormKey)) continue;
+                NoteDoors([door]);
+                (NavigationMesh Nav, int Tri, float D) pick = (navs[0], -1, float.MaxValue);
+                foreach (var nav in navs)
+                {
+                    var d = nav.Data!;
+                    (P3Float, P3Float, P3Float) Of(int i) { var t = d.Triangles[i].Vertices; return (d.Vertices[t.X], d.Vertices[t.Y], d.Vertices[t.Z]); }
+                    int tri = DoorTriangleFor(d.Triangles.Count, Of, door);
+                    if (tri < 0) continue;
+                    var (ta, tb, tc) = Of(tri);
+                    var at = new Vector3(door.Placement.Position.X, door.Placement.Position.Y, door.Placement.Position.Z);
+                    float dist = Vector3.Distance(at, ClosestOnTriangle(at, new Vector3(ta.X, ta.Y, ta.Z), new Vector3(tb.X, tb.Y, tb.Z), new Vector3(tc.X, tc.Y, tc.Z)));
+                    if (dist < pick.D) pick = (nav, tri, dist);
+                }
+                if (pick.Tri < 0) continue;
+                pick.Nav.Data!.DoorTriangles.Add(new DoorTriangle { TriangleBeforeDoor = (short)pick.Tri, Unknown = DoorTag, Door = door.ToLink<IPlacedObjectGetter>() });
+                pick.Nav.Data.Triangles[pick.Tri].Flags |= NavmeshTriangle.Flag.Door;
+                if (infoMap?.MapInfos.FirstOrDefault(i => i.NavigationMesh.FormKey == pick.Nav.FormKey) is { } info)
+                    info.LinkedDoors.Add(new LinkedDoor { Unknown = DoorTag, Door = door.ToLink<IPlacedObjectGetter>() });
+                have.Add(door.FormKey);
+                added++;
+            }
+        }
+        return added;
     }
 
     void AddInfo(NavigationMesh navm, Cell cell, List<P3Float> verts, List<IPlacedObjectGetter> doors) =>

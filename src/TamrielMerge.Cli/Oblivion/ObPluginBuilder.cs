@@ -36,7 +36,7 @@ public sealed partial class ObPluginBuilder : IDisposable
     /// <summary>Places vanilla effects at a reference's emitters (upright, whatever the reference's rotation).</summary>
     void PlaceEffects(List<Skyrim.EffectStandIns.Emitter> emitters, Placement placement, float scale, Cell cell)
     {
-        var m = System.Numerics.Matrix4x4.CreateRotationX(-placement.Rotation.X) * System.Numerics.Matrix4x4.CreateRotationY(-placement.Rotation.Y) * System.Numerics.Matrix4x4.CreateRotationZ(-placement.Rotation.Z);
+        var m = TamrielMerge.Skyrim.SkyrimRotation.Matrix(placement.Rotation);
         var pos = new System.Numerics.Vector3(placement.Position.X, placement.Position.Y, placement.Position.Z);
         foreach (var (at, effect, fxScale) in Skyrim.EffectStandIns.Pick(emitters, scale))
         {

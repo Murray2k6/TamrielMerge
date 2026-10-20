@@ -66,3 +66,38 @@ model making of its own:
   not the model maker's working files; `sprite-models --make` still makes new ones where TripoSR is set up.
 
 New models (the bat and imp to come) go the same way: their finished files in tools\, listed in the csproj.
+
+## Collision and placement
+
+User request (2026-10-20): "make a collision reader". **Skyrim/Meshes/CollisionReader.cs** reads a Skyrim SE model's
+own Havok collision as triangles in model space: each bhkCollisionObject's rigid body (bhkRigidBodyT's offset too) and
+its shapes through MOPP trees, lists and (convex) transform shapes down to compressed meshes, triangle strips, convex
+hulls, boxes, spheres and capsules. niflysharp gives no access to bhkCompressedMeshShapeData's chunk lists, so that
+block is read from the file's own bytes (the layout tools/ingame/cmsd.py reads). Over 400 of Skyrim.esm's static models
+(`collision-read --vanilla 400 [--surface] [--worst N]`): every shape read, 334 with collision, 105,483 triangles, the
+collision box within 16 units of the visible model's for 73.9% (the rest are Skyrim's own: invisible blockers above city
+walls and columns, background walls without collision).
+
+**Havok transforms.** A bhkTransformShape's (or phantom's) matrix is stored as the rotation's columns and then the
+translation, in Havok units; nifly's own Matrix4 * vector leaves the translation out (Blackreach's ceiling came out
+3,697 units too high). CollisionReader.HavokMatrix/HavokTransform read it as stored, and Oblivion's converter
+(ObMeshConverter) uses them too: of Oblivion's 117 models whose collision such a transform moves, the collision box now
+sits a median 1.2 units from the visible one (before: 6.6; 90%: 24.8, before 103.6) (`ob-collision-xf`).
+
+**Skyrim's rotation order.** A placed reference turns about the world's Z first, then Y, then X, each angle clockwise:
+`v * RotZ(-z) * RotY(-y) * RotX(-x)` (Skyrim/SkyrimRotation.cs, with the inverse, angles from a matrix). Measured with the
+collision reader (`rot-order-vanilla`): Skyrim.esm's 25,233 tilted interior statics placed by each of the twelve
+orders/signs, against the navmesh Bethesda built on them; of the 26,496 navmesh vertices the orders disagree on, Z-Y-X
+puts 45.7% on the collision, X-Y-Z (what this code used before) 23.1%; against Z-X-Y, 1,012 to 347. It is OpenMW's order
+for Morrowind and Oblivion's own (`ob-rot-order`: Oblivion.esm's 2,880 tilted interior statics against their pathgrid
+points; of the 1,273 points the orders disagree on, Z-Y-X 55.1%, X-Y-Z 37.3%; against Z-X-Y, 65 to 40), so both games'
+angles carry over unchanged. On Morrowind's test interiors (the shipwrecks, guard towers, Legge, Rimhull, Indarys) the
+navmesh built with it gives 35 of 38 load doors their door triangle (X-Y-Z: 27) and has 73 of 80 actors within 64 units
+(X-Y-Z: 64). Door triangles are now measured to each triangle's nearest point, not its middle (a hall's large floor
+triangles left Oblivion's TestingHall and warehouse doors, 28-46 units off, without one: now 2 of 2), and a floor
+anywhere along a door model's own height counts (its object bounds: Legge's dark door, 1,010 tall about its middle,
+stands 177 under its tunnel's floor): 36 of 38 there. `floor-near` lists what can be stood on around a point (each
+object's upward collision and the navmesh's heights); `navmesh-headroom` measures the room over a plugin's interior
+navmesh (Skyrim.esm: only 0.6% of its triangles have 64-128 units over them, the bulk 160 and more, so the 128-unit
+agent height stands). Every place that turns a reference (navmesh, distant LOD,
+the dungeon check, the scene renderer, Daggerfall's props and action objects, Redguard's objects) goes through it.

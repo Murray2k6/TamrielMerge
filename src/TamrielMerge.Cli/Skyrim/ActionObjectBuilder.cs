@@ -416,20 +416,15 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
 
     /// <summary>
     /// Euler angles for a Skyrim reference whose local-to-world rotation equals the Daggerfall transform's, after
-    /// swapping Unity's Y-up axes for Skyrim's Z-up. Skyrim angles turn clockwise and apply X, then Y, then Z about
-    /// world axes: R = Rz(-z) Ry(-y) Rx(-x) in counter-clockwise column-vector form.
+    /// swapping Unity's Y-up axes for Skyrim's Z-up (<see cref="SkyrimRotation"/> has Skyrim's order).
     /// </summary>
     public static Vector3 SkyrimAngles(Matrix4x4 m)
     {
-        // Row-vector Unity rotation -> column-vector Skyrim rotation: swap Y/Z rows and columns, then transpose.
+        // Row-vector Unity rotation -> row-vector Skyrim rotation: swap the Y/Z rows and columns.
         float[,] u = { { m.M11, m.M12, m.M13 }, { m.M21, m.M22, m.M23 }, { m.M31, m.M32, m.M33 } };
         int[] map = [0, 2, 1];
-        var r = new float[3, 3];
-        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) r[i, j] = u[map[j], map[i]];
-        float b = MathF.Asin(Math.Clamp(-r[2, 0], -1, 1));
-        float a = MathF.Atan2(r[2, 1], r[2, 2]);
-        float c = MathF.Atan2(r[1, 0], r[0, 0]);
-        return new Vector3(-a, -b, -c);
+        float S(int i, int j) => u[map[i], map[j]];
+        return SkyrimRotation.Angles(new Matrix4x4(S(0, 0), S(0, 1), S(0, 2), 0, S(1, 0), S(1, 1), S(1, 2), 0, S(2, 0), S(2, 1), S(2, 2), 0, 0, 0, 0, 1));
     }
 
     static Vector3 ToSkyrim(Vector3 df) => new(df.X * BlockMeshBuilder.Scale, df.Z * BlockMeshBuilder.Scale, df.Y * BlockMeshBuilder.Scale);

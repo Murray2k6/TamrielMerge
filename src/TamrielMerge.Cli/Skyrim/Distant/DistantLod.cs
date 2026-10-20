@@ -376,7 +376,7 @@ public static class DistantLod
                     int segment = level == 4 ? (cx - x0) * 4 + (cy - y0) : 0;
                     var rot = bases[p.Base].Tree
                         ? Matrix4x4.CreateRotationZ(-p.Rot.Z)
-                        : Matrix4x4.CreateRotationX(-p.Rot.X) * Matrix4x4.CreateRotationY(-p.Rot.Y) * Matrix4x4.CreateRotationZ(-p.Rot.Z);
+                        : TamrielMerge.Skyrim.SkyrimRotation.Matrix(p.Rot);
                     var m = rot * Matrix4x4.CreateScale(p.Scale);
                     var origin = new Vector3(x0 * 4096f, y0 * 4096f, 0);
                     foreach (var part in r.Parts)

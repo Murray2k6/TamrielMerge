@@ -104,14 +104,8 @@ public sealed class DfPropBuilder(SkyrimMod mod, ISkyrimModGetter skyrim, string
         return bases[id] = (copy.FormKey, furniture);
     }
 
-    /// <summary>A vector turned by Skyrim Euler angles (radians; clockwise, X then Y then Z about world axes).</summary>
-    static Vector3 Turn(Vector3 v, Vector3 a)
-    {
-        // Column-vector R = Rz(-z) Ry(-y) Rx(-x); System.Numerics' rotations are counter-clockwise for row vectors,
-        // so the same matrices applied in that order give it.
-        var r = Matrix4x4.CreateRotationX(-a.X) * Matrix4x4.CreateRotationY(-a.Y) * Matrix4x4.CreateRotationZ(-a.Z);
-        return Vector3.TransformNormal(v, r);
-    }
+    /// <summary>A vector turned by Skyrim reference angles (<see cref="SkyrimRotation"/>).</summary>
+    static Vector3 Turn(Vector3 v, Vector3 a) => Vector3.TransformNormal(v, SkyrimRotation.Matrix(a));
 
     static short C(float v) => (short)Math.Clamp(MathF.Round(v), short.MinValue, short.MaxValue);
 

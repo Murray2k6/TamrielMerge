@@ -23,25 +23,18 @@ public static class RgSpace
 
     /// <summary>
     /// A scene rotation (Vector3.Transform(v, rotation) turns model space into scene space) as Skyrim's reference
-    /// angles: Skyrim turns a model by v * RotX(-x) * RotY(-y) * RotZ(-z) (row vectors), so the matrix's rows are the
-    /// images of Skyrim's axes, from which the angles follow.
+    /// angles (<see cref="Skyrim.SkyrimRotation"/>): the rotation in Skyrim's axes as a row-vector matrix, whose rows are
+    /// the images of Skyrim's axes, from which the angles follow.
     /// </summary>
     public static Vector3 Euler(Matrix4x4 rotation)
     {
         Vector3 Row(Vector3 axis) => Dir(Vector3.Transform(FromDir(axis), rotation));
         var r0 = Row(Vector3.UnitX); var r1 = Row(Vector3.UnitY); var r2 = Row(Vector3.UnitZ);
-        float b = MathF.Asin(Math.Clamp(r0.Z, -1, 1));
-        float a, c;
-        if (MathF.Abs(MathF.Cos(b)) > 1e-4f) { a = MathF.Atan2(-r1.Z, r2.Z); c = MathF.Atan2(-r0.Y, r0.X); }
-        else { a = 0; c = MathF.Atan2(r1.X, r1.Y); }
-        return new Vector3(Wrap(a), Wrap(b), Wrap(c));
+        return Skyrim.SkyrimRotation.Angles(new Matrix4x4(r0.X, r0.Y, r0.Z, 0, r1.X, r1.Y, r1.Z, 0, r2.X, r2.Y, r2.Z, 0, 0, 0, 0, 1));
     }
 
-    static float Wrap(float r) { r %= MathF.Tau; return r < 0 ? r + MathF.Tau : r; }
-
     /// <summary>Skyrim's rotation for reference angles (row vectors), to check Euler.</summary>
-    public static Matrix4x4 SkyrimMatrix(Vector3 angles) =>
-        Matrix4x4.CreateRotationX(-angles.X) * Matrix4x4.CreateRotationY(-angles.Y) * Matrix4x4.CreateRotationZ(-angles.Z);
+    public static Matrix4x4 SkyrimMatrix(Vector3 angles) => Skyrim.SkyrimRotation.Matrix(angles);
 }
 
 /// <summary>

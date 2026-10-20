@@ -366,13 +366,12 @@ public sealed class SceneExporter
     }
 
     /// <summary>
-    /// A reference's placement as a row-major 4x4 matrix (column vectors). Bethesda's angles turn clockwise looking down
-    /// each axis, applied X, then Y, then Z.
+    /// A reference's placement as a row-major 4x4 matrix (column vectors), its angles as Skyrim applies them
+    /// (<see cref="SkyrimRotation"/>).
     /// </summary>
     static float[] Matrix(P3Float pos, P3Float rot, float scale)
     {
-        var m = Matrix4x4.CreateRotationX(-rot.X) * Matrix4x4.CreateRotationY(-rot.Y) * Matrix4x4.CreateRotationZ(-rot.Z);
-        // System.Numerics is row-vector (v * M): this is M = Rx * Ry * Rz applied as v*Rx*Ry*Rz, i.e. X first.
+        var m = SkyrimRotation.Matrix(rot);
         m *= Matrix4x4.CreateScale(scale);
         m.Translation = new Vector3(pos.X, pos.Y, pos.Z);
         // Transpose to column-vector, row-major for the renderer.

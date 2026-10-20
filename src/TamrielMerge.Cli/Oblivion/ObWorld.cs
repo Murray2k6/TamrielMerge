@@ -281,7 +281,7 @@ public sealed partial class ObPluginBuilder
         }
         if (triggerBase is null) { triggerBase = new Activator(mod) { EditorID = "TMObTriggerBox" }; mod.Activators.Add(triggerBase); }
         var pl = owner.Placement!;
-        var m = System.Numerics.Matrix4x4.CreateRotationX(-pl.Rotation.X) * System.Numerics.Matrix4x4.CreateRotationY(-pl.Rotation.Y) * System.Numerics.Matrix4x4.CreateRotationZ(-pl.Rotation.Z);
+        var m = TamrielMerge.Skyrim.SkyrimRotation.Matrix(pl.Rotation);
         var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
         foreach (var (lo, hi) in boxes)
         {
@@ -748,7 +748,7 @@ public sealed partial class ObPluginBuilder
         {
             if (p.Placement is not { } pl || !meshByBase.TryGetValue(p.Base.FormKey, out var mesh)) continue;
             float sc = p.Scale ?? 1;
-            var m = System.Numerics.Matrix4x4.CreateRotationX(-pl.Rotation.X) * System.Numerics.Matrix4x4.CreateRotationY(-pl.Rotation.Y) * System.Numerics.Matrix4x4.CreateRotationZ(-pl.Rotation.Z);
+            var m = TamrielMerge.Skyrim.SkyrimRotation.Matrix(pl.Rotation);
             var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
             bool turn = turnUntrusted && !Trusted(p.Base.FormKey, mesh);
             foreach (var t in mesh.Solid)
@@ -856,6 +856,11 @@ public sealed partial class ObPluginBuilder
             placed.TeleportDestination = new TeleportDestination { Door = partner.ToLink<IPlacedObjectGetter>(), Position = dest.Position, Rotation = dest.Rotation };
             linked++;
         }
+        // Doors linked here and any other without a door triangle get theirs now.
+        DoorTrianglesAdded = navmeshes?.AddMissingDoorTriangles(mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells)) ?? 0;
         return (linked, unlinked);
     }
+
+    /// <summary>Load doors given their door triangle after the navmeshes (<see cref="LinkDoors"/>).</summary>
+    public int DoorTrianglesAdded { get; private set; }
 }

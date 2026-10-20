@@ -18,7 +18,7 @@ public sealed partial class ObMeshConverter
     /// has no user version or export info.</summary>
     const string OlderHeader = "NetImmerse File Format, Version 10.0.1.0\n";
 
-    static bool IsOldNif(byte[] b) => b.Length > OldHeader.Length && Encoding.ASCII.GetString(b, 0, OldHeader.Length) is OldHeader or OlderHeader;
+    internal static bool IsOldNif(byte[] b) => b.Length > OldHeader.Length && Encoding.ASCII.GetString(b, 0, OldHeader.Length) is OldHeader or OlderHeader;
 
     sealed class OldReader(byte[] b)
     {

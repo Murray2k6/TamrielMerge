@@ -142,7 +142,7 @@ public static class DungeonCheck
     }
 
     static Matrix4x4 Placement(P3Float rot, float scale) =>
-        Matrix4x4.CreateRotationX(-rot.X) * Matrix4x4.CreateRotationY(-rot.Y) * Matrix4x4.CreateRotationZ(-rot.Z) * Matrix4x4.CreateScale(scale);
+        TamrielMerge.Skyrim.SkyrimRotation.Matrix(rot) * Matrix4x4.CreateScale(scale);
 
     sealed class Grid
     {
@@ -563,7 +563,7 @@ public static class DungeonCheck
     }
 
     /// <summary>Files by Data-relative path: the converted output first, then Skyrim's Data and archives.</summary>
-    sealed class FileFinder(string skyrimData, string dir)
+    internal sealed class FileFinder(string skyrimData, string dir)
     {
         readonly Dictionary<string, Mutagen.Bethesda.Archives.IArchiveFile> archived = Load(skyrimData);
         static Dictionary<string, Mutagen.Bethesda.Archives.IArchiveFile> Load(string data)

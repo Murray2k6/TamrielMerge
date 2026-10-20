@@ -395,10 +395,9 @@ public sealed partial class MwPluginBuilder
 
     readonly Dictionary<string, Cell> interiorsByName = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>A model-space point placed by a reference: scaled, rotated (Bethesda rotations are clockwise,
-    /// applied X, Y, then Z) and moved.</summary>
-    static Vector3 ToWorld(Vector3 v, Tes3Ref r) =>
-        Vector3.Transform(v * r.Scale, Matrix4x4.CreateRotationX(-r.Rotation.X) * Matrix4x4.CreateRotationY(-r.Rotation.Y) * Matrix4x4.CreateRotationZ(-r.Rotation.Z)) + r.Position;
+    /// <summary>A model-space point placed by a reference: scaled, rotated (<see cref="Skyrim.SkyrimRotation"/>, which
+    /// Morrowind's angles share) and moved.</summary>
+    static Vector3 ToWorld(Vector3 v, Tes3Ref r) => Vector3.Transform(v * r.Scale, Skyrim.SkyrimRotation.Matrix(r.Rotation)) + r.Position;
 
     /// <summary>
     /// Where Skyrim's player can stand near a Morrowind position: on the floor it would land on (the highest
@@ -1038,8 +1037,13 @@ public sealed partial class MwPluginBuilder
             };
             linked++;
         }
+        // Doors placed here (the backs of one-way doors) and any other without one get their door triangle now.
+        DoorTrianglesAdded = navmeshes?.AddMissingDoorTriangles(mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells)) ?? 0;
         return (linked, unlinked);
     }
+
+    /// <summary>Load doors given their door triangle after the navmeshes (<see cref="LinkDoors"/>).</summary>
+    public int DoorTrianglesAdded { get; private set; }
 
     void AddInteriorCell(Cell cell)
     {

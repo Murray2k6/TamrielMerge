@@ -326,12 +326,8 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         {
             if (hdr.GetBlockTypeStringById(i) != "bhkSPCollisionObject") continue;
             if (hdr.GetBlockById(i) is not bhkNiCollisionObject col || hdr.GetBlockById(col.bodyRef.index) is not bhkSimpleShapePhantom phantom) continue;
-            var m = phantom.transform;
-            V3 ToNode(V3 p)
-            {
-                var r = m.opMult(new nifly.Vector3(p.X / HavokScale, p.Y / HavokScale, p.Z / HavokScale));
-                return new V3(r.x, r.y, r.z) * HavokScale;
-            }
+            var m = Skyrim.Meshes.CollisionReader.HavokMatrix(phantom.transform);
+            V3 ToNode(V3 p) => Skyrim.Meshes.CollisionReader.HavokTransform(m, p, HavokScale);
             var tris = new List<(uint, V3[])>();
             var pending = new List<(uint Data, Func<V3, V3> Xf, V3 Scale, uint Target)>();
             if (!Shape(nif, hdr, phantom.shapeRef.index, ToNode, col.targetRef.index, tris, pending)) continue;
@@ -341,6 +337,12 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         }
         return boxes;
     }
+
+    /// <summary>The solid collision's triangles in model space (null when a shape kind isn't handled).</summary>
+    internal static List<V3[]>? SolidCollisionTriangles(NifFile nif) => HavokTriangles(nif)?.Select(t => t.Tri.Select(p => ToModel(nif, t.Target, p)).ToArray()).ToList();
+
+    /// <summary>The solid collision's triangle corners in model space (null when a shape kind isn't handled).</summary>
+    internal static List<V3>? SolidCollisionPoints(NifFile nif) => HavokTriangles(nif)?.SelectMany(t => t.Tri.Select(p => ToModel(nif, t.Target, p))).ToList();
 
     /// <summary>A point in a node's space (a collision target) in model space.</summary>
     static V3 ToModel(NifFile nif, uint node, V3 p)
@@ -416,13 +418,8 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             case "bhkTransformShape" or "bhkConvexTransformShape":
             {
                 var t = (bhkTransformShape)block;
-                var m = t.xform;   // in Havok units
-                V3 Child(V3 p)
-                {
-                    var r = m.opMult(new nifly.Vector3(p.X / HavokScale, p.Y / HavokScale, p.Z / HavokScale));
-                    return xf(new V3(r.x, r.y, r.z) * HavokScale);
-                }
-                return Shape(nif, hdr, t.shapeRef.index, Child, target, output, pending);
+                var m = Skyrim.Meshes.CollisionReader.HavokMatrix(t.xform);
+                return Shape(nif, hdr, t.shapeRef.index, p => xf(Skyrim.Meshes.CollisionReader.HavokTransform(m, p, HavokScale)), target, output, pending);
             }
             case "bhkBoxShape":
             {
