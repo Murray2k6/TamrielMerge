@@ -10,6 +10,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The garbage collector compacts the large object heap when it is fragmented (2026-10-19, Morrowind's 5,810 exterior
+         navmeshes: Recast's per-cell arrays left it 1.3 of 2.2 GB fragmented at 500 cells, 2.4 GB live, and the build
+         went on to 16 GB, under 5 GB free). -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="DotRecast.Recast" Version="2026.3.1" />
     <!-- LZ4 for compressed archives (BsaWriter.Pack); Mutagen reads them with the same library. -->
     <PackageReference Include="K4os.Compression.LZ4.Streams" Version="1.3.8" />

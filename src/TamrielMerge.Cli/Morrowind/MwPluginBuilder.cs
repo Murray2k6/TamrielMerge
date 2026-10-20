@@ -690,12 +690,90 @@ public sealed partial class MwPluginBuilder
         exteriorCells = cells;   // GetPCCell's exterior cells
         AddRegions(skyrim, ws, cells);
 
+        // What scripts take away for good is no obstacle to the navmesh: the state it is in for nearly all of play.
+        var gone = DisabledForGood();
+        int goneRefs = 0;
+        var goneIds = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var list in solids.Values)
+            goneRefs += list.RemoveAll(s =>
+            {
+                if (!gone.Contains(s.Ref.BaseId)) return false;
+                goneIds[s.Ref.BaseId] = goneIds.GetValueOrDefault(s.Ref.BaseId) + 1;
+                return true;
+            });
+        ExteriorGoneForGood = goneRefs;
+        ExteriorGoneIds = string.Join(", ", goneIds.OrderByDescending(g => g.Value).Select(g => $"{g.Key} ({g.Value})"));
+
+        // TM_MW_WINDING=1 (dev aid): how the placed models' collision is wound, by model and by reference: every shared
+        // edge run oppositely (closed, wound outward or inside out; open, its top facing up or down) or some the same way.
+        if (Environment.GetEnvironmentVariable("TM_MW_WINDING") == "1")
+        {
+            var byModel = solids.Values.SelectMany(l => l).GroupBy(s => s.Mesh.Path).ToList();
+            var classes = new Dictionary<string, (int Models, int Refs, long Tris)>();
+            var mixedList = new List<(string Path, int Refs, string Note)>();
+            foreach (var g in byModel)
+            {
+                var w = Skyrim.Navmesh.NavmeshBuilder.WindingOf(g.First().Mesh.Solid);
+                string kind = w.Inconsistent > 0 ? "mixed" : w.Open == 0 ? (w.Volume >= 0 ? "closed, outward" : "closed, inside out") : (w.TopUp >= 0 ? "open, top facing up" : "open, top facing down");
+                var c = classes.GetValueOrDefault(kind);
+                classes[kind] = (c.Models + 1, c.Refs + g.Count(), c.Tris + (long)w.Count * g.Count());
+                if (kind != "closed, outward" && kind != "open, top facing up") mixedList.Add((g.Key, g.Count(), $"{kind}: {Skyrim.Navmesh.NavmeshBuilder.Winding(g.First().Mesh.Solid)}"));
+            }
+            foreach (var (kind, c) in classes.OrderByDescending(k => k.Value.Refs))
+                Console.WriteLine($"  exterior winding: {kind}: {c.Models} models, {c.Refs} references, {c.Tris:N0} placed triangles");
+            foreach (var m in mixedList.OrderByDescending(m => m.Refs).Take(15)) Console.WriteLine($"    {m.Path} x{m.Refs}: {m.Note}");
+        }
+
+        // TM_MW_PROBE=exterior,x,y[;x,y...] (dev aid): every placed object's collision triangle over those points, its
+        // height there, which way it faces, its corners and the object it is of.
+        if (Environment.GetEnvironmentVariable("TM_MW_PROBE") is { } exteriorProbe && exteriorProbe.StartsWith("exterior,"))
+            foreach (var point in exteriorProbe["exterior,".Length..].Split(';'))
+            {
+                if (point.Split(',') is not [var epx, var epy] || !float.TryParse(epx, out var eqx) || !float.TryParse(epy, out var eqy)) continue;
+                int pcx = (int)MathF.Floor(eqx / 4096), pcy = (int)MathF.Floor(eqy / 4096);
+                for (int ndy = -1; ndy <= 1; ndy++)
+                    for (int ndx = -1; ndx <= 1; ndx++)
+                        if (solids.TryGetValue((pcx + ndx, pcy + ndy), out var probed))
+                            foreach (var s in probed)
+                                foreach (var w in s.Mesh.Solid.Select(t => t.Select(v => ToWorld(v, s.Ref)).ToArray()))
+                                {
+                                    float d = (w[1].Y - w[2].Y) * (w[0].X - w[2].X) + (w[2].X - w[1].X) * (w[0].Y - w[2].Y);
+                                    if (MathF.Abs(d) < 1e-6f) continue;
+                                    float a = ((w[1].Y - w[2].Y) * (eqx - w[2].X) + (w[2].X - w[1].X) * (eqy - w[2].Y)) / d, bb = ((w[2].Y - w[0].Y) * (eqx - w[2].X) + (w[0].X - w[2].X) * (eqy - w[2].Y)) / d;
+                                    if (a < 0 || bb < 0 || a + bb > 1) continue;
+                                    Console.WriteLine($"  probe {eqx},{eqy}: object {s.Ref.BaseId} {world.Model(s.Ref.BaseId)} at {s.Ref.Position} (collision node: {s.Mesh.FromCollisionNode}): height {a * w[0].Z + bb * w[1].Z + (1 - a - bb) * w[2].Z:F0}, " +
+                                        $"normal z {Vector3.Normalize(Vector3.Cross(w[1] - w[0], w[2] - w[0])).Z:F2}, corners {string.Join(" ", w.Select(v => $"({v.X:F0},{v.Y:F0},{v.Z:F0})"))}");
+                                }
+            }
+
         // Navmeshes outdoors: Morrowind's sea level is 0.
         navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod);
+        // Faces as wound where a model's are wound one way, outward (2026-10-19, TM_MW_WINDING over the 1,350 models placed
+        // outdoors: 1,338 of them, 99,644 of 99,846 references, every shared edge run oppositely, closed ones wound outward
+        // and open ones' tops facing up); turned up, each face, only where a model's winding is mixed or its open shell's
+        // top faces down. Every face turned up, the navmesh stood on undersides: 0.17% of it, the inside of Vivec's
+        // cantons (ex_vivec_c_02 over 29356,-77877: a face down at 2669 under its roof at 3008, the navmesh at 2682).
+        var trusted = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        bool Trusted(MwMeshConverter.Result mesh)
+        {
+            lock (trusted)
+            {
+                if (trusted.TryGetValue(mesh.Path, out bool known)) return known;
+                var w = Skyrim.Navmesh.NavmeshBuilder.WindingOf(mesh.Solid);
+                return trusted[mesh.Path] = w.Inconsistent == 0 && (w.Open == 0 ? w.Volume >= 0 : w.TopUp >= 0);
+            }
+        }
+        Vector3[] Placed(Vector3[] t, Tes3Ref r, bool asWound)
+        {
+            var w = t.Select(v => ToWorld(v, r)).ToArray();
+            return asWound || Vector3.Cross(w[1] - w[0], w[2] - w[0]).Z >= 0 ? w : [w[0], w[2], w[1]];
+        }
         var (navCount, navTriangles) = navmeshes.BuildExteriorCells(ws, cells,
-            (x, y) => solids.TryGetValue((x, y), out var list) ? list.SelectMany(s => s.Mesh.Solid.Select(t => t.Select(v => ToWorld(v, s.Ref)).ToArray())) : [],
+            (x, y) => solids.TryGetValue((x, y), out var list) ? list.SelectMany(s => { bool asWound = Trusted(s.Mesh); return s.Mesh.Solid.Select(t => Placed(t, s.Ref, asWound)); }) : [],
             c => c.Flags.HasFlag(Cell.Flag.HasWater) ? 0f : null,
-            top.Persistent.OfType<PlacedObject>().Where(p => !scriptPersistent.Contains(p)).Cast<IPlacedObjectGetter>().ToList(), Problems);
+            top.Persistent.OfType<PlacedObject>().Where(p => !scriptPersistent.Contains(p)).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true);
+        ExteriorWoundTrusted = trusted.Count(t => t.Value);
+        ExteriorWoundTurned = trusted.Count(t => !t.Value);
         ExteriorNavmeshes += navCount;
         NavmeshTriangles += navTriangles;
         ExteriorEdgeLinks = navmeshes.LinkExteriorEdges();
@@ -709,6 +787,71 @@ public sealed partial class MwPluginBuilder
     }
 
     public int TerrainLodChunks { get; private set; }
+
+    /// <summary>Exterior references left out of the navmeshes as taken away for good (<see cref="DisabledForGood"/>).</summary>
+    public int ExteriorGoneForGood { get; private set; }
+
+    /// <summary>Those references' objects, each with its count, for the build's log.</summary>
+    public string ExteriorGoneIds { get; private set; } = "";
+
+    /// <summary>Models placed outdoors whose collision went into the navmeshes as wound, and those turned up.</summary>
+    public int ExteriorWoundTrusted { get; private set; }
+    public int ExteriorWoundTurned { get; private set; }
+
+    /// <summary>
+    /// The objects the character's making takes away and nothing brings back, by ID: a CharGen script's
+    /// <c>"id"-&gt;Disable</c>, and the objects whose own CharGen script disables them (a bare <c>Disable</c>), less those
+    /// any script or dialogue result enables. Their references are there only until then (2026-10-19: the CharGen script disables
+    /// "CharGen Boat", the prison ship at Seyda Neen, when the character is made; in the navmesh it stood over the dock
+    /// for good, and Siege at Firemoth's longboat inside its hull had none).
+    /// </summary>
+    HashSet<string> DisabledForGood()
+    {
+        var disabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var enabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var targeted = new System.Text.RegularExpressions.Regex(@"(?:""([^""]+)""|([A-Za-z0-9_]+))\s*->\s*(disable|enable)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var bare = new System.Text.RegularExpressions.Regex(@"^\s*(disable|enable)\s*(;.*)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
+        // Disables counted only from the character's making, the CharGen scripts every game runs first; what other scripts
+        // and dialogue take away is there for much of play (2026-10-19, counted from every script: the Ghostfence,
+        // ex_gg_fence_*, standing until the main quest ends; Raven Rock's colony trees and rocks, cleared as it is built;
+        // Solstheim's snow doors), so it stays an obstacle. Enables are counted from everything.
+        static bool AtStart(string script) => script.StartsWith("CharGen", StringComparison.OrdinalIgnoreCase);
+        void Scan(string text, bool start)
+        {
+            foreach (System.Text.RegularExpressions.Match m in targeted.Matches(text))
+            {
+                bool disable = m.Groups[3].Value.Equals("disable", StringComparison.OrdinalIgnoreCase);
+                if (disable && !start) continue;
+                (disable ? disabled : enabled).Add(m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value);
+            }
+        }
+        // Scripts that disable or enable the object running them.
+        var selfDisabling = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var selfEnabling = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in world.Objects.Values.Where(o => o.Type == "SCPT"))
+        {
+            string text = s.Str("SCTX") ?? "";
+            Scan(text, AtStart(s.Id));
+            foreach (System.Text.RegularExpressions.Match m in bare.Matches(text))
+            {
+                bool disable = m.Groups[1].Value.Equals("disable", StringComparison.OrdinalIgnoreCase);
+                if (disable && !AtStart(s.Id)) continue;
+                (disable ? selfDisabling : selfEnabling).Add(s.Id);
+            }
+        }
+        // Not kept in dialogueData: its being there means the dialogue is built (BuildBarks).
+        var dialogue = dialogueData ?? MwDialogue.Load(world.Plugins);
+        foreach (var info in dialogue.Topics.Values.SelectMany(t => t.Infos))
+            if (info.Result is { } result) Scan(result, false);
+        foreach (var o in world.Objects.Values)
+            if (o.Str("SCRI") is { Length: > 0 } script)
+            {
+                if (selfDisabling.Contains(script)) disabled.Add(o.Id);
+                if (selfEnabling.Contains(script)) enabled.Add(o.Id);
+            }
+        disabled.ExceptWith(enabled);
+        return disabled;
+    }
 
     public int ExteriorNavmeshes { get; private set; }
     public int ExteriorEdgeLinks { get; private set; }

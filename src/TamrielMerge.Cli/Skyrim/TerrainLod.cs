@@ -98,7 +98,8 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
                 for (int y = ey0; y <= ey1; y += level)
                     if (AnyIn(x, y, level)) jobs.Add((level, x, y));
         var errors = new System.Collections.Concurrent.ConcurrentBag<string>();
-        Parallel.ForEach(jobs, job =>
+        // One job a core (unbounded, the thread pool adds threads to long iterations, each with its memory: NavmeshBuilder).
+        Parallel.ForEach(jobs, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, job =>
         {
             try { WriteChunk(world, job.L, job.X, job.Y, data, defaultHeight); }
             catch (Exception e) { errors.Add($"terrain LOD {world}.{job.L}.{job.X}.{job.Y}: {e.Message}"); }

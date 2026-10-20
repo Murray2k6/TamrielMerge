@@ -1,3 +1,4 @@
+using DotRecast.Core;
 using DotRecast.Core.Numerics;
 using DotRecast.Recast;
 using DotRecast.Recast.Geom;
@@ -90,11 +91,15 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// which joins surfaces closer than a voxel. DotRecast prints its warnings straight to the console, so each try's
     /// are kept (<see cref="RecastOutput"/>) and printed only for a mesh no try could make whole.
     /// </summary>
-    static (RcPolyMesh Mesh, RcPolyMeshDetail? Detail)? BuildMesh(IRcInputGeomProvider geom, Func<RcPartition, float, float, RcBuilderConfig> config)
+    static (RcPolyMesh Mesh, RcPolyMeshDetail? Detail)? BuildMesh(IRcInputGeomProvider geom, Func<RcPartition, float, float, RcBuilderConfig> config, Func<float, float, float?>? land = null, Lazy<WoundInput>? wound = null,
+        float margin = 0)
     {
         (RcPolyMesh Mesh, RcPolyMeshDetail? Detail)? best = null;
         FloorCheck bestFloor = default;
-        int bestBad = int.MaxValue;
+        // The spans each voxel size's tries make unwalkable (BuildOverLand), found by the first try of that size.
+        var marks = new Dictionary<float, HashSet<long>>();
+        int bestBad = int.MaxValue, bestOverlapping = 0, bestTry = -1;
+        double bestCovered = 0;
         string bestWarnings = "";
         Exception? error = null;
         for (int t = 0; t < Tries.Length; t++)
@@ -102,40 +107,172 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             var (partition, coarse, outline) = Tries[t];
             try
             {
-                var r = RecastOutput.Keep(() => new RcBuilder().Build(geom, config(partition, coarse, outline), true), out var warnings);
+                var bc = config(partition, coarse, outline);
+                var r = RecastOutput.Keep(() => land is null && wound is null ? new RcBuilder().Build(geom, bc, true) : BuildOverLand(geom, bc, land, wound, marks), out var warnings);
                 if (r.Mesh is null || r.ContourSet is null || r.CompactHeightfield is null) { if (t == 0) return r.Mesh is null ? null : (r.Mesh, r.MeshDetail); continue; }
                 int overlapping = Overlapping(r.CompactHeightfield);
                 if (overlapping > 0) warnings += $"{overlapping} regions lie over themselves ({partition}){Environment.NewLine}";
                 int bad = RecastOutput.Bad(warnings) + overlapping;
-                var floor = UncoveredFloor(r.CompactHeightfield, r.ContourSet, r.Mesh, r.MeshDetail);
+                // Only the floor the mesh is kept for: not the margin round an exterior cell (clipped off).
+                var floor = UncoveredFloor(r.CompactHeightfield, r.ContourSet, r.Mesh, r.MeshDetail, (int)MathF.Round(margin / r.CompactHeightfield.cs));
                 if (Trace)
                 {
                     Console.WriteLine($"  recast try {t} ({partition}, voxels x{coarse}, outline x{outline}) at {Where(r.Mesh)}: {bad} bad ({overlapping} over themselves); {floor}");
                     if (floor.None > 0) Console.Write(RegionDetail(r.CompactHeightfield, r.ContourSet, r.Mesh, floor.Where));
                 }
-                if (bad == 0 && floor.None == 0)
+                // Floor left without navmesh: under no polygon, in a region Recast made no outline for, or with only
+                // another floor's polygon over or under it (2026-10-19, nine Bitter Coast cells of Morrowind: every one
+                // of those was in a region with no outline, 0.05% of the floor, pockets on rock tops and under overhangs).
+                long lost = floor.None + floor.Dropped + floor.Far;
+                // A try in the config's own voxels with nothing wrong is the mesh. A coarser one is never taken as whole
+                // on its own count: its voxels are four times the area, and its outline loses the narrow floor the agent's
+                // radius takes off (the same nine cells: one whole coarse covered 914 spans of 32 units, 0.94 million
+                // square units, where the fine tries covered 4,810 of 16, 1.23 million, short only one span).
+                if (bad == 0 && lost == 0 && coarse == 1)
                 {
                     if (t > 0) Interlocked.Increment(ref retriangulated);
                     Interlocked.Increment(ref tryWins[t]);
                     Record(floor, r.Mesh);
                     return (r.Mesh, r.MeshDetail);
                 }
-                if (best is null || floor.None < bestFloor.None || (floor.None == bestFloor.None && bad < bestBad))
-                    (bestFloor, bestBad, best, bestWarnings) = (floor, bad, (r.Mesh, r.MeshDetail), warnings);
+                // Otherwise the best of the tries: none of its regions over themselves, then the most floor covered (in
+                // square units), then the fewest warnings.
+                double covered = floor.On * (double)r.CompactHeightfield.cs * r.CompactHeightfield.cs;
+                if (best is null || (overlapping == 0 && bestOverlapping > 0) || ((overlapping == 0) == (bestOverlapping == 0) && (covered > bestCovered || (covered == bestCovered && bad < bestBad))))
+                    (bestFloor, bestBad, best, bestWarnings, bestOverlapping, bestCovered, bestTry) = (floor, bad, (r.Mesh, r.MeshDetail), warnings, overlapping, covered, t);
             }
             catch (Exception e) { error ??= e; }
         }
         if (best is null) throw error ?? new InvalidOperationException("Recast made no mesh");
-        Interlocked.Increment(ref untriangulated);
         Record(bestFloor, best.Value.Mesh);
-        Console.Write($"Recast, still after every retry at {Where(best.Value.Mesh)} ({bestFloor.None} walkable spans with no polygon): {bestFloor}{Environment.NewLine}{bestWarnings}");
+        long bestLost = bestFloor.None + bestFloor.Dropped + bestFloor.Far;
+        // Whole only in coarser voxels, where no finer try could be made at all (one threw) or covered as much.
+        if (bestLost == 0 && bestBad == 0)
+        {
+            Interlocked.Increment(ref retriangulated);
+            Interlocked.Increment(ref tryWins[bestTry]);
+            return best;
+        }
+        Interlocked.Increment(ref untriangulated);
+        var (bp, bcoarse, boutline) = Tries[bestTry];
+        Console.Write($"Recast, still after every retry at {Where(best.Value.Mesh)} ({bestLost} walkable spans with no polygon at their height; kept try {bestTry}, {bp} voxels x{bcoarse} outline x{boutline}): {bestFloor}" +
+            $"{(bestFloor.DroppedAt.Length > 0 ? $"; in regions without an outline at {bestFloor.DroppedAt}" : "")}{(bestFloor.FarAt.Length > 0 ? $"; far at {bestFloor.FarAt}" : "")}{Environment.NewLine}{bestWarnings}");
         return best;
     }
+
+    /// <summary>
+    /// Recast's build with every voxel span whose top lies more than <see cref="BuriedDepth"/> under the land at its
+    /// column (<paramref name="land"/>: Skyrim x, y to the land's height there, null where there is none) made
+    /// unwalkable before the heightfield is filtered. The land is a height field, so nothing under it can be walked to;
+    /// a placed object's triangle partly under it kept its buried part as floor (2026-10-19, Morrowind at -37376,-69952:
+    /// a Velothi tomb entrance's base plate, 760 units across at 227, one corner where the land dips to 304, became
+    /// navmesh 380 units under the land at 608; leaving out only triangles buried at all three corners left 0.39% of
+    /// Morrowind's exterior navmesh more than 128 under the land). The spans stay as solid, so what stands on them
+    /// keeps its headroom as it was.
+    /// With <paramref name="wound"/> (the input as wound), a span shut inside something is made unwalkable too
+    /// (<see cref="WoundInput.Shut"/>: from 64 units over it, the ray up and four level ones all meet faces from
+    /// behind). Exteriors' faces are all turned up for Recast (their winding is either way), so the land inside an
+    /// open-bottomed shell was floor (2026-10-19, measured over each navmesh against its input as wound, Morrowind's
+    /// Bitter Coast: 0.74% of the navmesh shut in, the land inside the Bitter Coast's rocks, terrain_rock_bc_18 over
+    /// -37952,-71232 with its top 224 units over the land and no bottom). Only a span with another above it in its
+    /// column can be shut in, so the rays are cast for those alone.
+    /// </summary>
+    /// <remarks>The spans made unwalkable depend only on the voxels, the same for every try of one voxel size, so they
+    /// are found once a size (<paramref name="marks"/>: by cell size, each span as column and top) and the later
+    /// tries take them.</remarks>
+    static RcBuilderResult BuildOverLand(IRcInputGeomProvider geom, RcBuilderConfig bc, Func<float, float, float?>? land, Lazy<WoundInput>? wound,
+        Dictionary<float, HashSet<long>> marks)
+    {
+        var ctx = new RcContext();
+        var solid = RcVoxelizations.BuildSolidHeightfield(ctx, geom, bc);
+        static long Key(int x, int z, int top) => x | ((long)z << 16) | ((long)top << 32);
+        var marking = System.Diagnostics.Stopwatch.StartNew();
+        if (marks.TryGetValue(solid.cs, out var known))
+        {
+            for (int z = 0; z < solid.height; z++)
+                for (int x = 0; x < solid.width; x++)
+                    for (var s = solid.spans[x + z * solid.width]; s is not null; s = s.next)
+                        if (s.area != RcRecast.RC_NULL_AREA && known.Contains(Key(x, z, s.smax))) s.area = RcRecast.RC_NULL_AREA;
+        }
+        else
+        {
+            known = marks[solid.cs] = [];
+            long cut = 0, shutIn = 0, tested = 0;
+            for (int z = 0; z < solid.height; z++)
+                for (int x = 0; x < solid.width; x++)
+                {
+                    if (solid.spans[x + z * solid.width] is not { } first) continue;
+                    // Recast's z is Skyrim's -y.
+                    float wx = solid.bmin.X + (x + 0.5f) * solid.cs, wy = -(solid.bmin.Z + (z + 0.5f) * solid.cs);
+                    float? ground = land?.Invoke(wx, wy);
+                    for (var s = first; s is not null; s = s.next)
+                    {
+                        if (s.area == RcRecast.RC_NULL_AREA) continue;
+                        float top = solid.bmin.Y + s.smax * solid.ch;
+                        if (ground is { } g && top < g - BuriedDepth) { s.area = RcRecast.RC_NULL_AREA; cut++; known.Add(Key(x, z, s.smax)); }
+                        else if (wound is not null && s.next is not null)
+                        {
+                            tested++;
+                            if (wound.Value.Shut(new Vector3(wx, wy, top))) { s.area = RcRecast.RC_NULL_AREA; shutIn++; known.Add(Key(x, z, s.smax)); }
+                        }
+                    }
+                }
+            // TM_NAV_MARKS=x,y (dev aid): that column's spans, the land there, and what each shut-in ray met.
+            if (Environment.GetEnvironmentVariable("TM_NAV_MARKS")?.Split(',') is [var mxs, var mys] && float.TryParse(mxs, out var mx) && float.TryParse(mys, out var my))
+            {
+                int qx = (int)MathF.Floor((mx - solid.bmin.X) / solid.cs), qz = (int)MathF.Floor((-my - solid.bmin.Z) / solid.cs);
+                if (qx >= 0 && qz >= 0 && qx < solid.width && qz < solid.height)
+                {
+                    float wx = solid.bmin.X + (qx + 0.5f) * solid.cs, wy = -(solid.bmin.Z + (qz + 0.5f) * solid.cs);
+                    var sb = new StringBuilder($"  marks at {wx:F0},{wy:F0} (voxels of {solid.cs}): land {land?.Invoke(wx, wy)?.ToString("F0") ?? "none"};");
+                    for (var s = solid.spans[qx + qz * solid.width]; s is not null; s = s.next)
+                    {
+                        float top = solid.bmin.Y + s.smax * solid.ch;
+                        sb.Append($" span {solid.bmin.Y + s.smin * solid.ch:F0}-{top:F0} area {s.area}{(known.Contains(Key(qx, qz, s.smax)) ? " made unwalkable" : "")}");
+                        if (wound is not null && s.next is not null)
+                        {
+                            var o = new Vector3(wx, wy, top + 64);
+                            string Ray(Vector3 d) => wound.Value.Cast(o, d, 4096) is { } h ? $"{h.T:F0}{(h.Back ? " back" : " front")}" : "none";
+                            sb.Append($" (rays from {top + 64:F0}: up {Ray(Vector3.UnitZ)}, east {Ray(Vector3.UnitX)}, west {Ray(-Vector3.UnitX)}, north {Ray(Vector3.UnitY)}, south {Ray(-Vector3.UnitY)})");
+                        }
+                        sb.Append(';');
+                    }
+                    Console.WriteLine(sb.ToString());
+                }
+            }
+            Interlocked.Add(ref buriedSpans, cut);
+            Interlocked.Add(ref shutSpans, shutIn);
+            Interlocked.Add(ref shutTested, tested);
+            if (wound is { IsValueCreated: true }) wound.Value.Count();
+        }
+        Interlocked.Add(ref markingTicks, marking.ElapsedTicks);
+        var recast = System.Diagnostics.Stopwatch.StartNew();
+        var built = new RcBuilder().Build(ctx, bc.tileX, bc.tileZ, geom, bc.cfg, solid, true);
+        Interlocked.Add(ref recastTicks, recast.ElapsedTicks);
+        return built;
+    }
+
+    /// <summary>Spans tested for being shut in, and the time (all threads) spent marking spans and in Recast.</summary>
+    static long shutTested, markingTicks, recastTicks;
+
+    /// <summary>For the build's log: the shut-in test's work and where the time went.</summary>
+    public static string MarkingSummary =>
+        $"under-land and shut-in marking: {Interlocked.Read(ref shutTested):N0} spans tested, {WoundInput.Rays:N0} rays, {WoundInput.Tests:N0} triangles tested; " +
+        $"{Interlocked.Read(ref markingTicks) / (double)System.Diagnostics.Stopwatch.Frequency:F0} s marking, {Interlocked.Read(ref recastTicks) / (double)System.Diagnostics.Stopwatch.Frequency:F0} s in Recast (all threads)";
+
+    /// <summary>Walkable voxel spans made unwalkable as under the land (<see cref="BuildOverLand"/>), once a voxel size.</summary>
+    public static long BuriedSpans => Interlocked.Read(ref buriedSpans);
+    static long buriedSpans;
+
+    /// <summary>Walkable voxel spans made unwalkable as shut inside something (<see cref="BuildOverLand"/>), once a voxel
+    /// size.</summary>
+    public static long ShutSpans => Interlocked.Read(ref shutSpans);
+    static long shutSpans;
 
     /// <summary>Every kept mesh's floor check added up, and the meshes with the most floor without navmesh and the most
     /// far from it.</summary>
     static FloorCheck floorTotal;
-    static readonly List<(long Count, string Where)> worstNone = [], worstFar = [];
+    static readonly List<(long Count, string Where)> worstNone = [], worstFar = [], worstDropped = [], worstOff = [];
     static readonly object FloorGate = new();
 
     static void Record(FloorCheck floor, RcPolyMesh mesh)
@@ -144,7 +281,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         {
             floorTotal += floor;
             if (floor.None > 0) Keep(worstNone, (floor.None, Where(mesh)));
-            if (floor.Far > 0) Keep(worstFar, (floor.Far, $"{Where(mesh)} of {floor.Walkable}"));
+            if (floor.Off > 0) Keep(worstOff, (floor.Off, $"{Where(mesh)} (e.g. {floor.OffAt})"));
+            if (floor.Dropped > 0) Keep(worstDropped, (floor.Dropped, $"{Where(mesh)} (e.g. {floor.DroppedAt})"));
+            if (floor.Far > 0) Keep(worstFar, (floor.Far, $"{Where(mesh)} of {floor.Walkable} (e.g. {floor.FarAt})"));
         }
         static void Keep(List<(long Count, string Where)> list, (long, string) item)
         {
@@ -163,11 +302,15 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             {
                 var f = floorTotal;
                 string Pct(long n) => f.Walkable > 0 ? $"{100.0 * n / f.Walkable:F2}%" : "0%";
-                return $"navmesh over the floor ({Interlocked.Read(ref trianglesMade):N0} triangles made, {BuriedLeftOut:N0} buried input triangles left out): {f.Walkable:N0} walkable spans; on a polygon {Pct(f.On)}, off it by up to the agent's height {Pct(f.Off)}, " +
-                    $"further {Pct(f.Far)}, under no polygon {f.None:N0} ({Pct(f.None)}), in regions too small for Recast to outline {f.Dropped:N0} ({Pct(f.Dropped)}); " +
+                return $"navmesh over the floor ({Interlocked.Read(ref trianglesMade):N0} triangles made, {BuriedLeftOut:N0} buried input triangles left out, {BuriedSpans:N0} voxel spans under the land and {ShutSpans:N0} shut inside something made unwalkable): {f.Walkable:N0} walkable spans; on a polygon {Pct(f.On)}, off it by up to the agent's height {Pct(f.Off)} ({f.Off:N0}), " +
+                    $"further {Pct(f.Far)} ({f.Far:N0}), under no polygon {f.None:N0} ({Pct(f.None)}), in regions too small for Recast to outline {f.Dropped:N0} ({Pct(f.Dropped)}); " +
                     $"polygons whose detail triangles fall short of them {f.LostPolygons:N0} ({f.LostArea:N0} voxels)" +
                     (worstNone.Count > 0 ? $"; most without: {string.Join(", ", worstNone.Select(w => $"{w.Count} at {w.Where}"))}" : "") +
-                    (worstFar.Count > 0 ? $"; most far: {string.Join(", ", worstFar.Select(w => $"{w.Count} at {w.Where}"))}" : "");
+                    (worstFar.Count > 0 ? $"; most far: {string.Join(", ", worstFar.Select(w => $"{w.Count} at {w.Where}"))}" : "") +
+                    (worstOff.Count > 0 ? $"; most off: {string.Join(", ", worstOff.Select(w => $"{w.Count} at {w.Where}"))}" : "") +
+                    (worstDropped.Count > 0 ? $"; most in regions without an outline: {string.Join(", ", worstDropped.Select(w => $"{w.Count} at {w.Where}"))}" : "") +
+                    (ExteriorSurface.On ? Environment.NewLine + "  " + ExteriorSurface.Summary : "") +
+                    (Interlocked.Read(ref markingTicks) > 0 ? Environment.NewLine + "  " + MarkingSummary : "");
             }
         }
     }
@@ -187,6 +330,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         }
         return sb.ToString();
     }
+
+    /// <summary>TM_MEM=1: the memory in use as exterior navmeshes are made.</summary>
+    public static readonly bool MemoryTrace = Environment.GetEnvironmentVariable("TM_MEM") == "1";
 
     /// <summary>TM_NAV_TRACE=1: every Recast try's coverage and warnings.</summary>
     static readonly bool Trace = Environment.GetEnvironmentVariable("TM_NAV_TRACE") == "1";
@@ -271,18 +417,20 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// simplifies to fewer than three corners: a few voxels against the tile's edge, measured 1 to 39 spans on
     /// Solstheim) are counted apart, as Dropped: Recast leaves them out by design.
     /// </summary>
-    internal readonly record struct FloorCheck(long Walkable, long On, long Off, long Far, long None, long Dropped, int WorstOff, string Where, long LostPolygons = 0, double LostArea = 0)
+    internal readonly record struct FloorCheck(long Walkable, long On, long Off, long Far, long None, long Dropped, int WorstOff, string Where, long LostPolygons = 0, double LostArea = 0, string FarAt = "", string DroppedAt = "", string OffAt = "")
     {
         public static FloorCheck operator +(FloorCheck a, FloorCheck b) =>
-            new(a.Walkable + b.Walkable, a.On + b.On, a.Off + b.Off, a.Far + b.Far, a.None + b.None, a.Dropped + b.Dropped, Math.Max(a.WorstOff, b.WorstOff), (a.Where ?? "").Length > 0 ? a.Where! : b.Where ?? "", a.LostPolygons + b.LostPolygons, a.LostArea + b.LostArea);
+            new(a.Walkable + b.Walkable, a.On + b.On, a.Off + b.Off, a.Far + b.Far, a.None + b.None, a.Dropped + b.Dropped, Math.Max(a.WorstOff, b.WorstOff), (a.Where ?? "").Length > 0 ? a.Where! : b.Where ?? "", a.LostPolygons + b.LostPolygons, a.LostArea + b.LostArea, (a.FarAt ?? "").Length > 0 ? a.FarAt! : b.FarAt ?? "", (a.DroppedAt ?? "").Length > 0 ? a.DroppedAt! : b.DroppedAt ?? "", (a.OffAt ?? "").Length > 0 ? a.OffAt! : b.OffAt ?? "");
 
         public override string ToString() =>
             $"floor: {Walkable} walkable spans, {On} on a polygon, {Off} off it (at most {WorstOff} voxels), {Far} far from it, {None} under no polygon, {Dropped} in regions without an outline; detail triangles short of their polygon: {LostPolygons} ({LostArea:F0} voxels) {Where}";
     }
 
-    static FloorCheck UncoveredFloor(RcCompactHeightfield chf, RcContourSet cset, RcPolyMesh mesh, RcPolyMeshDetail? detail)
+    static FloorCheck UncoveredFloor(RcCompactHeightfield chf, RcContourSet cset, RcPolyMesh mesh, RcPolyMeshDetail? detail, int skip = 0)
     {
-        int b = chf.borderSize, w = chf.width - 2 * b, h = chf.height - 2 * b, climb = chf.walkableClimb;
+        // The spans checked: inside the tile's border, and <paramref name="skip"/> more voxels in (the margin an exterior
+        // cell's mesh is clipped off). The mesh's coordinates start at the border, so its faces are moved by skip.
+        int b = chf.borderSize + skip, w = chf.width - 2 * b, h = chf.height - 2 * b, climb = chf.walkableClimb;
         double reach = Math.Ceiling(cset.maxError) + 1;
         var outlined = new HashSet<int>(cset.conts.Where(c => c.nverts >= 3).Select(c => c.reg));
         // The faces the navmesh is written from (SkyrimTriangles), in the tile's voxels (x, height, z): the detail
@@ -345,7 +493,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             double x0 = double.MaxValue, x1 = double.MinValue, z0 = double.MaxValue, z1 = double.MinValue;
             for (int k = 0; k < n; k++)
             {
-                xs[k] = face[k * 3]; ys[k] = face[k * 3 + 1]; zs[k] = face[k * 3 + 2];
+                xs[k] = face[k * 3] - skip; ys[k] = face[k * 3 + 1]; zs[k] = face[k * 3 + 2] - skip;
                 x0 = Math.Min(x0, xs[k]); x1 = Math.Max(x1, xs[k]); z0 = Math.Min(z0, zs[k]); z1 = Math.Max(z1, zs[k]);
             }
             for (int cz = Math.Max(0, (int)Math.Floor(z0 - reach)); cz < Math.Min(h, (int)Math.Ceiling(z1 + reach)); cz++)
@@ -382,6 +530,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         // that) or none (no polygon in its column at all: floor without navmesh).
         int walkable = 0, on = 0, off = 0, far = 0, none = 0, dropped = 0, worst = 0;
         var where = new List<string>();
+        var farAt = new List<string>();
+        var droppedAt = new List<string>();
+        var offAt = new List<string>();
         for (int cz = 0; cz < h; cz++)
             for (int cx = 0; cx < w; cx++)
             {
@@ -393,13 +544,53 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                     walkable++;
                     double gap = surfaces[cx + cz * w] is { } list ? list.Min(s => Math.Abs(s - y)) : double.MaxValue;
                     if (gap <= climb) on++;
-                    else if (gap <= chf.walkableHeight) { off++; worst = Math.Max(worst, (int)Math.Round(gap)); }
-                    else if (gap < double.MaxValue) far++;
-                    else if (!outlined.Contains(reg)) dropped++;
+                    else if (gap <= chf.walkableHeight)
+                    {
+                        off++; worst = Math.Max(worst, (int)Math.Round(gap));
+                        if (offAt.Count < 3) offAt.Add($"{chf.bmin.X + (cx + b + 0.5f) * chf.cs:F0},{-(chf.bmin.Z + (cz + b + 0.5f) * chf.cs):F0},{chf.bmin.Y + y * chf.ch:F0} by {gap * chf.ch:F0}");
+                    }
+                    else if (gap < double.MaxValue)
+                    {
+                        far++;
+                        // Where (Skyrim units), and how far off the nearest navmesh over or under it is.
+                        if (farAt.Count < 3) farAt.Add($"{chf.bmin.X + (cx + b + 0.5f) * chf.cs:F0},{-(chf.bmin.Z + (cz + b + 0.5f) * chf.cs):F0},{chf.bmin.Y + y * chf.ch:F0} by {gap * chf.ch:F0}");
+                        // TM_NAV_TRACE: the first such span's region, the polygons over its column and how near its own
+                        // region's polygons come to it.
+                        if (Trace && far == 1)
+                        {
+                            var sb = new StringBuilder($"    far span at voxel {cx},{cz} height {y} region {reg} (its region outlined: {outlined.Contains(reg)}):");
+                            double nearOwn = double.MaxValue; int own = 0;
+                            for (int p = 0; p < mesh.npolys; p++)
+                            {
+                                int at = p * mesh.nvp * 2, n = 0;
+                                while (n < mesh.nvp && mesh.polys[at + n] != 0xffff) n++;
+                                bool inside = false; double edge = double.MaxValue;
+                                for (int k = 0, j = n - 1; k < n; j = k++)
+                                {
+                                    int vk = mesh.polys[at + k] * 3, vj = mesh.polys[at + j] * 3;
+                                    double xk = mesh.verts[vk] - skip, zk = mesh.verts[vk + 2] - skip, xj = mesh.verts[vj] - skip, zj = mesh.verts[vj + 2] - skip;
+                                    if ((zk > cz + 0.5) != (zj > cz + 0.5) && cx + 0.5 < (xj - xk) * (cz + 0.5 - zk) / (zj - zk) + xk) inside = !inside;
+                                    double ex = xk - xj, ez = zk - zj, len = ex * ex + ez * ez;
+                                    double tt = len > 0 ? Math.Clamp(((cx + 0.5 - xj) * ex + (cz + 0.5 - zj) * ez) / len, 0, 1) : 0;
+                                    edge = Math.Min(edge, Math.Sqrt(Math.Pow(xj + tt * ex - cx - 0.5, 2) + Math.Pow(zj + tt * ez - cz - 0.5, 2)));
+                                }
+                                if (mesh.regs[p] == reg) { own++; nearOwn = Math.Min(nearOwn, inside ? 0 : edge); }
+                                if (inside)
+                                    sb.Append($" polygon {p} of region {mesh.regs[p]} heights {string.Join("/", Enumerable.Range(0, n).Select(k => mesh.verts[mesh.polys[at + k] * 3 + 1]))};");
+                            }
+                            sb.Append($" its region's {own} polygons come within {nearOwn:F1} voxels");
+                            Console.WriteLine(sb.ToString());
+                        }
+                    }
+                    else if (!outlined.Contains(reg))
+                    {
+                        dropped++;
+                        if (droppedAt.Count < 3) droppedAt.Add($"{chf.bmin.X + (cx + b + 0.5f) * chf.cs:F0},{-(chf.bmin.Z + (cz + b + 0.5f) * chf.cs):F0},{chf.bmin.Y + y * chf.ch:F0} r{reg}");
+                    }
                     else { none++; if (where.Count < 6) where.Add($"({cx},{cz},{y} r{reg})"); }
                 }
             }
-        return new(walkable, on, off, far, none, dropped, worst, string.Join(" ", where), lostPolygons, lostArea);
+        return new(walkable, on, off, far, none, dropped, worst, string.Join(" ", where), lostPolygons, lostArea, string.Join(" ", farAt), string.Join(" ", droppedAt), string.Join(" ", offAt));
     }
 
     public sealed record Result(NavigationMesh Navmesh, int Triangles, int Vertices, int DoorTriangles);
@@ -640,7 +831,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 EdgeLink_1_2 = (short)neighbours[i, 1],
                 EdgeLink_2_0 = (short)neighbours[i, 2],
                 // Ground under water is swum over (the Water flag), so swimming creatures can use it.
-                Flags = NavmeshTriangle.Flag.Found | (underwater?.Invoke(Centroid(outVerts, tris[i])) == true ? NavmeshTriangle.Flag.Water : 0),
+                // Water when wholly under it, its three corners, as vanilla's (WriteExterior).
+                Flags = NavmeshTriangle.Flag.Found | (underwater is { } wet && wet(outVerts[tris[i].A]) && wet(outVerts[tris[i].B]) && wet(outVerts[tris[i].C]) ? NavmeshTriangle.Flag.Water : 0),
             });
 
         // Load doors: tag the nearest triangle within 256 units of the door.
@@ -708,17 +900,47 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// </summary>
     public static string Winding(IEnumerable<Vector3[]> triangles)
     {
+        var w = WindingOf(triangles);
+        return $"{w.Count} triangles, {w.Consistent} edges shared oppositely, {w.Inconsistent} shared the same way, {w.Open} open, volume {w.Volume:F0}, its top facing {(w.TopUp > 0 ? "up" : w.TopUp < 0 ? "down" : "neither")}";
+    }
+
+    /// <summary>Whether a model's collision can go into an exterior navmesh as wound: every shared edge run oppositely,
+    /// and wound outward (closed: a positive volume; open: the faces at its top facing up). Otherwise each of its faces
+    /// is turned up (<see cref="BuildExteriorCells"/> with asWound).</summary>
+    public static bool TrustedWinding(IEnumerable<Vector3[]> solid)
+    {
+        var w = WindingOf(solid);
+        return w.Inconsistent == 0 && (w.Open == 0 ? w.Volume >= 0 : w.TopUp >= 0);
+    }
+
+    /// <summary>The kind of a model's winding, for the build's log: mixed; closed outward or inside out; open with its
+    /// top facing up or down.</summary>
+    public static string WindingKind(IEnumerable<Vector3[]> solid)
+    {
+        var w = WindingOf(solid);
+        return w.Inconsistent > 0 ? "mixed" : w.Open == 0 ? (w.Volume >= 0 ? "closed, outward" : "closed, inside out") : (w.TopUp >= 0 ? "open, top facing up" : "open, top facing down");
+    }
+
+    /// <summary>A model's winding (<see cref="Winding"/>), and which way the faces at its top face: their area-weighted
+    /// normals' z summed over the faces in the top tenth of its height (outward, the top of a thing faces up).</summary>
+    public readonly record struct WindingInfo(int Count, int Consistent, int Inconsistent, int Open, double Volume, double TopUp);
+
+    public static WindingInfo WindingOf(IEnumerable<Vector3[]> triangles)
+    {
         var ids = new Dictionary<(int, int, int), int>();
         int Id(Vector3 v) { var k = ((int)MathF.Round(v.X * 16), (int)MathF.Round(v.Y * 16), (int)MathF.Round(v.Z * 16)); if (!ids.TryGetValue(k, out var i)) ids[k] = i = ids.Count; return i; }
         var directed = new Dictionary<(int, int), int>();
         double volume = 0;
         int count = 0;
-        foreach (var t in triangles)
+        var list = triangles as IReadOnlyList<Vector3[]> ?? triangles.ToList();
+        float zMin = float.MaxValue, zMax = float.MinValue;
+        foreach (var t in list)
         {
             count++;
             int a = Id(t[0]), b = Id(t[1]), c = Id(t[2]);
             foreach (var e in new[] { (a, b), (b, c), (c, a) }) directed[e] = directed.GetValueOrDefault(e) + 1;
             volume += Vector3.Dot(t[0], Vector3.Cross(t[1], t[2])) / 6.0;
+            foreach (var v in t) { zMin = MathF.Min(zMin, v.Z); zMax = MathF.Max(zMax, v.Z); }
         }
         int consistent = 0, inconsistent = 0, open = 0;
         foreach (var ((a, b), n) in directed)
@@ -728,7 +950,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             else open++;
         }
         // An edge run the same way by two triangles (counted on its own direction) is inconsistent; one with no partner is open.
-        return $"{count} triangles, {consistent} edges shared oppositely, {inconsistent} shared the same way, {open} open, volume {volume:F0}";
+        double topUp = 0;
+        float topFrom = zMax - (zMax - zMin) * 0.1f;
+        foreach (var t in list)
+            if ((t[0].Z + t[1].Z + t[2].Z) / 3 >= topFrom) topUp += Vector3.Cross(t[1] - t[0], t[2] - t[0]).Z / 2;
+        return new(count, consistent, inconsistent, open, volume, topUp);
     }
 
     /// <summary>TM_NAV_LAYERS=1, for "Heightfield has too many layers": the 32-unit column of the input with the most
@@ -828,16 +1054,50 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     static long buriedLeftOut;
 
     /// <summary>An exterior cell's navmesh with its world-space geometry, kept for linking edges to neighbours.</summary>
-    public sealed record ExteriorMesh(Worldspace Worldspace, int X, int Y, NavigationMesh Navmesh, List<P3Float> Verts, List<(int A, int B, int C)> Tris);
+    /// <remarks>Only its triangles' edges on the cell's four sides are kept for linking (<see cref="BorderEdges"/>), not the
+    /// mesh again: every exterior navmesh is held until the worldspaces are linked (2026-10-19, Oblivion's worldspaces:
+    /// 35 million triangles, held by the builder, by these and by the records).</remarks>
+    public sealed record ExteriorMesh(Worldspace Worldspace, int X, int Y, NavigationMesh Navmesh, List<(int Tri, int Edge, float Lo, float Hi, float ZLo, float ZHi)>[] Sides);
+
+    /// <summary>A mesh's triangle edges on each side of its cell (0 west, 1 east, 2 south, 3 north) with no neighbour
+    /// inside the mesh: (triangle, edge, span from, span to along the side, the heights there).</summary>
+    static List<(int Tri, int Edge, float Lo, float Hi, float ZLo, float ZHi)>[] BorderEdges(int cx, int cy, List<P3Float> verts, List<(int A, int B, int C)> tris, int[,] neighbours)
+    {
+        var sides = new List<(int Tri, int Edge, float Lo, float Hi, float ZLo, float ZHi)>[4];
+        for (int side = 0; side < 4; side++)
+        {
+            var list = sides[side] = [];
+            float line = side switch { 0 => cx * CellUnits, 1 => (cx + 1) * CellUnits, 2 => cy * CellUnits, _ => (cy + 1) * CellUnits };
+            bool vertical = side < 2;
+            for (int i = 0; i < tris.Count; i++)
+            {
+                var t = tris[i];
+                int[] vs = [t.A, t.B, t.C];
+                for (int e = 0; e < 3; e++)
+                {
+                    if (neighbours[i, e] >= 0) continue;
+                    var a = verts[vs[e]]; var b = verts[vs[(e + 1) % 3]];
+                    float ac = vertical ? a.X : a.Y, bc = vertical ? b.X : b.Y;
+                    if (MathF.Abs(ac - line) > 0.5f || MathF.Abs(bc - line) > 0.5f) continue;
+                    float sa = vertical ? a.Y : a.X, sb = vertical ? b.Y : b.X;
+                    list.Add(sa <= sb ? (i, e, sa, sb, a.Z, b.Z) : (i, e, sb, sa, b.Z, a.Z));
+                }
+            }
+        }
+        return sides;
+    }
 
     readonly List<ExteriorMesh> exteriors = [];
 
     /// <summary>
     /// A Skyrim landscape's surface as world-space triangles (33 x 33 heights, 128 units apart; VHGT holds the first
-    /// height then per-row and per-column deltas, all in units of 8). With <paramref name="water"/>, quads lying more
-    /// than 64 units under the water are left out: actors swim there, they don't walk the bottom.
+    /// height then per-row and per-column deltas, all in units of 8), under water too: vanilla's navmesh covers the beds
+    /// of its lakes and seas at every depth (2026-10-19, Skyrim.esm's Tamriel against its land: of the land's height
+    /// points under water, 83% of those 0-128 deep had navmesh over them, 63% of those deeper than 2048), and its
+    /// swimmers stand on it (77 of 133 actors more than 128 under water within 64 units of it); its triangles there are
+    /// flagged Water (<see cref="WriteExterior"/>).
     /// </summary>
-    public static void AddTerrain(List<Vector3[]> output, ILandscapeGetter land, int cx, int cy, float? water)
+    public static void AddTerrain(List<Vector3[]> output, ILandscapeGetter land, int cx, int cy)
     {
         if (Heights(land) is not { } h) return;
         float ox = cx * CellUnits, oy = cy * CellUnits;
@@ -845,7 +1105,6 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         for (int y = 0; y < 32; y++)
             for (int x = 0; x < 32; x++)
             {
-                if (water is { } w && MathF.Max(MathF.Max(h[x, y], h[x + 1, y]), MathF.Max(h[x, y + 1], h[x + 1, y + 1])) < w - 64) continue;
                 output.Add([P(x, y), P(x + 1, y), P(x + 1, y + 1)]);
                 output.Add([P(x, y), P(x + 1, y + 1), P(x, y + 1)]);
             }
@@ -870,8 +1129,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// <summary>
     /// An open-country cell with nothing on it but its land (Daggerfall's overland), meshed straight from its heights
     /// instead of by Recast: blocks of 16 quads (2048 units; Recast kept edges under 1600) split in four while they lie
-    /// more than <see cref="GridTolerance"/> from the ground under them or cross from walkable ground into deep water or
-    /// a slope too steep to walk, down to single 128-unit quads. Neighbouring blocks differ by one split at most, and a
+    /// more than <see cref="GridTolerance"/> from the ground under them, cross the water's edge (a block is wholly under
+    /// the water or not, so its triangles are flagged Water whole, as vanilla's are: <see cref="WriteExterior"/>) or
+    /// cross into a slope too steep to walk, down to single 128-unit quads. Neighbouring blocks differ by one split at most, and a
     /// block's edge gets a midpoint where the block beside it is split, so the triangles share their corners.
     /// 2026-10-15 (user: "should be a 1 hour conversion"): Recast voxelised each of the overland's 400,000 cells for
     /// over 50 minutes on every core, and left about 3 triangles a cell, hundreds of units off the ground on Daggerfall's
@@ -880,21 +1140,22 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     public static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateTerrainGrid(ILandscapeGetter land, int cx, int cy, float? water, List<P3Float> keep)
     {
         if (Heights(land) is not { } h) return null;
-        // Each 128-unit quad: walkable, or left out (more than 64 units under the water, as AddTerrain leaves out, or
-        // steeper than Recast's 50-degree limit).
+        // Each 128-unit quad: walkable, or left out (steeper than Recast's 50-degree limit); and wholly under the water
+        // (its four corners) or not.
         float cosMax = MathF.Cos(50f * MathF.PI / 180f);
         var open = new bool[32, 32];
+        var wet = new bool[32, 32];
         static float Up(float dx, float dy) => 1f / MathF.Sqrt(1 + dx * dx + dy * dy);
         bool any = false;
         for (int y = 0; y < 32; y++)
             for (int x = 0; x < 32; x++)
             {
                 float top = MathF.Max(MathF.Max(h[x, y], h[x + 1, y]), MathF.Max(h[x, y + 1], h[x + 1, y + 1]));
-                bool deep = water is { } w && top < w - 64;
+                wet[x, y] = water is { } w && top < w;
                 // The quad's two triangles' slopes (P00 P10 P11 and P00 P11 P01).
                 bool steep = Up((h[x + 1, y] - h[x, y]) / 128, (h[x + 1, y + 1] - h[x + 1, y]) / 128) < cosMax
                           || Up((h[x + 1, y + 1] - h[x, y + 1]) / 128, (h[x, y + 1] - h[x, y]) / 128) < cosMax;
-                open[x, y] = !deep && !steep;
+                open[x, y] = !steep;
                 any |= open[x, y];
             }
         if (!any) return null;
@@ -903,10 +1164,10 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var leaf = new int[32, 32];
         bool Fits(int x0, int y0, int size)
         {
-            bool first = open[x0, y0];
+            bool first = open[x0, y0], firstWet = wet[x0, y0];
             for (int y = y0; y < y0 + size; y++)
                 for (int x = x0; x < x0 + size; x++)
-                    if (open[x, y] != first) return false;
+                    if (open[x, y] != first || wet[x, y] != firstWet) return false;
             if (!first) return true;
             float a = h[x0, y0], b = h[x0 + size, y0], c = h[x0 + size, y0 + size], d = h[x0, y0 + size];
             for (int y = 0; y <= size; y++)
@@ -998,18 +1259,30 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// overland cells: 48 units made 68 million triangles over the overland, 96 made 26, 128 made 17).</summary>
     const float GridTolerance = 96f;
 
-    /// <summary>Recast settings for exteriors: 16-unit voxels (terrain vertices are 128 apart), one 4096-unit tile per
-    /// cell with a border, so the agent radius doesn't erode the mesh back from the cell's edges.</summary>
+    /// <summary>How far past its cell an exterior cell's heightfield reaches (<see cref="GenerateExteriorRaw"/>): the agent's
+    /// radius erodes the floor back from the heightfield's edge, out there, and a floor crossing the cell's edge is one
+    /// region across it (2026-10-19, nine Bitter Coast cells of Morrowind: with Recast's tile border, a band round the
+    /// tile of its own, a floor cut at the cell's edge a voxel wide got no outline, and its neighbour's navmesh met
+    /// nothing there: 4 of 194 border edges facing a neighbour's navmesh unlinked). A multiple of every voxel size.</summary>
+    const float ExteriorMargin = 128f;
+
+    /// <summary>Recast settings for exteriors: 16-unit voxels (terrain vertices are 128 apart), the cell and
+    /// <see cref="ExteriorMargin"/> round it in one heightfield. The detail mesh's heights every 24 units, within 16
+    /// (measured on nine Bitter Coast cells of Morrowind against the floor, 2,182,021 walkable spans, those 32 to 128
+    /// units from the navmesh over them: every 128 within 24, 0.39%, the navmesh 50-67 units over the dips in rocks'
+    /// tops; 2026-10-20, counted: every 32 within 8, 1 span, 50,077 triangles; every 24 within 16, 2, 25,327; 16 within
+    /// 16, 2, 26,108; 32 within 12, 8, 31,149; 32 within 16, 10, 23,373; 48 within 16, 24, 21,921; 64 within 12, 84,
+    /// 26,475. Those left are 32 to 43 units off, at rocks' edges).</summary>
     static RcConfig ExteriorConfig(bool open = false, RcPartition partition = RcPartition.WATERSHED, float coarse = 1, float outline = 1)
     {
         // Open country (open: Daggerfall's overland, smooth land and little on it) in coarser voxels and longer, looser
         // edges: a quarter of the triangles over 87,000 cells, as vanilla's wilds are meshed in big triangles too.
         float cs = (open ? 32f : 16f) * coarse, ch = (open ? 8f : 4f) * coarse, radius = 24f;
-        int tile = (int)(CellUnits / cs);
-        return new RcConfig(true, tile, tile, RcConfig.CalcBorder(radius, cs), partition,
+        // Not tiled, no border: the heightfield reaches ExteriorMargin past the cell and the mesh is clipped to it.
+        return new RcConfig(false, 0, 0, 0, partition,
             cs, ch, agentMaxSlope: 50f, agentHeight: 128f, agentRadius: radius, agentMaxClimb: open ? 48f : 32f,
             minRegionArea: 8 * cs * cs, mergeRegionArea: 20 * cs * cs, edgeMaxLen: open ? 1600f : 600f, edgeMaxError: (open ? 4f : 2f) * outline, vertsPerPoly: 6,
-            detailSampleDist: Env("DETAILDIST", 128f) / cs, detailSampleMaxError: Env("DETAILERR", 24f) / ch, filterLowHangingObstacles: true, filterLedgeSpans: true, filterWalkableLowHeightSpans: true,
+            detailSampleDist: Env("DETAILDIST", 24f) / cs, detailSampleMaxError: Env("DETAILERR", 16f) / ch, filterLowHangingObstacles: true, filterLedgeSpans: true, filterWalkableLowHeightSpans: true,
             walkableAreaMod: new RcAreaModification(0x3f), buildMeshDetail: Env("DETAIL", 1f) > 0);
     }
 
@@ -1018,8 +1291,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// up), clipped to the cell. Thread-safe: it touches no records, so cells can be generated in parallel and written
     /// with <see cref="WriteExterior"/> afterwards. Null when nothing is walkable.
     /// </summary>
-    public static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExterior(int cx, int cy, List<Vector3[]> triangles, List<P3Float> keep, bool open = false) =>
-        GenerateExteriorRaw(cx, cy, triangles, open) is { } raw ? Finish(raw.Verts, raw.Tris, keep) : null;
+    public static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExterior(int cx, int cy, List<Vector3[]> triangles, List<P3Float> keep, bool open = false,
+        Func<float, float, float?>? land = null, float[]? around = null, bool asWound = false) =>
+        GenerateExteriorRaw(cx, cy, triangles, open, land, around, asWound) is { } raw ? Finish(raw.Verts, raw.Tris, keep) : null;
 
     /// <summary>The islands not reached from <paramref name="keep"/> pruned (<see cref="PruneIslands"/>); null when
     /// nothing is left or the mesh is too big for a navmesh's 16-bit indices.</summary>
@@ -1030,8 +1304,10 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         return (verts, tris);
     }
 
-    /// <summary><see cref="GenerateExterior"/>'s mesh as Recast makes it, before the islands are pruned.</summary>
-    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExteriorRaw(int cx, int cy, List<Vector3[]> triangles, bool open)
+    /// <summary><see cref="GenerateExterior"/>'s mesh as Recast makes it, before the islands are pruned; with
+    /// <paramref name="land"/>, nothing under the land is walkable, and with <paramref name="around"/> (the input of
+    /// the cell and its neighbours as wound) nothing shut inside something (<see cref="BuildOverLand"/>).</summary>
+    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExteriorRaw(int cx, int cy, List<Vector3[]> triangles, bool open, Func<float, float, float?>? land = null, float[]? around = null, bool asWound = false)
     {
         if (triangles.Count == 0) return null;
         // TM_NAV_PROBE=x,y: every input triangle over that point, with its height there and which way it faces.
@@ -1044,7 +1320,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 float a = ((p[1].Y - p[2].Y) * (qx - p[2].X) + (p[2].X - p[1].X) * (qy - p[2].Y)) / d, b = ((p[2].Y - p[0].Y) * (qx - p[2].X) + (p[0].X - p[2].X) * (qy - p[2].Y)) / d;
                 if (a < 0 || b < 0 || a + b > 1) continue;
                 var nz = Vector3.Normalize(Vector3.Cross(p[1] - p[0], p[2] - p[0])).Z;
-                Console.WriteLine($"  probe {qx},{qy} (cell {cx},{cy}): triangle at height {a * p[0].Z + b * p[1].Z + (1 - a - b) * p[2].Z:F0}, normal z {nz:F2}");
+                Console.WriteLine($"  probe {qx},{qy} (cell {cx},{cy}): triangle at height {a * p[0].Z + b * p[1].Z + (1 - a - b) * p[2].Z:F0}, normal z {nz:F2}, corners {string.Join(" ", p.Select(v => $"({v.X:F0},{v.Y:F0},{v.Z:F0})"))}");
             }
         var verts = new float[triangles.Count * 9];
         var faces = new int[triangles.Count * 3];
@@ -1052,7 +1328,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         for (int t = 0; t < triangles.Count; t++)
         {
             var p = triangles[t];
-            bool up = Vector3.Cross(p[1] - p[0], p[2] - p[0]).Z >= 0;
+            // Each face turned up (walkable faces are taken to point up, the winding either way), or as wound.
+            bool up = asWound || Vector3.Cross(p[1] - p[0], p[2] - p[0]).Z >= 0;
             for (int k = 0; k < 3; k++)
             {
                 var v = p[k];
@@ -1064,10 +1341,13 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             faces[t * 3 + 2] = up ? t * 3 + 2 : t * 3 + 1;
         }
         var geom = new RcSampleInputGeomProvider(verts, faces);
-        var bmin = new RcVec3f(cx * CellUnits, minZ - 16, -(cy + 1) * CellUnits);
-        var bmax = new RcVec3f((cx + 1) * CellUnits, maxZ + 256, -cy * CellUnits);
-        if (BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(ExteriorConfig(open, p, coarse, outline), bmin, bmax, 0, 0)) is not { } built || built.Mesh.npolys == 0) return null;
-        return SkyrimTriangles(built.Mesh, built.Detail);
+        var bmin = new RcVec3f(cx * CellUnits - ExteriorMargin, minZ - 16, -(cy + 1) * CellUnits - ExteriorMargin);
+        var bmax = new RcVec3f((cx + 1) * CellUnits + ExteriorMargin, maxZ + 256, -cy * CellUnits + ExteriorMargin);
+        var wound = around is null ? null : new Lazy<WoundInput>(() => new WoundInput(around));
+        if (BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(ExteriorConfig(open, p, coarse, outline), bmin, bmax, 0, 0), land, wound, ExteriorMargin) is not { } built || built.Mesh.npolys == 0) return null;
+        var (cv, ct) = SkyrimTriangles(built.Mesh, built.Detail);
+        var clipped = ClipToCell(cv, ct, cx, cy);
+        return clipped.Tris.Count == 0 ? null : clipped;
     }
 
     /// <summary>
@@ -1084,6 +1364,73 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var made = SkyrimTrianglesOf(pmesh, detail);
         Interlocked.Add(ref trianglesMade, made.Tris.Count);
         return made;
+    }
+
+    /// <summary>
+    /// An exterior mesh's triangles clipped to its cell's square (Recast's mesh reaches <see cref="ExteriorMargin"/>
+    /// past it): each triangle's part inside, fanned from its first corner, the corners on the cell's edges exactly on
+    /// them (so <see cref="LinkExteriorEdges"/> finds them), corners welded at 1/8 unit, parts of no area left out.
+    /// </summary>
+    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris) ClipToCell(List<P3Float> verts, List<(int A, int B, int C)> tris, int cx, int cy)
+    {
+        float x0 = cx * CellUnits, x1 = x0 + CellUnits, y0 = cy * CellUnits, y1 = y0 + CellUnits;
+        var outVerts = new List<P3Float>();
+        var outTris = new List<(int A, int B, int C)>();
+        var index = new Dictionary<(long, long, long), int>();
+        int Weld(Vector3 p)
+        {
+            var key = ((long)MathF.Round(p.X * 8), (long)MathF.Round(p.Y * 8), (long)MathF.Round(p.Z * 8));
+            if (!index.TryGetValue(key, out int i)) { i = outVerts.Count; index[key] = i; outVerts.Add(new P3Float(p.X, p.Y, p.Z)); }
+            return i;
+        }
+        // One side of the square: the polygon's part where the coordinate (0 x, 1 y) is on the kept side of the line,
+        // the points made on the line set exactly on it.
+        static List<Vector3> Clip(List<Vector3> poly, int axis, float line, bool keepAbove)
+        {
+            var kept = new List<Vector3>(poly.Count + 2);
+            for (int i = 0; i < poly.Count; i++)
+            {
+                var p = poly[i]; var q = poly[(i + 1) % poly.Count];
+                float fp = (axis == 0 ? p.X : p.Y) - line, fq = (axis == 0 ? q.X : q.Y) - line;
+                if (!keepAbove) { fp = -fp; fq = -fq; }
+                if (fp >= 0) kept.Add(p);
+                if ((fp >= 0) != (fq >= 0))
+                {
+                    var m = p + (q - p) * (fp / (fp - fq));
+                    kept.Add(axis == 0 ? new Vector3(line, m.Y, m.Z) : new Vector3(m.X, line, m.Z));
+                }
+            }
+            return kept;
+        }
+        // A corner within 2 units of a cell's edge is put on it: just past it, its triangle's two crossings would be a
+        // fraction of a unit apart, a border edge too short to link (measured: 268 of 5,571 on nine cells), and just
+        // inside it, its edges to the line were slivers a unit long (with half a unit: 46 of 5,314).
+        Vector3 Snap(P3Float v) => new(
+            MathF.Abs(v.X - x0) < 2 ? x0 : MathF.Abs(v.X - x1) < 2 ? x1 : v.X,
+            MathF.Abs(v.Y - y0) < 2 ? y0 : MathF.Abs(v.Y - y1) < 2 ? y1 : v.Y, v.Z);
+        foreach (var (a, b, c) in tris)
+        {
+            var poly = new List<Vector3> { Snap(verts[a]), Snap(verts[b]), Snap(verts[c]) };
+            if (poly.Any(p => p.X < x0 || p.X > x1 || p.Y < y0 || p.Y > y1))
+            {
+                poly = Clip(poly, 0, x0, true);
+                if (poly.Count >= 3) poly = Clip(poly, 0, x1, false);
+                if (poly.Count >= 3) poly = Clip(poly, 1, y0, true);
+                if (poly.Count >= 3) poly = Clip(poly, 1, y1, false);
+                if (poly.Count < 3) continue;
+            }
+            var ids = poly.Select(Weld).ToList();
+            for (int k = 1; k + 1 < ids.Count; k++)
+            {
+                int ia = ids[0], ib = ids[k], ic = ids[k + 1];
+                if (ia == ib || ib == ic || ia == ic) continue;
+                float area = CrossZ(outVerts[ia], outVerts[ib], outVerts[ic]);
+                // Under half a square unit (twice the area here): a sliver of the clipping.
+                if (MathF.Abs(area) < 1f) continue;
+                outTris.Add(area < 0 ? (ia, ic, ib) : (ia, ib, ic));
+            }
+        }
+        return (outVerts, outTris);
     }
 
     /// <summary>Triangles Recast's meshes became (before islands are pruned), for the build's log.</summary>
@@ -1166,6 +1513,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         {
             mesh = null;
             if (!File.Exists(file)) return false;
+            // Made by an older converter (a resumed run after an update): made again.
+            if (Environment.ProcessPath is { } exe && File.GetLastWriteTimeUtc(file) < File.GetLastWriteTimeUtc(exe)) return false;
             using var r = new BinaryReader(File.OpenRead(file));
             if (r.ReadUInt32() != 0x564E4D54) return false;
             int nv = r.ReadInt32();
@@ -1198,31 +1547,53 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                     foreach (var (a, b, c) in m.Tris) { w.Write(a); w.Write(b); w.Write(c); }
                 }
             }
-            // Renamed when whole; another part may have left the same one meanwhile (the same mesh).
-            if (!File.Exists(file)) File.Move(tmp, file, overwrite: true); else File.Delete(tmp);
+            // Renamed when whole; another part may have left the same one meanwhile (the same mesh), unless what is there
+            // is an older converter's.
+            if (!File.Exists(file) || (Environment.ProcessPath is { } exe && File.GetLastWriteTimeUtc(file) < File.GetLastWriteTimeUtc(exe))) File.Move(tmp, file, overwrite: true);
+            else File.Delete(tmp);
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
 
-    static (ulong, ulong) InputKey(List<Vector3[]> tris, int cx, int cy)
+    /// <summary>The cell's input (its triangles in its own coordinates, to 1/16 unit) and, with <paramref name="land"/>,
+    /// the land's heights at its 128-unit points from one beyond the cell's edges (the land is flat between them, and
+    /// Recast's border reaches 80 units out), which decide what is under it (<see cref="BuildOverLand"/>).</summary>
+    static (ulong, ulong) InputKey(List<Vector3[]> tris, int cx, int cy, Func<float, float, float?>? land = null)
     {
-        var q = new int[tris.Count * 9];
+        var f = new float[tris.Count * 9];
+        for (int i = 0; i < tris.Count; i++)
+            for (int k = 0; k < 3; k++) { f[i * 9 + k * 3] = tris[i][k].X; f[i * 9 + k * 3 + 1] = tris[i][k].Y; f[i * 9 + k * 3 + 2] = tris[i][k].Z; }
+        return InputKey(f, cx, cy, land);
+    }
+
+    /// <summary>The same over corners nine floats a triangle.</summary>
+    static (ulong, ulong) InputKey(float[] coords, int cx, int cy, Func<float, float, float?>? land = null)
+    {
+        var q = new int[coords.Length + (land is null ? 0 : 35 * 35)];
         int n = 0;
-        foreach (var t in tris)
-            foreach (var v in t)
-            {
-                q[n++] = (int)MathF.Round((v.X - cx * CellUnits) * 16);
-                q[n++] = (int)MathF.Round((v.Y - cy * CellUnits) * 16);
-                q[n++] = (int)MathF.Round(v.Z * 16);
-            }
+        for (int k = 0; k + 2 < coords.Length; k += 3)
+        {
+            q[n++] = (int)MathF.Round((coords[k] - cx * CellUnits) * 16);
+            q[n++] = (int)MathF.Round((coords[k + 1] - cy * CellUnits) * 16);
+            q[n++] = (int)MathF.Round(coords[k + 2] * 16);
+        }
+        if (land is not null)
+            for (int gy = -1; gy <= 33; gy++)
+                for (int gx = -1; gx <= 33; gx++)
+                    q[n++] = land(cx * CellUnits + gx * 128, cy * CellUnits + gy * 128) is { } g ? (int)MathF.Round(g * 16) : int.MinValue;
         var hash = System.Security.Cryptography.SHA256.HashData(System.Runtime.InteropServices.MemoryMarshal.AsBytes(q.AsSpan(0, n)));
         return (BitConverter.ToUInt64(hash, 0), BitConverter.ToUInt64(hash, 8));
     }
 
-    (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExteriorReused(int cx, int cy, List<Vector3[]> triangles, List<P3Float> keep, bool open)
+    (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExteriorReused(int cx, int cy, List<Vector3[]> triangles, List<P3Float> keep, bool open,
+        Func<float, float, float?>? land = null, float[]? around = null, bool asWound = false)
     {
-        var (k1, k2) = InputKey(triangles, cx, cy);
+        // Keyed by the whole input round the cell when what is shut in is looked for beyond it (the cell's own input is
+        // taken from that).
+        var (k1, k2) = around is null ? InputKey(triangles, cx, cy, land) : InputKey(around, cx, cy, land);
+        // Faces as wound make another mesh of the same input (and another shared file).
+        if (asWound) k2 ^= 0x5A5A5A5A5A5A5A5AUL;
         bool made = false;
         var local = exteriorCache.GetOrAdd((k1, k2, open), _ => new Lazy<(P3Float[], (int, int, int)[])?>(() =>
         {
@@ -1230,7 +1601,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             string? file = SharedExteriors is { } dir ? Path.Combine(dir, $"{k1:x16}{k2:x16}{(open ? "o" : "")}.bin") : null;
             if (file is not null && ReadShared(file, out var shared)) { Interlocked.Increment(ref exteriorShared); return shared; }
             (P3Float[], (int, int, int)[])? mesh = null;
-            if (GenerateExteriorRaw(cx, cy, triangles, open) is { } raw)
+            if (GenerateExteriorRaw(cx, cy, triangles, open, land, around, asWound) is { } raw)
             {
                 float ox = cx * CellUnits, oy = cy * CellUnits;
                 mesh = (raw.Verts.Select(v => new P3Float(v.X - ox, v.Y - oy, v.Z)).ToArray(), raw.Tris.ToArray());
@@ -1244,8 +1615,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         return Finish(m.Verts.Select(v => new P3Float(v.X + wx, v.Y + wy, v.Z)).ToList(), [.. m.Tris], keep);
     }
 
-    /// <summary>Writes an exterior cell's navmesh (generated by <see cref="GenerateExterior"/>), with its load doors.</summary>
-    public ExteriorMesh WriteExterior(Worldspace ws, Cell cell, int cx, int cy, List<P3Float> verts, List<(int A, int B, int C)> tris, IEnumerable<IPlacedObjectGetter> loadDoors)
+    /// <summary>Writes an exterior cell's navmesh (generated by <see cref="GenerateExterior"/>), with its load doors. A
+    /// triangle wholly under the cell's <paramref name="water"/> (its three corners) is flagged Water, as vanilla's are
+    /// (2026-10-19, Skyrim.esm's Tamriel: of its triangles with every corner under the water, 89-96% flagged once the
+    /// shallowest corner is 8 units under, 65% when nearer; of those with a corner above it, 5%).</summary>
+    public ExteriorMesh WriteExterior(Worldspace ws, Cell cell, int cx, int cy, List<P3Float> verts, List<(int A, int B, int C)> tris, IEnumerable<IPlacedObjectGetter> loadDoors, float? water = null)
     {
         var data = new NavigationMeshData
         {
@@ -1265,7 +1639,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 EdgeLink_0_1 = (short)neighbours[i, 0],
                 EdgeLink_1_2 = (short)neighbours[i, 1],
                 EdgeLink_2_0 = (short)neighbours[i, 2],
-                Flags = NavmeshTriangle.Flag.Found,
+                Flags = NavmeshTriangle.Flag.Found
+                    | (water is { } w && verts[tris[i].A].Z < w && verts[tris[i].B].Z < w && verts[tris[i].C].Z < w ? NavmeshTriangle.Flag.Water : 0),
             });
         var linked = new List<IPlacedObjectGetter>();
         foreach (var door in loadDoors)
@@ -1288,7 +1663,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         cell.NavigationMeshes.Add(navm);
         // The navmesh map's entry stores the grid the same way: Y first.
         AddInfo(navm, new NavigationMapInfoWorldParent { ParentWorldspace = ws.ToLink<IWorldspaceGetter>(), ParentWorldspaceCoord = new P2Int16((short)cy, (short)cx) }, verts, linked);
-        var mesh = new ExteriorMesh(ws, cx, cy, navm, verts, tris);
+        var mesh = new ExteriorMesh(ws, cx, cy, navm, BorderEdges(cx, cy, verts, tris, neighbours));
         exteriors.Add(mesh);
         return mesh;
     }
@@ -1311,7 +1686,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// (<see cref="exteriorCache"/>; Daggerfall's towns). Not with <paramref name="open"/>.</remarks>
     public (int Meshes, int Triangles) BuildExteriorCells(Worldspace ws, IReadOnlyDictionary<(int X, int Y), Cell> cells,
         Func<int, int, IEnumerable<Vector3[]>> solidsOf, Func<Cell, float?> waterOf, IReadOnlyList<IPlacedObjectGetter> doors, List<string> problems,
-        bool open = false, Func<int, int, bool>? only = null, bool reuse = false)
+        bool open = false, Func<int, int, bool>? only = null, bool reuse = false, bool asWound = false)
     {
         reuse &= !open;
         const float margin = 160f;
@@ -1319,8 +1694,28 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var results = new (List<P3Float> Verts, List<(int A, int B, int C)> Tris)?[keys.Count];
         var errors = new System.Collections.Concurrent.ConcurrentBag<string>();
         bool InCell(P3Float p, int x, int y) => p.X >= x * CellUnits && p.X < (x + 1) * CellUnits && p.Y >= y * CellUnits && p.Y < (y + 1) * CellUnits;
-        Parallel.For(0, keys.Count, i =>
+        int done = 0;
+        // One cell a core: unbounded, the thread pool kept adding threads to the long iterations (2026-10-19: 26 to 152 in two
+        // minutes of Morrowind's exteriors), each a whole Recast build at once with its own pooled buffers, and memory
+        // rose with them to 16 GB.
+        Parallel.For(0, keys.Count, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, i =>
         {
+            // TM_MEM=1 (dev aid): the memory in use every 500 cells: allocated, live (after a full collection), private,
+            // and the meshes made so far.
+            if (MemoryTrace && Interlocked.Increment(ref done) is var started && started % 100 == 0)
+            {
+                // TM_MEM=2: live after a full collection too (it changes what is measured).
+                long allocated = GC.GetTotalMemory(false), live = Environment.GetEnvironmentVariable("TM_MEM2") == "1" ? GC.GetTotalMemory(true) : -1;
+                long meshTris = 0, meshVerts = 0;
+                foreach (var r in results) if (r is { } made) { meshTris += made.Tris.Count; meshVerts += made.Verts.Count; }
+                var gc = GC.GetGCMemoryInfo(GCKind.Any);
+                static string G(long b) => $"{b / 1073741824.0:F1}";
+                string gens = string.Join(", ", new[] { "gen0", "gen1", "gen2", "large", "pinned" }.Select((name, g) => g < gc.GenerationInfo.Length
+                    ? $"{name} {G(gc.GenerationInfo[g].SizeAfterBytes)} (fragmented {G(gc.GenerationInfo[g].FragmentationAfterBytes)})" : ""));
+                Console.WriteLine($"    navmesh {ws.EditorID}: {started:N0} of {keys.Count:N0} cells, {G(allocated)} GB allocated, {G(live)} GB live, " +
+                    $"{G(System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64)} GB private; GC heap {G(gc.HeapSizeBytes)}, fragmented {G(gc.FragmentedBytes)}, committed {G(gc.TotalCommittedBytes)}, " +
+                    $"by generation after the last collection: {gens}; meshes so far {meshTris:N0} triangles, {meshVerts:N0} vertices");
+            }
             var (x, y) = keys[i];
             float x0 = x * CellUnits - margin, x1 = (x + 1) * CellUnits + margin, y0 = y * CellUnits - margin, y1 = (y + 1) * CellUnits + margin;
             bool Near(Vector3[] t) =>
@@ -1355,26 +1750,33 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 }
                 bool Buried(Vector3[] t) => t.All(v => LandAt(v.X, v.Y) is { } g && v.Z < g - BuriedDepth);
                 var tris = new List<Vector3[]>();
+                // The cell's and its neighbours' whole input as wound, flat (WoundInput): what is shut inside something
+                // is looked for in it.
+                var aroundCoords = new List<float>();
                 for (int dy = -1; dy <= 1; dy++)
                     for (int dx = -1; dx <= 1; dx++)
                     {
                         if (!cells.TryGetValue((x + dx, y + dy), out var c)) continue;
-                        float? water = waterOf(c);
                         var local = new List<Vector3[]>();
-                        if (c.Landscape is { } land) AddTerrain(local, land, x + dx, y + dy, water);
+                        // Under water too (AddTerrain): what lies on the bed is walked as vanilla's is, flagged Water.
+                        if (c.Landscape is { } land) AddTerrain(local, land, x + dx, y + dy);
                         foreach (var t in solidsOf(x + dx, y + dy))
                         {
-                            if (water is { } w && MathF.Max(t[0].Z, MathF.Max(t[1].Z, t[2].Z)) < w - 64) continue;
                             if (Buried(t)) { Interlocked.Increment(ref buriedLeftOut); continue; }
                             local.Add(t);
                         }
                         tris.AddRange(dx == 0 && dy == 0 ? local : local.Where(Near));
+                        foreach (var t in local)
+                            foreach (var v in t) { aroundCoords.Add(v.X); aroundCoords.Add(v.Y); aroundCoords.Add(v.Z); }
                     }
+                var around = aroundCoords.ToArray();
+                aroundCoords = null;
                 // A cell Recast can't outline in the open-country setting is tried again in the fine one.
-                if (reuse) results[i] = GenerateExteriorReused(x, y, tris, keep, open);
+                if (reuse) results[i] = GenerateExteriorReused(x, y, tris, keep, open, LandAt, around, asWound);
                 else
-                    try { results[i] = GenerateExterior(x, y, tris, keep, open); }
-                    catch (Exception) when (open) { results[i] = GenerateExterior(x, y, tris, keep); }
+                    try { results[i] = GenerateExterior(x, y, tris, keep, open, LandAt, around, asWound); }
+                    catch (Exception) when (open) { results[i] = GenerateExterior(x, y, tris, keep, land: LandAt, around: around, asWound: asWound); }
+                if (ExteriorSurface.On && results[i] is { } made) ExteriorSurface.Check(ws.EditorID ?? "", x, y, around, made.Verts, made.Tris, LandAt);
             }
             catch (Exception e) { errors.Add($"navmesh {ws.EditorID} {x},{y}: {e.Message}"); }
         });
@@ -1384,9 +1786,10 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         {
             if (results[i] is not { } r) continue;
             var (x, y) = keys[i];
-            WriteExterior(ws, cells[keys[i]], x, y, r.Verts, r.Tris, doors.Where(d => InCell(d.Placement!.Position, x, y)));
+            WriteExterior(ws, cells[keys[i]], x, y, r.Verts, r.Tris, doors.Where(d => InCell(d.Placement!.Position, x, y)), waterOf(cells[keys[i]]));
             meshes++;
             triangles += r.Tris.Count;
+            results[i] = null;   // in the record now
         }
         return (meshes, triangles);
     }
@@ -1400,29 +1803,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     public int LinkExteriorEdges()
     {
         var byCell = exteriors.GroupBy(m => (m.Worldspace, m.X, m.Y)).ToDictionary(g => g.Key, g => g.First());
-        // Border edges per mesh and side (0 west, 1 east, 2 south, 3 north): (triangle, edge, span from, span to).
-        var borders = new Dictionary<(ExteriorMesh, int), List<(int Tri, int Edge, float Lo, float Hi)>>();
-        List<(int Tri, int Edge, float Lo, float Hi)> Borders(ExteriorMesh m, int side)
-        {
-            if (borders.TryGetValue((m, side), out var list)) return list;
-            list = [];
-            float line = side switch { 0 => m.X * CellUnits, 1 => (m.X + 1) * CellUnits, 2 => m.Y * CellUnits, _ => (m.Y + 1) * CellUnits };
-            bool vertical = side < 2;
-            for (int i = 0; i < m.Tris.Count; i++)
-            {
-                var t = m.Tris[i];
-                int[] vs = [t.A, t.B, t.C];
-                for (int e = 0; e < 3; e++)
-                {
-                    var a = m.Verts[vs[e]]; var b = m.Verts[vs[(e + 1) % 3]];
-                    float ac = vertical ? a.X : a.Y, bc = vertical ? b.X : b.Y;
-                    if (MathF.Abs(ac - line) > 0.5f || MathF.Abs(bc - line) > 0.5f) continue;
-                    float sa = vertical ? a.Y : a.X, sb = vertical ? b.Y : b.X;
-                    list.Add((i, e, MathF.Min(sa, sb), MathF.Max(sa, sb)));
-                }
-            }
-            return borders[(m, side)] = list;
-        }
+        // Border edges per mesh and side (BorderEdges, kept when each was written).
+        static List<(int Tri, int Edge, float Lo, float Hi, float ZLo, float ZHi)> Borders(ExteriorMesh m, int side) => m.Sides[side];
         int links = 0;
         foreach (var m in exteriors)
         {
@@ -1433,16 +1815,22 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 if (!byCell.TryGetValue((m.Worldspace, nx, ny), out var other)) continue;
                 var theirs = Borders(other, nside);
                 if (theirs.Count == 0) continue;
-                foreach (var (tri, edge, lo, hi) in Borders(m, side))
+                foreach (var (tri, edge, lo, hi, zlo, zhi) in Borders(m, side))
                 {
                     var tr = data.Triangles[tri];
                     short current = edge switch { 0 => tr.EdgeLink_0_1, 1 => tr.EdgeLink_1_2, _ => tr.EdgeLink_2_0 };
                     if (current >= 0) continue;   // shared inside the mesh
-                    int best = -1; float bestOverlap = 1f;
+                    // The neighbour's edge overlapping it most whose floor is the same floor there: within 64 units of
+                    // it at the middle of their overlap (not a bridge over it, or the ground under one).
+                    static float At(float s, float lo2, float hi2, float z0, float z1) => hi2 > lo2 ? z0 + (z1 - z0) * Math.Clamp((s - lo2) / (hi2 - lo2), 0, 1) : (z0 + z1) / 2;
+                    int best = -1; float bestOverlap = 0;
                     foreach (var o in theirs)
                     {
-                        float overlap = MathF.Min(hi, o.Hi) - MathF.Max(lo, o.Lo);
-                        if (overlap > bestOverlap) { bestOverlap = overlap; best = o.Tri; }
+                        float from = MathF.Max(lo, o.Lo), to = MathF.Min(hi, o.Hi), overlap = to - from;
+                        if (overlap <= bestOverlap) continue;
+                        float mid = (from + to) / 2;
+                        if (MathF.Abs(At(mid, lo, hi, zlo, zhi) - At(mid, o.Lo, o.Hi, o.ZLo, o.ZHi)) > 64) continue;
+                        bestOverlap = overlap; best = o.Tri;
                     }
                     if (best < 0) continue;
                     short index = (short)data.EdgeLinks.Count;

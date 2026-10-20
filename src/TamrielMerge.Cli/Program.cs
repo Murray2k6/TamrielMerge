@@ -3473,6 +3473,8 @@ static class Program
                 }
                 Console.WriteLine($"  {cells} interiors, {refs} references, {builder.Navmeshes} navmeshes ({builder.NavmeshTriangles} triangles) ({sw.Elapsed.TotalSeconds:F0}s)");
                 Console.WriteLine($"  on the interiors' navmeshes (within 64 units): {builder.ActorsOnNavmesh:N0} of {builder.ActorsChecked:N0} actors");
+                if (Skyrim.Navmesh.NavmeshBuilder.MemoryTrace)
+                    Console.WriteLine($"  memory after the interiors: {GC.GetTotalMemory(false) / 1073741824.0:F1} GB managed, {System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64 / 1073741824.0:F1} GB private");
                 // --doors <cell name>: that cell's teleporting doors and where they lead.
                 if (opts.TryGetValue("doors", out var doorCell) && world.Interiors.TryGetValue(doorCell, out var dc))
                     foreach (var r in dc.Refs.Where(r => world.Objects.GetValueOrDefault(r.BaseId)?.Type == "DOOR"))
@@ -3483,7 +3485,9 @@ static class Program
                 if (!opts.ContainsKey("no-exterior"))
                 {
                     var ws = builder.BuildExteriors(skyrimData);
-                    Console.WriteLine($"  exterior {ws.EditorID}: {ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Count()} cells, {ws.TopCell!.Persistent.Count} doors, {builder.ExteriorNavmeshes} navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  exterior {ws.EditorID}: {ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Count()} cells, {ws.TopCell!.Persistent.Count} doors, {builder.ExteriorNavmeshes} navmeshes ({builder.ExteriorGoneForGood} references scripts take away for good left out of them, {builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
+                    if (builder.ExteriorGoneForGood > 0) Console.WriteLine($"  left out of the navmeshes as scripts take them away for good: {builder.ExteriorGoneIds}");
+                    Console.WriteLine($"  navmeshes' input: {builder.ExteriorWoundTrusted} models as wound, {builder.ExteriorWoundTurned} turned up (winding mixed or unclear)");
                     Console.WriteLine($"  weather: {builder.WeatherCount} Morrowind weathers, {builder.ClimateCount} climates (one per region + the worldspace's), {builder.Mod.Regions.Count} regions, water {builder.Mod.Waters.FirstOrDefault()?.EditorID}");
                 }
                 var missing = builder.MissingTextures.ToList();
@@ -3938,14 +3942,19 @@ static class Program
                         if (cell is null) { Console.WriteLine($"  no interior {id}"); continue; }
                         var built = builder.BuildInterior(cell);
                         Console.WriteLine($"  {cell.Name}: {built.Temporary.Count + built.Persistent.Count} references ({built.EditorID})");
+                        // Its references Oblivion names (what a script could move someone to), from the source cell.
+                        var named = cell.Persistent.Concat(cell.Temporary).Select(r => r.EditorID).Where(e => !string.IsNullOrEmpty(e)).ToList();
+                        Console.WriteLine($"    named in Oblivion: {(named.Count > 0 ? string.Join(", ", named) : "none")} ({cell.Persistent.Count} persistent, {cell.Temporary.Count} temporary)");
                     }
                 else
                 {
-                    Console.WriteLine($"  {builder.BuildAllInteriors()} interiors ({sw.Elapsed.TotalSeconds:F0}s)");
+                    // --no-interiors skips the interiors, --worldspaces <regex> builds only those worldspaces (test builds).
+                    if (!opts.ContainsKey("no-interiors")) Console.WriteLine($"  {builder.BuildAllInteriors()} interiors ({sw.Elapsed.TotalSeconds:F0}s)");
                     // --no-exterior skips the worldspaces (faster when working on interiors).
                     if (!opts.ContainsKey("no-exterior"))
                     {
-                        var (worlds, cells) = builder.BuildWorldspaces();
+                        var (worlds, cells) = builder.BuildWorldspaces(opts.TryGetValue("worldspaces", out var wsOnly)
+                            ? new System.Text.RegularExpressions.Regex(wsOnly, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null);
                         Console.WriteLine($"  {worlds} worldspaces, {cells} exterior cells, {builder.RegionCount} regions, {builder.ExteriorNavmeshes} exterior navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
                     }
                 }
@@ -7694,6 +7703,40 @@ static class Program
                 Console.WriteLine(Skyrim.VoiceFiles.Pack(skyrimData, opts["wav"], opts["text"], opts["fuz"]) ? $"wrote {opts["fuz"]}" : "failed");
                 return 0;
             }
+            case "doors-into":
+            {
+                // Dev aid: the load doors of --plugin (a built plugin) leading into the interiors --cells names (EditorIDs,
+                // comma-separated), where each door is and which cell or worldspace holds it.
+                using var built = SkyrimMod.CreateFromBinaryOverlay(Path.GetFullPath(opts["plugin"]), SkyrimRelease.SkyrimSE);
+                var wanted = opts["cells"].Split(',').ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var inside = new Dictionary<FormKey, string>();
+                var allCells = new List<(ICellGetter Cell, string Where)>();
+                foreach (var c in built.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells)) allCells.Add((c, c.EditorID ?? c.FormKey.ToString()));
+                foreach (var w in built.Worldspaces)
+                {
+                    foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items)) allCells.Add((c, w.EditorID + " " + c.Grid?.Point));
+                    if (w.TopCell is { } topCell) allCells.Add((topCell, w.EditorID + " (persistent)"));
+                }
+                foreach (var (cell, _) in allCells)
+                    if (cell.EditorID is { } id && wanted.Contains(id))
+                        foreach (var r in cell.Temporary.Concat(cell.Persistent)) inside[r.FormKey] = id;
+                int found = 0;
+                foreach (var (cell, where) in allCells)
+                    foreach (var r in cell.Temporary.Concat(cell.Persistent).OfType<IPlacedObjectGetter>())
+                        if (r.TeleportDestination?.Door.FormKey is { } dest && inside.TryGetValue(dest, out var into))
+                        {
+                            found++;
+                            Console.WriteLine($"  into {into}: door {r.FormKey} ({r.EditorID}) in {where} at {r.Placement?.Position}");
+                        }
+                foreach (var c in wanted) Console.WriteLine($"  {c}: {(inside.ContainsValue(c) ? "" : "not built, or empty; ")}{allCells.Count(x => x.Cell.EditorID == c)} cell(s)");
+                // Their references that have EditorIDs (what a script could move someone to).
+                foreach (var (cell, _) in allCells.Where(x => x.Cell.EditorID is { } e && wanted.Contains(e)))
+                    foreach (var r in cell.Temporary.Concat(cell.Persistent).Where(r => !string.IsNullOrEmpty(r.EditorID)))
+                        Console.WriteLine($"    named in {cell.EditorID}: {r.EditorID}");
+                Console.WriteLine($"  references with EditorIDs in the whole plugin: {allCells.Sum(x => x.Cell.Temporary.Concat(x.Cell.Persistent).Count(r => !string.IsNullOrEmpty(r.EditorID)))}");
+                Console.WriteLine($"{found} load doors lead into them");
+                return 0;
+            }
             case "navmesh-ground":
             {
                 // Dev aid: every exterior navmesh of --plugin (a built plugin; --worldspace EditorID for one) against its
@@ -7703,7 +7746,18 @@ static class Program
                 string plugin = Path.GetFullPath(opts["plugin"]);
                 using var built = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
                 var only = opts.GetValueOrDefault("worldspace");
-                long samples = 0, on = 0, above = 0, farAbove = 0, below = 0, farBelow = 0; double sumAbs = 0;
+                long samples = 0, on = 0, above = 0, farAbove = 0, below = 0, farBelow = 0, deepWet = 0; double sumAbs = 0;
+                // Triangles under their cell's water (by their middle): how many, how many flagged Water, and by depth.
+                var wetBy = new Dictionary<string, (long Wet, long Flagged, long WhollyUnder)>();
+                long wetTris = 0, wetFlagged = 0, dryFlagged = 0, allTris = 0; var wetDepth = new long[6]; var wetDepthFlagged = new long[6];
+                // Finer: by 8-unit bands to 128 (deeper in the last), of the middle's depth and of the shallowest corner's.
+                var midBand = new long[17]; var midBandFlagged = new long[17]; var topBand = new long[18]; var topBandFlagged = new long[18];
+                // The land's height points under water, by depth (0-128, -256, -512, -1024, -2048, deeper), and those with navmesh within 64 units over them.
+                var bedPoints = new long[6]; var bedCovered = new long[6];
+                static int DepthBand(float depth) => depth < 128 ? 0 : depth < 256 ? 1 : depth < 512 ? 2 : depth < 1024 ? 3 : depth < 2048 ? 4 : 5;
+                var deepAt = new List<string>();
+                // Each checked cell's land heights and water, for the actors with no navmesh under them.
+                var landOf = new Dictionary<(string, int, int), (float[,] H, float? Water)>();
                 int cellsChecked = 0;
                 var perCell = new List<(string Name, long Far, long Of)>();
                 var underCells = new List<(string Name, long Under, long Wet, long Of)>();
@@ -7724,7 +7778,10 @@ static class Program
                             return (hh[x0, y0] * (1 - fx) + hh[x0 + 1, y0] * fx) * (1 - fy) + (hh[x0, y0 + 1] * (1 - fx) + hh[x0 + 1, y0 + 1] * fx) * fy;
                         }
                         long cellFar = 0, cellSamples = 0, cellUnder = 0, cellWet = 0;
-                        float? waterZ = cell.Flags.HasFlag(Cell.Flag.HasWater) ? cell.WaterHeight ?? 0f : null;
+                        var nearLand = new HashSet<(int, int)>();
+                        // A cell's water height: its own, or (none, or 3.4e38 as vanilla's cells store it) the worldspace's.
+                        float? waterZ = cell.Flags.HasFlag(Cell.Flag.HasWater) ? (cell.WaterHeight is { } own && own < 1e30f ? own : ws.LandDefaults?.DefaultWaterHeight ?? 0f) : null;
+                        landOf[(ws.EditorID!, cx, cy)] = (hh, waterZ);
                         foreach (var nav in cell.NavigationMeshes)
                         {
                             if (nav.Data is not { } d) continue;
@@ -7732,6 +7789,24 @@ static class Program
                             foreach (var t in d.Triangles)
                             {
                                 var A = vs[t.Vertices.X]; var B = vs[t.Vertices.Y]; var C = vs[t.Vertices.Z];
+                                allTris++;
+                                bool flagged = t.Flags.HasFlag(NavmeshTriangle.Flag.Water);
+                                if (waterZ is { } tw && (A.Z + B.Z + C.Z) / 3 < tw)
+                                {
+                                    wetTris++; if (flagged) wetFlagged++;
+                                    var wb = wetBy.GetValueOrDefault(ws.EditorID!);
+                                    wetBy[ws.EditorID!] = (wb.Wet + 1, wb.Flagged + (flagged ? 1 : 0), wb.WhollyUnder + (MathF.Max(A.Z, MathF.Max(B.Z, C.Z)) < tw ? 1 : 0));
+                                    wetDepth[Math.Min(5, (int)((tw - (A.Z + B.Z + C.Z) / 3) / 32))]++;
+                                    if (flagged) wetDepthFlagged[Math.Min(5, (int)((tw - (A.Z + B.Z + C.Z) / 3) / 32))]++;
+                                    int mb = Math.Min(16, (int)((tw - (A.Z + B.Z + C.Z) / 3) / 8)); midBand[mb]++; if (flagged) midBandFlagged[mb]++;
+                                }
+                                if (waterZ is { } tw2 && MathF.Min(A.Z, MathF.Min(B.Z, C.Z)) < tw2)
+                                {
+                                    // The shallowest corner's depth (negative: above the water; band 0 for those).
+                                    float top = tw2 - MathF.Max(A.Z, MathF.Max(B.Z, C.Z));
+                                    int tb = top < 0 ? 0 : Math.Min(17, 1 + (int)(top / 8)); topBand[tb]++; if (flagged) topBandFlagged[tb]++;
+                                }
+                                else if (flagged) dryFlagged++;
                                 float det = (B.Y - C.Y) * (A.X - C.X) + (C.X - B.X) * (A.Y - C.Y);
                                 if (MathF.Abs(det) < 1e-3f) continue;
                                 float minX = MathF.Min(A.X, MathF.Min(B.X, C.X)), maxX = MathF.Max(A.X, MathF.Max(B.X, C.X)), minY = MathF.Min(A.Y, MathF.Min(B.Y, C.Y)), maxY = MathF.Max(A.Y, MathF.Max(B.Y, C.Y));
@@ -7742,6 +7817,9 @@ static class Program
                                         if (l1 < -1e-4f || l2 < -1e-4f || l3 < -1e-4f) continue;
                                         float e = l1 * A.Z + l2 * B.Z + l3 * C.Z - Ground(px, py);
                                         samples++; cellSamples++; sumAbs += MathF.Abs(e);
+                                        if (MathF.Abs(e) <= 64) nearLand.Add(((int)px, (int)py));
+                                        // More than 64 units under the cell's water: where actors swim (the land's quads there are left out).
+                                        if (waterZ is { } dw && l1 * A.Z + l2 * B.Z + l3 * C.Z < dw - 64 && deepWet++ < 6) deepAt.Add($"{px:F0},{py:F0},{l1 * A.Z + l2 * B.Z + l3 * C.Z:F0} (water {dw:F0})");
                                         if (MathF.Abs(e) <= 32) on++;
                                         else if (e > 128) { farAbove++; cellFar++; }
                                         else if (e > 0) above++;
@@ -7763,6 +7841,15 @@ static class Program
                                     }
                             }
                         }
+                        if (waterZ is { } bw)
+                            for (int by = 0; by <= 32; by++)
+                                for (int bx = 0; bx <= 32; bx++)
+                                    if (hh[bx, by] < bw)
+                                    {
+                                        int band = DepthBand(bw - hh[bx, by]);
+                                        bedPoints[band]++;
+                                        if (nearLand.Contains((cx * 4096 + bx * 128, cy * 4096 + by * 128))) bedCovered[band]++;
+                                    }
                         cellsChecked++;
                         perCell.Add(($"{ws.EditorID} {cx},{cy}", cellFar, cellSamples));
                         if (cellUnder > 0) underCells.Add(($"{ws.EditorID} {cx},{cy}", cellUnder, cellWet, cellSamples));
@@ -7775,6 +7862,241 @@ static class Program
                     $"{underSteep:N0} where the land's four height points round it are more than 256 apart (a cliff), {underFlat:N0} further under than the land's lowest point there by 128");
                 foreach (var c in underCells.OrderByDescending(c => c.Under).Take(8)) Console.WriteLine($"    {c.Name}: {c.Under} of {c.Of} samples ({c.Wet} under water)");
                 foreach (var a in underAt) Console.WriteLine($"    under the land's lowest point at {a}");
+                Console.WriteLine($"  triangles under their cell's water: {wetTris:N0} of {allTris:N0}, flagged Water {wetFlagged:N0} (and {dryFlagged:N0} above it flagged); by depth 0-32 {wetDepth[0]:N0}, 32-64 {wetDepth[1]:N0}, 64-96 {wetDepth[2]:N0}, 96-128 {wetDepth[3]:N0}, 128-160 {wetDepth[4]:N0}, deeper {wetDepth[5]:N0}; flagged Water by those depths {string.Join(", ", wetDepthFlagged.Select(n => n.ToString("N0")))}");
+                Console.WriteLine($"  flagged Water by the middle's depth (8-unit bands from 0): {string.Join(" ", Enumerable.Range(0, 17).Select(b => $"{100.0 * midBandFlagged[b] / Math.Max(1, midBand[b]):F0}%"))}");
+                Console.WriteLine($"  flagged Water, a corner under water, by the shallowest corner's depth (one above it, then 8-unit bands from 0): {string.Join(" ", Enumerable.Range(0, 18).Select(b => $"{100.0 * topBandFlagged[b] / Math.Max(1, topBand[b]):F0}%({topBand[b]})"))}");
+                foreach (var (wn, wv) in wetBy.OrderByDescending(w => w.Value.Wet - w.Value.Flagged).Take(12)) Console.WriteLine($"    under water in {wn}: {wv.Wet:N0} triangles, {wv.WhollyUnder:N0} wholly, {wv.Flagged:N0} flagged Water");
+                Console.WriteLine($"  the land under water (its height points) with navmesh within 64 units over it, by depth: 0-128 {bedCovered[0]:N0} of {bedPoints[0]:N0}, 128-256 {bedCovered[1]:N0} of {bedPoints[1]:N0}, 256-512 {bedCovered[2]:N0} of {bedPoints[2]:N0}, 512-1024 {bedCovered[3]:N0} of {bedPoints[3]:N0}, 1024-2048 {bedCovered[4]:N0} of {bedPoints[4]:N0}, deeper {bedCovered[5]:N0} of {bedPoints[5]:N0}");
+                Console.WriteLine($"  more than 64 units under the cell's water: {Pct(deepWet)} ({deepWet:N0} samples){(deepAt.Count > 0 ? ", e.g. " + string.Join("; ", deepAt) : "")}");
+
+                // Walkable: the exterior navmeshes as one graph, each triangle joined to its neighbours inside its mesh and
+                // across cells by its edge links. Who stands on it (exterior actors and load doors within 64 units of a
+                // triangle of their cell's navmesh), how much of it lies in pieces one of them is on, the biggest piece, and
+                // the triangle edges on a cell's border facing a neighbour's navmesh that are linked to it.
+                var meshList = new List<(string Ws, int X, int Y, INavigationMeshDataGetter Data)>();
+                var meshIndex = new Dictionary<FormKey, int>();
+                var standers = new List<(string Ws, Noggog.P3Float At, bool Door, FormKey Key)>();
+                var baseOf = new Dictionary<FormKey, string>();
+                var npcNames = built.Npcs.ToDictionary(n => n.FormKey, n => n.EditorID ?? n.FormKey.ToString());
+                var doorLinked = new HashSet<FormKey>();
+                var waterAt = new Dictionary<(string, int, int), float>();
+                foreach (var ws in built.Worldspaces.Where(w => only is null || w.EditorID == only))
+                {
+                    var placedHere = ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).SelectMany(c => c.Temporary.Concat(c.Persistent))
+                        .Concat(ws.TopCell is { } top ? top.Temporary.Concat(top.Persistent) : []);
+                    foreach (var r in placedHere)
+                    {
+                        if (r is IPlacedNpcGetter { Placement: { } np } pn) { standers.Add((ws.EditorID!, np.Position, false, r.FormKey)); baseOf[r.FormKey] = npcNames.GetValueOrDefault(pn.Base.FormKey) ?? pn.Base.FormKey.ToString(); }
+                        else if (r is IPlacedObjectGetter { TeleportDestination: not null, Placement: { } dp }) standers.Add((ws.EditorID!, dp.Position, true, r.FormKey));
+                    }
+                    foreach (var cell in ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                    {
+                        if (cell.Grid is null) continue;
+                        if (cell.Flags.HasFlag(Cell.Flag.HasWater)) waterAt[(ws.EditorID!, cell.Grid.Point.X, cell.Grid.Point.Y)] = cell.WaterHeight is { } own && own < 1e30f ? own : ws.LandDefaults?.DefaultWaterHeight ?? 0f;
+                        foreach (var nav in cell.NavigationMeshes)
+                            if (nav.Data is { } d)
+                            {
+                                meshIndex[nav.FormKey] = meshList.Count; meshList.Add((ws.EditorID!, cell.Grid.Point.X, cell.Grid.Point.Y, d));
+                                foreach (var dt in d.DoorTriangles) doorLinked.Add(dt.Door.FormKey);
+                            }
+                    }
+                }
+                var firstTri = new int[meshList.Count + 1];
+                for (int m = 0; m < meshList.Count; m++) firstTri[m + 1] = firstTri[m] + meshList[m].Data.Triangles.Count;
+                var parent = Enumerable.Range(0, firstTri[^1]).ToArray();
+                int Find(int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; }
+                void Join(int a, int b) { a = Find(a); b = Find(b); if (a != b) parent[a] = b; }
+                var byCell = meshList.Select((m, i) => (m, i)).GroupBy(x => (x.m.Ws, x.m.X, x.m.Y)).ToDictionary(g => g.Key, g => g.Select(x => x.i).ToList());
+                long borderEdges = 0, borderLinked = 0, brokenLinks = 0;
+                var unlinkedAt = new List<string>();
+                for (int m = 0; m < meshList.Count; m++)
+                {
+                    var (wsName, mx, my, d) = meshList[m];
+                    for (int t = 0; t < d.Triangles.Count; t++)
+                    {
+                        var tr = d.Triangles[t];
+                        var corner = new[] { tr.Vertices.X, tr.Vertices.Y, tr.Vertices.Z };
+                        for (int e = 0; e < 3; e++)
+                        {
+                            short link = e switch { 0 => tr.EdgeLink_0_1, 1 => tr.EdgeLink_1_2, _ => tr.EdgeLink_2_0 };
+                            var flag = e switch { 0 => NavmeshTriangle.Flag.EdgeLink_0_1, 1 => NavmeshTriangle.Flag.EdgeLink_1_2, _ => NavmeshTriangle.Flag.EdgeLink_2_0 };
+                            var p0 = d.Vertices[corner[e]]; var p1 = d.Vertices[corner[(e + 1) % 3]];
+                            // Which border of its cell the edge lies on, if any (0 west, 1 east, 2 south, 3 north).
+                            int side = MathF.Abs(p0.X - mx * 4096f) <= 0.5f && MathF.Abs(p1.X - mx * 4096f) <= 0.5f ? 0
+                                : MathF.Abs(p0.X - (mx + 1) * 4096f) <= 0.5f && MathF.Abs(p1.X - (mx + 1) * 4096f) <= 0.5f ? 1
+                                : MathF.Abs(p0.Y - my * 4096f) <= 0.5f && MathF.Abs(p1.Y - my * 4096f) <= 0.5f ? 2
+                                : MathF.Abs(p0.Y - (my + 1) * 4096f) <= 0.5f && MathF.Abs(p1.Y - (my + 1) * 4096f) <= 0.5f ? 3 : -1;
+                            if (tr.Flags.HasFlag(flag))
+                            {
+                                if (link >= 0 && link < d.EdgeLinks.Count && meshIndex.TryGetValue(d.EdgeLinks[link].Mesh.FormKey, out int other)
+                                    && d.EdgeLinks[link].TriangleIndex is var ot && ot >= 0 && ot < meshList[other].Data.Triangles.Count)
+                                    Join(firstTri[m] + t, firstTri[other] + ot);
+                                else brokenLinks++;
+                                if (side >= 0) { borderEdges++; borderLinked++; }
+                            }
+                            else if (link >= 0 && link < d.Triangles.Count) Join(firstTri[m] + t, firstTri[m] + link);
+                            else if (side >= 0)
+                            {
+                                var (nx, ny) = side switch { 0 => (mx - 1, my), 1 => (mx + 1, my), 2 => (mx, my - 1), _ => (mx, my + 1) };
+                                // Counted only where the neighbour's navmesh has a border edge over the same stretch of
+                                // the border at the same floor (within 64 units at the middle of their overlap).
+                                float lo = side < 2 ? MathF.Min(p0.Y, p1.Y) : MathF.Min(p0.X, p1.X), hi = side < 2 ? MathF.Max(p0.Y, p1.Y) : MathF.Max(p0.X, p1.X);
+                                float ZAt(float s, Noggog.P3Float q0, Noggog.P3Float q1)
+                                {
+                                    float s0 = side < 2 ? q0.Y : q0.X, s1 = side < 2 ? q1.Y : q1.X;
+                                    return MathF.Abs(s1 - s0) > 1e-3f ? q0.Z + (q1.Z - q0.Z) * Math.Clamp((s - s0) / (s1 - s0), 0, 1) : (q0.Z + q1.Z) / 2;
+                                }
+                                float line = side switch { 0 => mx * 4096f, 1 => (mx + 1) * 4096f, 2 => my * 4096f, _ => (my + 1) * 4096f };
+                                bool Facing(int o)
+                                {
+                                    var od = meshList[o].Data;
+                                    foreach (var ot in od.Triangles)
+                                    {
+                                        var oc = new[] { ot.Vertices.X, ot.Vertices.Y, ot.Vertices.Z };
+                                        for (int oe = 0; oe < 3; oe++)
+                                        {
+                                            var q0 = od.Vertices[oc[oe]]; var q1 = od.Vertices[oc[(oe + 1) % 3]];
+                                            if (side < 2 ? MathF.Abs(q0.X - line) > 0.5f || MathF.Abs(q1.X - line) > 0.5f : MathF.Abs(q0.Y - line) > 0.5f || MathF.Abs(q1.Y - line) > 0.5f) continue;
+                                            float olo = side < 2 ? MathF.Min(q0.Y, q1.Y) : MathF.Min(q0.X, q1.X), ohi = side < 2 ? MathF.Max(q0.Y, q1.Y) : MathF.Max(q0.X, q1.X);
+                                            float from = MathF.Max(lo, olo), to = MathF.Min(hi, ohi);
+                                            if (to - from <= 0) continue;
+                                            if (MathF.Abs(ZAt((from + to) / 2, p0, p1) - ZAt((from + to) / 2, q0, q1)) <= 64) return true;
+                                        }
+                                    }
+                                    return false;
+                                }
+                                if (byCell.TryGetValue((wsName, nx, ny), out var others) && others.Any(Facing))
+                                {
+                                    borderEdges++;
+                                    if (unlinkedAt.Count < 6) unlinkedAt.Add($"{wsName} {mx},{my}: border edge ({p0.X:F0},{p0.Y:F0},{p0.Z:F0})-({p1.X:F0},{p1.Y:F0},{p1.Z:F0}) not linked");
+                                }
+                            }
+                        }
+                    }
+                }
+                // Each triangle's area (seen from above) and the pieces' areas.
+                var pieceArea = new Dictionary<int, double>();
+                double totalArea = 0;
+                for (int m = 0; m < meshList.Count; m++)
+                {
+                    var d = meshList[m].Data;
+                    for (int t = 0; t < d.Triangles.Count; t++)
+                    {
+                        var tv = d.Triangles[t].Vertices;
+                        var A = d.Vertices[tv.X]; var B = d.Vertices[tv.Y]; var C = d.Vertices[tv.Z];
+                        double area = Math.Abs((B.X - A.X) * (C.Y - A.Y) - (B.Y - A.Y) * (C.X - A.X)) / 2;
+                        int root = Find(firstTri[m] + t);
+                        pieceArea[root] = pieceArea.GetValueOrDefault(root) + area;
+                        totalArea += area;
+                    }
+                }
+                // Who stands on it: the nearest triangle of their cell's navmeshes.
+                static float ToTriangle(System.Numerics.Vector3 p, System.Numerics.Vector3 a, System.Numerics.Vector3 b, System.Numerics.Vector3 c)
+                {
+                    // Ericson, Real-Time Collision Detection 5.1.5: the closest point of a triangle.
+                    var ab = b - a; var ac = c - a; var ap = p - a;
+                    float d1 = System.Numerics.Vector3.Dot(ab, ap), d2 = System.Numerics.Vector3.Dot(ac, ap);
+                    if (d1 <= 0 && d2 <= 0) return System.Numerics.Vector3.Distance(p, a);
+                    var bp = p - b; float d3 = System.Numerics.Vector3.Dot(ab, bp), d4 = System.Numerics.Vector3.Dot(ac, bp);
+                    if (d3 >= 0 && d4 <= d3) return System.Numerics.Vector3.Distance(p, b);
+                    float vc = d1 * d4 - d3 * d2;
+                    if (vc <= 0 && d1 >= 0 && d3 <= 0) return System.Numerics.Vector3.Distance(p, a + ab * (d1 / (d1 - d3)));
+                    var cp = p - c; float d5 = System.Numerics.Vector3.Dot(ab, cp), d6 = System.Numerics.Vector3.Dot(ac, cp);
+                    if (d6 >= 0 && d5 <= d6) return System.Numerics.Vector3.Distance(p, c);
+                    float vb = d5 * d2 - d1 * d6;
+                    if (vb <= 0 && d2 >= 0 && d6 <= 0) return System.Numerics.Vector3.Distance(p, a + ac * (d2 / (d2 - d6)));
+                    float va = d3 * d6 - d5 * d4;
+                    if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) return System.Numerics.Vector3.Distance(p, b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))));
+                    float den = 1 / (va + vb + vc);
+                    return System.Numerics.Vector3.Distance(p, a + ab * (vb * den) + ac * (vc * den));
+                }
+                int actors = 0, actorsOn = 0, doorsAll = 0, doorsOn = 0, noMesh = 0, swimming = 0, swimmingOn = 0, swimmingOver = 0, actorsFall = 0, actorsNothing = 0;
+                var nothingUnder = new List<(string Base, Noggog.P3Float At, float Near, float? Under)>();
+                var reached = new HashSet<int>();
+                var offExamples = new List<string>();
+                foreach (var (wsName, at, door, key) in standers)
+                {
+                    int gx = (int)MathF.Floor(at.X / 4096), gy = (int)MathF.Floor(at.Y / 4096);
+                    // Under its cell's water by more than a body's height: swimming, counted apart.
+                    bool wet = !door && waterAt.TryGetValue((wsName, gx, gy), out var wz) && at.Z < wz - 128;
+                    if (door) doorsAll++; else if (wet) swimming++; else actors++;
+                    if (door && doorLinked.Contains(key)) doorsOn++;
+                    if (!byCell.TryGetValue((wsName, gx, gy), out var here)) { noMesh++; if (!wet && offExamples.Count < 8) offExamples.Add($"{(door ? "door" : "actor")} at {at.X:F0},{at.Y:F0},{at.Z:F0}: its cell has no navmesh"); continue; }
+                    var p = new System.Numerics.Vector3(at.X, at.Y, at.Z);
+                    float best = float.MaxValue; int bestNode = -1;
+                    foreach (int m in here)
+                    {
+                        var d = meshList[m].Data;
+                        for (int t = 0; t < d.Triangles.Count; t++)
+                        {
+                            var tv = d.Triangles[t].Vertices;
+                            static System.Numerics.Vector3 V(Noggog.P3Float q) => new(q.X, q.Y, q.Z);
+                            float dist = ToTriangle(p, V(d.Vertices[tv.X]), V(d.Vertices[tv.Y]), V(d.Vertices[tv.Z]));
+                            if (dist < best) { best = dist; bestNode = firstTri[m] + t; }
+                        }
+                    }
+                    // A swimmer: a Water triangle of its cell under it.
+                    if (wet && here.Any(m => meshList[m].Data is var wd && wd.Triangles.Any(tr => tr.Flags.HasFlag(NavmeshTriangle.Flag.Water) && wd.Vertices[tr.Vertices.X] is var wa && wd.Vertices[tr.Vertices.Y] is var wb && wd.Vertices[tr.Vertices.Z] is var wc
+                            && (wb.Y - wc.Y) * (wa.X - wc.X) + (wc.X - wb.X) * (wa.Y - wc.Y) is var wdet && MathF.Abs(wdet) > 1e-3f
+                            && ((wb.Y - wc.Y) * (at.X - wc.X) + (wc.X - wb.X) * (at.Y - wc.Y)) / wdet is var u1 && ((wc.Y - wa.Y) * (at.X - wc.X) + (wa.X - wc.X) * (at.Y - wc.Y)) / wdet is var u2
+                            && u1 >= 0 && u2 >= 0 && u1 + u2 <= 1 && u1 * wa.Z + u2 * wb.Z + (1 - u1 - u2) * wc.Z <= at.Z + 64)))
+                        swimmingOver++;
+                    if (best <= 64)
+                    {
+                        if (door) { } else if (wet) swimmingOn++; else actorsOn++;
+                        reached.Add(Find(bestNode));
+                    }
+                    else if (!wet && !(door && doorLinked.Contains(key)))
+                    {
+                        // The navmesh straight under it (its triangles of the cell over that point, the highest below it).
+                        float? under = null;
+                        foreach (int m in here)
+                        {
+                            var ud = meshList[m].Data;
+                            foreach (var utr in ud.Triangles)
+                            {
+                                var ua = ud.Vertices[utr.Vertices.X]; var ub = ud.Vertices[utr.Vertices.Y]; var uc = ud.Vertices[utr.Vertices.Z];
+                                float udet = (ub.Y - uc.Y) * (ua.X - uc.X) + (uc.X - ub.X) * (ua.Y - uc.Y);
+                                if (MathF.Abs(udet) < 1e-3f) continue;
+                                float w1 = ((ub.Y - uc.Y) * (at.X - uc.X) + (uc.X - ub.X) * (at.Y - uc.Y)) / udet, w2 = ((uc.Y - ua.Y) * (at.X - uc.X) + (ua.X - uc.X) * (at.Y - uc.Y)) / udet;
+                                if (w1 < 0 || w2 < 0 || w1 + w2 > 1) continue;
+                                float uz = w1 * ua.Z + w2 * ub.Z + (1 - w1 - w2) * uc.Z;
+                                if (uz <= at.Z + 16 && (under is null || uz > under)) under = uz;
+                            }
+                        }
+                        // An actor over navmesh it falls onto (placed in the air, as Morrowind places them), or not.
+                        bool falls = !door && under is { } fu && at.Z - fu <= 512;
+                        if (!door) { if (falls) actorsFall++; else { actorsNothing++; nothingUnder.Add((baseOf.GetValueOrDefault(key) ?? "", at, best, under)); } }
+                        if ((door || !falls) && offExamples.Count < 8)
+                            offExamples.Add($"{(door ? "door" : "actor " + baseOf.GetValueOrDefault(key))} at {at.X:F0},{at.Y:F0},{at.Z:F0}: {best:F0} units from the navmesh, {(under is { } uu ? $"navmesh {at.Z - uu:F0} units straight under it" : "no navmesh straight under it")}");
+                    }
+                }
+                // The first of those: the land under them, how steep it is there (the most the height changes over the
+                // 128-unit quad round them), and the cell's water.
+                foreach (var n in nothingUnder.Take(12))
+                {
+                    int gx = (int)MathF.Floor(n.At.X / 4096), gy = (int)MathF.Floor(n.At.Y / 4096);
+                    string landNote = "no land checked";
+                    if (landOf.TryGetValue((only ?? built.Worldspaces.First().EditorID!, gx, gy), out var lw) || landOf.Keys.FirstOrDefault(k => k.Item2 == gx && k.Item3 == gy) is var lk && landOf.TryGetValue(lk, out lw))
+                    {
+                        float fx = Math.Clamp((n.At.X - gx * 4096f) / 128f, 0, 31.999f), fy = Math.Clamp((n.At.Y - gy * 4096f) / 128f, 0, 31.999f);
+                        int ix = (int)fx, iy = (int)fy;
+                        float h00 = lw.H[ix, iy], h10 = lw.H[ix + 1, iy], h01 = lw.H[ix, iy + 1], h11 = lw.H[ix + 1, iy + 1];
+                        float g = (h00 * (1 - (fx - ix)) + h10 * (fx - ix)) * (1 - (fy - iy)) + (h01 * (1 - (fx - ix)) + h11 * (fx - ix)) * (fy - iy);
+                        float rise = MathF.Max(MathF.Max(h00, h10), MathF.Max(h01, h11)) - MathF.Min(MathF.Min(h00, h10), MathF.Min(h01, h11));
+                        landNote = $"land {g:F0} ({n.At.Z - g:F0} under it), rising {rise:F0} over the quad ({MathF.Atan(rise / 128) * 180 / MathF.PI:F0} degrees at most){(lw.Water is { } lwz ? $", water {lwz:F0}" : "")}";
+                    }
+                    Console.WriteLine($"    nothing under {n.Base} at {n.At.X:F0},{n.At.Y:F0},{n.At.Z:F0}: nearest navmesh {n.Near:F0} units; {landNote}");
+                }
+                Console.WriteLine($"  actors off the navmesh: over navmesh within 512 units straight under them (they fall onto it) {actorsFall:N0}, not {actorsNothing:N0}; " +
+                    $"those by base: {string.Join(", ", nothingUnder.GroupBy(n => n.Base).OrderByDescending(g => g.Count()).Take(12).Select(g => $"{g.Key} {g.Count()}"))}");
+                double reachedArea = reached.Sum(r => pieceArea.GetValueOrDefault(r));
+                double biggest = pieceArea.Count > 0 ? pieceArea.Values.Max() : 0;
+                string Share(double a) => $"{100 * a / Math.Max(1, totalArea):F2}%";
+                Console.WriteLine($"  walkable: {firstTri[^1]:N0} triangles in {pieceArea.Count:N0} pieces; the biggest piece {Share(biggest)} of the area; in pieces an actor or a door is on {Share(reachedArea)}");
+                Console.WriteLine($"  on the navmesh (within 64 units): actors {actorsOn:N0} of {actors:N0}, load doors linked to a navmesh triangle {doorsOn:N0} of {doorsAll:N0}; actors more than 128 under their cell's water {swimmingOn:N0} of {swimming:N0}, over a Water triangle {swimmingOver:N0} ({noMesh} of all in cells with no navmesh)");
+                Console.WriteLine($"  cell borders: {borderLinked:N0} of {borderEdges:N0} edges facing a neighbour's navmesh linked to it; edge links to no triangle: {brokenLinks}");
+                foreach (var o in offExamples.Concat(unlinkedAt)) Console.WriteLine($"    {o}");
                 return 0;
             }
             case "df-navmesh-test":

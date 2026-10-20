@@ -363,7 +363,8 @@ public static class DistantLod
                 if (!byChunk.TryGetValue(key, out var list)) byChunk[key] = list = [];
                 list.Add(i);
             }
-            Parallel.ForEach(byChunk, kv =>
+            // One chunk a core (unbounded, the thread pool adds threads to long iterations, each with its memory).
+            Parallel.ForEach(byChunk, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, kv =>
             {
                 var (x0, y0) = kv.Key;
                 var shapes = new Dictionary<(int Page, bool Cutout), BtoWriter.Shape>();

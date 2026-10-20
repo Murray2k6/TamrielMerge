@@ -194,7 +194,7 @@ public static class DataArchives
                     reading.Stop();
                     var done = new BsaWriter.Stored[batch.Count];
                     packing.Start();
-                    Parallel.For(0, batch.Count, i => done[i] = compress ? BsaWriter.Pack(batch[i].Rel, batch[i].Raw) : new BsaWriter.Stored(batch[i].Rel, batch[i].Raw, false));
+                    Parallel.For(0, batch.Count, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, i => done[i] = compress ? BsaWriter.Pack(batch[i].Rel, batch[i].Raw) : new BsaWriter.Stored(batch[i].Rel, batch[i].Raw, false));
                     packing.Stop();
                     foreach (var (s, b) in done.Zip(batch))
                     {

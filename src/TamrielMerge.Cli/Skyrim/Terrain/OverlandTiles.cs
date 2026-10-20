@@ -319,7 +319,8 @@ public sealed class OverlandTiles
         // as the estimate needs (or LandPluginsWanted), the pieces in order, each plugin a run of them with an equal
         // share of the bytes; the last plugin also takes the navmeshes, so it gets less land.
         var landIn = new int[units.Count];
-        Parallel.For(0, units.Count, u =>
+        // One unit a core (unbounded, the thread pool adds threads to long iterations, each with its memory).
+        Parallel.For(0, units.Count, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, u =>
         {
             var (t, ux0, uy0, ux1, uy1, _) = units[u];
             var (x0, y0, x1, y1) = Extent(t);

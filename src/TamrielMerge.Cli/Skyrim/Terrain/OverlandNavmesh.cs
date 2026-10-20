@@ -9,7 +9,7 @@ namespace TamrielMerge.Skyrim.Terrain;
 /// <summary>
 /// Navmeshes for Daggerfall's overland (user, 2026-10-09: "the overland needs done"): every land cell of every tile of
 /// "Daggerfall Land.esm" gets one, from its own heights (Recast, the open-country setting: coarse voxels and long edges,
-/// as vanilla's wilds are meshed), underwater ground left out, the cells' edges joined within each tile (each tile is a
+/// as vanilla's wilds are meshed), under water too and flagged Water there as vanilla's is, the cells' edges joined within each tile (each tile is a
 /// worldspace of its own). Built a tile at a time from the finished land plugin - its cells and heights read from the
 /// plugin, nothing else rebuilt - each tile written as a part of the same plugin (the cells again, now carrying their
 /// navmeshes, with FormIDs above those the land used), the navmesh map (NAVI) written once in a last part with every

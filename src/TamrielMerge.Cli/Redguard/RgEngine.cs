@@ -128,7 +128,7 @@ public sealed partial class RgPluginBuilder
                 if (cell2.Landscape is { } land)
                 {
                     var tris = new List<Vector3[]>();
-                    Skyrim.Navmesh.NavmeshBuilder.AddTerrain(tris, land, cx, cy, null);
+                    Skyrim.Navmesh.NavmeshBuilder.AddTerrain(tris, land, cx, cy);
                     foreach (var t in tris) s.Add(t);
                 }
             }

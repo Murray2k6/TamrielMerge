@@ -390,12 +390,22 @@ public sealed partial class ObPluginBuilder
 
     // ---- worldspaces ----
 
-    /// <summary>Every worldspace, parents first, with its land and references.</summary>
-    public (int Worldspaces, int Cells) BuildWorldspaces()
+    /// <summary>Every worldspace, parents first, with its land and references (with <paramref name="only"/>, those whose
+    /// EditorID it matches: test builds).</summary>
+    public (int Worldspaces, int Cells) BuildWorldspaces(System.Text.RegularExpressions.Regex? only = null)
     {
         var tamriel = SkyrimEsm.Worldspaces.First(w => w.EditorID == "Tamriel");
         var byWorld = Merge().Where(m => m.World is not null).GroupBy(m => m.World!.FormKey).ToDictionary(g => g.Key, g => g.ToList());
         var sources = plugins.SelectMany(p => p.Worldspaces).GroupBy(w => w.FormKey).ToDictionary(g => g.Key, g => g.Last());
+        // TM_OB_WATER=1 (dev aid): each worldspace's cells, those Oblivion marks as having water and at what heights.
+        if (Environment.GetEnvironmentVariable("TM_OB_WATER") == "1")
+            foreach (var (wkey, wsrc) in sources)
+            {
+                var headers = (byWorld.GetValueOrDefault(wkey) ?? []).Where(m => !m.IsPersistentCell && m.Header.Grid is not null).ToList();
+                var wetCells = headers.Where(m => m.Header.Flags is { } f && f.HasFlag(Ob.Cell.Flag.HasWater)).ToList();
+                var heights = wetCells.GroupBy(m => m.Header.WaterHeight?.ToString("F0") ?? "none").OrderByDescending(g => g.Count()).Take(4).Select(g => $"{g.Key} x{g.Count()}");
+                Console.WriteLine($"  water {wsrc.EditorID}: {headers.Count} cells, {wetCells.Count} with water in Oblivion (heights {string.Join(", ", heights)}); worldspace water {wsrc.Water.FormKey}, its flags {wsrc.Flags}");
+            }
         int cellCount = 0;
         void Build(FormKey key)
         {
@@ -403,7 +413,10 @@ public sealed partial class ObPluginBuilder
             if (src.Parent.FormKey is { IsNull: false } parentKey) Build(parentKey);
             var cells = new Dictionary<(int X, int Y), Cell>();
             var cellRegions = new List<(Cell Cell, IEnumerable<FormKey> Regions)>();
-            var water = new Dictionary<Cell, float>();
+            // By the cell itself: a record's hash is of its contents, which change as its land and references are added,
+            // and looked up afterwards most cells weren't found (2026-10-20: Tamriel's navmesh had 872,250 triangles
+            // wholly under water and none flagged Water).
+            var water = new Dictionary<Cell, float>(ReferenceEqualityComparer.Instance);
             var top = new Cell(mod) { Flags = tamriel.TopCell?.Flags ?? 0, SkyrimMajorRecordFlags = tamriel.TopCell?.SkyrimMajorRecordFlags ?? 0, Persistent = [], Temporary = [] };
             Cell CellAt((int X, int Y) g) => cells.TryGetValue(g, out var c) ? c : cells[g] = new Cell(mod) { Grid = new CellGrid { Point = new P2Int(g.X, g.Y) }, Flags = Cell.Flag.HasWater, Persistent = [], Temporary = [] };
             foreach (var m in byWorld.GetValueOrDefault(key) ?? [])
@@ -489,10 +502,20 @@ public sealed partial class ObPluginBuilder
                 if (townCentres is null) { townCentres = new FormList(mod) { EditorID = Skyrim.TownNights.TownCentresId("OB") }; mod.FormLists.Add(townCentres); }
                 townCentres.Items.Add(centre.ToLink<ISkyrimMajorRecordGetter>());
             }
+            // TM_OB_WINDING=1 (dev aid): how the models placed outdoors here are wound, by model and by reference.
+            if (Environment.GetEnvironmentVariable("TM_OB_WINDING") == "1")
+                foreach (var g in cells.Values.SelectMany(c => c.Temporary.OfType<PlacedObject>()).Where(p => meshByBase.ContainsKey(p.Base.FormKey)).GroupBy(p => p.Base.FormKey))
+                {
+                    string kind = Skyrim.Navmesh.NavmeshBuilder.WindingKind(meshByBase[g.Key].Solid);
+                    var c = windingKinds.GetValueOrDefault(kind);
+                    windingKinds[kind] = (c.Models + 1, c.Refs + g.Count());
+                    if (kind is not ("closed, outward" or "open, top facing up")) windingOdd.Add((meshByBase[g.Key].Path, g.Count(), $"{kind}: {Skyrim.Navmesh.NavmeshBuilder.Winding(meshByBase[g.Key].Solid)}"));
+                }
+            // Faces as wound where a model's are wound one way, outward; turned up only where not (measured: TM_OB_WINDING).
             var (navCount, navTriangles) = navmeshes.BuildExteriorCells(ws, cells,
-                (x, y) => cells.TryGetValue((x, y), out var c) ? Solids(c.Temporary.OfType<PlacedObject>()) : [],
+                (x, y) => cells.TryGetValue((x, y), out var c) ? Solids(c.Temporary.OfType<PlacedObject>(), turnUntrusted: true) : [],
                 c => water.TryGetValue(c, out var w) ? w : null,
-                top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems);
+                top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true);
             ExteriorNavmeshes += navCount;
             NavmeshTriangles += navTriangles;
             // Distant terrain, for worldspaces that don't use their parent's.
@@ -503,11 +526,21 @@ public sealed partial class ObPluginBuilder
             }
             cellCount += cells.Count;
         }
-        foreach (var key in sources.Keys) Build(key);
+        foreach (var key in sources.Keys)
+            if (only is null || only.IsMatch(sources[key].EditorID ?? "")) Build(key);
+        if (windingKinds.Count > 0)
+        {
+            foreach (var (kind, c) in windingKinds.OrderByDescending(k => k.Value.Refs)) Console.WriteLine($"  exterior winding: {kind}: {c.Models} models (counted a worldspace each), {c.Refs} references");
+            foreach (var o in windingOdd.OrderByDescending(o => o.Refs).Take(15)) Console.WriteLine($"    {o.Path} x{o.Refs}: {o.Note}");
+        }
         ExteriorEdgeLinks = navmeshes?.LinkExteriorEdges() ?? 0;
         if (terrainLod is not null) Problems.AddRange(terrainLod.Problems);
         return (worldspaces.Count, cellCount);
     }
+
+    /// <summary>TM_OB_WINDING's counts: by kind, the models and references; the models not wound one way outward.</summary>
+    readonly Dictionary<string, (int Models, int Refs)> windingKinds = new();
+    readonly List<(string Path, int Refs, string Note)> windingOdd = new();
 
     FormList? townCentres;
     readonly Dictionary<FormKey, Region> regions = new();
@@ -592,8 +625,10 @@ public sealed partial class ObPluginBuilder
     public int ExteriorNavmeshes { get; private set; }
     public int ExteriorEdgeLinks { get; private set; }
 
-    /// <summary>The collision of placed objects as world-space triangles (scaled, rotated X, Y then Z clockwise, moved).</summary>
-    IEnumerable<System.Numerics.Vector3[]> Solids(IEnumerable<PlacedObject> placed)
+    /// <summary>The collision of placed objects as world-space triangles (scaled, rotated X, Y then Z clockwise, moved).
+    /// With <paramref name="turnUntrusted"/>, the faces of a model whose winding can't be trusted
+    /// (<see cref="Skyrim.Navmesh.NavmeshBuilder.TrustedWinding"/>) are each turned up, the rest left as wound.</summary>
+    IEnumerable<System.Numerics.Vector3[]> Solids(IEnumerable<PlacedObject> placed, bool turnUntrusted = false)
     {
         foreach (var p in placed)
         {
@@ -601,9 +636,21 @@ public sealed partial class ObPluginBuilder
             float sc = p.Scale ?? 1;
             var m = System.Numerics.Matrix4x4.CreateRotationX(-pl.Rotation.X) * System.Numerics.Matrix4x4.CreateRotationY(-pl.Rotation.Y) * System.Numerics.Matrix4x4.CreateRotationZ(-pl.Rotation.Z);
             var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+            bool turn = turnUntrusted && !Trusted(p.Base.FormKey, mesh);
             foreach (var t in mesh.Solid)
-                yield return t.Select(v => System.Numerics.Vector3.Transform(v * sc, m) + pos).ToArray();
+            {
+                var w = t.Select(v => System.Numerics.Vector3.Transform(v * sc, m) + pos).ToArray();
+                yield return turn && System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0]).Z < 0 ? [w[0], w[2], w[1]] : w;
+            }
         }
+    }
+
+    /// <summary>Each base object's collision: whether its winding can be trusted (worked out once).</summary>
+    readonly Dictionary<FormKey, bool> trustedWinding = new();
+    bool Trusted(FormKey key, ObMeshConverter.Result mesh)
+    {
+        lock (trustedWinding)
+            return trustedWinding.TryGetValue(key, out bool known) ? known : trustedWinding[key] = Skyrim.Navmesh.NavmeshBuilder.TrustedWinding(mesh.Solid);
     }
 
     /// <summary>Interior actors and load doors checked against their navmesh, and those within 64 units of it.</summary>
@@ -641,8 +688,8 @@ public sealed partial class ObPluginBuilder
                     var rec = mod.EnumerateMajorRecords().FirstOrDefault(r => r.FormKey == placed.Base.FormKey);
                     Console.WriteLine($"  probe {cell.EditorID} {qx},{qy}: height {a * w[0].Z + b * w[1].Z + (1 - a - b) * w[2].Z:F0}, normal z {nz:F2}, {rec?.EditorID} {(rec as IModeledGetter)?.Model?.File}");
                 }
-        // TM_OB_SOLIDS=<EditorID>: what each placed object gives that cell's navmesh (triangles, those facing up).
-        if (Environment.GetEnvironmentVariable("TM_OB_SOLIDS") is { Length: > 0 } traced && cell.EditorID == traced)
+        // TM_OB_SOLIDS=<EditorID>[,<EditorID>...]: what each placed object gives that cell's navmesh (triangles, those facing up).
+        if (Environment.GetEnvironmentVariable("TM_OB_SOLIDS") is { Length: > 0 } traced && traced.Split(',').Contains(cell.EditorID))
             foreach (var g in cell.Temporary.OfType<PlacedObject>().Concat(cell.Persistent.OfType<PlacedObject>()).GroupBy(p => p.Base.FormKey))
             {
                 var tris = Solids(g).ToList();
