@@ -92,7 +92,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// are kept (<see cref="RecastOutput"/>) and printed only for a mesh no try could make whole.
     /// </summary>
     static (RcPolyMesh Mesh, RcPolyMeshDetail? Detail)? BuildMesh(IRcInputGeomProvider geom, Func<RcPartition, float, float, RcBuilderConfig> config, Func<float, float, float?>? land = null, Lazy<WoundInput>? wound = null,
-        float margin = 0)
+        float margin = 0, Hazards? hazards = null)
     {
         (RcPolyMesh Mesh, RcPolyMeshDetail? Detail)? best = null;
         FloorCheck bestFloor = default;
@@ -108,7 +108,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             try
             {
                 var bc = config(partition, coarse, outline);
-                var r = RecastOutput.Keep(() => land is null && wound is null ? new RcBuilder().Build(geom, bc, true) : BuildOverLand(geom, bc, land, wound, marks), out var warnings);
+                var r = RecastOutput.Keep(() => land is null && wound is null && hazards is null ? new RcBuilder().Build(geom, bc, true) : BuildOverLand(geom, bc, land, wound, marks, hazards), out var warnings);
                 if (r.Mesh is null || r.ContourSet is null || r.CompactHeightfield is null) { if (t == 0) return r.Mesh is null ? null : (r.Mesh, r.MeshDetail); continue; }
                 int overlapping = Overlapping(r.CompactHeightfield);
                 if (overlapping > 0) warnings += $"{overlapping} regions lie over themselves ({partition}){Environment.NewLine}";
@@ -181,7 +181,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// are found once a size (<paramref name="marks"/>: by cell size, each span as column and top) and the later
     /// tries take them.</remarks>
     static RcBuilderResult BuildOverLand(IRcInputGeomProvider geom, RcBuilderConfig bc, Func<float, float, float?>? land, Lazy<WoundInput>? wound,
-        Dictionary<float, HashSet<long>> marks)
+        Dictionary<float, HashSet<long>> marks, Hazards? hazards = null)
     {
         var ctx = new RcContext();
         var solid = RcVoxelizations.BuildSolidHeightfield(ctx, geom, bc);
@@ -197,7 +197,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         else
         {
             known = marks[solid.cs] = [];
-            long cut = 0, shutIn = 0, tested = 0;
+            long cut = 0, shutIn = 0, tested = 0, hurt = 0;
             for (int z = 0; z < solid.height; z++)
                 for (int x = 0; x < solid.width; x++)
                 {
@@ -210,6 +210,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                         if (s.area == RcRecast.RC_NULL_AREA) continue;
                         float top = solid.bmin.Y + s.smax * solid.ch;
                         if (ground is { } g && top < g - BuriedDepth) { s.area = RcRecast.RC_NULL_AREA; cut++; known.Add(Key(x, z, s.smax)); }
+                        else if (hazards is not null && hazards.Covers(wx, wy, top)) { s.area = RcRecast.RC_NULL_AREA; hurt++; known.Add(Key(x, z, s.smax)); }
                         else if (wound is not null && s.next is not null)
                         {
                             tested++;
@@ -242,6 +243,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             }
             Interlocked.Add(ref buriedSpans, cut);
             Interlocked.Add(ref shutSpans, shutIn);
+            Interlocked.Add(ref hazardSpans, hurt);
             Interlocked.Add(ref shutTested, tested);
             if (wound is { IsValueCreated: true }) wound.Value.Count();
         }
@@ -302,7 +304,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             {
                 var f = floorTotal;
                 string Pct(long n) => f.Walkable > 0 ? $"{100.0 * n / f.Walkable:F2}%" : "0%";
-                return $"navmesh over the floor ({Interlocked.Read(ref trianglesMade):N0} triangles made, {BuriedLeftOut:N0} buried input triangles left out, {BuriedSpans:N0} voxel spans under the land and {ShutSpans:N0} shut inside something made unwalkable): {f.Walkable:N0} walkable spans; on a polygon {Pct(f.On)}, off it by up to the agent's height {Pct(f.Off)} ({f.Off:N0}), " +
+                return $"navmesh over the floor ({Interlocked.Read(ref trianglesMade):N0} triangles made, {BuriedLeftOut:N0} buried input triangles left out, {BuriedSpans:N0} voxel spans under the land and {ShutSpans:N0} shut inside something and {HazardSpans:N0} on or under a hazard made unwalkable): {f.Walkable:N0} walkable spans; on a polygon {Pct(f.On)}, off it by up to the agent's height {Pct(f.Off)} ({f.Off:N0}), " +
                     $"further {Pct(f.Far)} ({f.Far:N0}), under no polygon {f.None:N0} ({Pct(f.None)}), in regions too small for Recast to outline {f.Dropped:N0} ({Pct(f.Dropped)}); " +
                     $"polygons whose detail triangles fall short of them {f.LostPolygons:N0} ({f.LostArea:N0} voxels)" +
                     (worstNone.Count > 0 ? $"; most without: {string.Join(", ", worstNone.Select(w => $"{w.Count} at {w.Where}"))}" : "") +
@@ -600,8 +602,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// counter-clockwise around their normals) and links load doors to the nearest triangle in front of them.
     /// </summary>
     public Result BuildInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround = null, IEnumerable<P3Float>? keepAlso = null,
-        Func<P3Float, bool>? underwater = null) =>
-        BeginInterior(cell, polygons, loadDoors, keepAround, keepAlso, underwater, background: false).Finish();
+        Func<P3Float, bool>? underwater = null, Hazards? hazards = null) =>
+        BeginInterior(cell, polygons, loadDoors, keepAround, keepAlso, underwater, background: false, hazards: hazards).Finish();
 
     /// <summary>
     /// An interior's navmesh from its faces as wound (a ceiling or an underside is an obstacle), or, when that leaves an
@@ -612,16 +614,16 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// million spans to 70, for five more actors near it). Load doors don't choose: a trapdoor is in the ceiling.
     /// </summary>
     public Result BuildInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> asWound, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> turnedUp,
-        IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IReadOnlyList<P3Float> actors)
+        IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IReadOnlyList<P3Float> actors, Hazards? hazards = null, Func<P3Float, bool>? underwater = null)
     {
         var doors = loadDoors.ToList();
-        var made = Generate(cell, asWound, doors, keepAround, actors, null);
+        var made = Generate(cell, asWound, doors, keepAround, actors, underwater, hazards);
         int On(Generated g) => actors.Count(a => Distance(g.Data, a) <= 64);
         int on = On(made);
         if (on < actors.Count)
         {
             Generated? alt = null;
-            try { alt = Generate(cell, turnedUp, doors, keepAround, actors, null); }
+            try { alt = Generate(cell, turnedUp, doors, keepAround, actors, underwater, hazards); }
             catch (Exception) { }
             if (alt is not null && On(alt) > on) { made = alt; Interlocked.Increment(ref turnedUpChosen); }
         }
@@ -781,7 +783,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// inputs must not change until it is finished), else when <see cref="PendingInterior.Finish"/> is called.
     /// </summary>
     public PendingInterior BeginInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IEnumerable<P3Float>? keepAlso,
-        Func<P3Float, bool>? underwater, bool background, bool snapActors = false)
+        Func<P3Float, bool>? underwater, bool background, bool snapActors = false, Hazards? hazards = null)
     {
         var doors = loadDoors.ToList();
         var keep = keepAlso?.ToList();
@@ -789,7 +791,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         pending.Run = () =>
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var g = Generate(cell, polygons, doors, keepAround, keep, underwater);
+            var g = Generate(cell, polygons, doors, keepAround, keep, underwater, hazards);
             pending.Seconds = sw.Elapsed.TotalSeconds;
             return g;
         };
@@ -803,11 +805,12 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     }
 
     static Generated Generate(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, List<IPlacedObjectGetter> doorList, P3Float? keepAround, IEnumerable<P3Float>? keepAlso,
-        Func<P3Float, bool>? underwater)
+        Func<P3Float, bool>? underwater, Hazards? hazards = null)
     {
         // Recast's mesh, or the same input's from another part (SharedExteriors: a town part's building interiors are
         // the same buildings as other parts', 2026-10-15: a fifth of a town part's work).
-        var (outVerts, tris) = SharedExteriors is { } dir ? SharedInterior(dir, polygons) : RecastInterior(polygons);
+        // (Not shared with hazards: the shared files are keyed by the polygons alone.)
+        var (outVerts, tris) = SharedExteriors is { } dir && hazards is null ? SharedInterior(dir, polygons) : RecastInterior(polygons, hazards);
         (outVerts, tris) = PruneIslands(outVerts, tris, doorList.Select(d => d.Placement!.Position).Append(keepAround ?? default).Concat(keepAlso ?? []).ToList());
         // Nothing walkable (an Oblivion test cell, a room of models the converter can't read): said plainly, not as the
         // grid's "Sequence contains no elements" (2026-10-17).
@@ -984,8 +987,26 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         return $"  layers: tallest column at {at.Item1 * 32 + 16},{at.Item2 * 32 + 16}: {apart.Count} surfaces over 8 units apart, heights " + string.Join(" ", apart.Select(z => z * 8));
     }
 
-    /// <summary>An interior's mesh as Recast makes it from its polygons, before its islands are pruned.</summary>
-    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris) RecastInterior(IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons)
+    /// <summary>
+    /// What hurts to stand on or in, kept off the navmesh as vanilla keeps actors off its hazards (it has no navmesh over
+    /// them): <paramref name="Faces"/>, the faces of objects that hurt whoever stands on or touches them (a span resting
+    /// on one is no floor; Morrowind's lava pools, In_lava_*, whose script hurts a standing actor 20 a second), and
+    /// <paramref name="Level"/>, the surface of a liquid that hurts (Oblivion's lava water, 50 a second, in its planes and
+    /// 47 interiors), under which nothing is floor.
+    /// </summary>
+    public sealed record Hazards(WoundInput? Faces, Func<float, float, float?>? Level)
+    {
+        public bool Covers(float x, float y, float top) =>
+            (Faces is { } f && f.Under(new Vector3(x, y, top), 12, 12) is not null) || (Level?.Invoke(x, y) is { } lv && top < lv);
+    }
+
+    /// <summary>Walkable voxel spans made unwalkable as on or under a hazard (<see cref="Hazards"/>), once a voxel size.</summary>
+    public static long HazardSpans => Interlocked.Read(ref hazardSpans);
+    static long hazardSpans;
+
+    /// <summary>An interior's mesh as Recast makes it from its polygons, before its islands are pruned; with
+    /// <paramref name="hazards"/>, nothing on or under them walkable.</summary>
+    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris) RecastInterior(IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, Hazards? hazards = null)
     {
         // Skyrim (x, y north, z up) -> Recast (x, y up, z) by rotation (x, z, -y), which keeps winding.
         var verts = new List<float>();
@@ -1002,7 +1023,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         }
         var geom = new RcSampleInputGeomProvider(verts.ToArray(), faces.ToArray());
         if (Environment.GetEnvironmentVariable("TM_NAV_LAYERS") == "1") Console.WriteLine(TallestStack(polygons));
-        var (pmesh, detail) = BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(Config(p, coarse, outline), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()))!.Value;
+        var (pmesh, detail) = BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(Config(p, coarse, outline), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()), hazards: hazards)!.Value;
         var (outVerts, tris) = SkyrimTriangles(pmesh, detail);
         if (Environment.GetEnvironmentVariable("TM_DEBUG_NAV") == "1")
         {
@@ -1292,8 +1313,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// with <see cref="WriteExterior"/> afterwards. Null when nothing is walkable.
     /// </summary>
     public static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExterior(int cx, int cy, List<Vector3[]> triangles, List<P3Float> keep, bool open = false,
-        Func<float, float, float?>? land = null, float[]? around = null, bool asWound = false) =>
-        GenerateExteriorRaw(cx, cy, triangles, open, land, around, asWound) is { } raw ? Finish(raw.Verts, raw.Tris, keep) : null;
+        Func<float, float, float?>? land = null, float[]? around = null, bool asWound = false, Hazards? hazards = null) =>
+        GenerateExteriorRaw(cx, cy, triangles, open, land, around, asWound, hazards) is { } raw ? Finish(raw.Verts, raw.Tris, keep) : null;
 
     /// <summary>The islands not reached from <paramref name="keep"/> pruned (<see cref="PruneIslands"/>); null when
     /// nothing is left or the mesh is too big for a navmesh's 16-bit indices.</summary>
@@ -1307,7 +1328,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// <summary><see cref="GenerateExterior"/>'s mesh as Recast makes it, before the islands are pruned; with
     /// <paramref name="land"/>, nothing under the land is walkable, and with <paramref name="around"/> (the input of
     /// the cell and its neighbours as wound) nothing shut inside something (<see cref="BuildOverLand"/>).</summary>
-    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExteriorRaw(int cx, int cy, List<Vector3[]> triangles, bool open, Func<float, float, float?>? land = null, float[]? around = null, bool asWound = false)
+    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExteriorRaw(int cx, int cy, List<Vector3[]> triangles, bool open, Func<float, float, float?>? land = null, float[]? around = null, bool asWound = false, Hazards? hazards = null)
     {
         if (triangles.Count == 0) return null;
         // TM_NAV_PROBE=x,y: every input triangle over that point, with its height there and which way it faces.
@@ -1344,7 +1365,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var bmin = new RcVec3f(cx * CellUnits - ExteriorMargin, minZ - 16, -(cy + 1) * CellUnits - ExteriorMargin);
         var bmax = new RcVec3f((cx + 1) * CellUnits + ExteriorMargin, maxZ + 256, -cy * CellUnits + ExteriorMargin);
         var wound = around is null ? null : new Lazy<WoundInput>(() => new WoundInput(around));
-        if (BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(ExteriorConfig(open, p, coarse, outline), bmin, bmax, 0, 0), land, wound, ExteriorMargin) is not { } built || built.Mesh.npolys == 0) return null;
+        if (BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(ExteriorConfig(open, p, coarse, outline), bmin, bmax, 0, 0), land, wound, ExteriorMargin, hazards) is not { } built || built.Mesh.npolys == 0) return null;
         var (cv, ct) = SkyrimTriangles(built.Mesh, built.Detail);
         var clipped = ClipToCell(cv, ct, cx, cy);
         return clipped.Tris.Count == 0 ? null : clipped;
@@ -1686,7 +1707,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// (<see cref="exteriorCache"/>; Daggerfall's towns). Not with <paramref name="open"/>.</remarks>
     public (int Meshes, int Triangles) BuildExteriorCells(Worldspace ws, IReadOnlyDictionary<(int X, int Y), Cell> cells,
         Func<int, int, IEnumerable<Vector3[]>> solidsOf, Func<Cell, float?> waterOf, IReadOnlyList<IPlacedObjectGetter> doors, List<string> problems,
-        bool open = false, Func<int, int, bool>? only = null, bool reuse = false, bool asWound = false)
+        bool open = false, Func<int, int, bool>? only = null, bool reuse = false, bool asWound = false,
+        Func<int, int, IEnumerable<Vector3[]>>? hazardsOf = null, Func<Cell, float?>? hazardLevelOf = null)
     {
         reuse &= !open;
         const float margin = 160f;
@@ -1771,11 +1793,26 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                     }
                 var around = aroundCoords.ToArray();
                 aroundCoords = null;
+                // What hurts round the cell (Hazards): the hazard faces of it and its neighbours, the hazard liquid's level
+                // by the cell a point is in.
+                Hazards? hazards = null;
+                if (hazardsOf is not null || hazardLevelOf is not null)
+                {
+                    var hz = new List<float>();
+                    if (hazardsOf is not null)
+                        for (int dy = -1; dy <= 1; dy++)
+                            for (int dx = -1; dx <= 1; dx++)
+                                foreach (var t in hazardsOf(x + dx, y + dy))
+                                    foreach (var v in t) { hz.Add(v.X); hz.Add(v.Y); hz.Add(v.Z); }
+                    float? LevelAt(float px, float py) => hazardLevelOf is not null && cells.TryGetValue(((int)MathF.Floor(px / CellUnits), (int)MathF.Floor(py / CellUnits)), out var hc) ? hazardLevelOf(hc) : null;
+                    if (hz.Count > 0 || hazardLevelOf is not null) hazards = new Hazards(hz.Count > 0 ? new WoundInput(hz.ToArray()) : null, hazardLevelOf is null ? null : LevelAt);
+                }
                 // A cell Recast can't outline in the open-country setting is tried again in the fine one.
-                if (reuse) results[i] = GenerateExteriorReused(x, y, tris, keep, open, LandAt, around, asWound);
+                // Shared meshes are keyed by the input alone: a cell with hazards is made on its own.
+                if (reuse && hazards is null) results[i] = GenerateExteriorReused(x, y, tris, keep, open, LandAt, around, asWound);
                 else
-                    try { results[i] = GenerateExterior(x, y, tris, keep, open, LandAt, around, asWound); }
-                    catch (Exception) when (open) { results[i] = GenerateExterior(x, y, tris, keep, land: LandAt, around: around, asWound: asWound); }
+                    try { results[i] = GenerateExterior(x, y, tris, keep, open, LandAt, around, asWound, hazards); }
+                    catch (Exception) when (open) { results[i] = GenerateExterior(x, y, tris, keep, land: LandAt, around: around, asWound: asWound, hazards: hazards); }
                 if (ExteriorSurface.On && results[i] is { } made) ExteriorSurface.Check(ws.EditorID ?? "", x, y, around, made.Verts, made.Tris, LandAt);
             }
             catch (Exception e) { errors.Add($"navmesh {ws.EditorID} {x},{y}: {e.Message}"); }

@@ -233,7 +233,73 @@ public sealed partial class ObPluginBuilder
         }
         else if (!PlaceForScripts(r.FormKey, placed, cell, persistentCell)) cell.Temporary.Add(placed);
         if (emittersByBase.TryGetValue(baseKey, out var emitters)) PlaceEffects(emitters, placement, scale, cell);
+        // Its model's trigger shapes as trigger boxes, when its script listens for what enters them.
+        if (!isDoor && meshByBase.TryGetValue(baseKey, out var withTriggers) && withTriggers.Triggers.Count > 0)
+        {
+            TriggerShapesSeen++;
+            if (ListensForTriggers(r.Base.FormKey)) PlaceTriggers(placed, withTriggers.Triggers, scale, cell, persistentCell);
+            else if (TriggerUnheard.Count < 8) TriggerUnheard.Add(records.GetValueOrDefault(r.Base.FormKey)?.EditorID ?? r.Base.FormKey.ToString());
+        }
         return placed;
+    }
+
+    /// <summary>Trigger boxes placed for Oblivion's trigger shapes (<see cref="PlaceTriggers"/>), the references whose
+    /// model has one, and some whose script listens for none.</summary>
+    public int TriggersPlaced { get; private set; }
+    public int TriggerShapesSeen { get; private set; }
+    public List<string> TriggerUnheard { get; } = [];
+
+    readonly Dictionary<FormKey, bool> listensForTriggers = new();
+
+    /// <summary>Whether an Oblivion base object's script has an OnTrigger, OnTriggerActor or OnTriggerMob block.</summary>
+    bool ListensForTriggers(FormKey obBase)
+    {
+        if (listensForTriggers.TryGetValue(obBase, out bool known)) return known;
+        bool listens = records.GetValueOrDefault(obBase) is { } rec && ObScriptWorld.ScriptLink(rec) is { } script
+            && records.GetValueOrDefault(script) is Ob.IScriptGetter s && s.Fields?.SourceCode is { } source
+            && System.Text.RegularExpressions.Regex.IsMatch(source, @"(?im)^\s*begin\s+ontrigger");
+        return listensForTriggers[obBase] = listens;
+    }
+
+    Activator? triggerBase;
+
+    /// <summary>
+    /// A reference's trigger shapes (its model's phantoms, ObMeshConverter.Result.Triggers) as Skyrim trigger boxes, as
+    /// vanilla's are: a reference of a model-less activator with a box primitive (unknown 0.15, no collision layer:
+    /// 2,899 of vanilla's scripted ones, vanilla-primitives) at the shape's middle, turned with the reference, its script
+    /// TMObTrigger telling the reference what enters (2026-10-20, ob-hazards: 5,890 placed Oblivion objects whose
+    /// scripts hurt, most from OnTrigger: flames burning whoever touches them, pressure plates, tripwires, kill boxes, fire
+    /// columns, gas and spore traps; the shapes were left out, so none of them fired). The reference, named by the boxes'
+    /// script, is made persistent.
+    /// </summary>
+    void PlaceTriggers(PlacedObject owner, List<(System.Numerics.Vector3 Min, System.Numerics.Vector3 Max)> boxes, float scale, Cell cell, Cell persistentCell)
+    {
+        if (cell.Temporary.Remove(owner))
+        {
+            owner.SkyrimMajorRecordFlags |= (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
+            persistentCell.Persistent.Add(owner);
+        }
+        if (triggerBase is null) { triggerBase = new Activator(mod) { EditorID = "TMObTriggerBox" }; mod.Activators.Add(triggerBase); }
+        var pl = owner.Placement!;
+        var m = System.Numerics.Matrix4x4.CreateRotationX(-pl.Rotation.X) * System.Numerics.Matrix4x4.CreateRotationY(-pl.Rotation.Y) * System.Numerics.Matrix4x4.CreateRotationZ(-pl.Rotation.Z);
+        var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+        foreach (var (lo, hi) in boxes)
+        {
+            var centre = System.Numerics.Vector3.Transform((lo + hi) / 2 * scale, m) + pos;
+            var half = (hi - lo) / 2 * scale;
+            var box = new PlacedObject(mod)
+            {
+                Base = triggerBase.ToNullableLink<IPlaceableObjectGetter>(),
+                Placement = new Placement { Position = new P3Float(centre.X, centre.Y, centre.Z), Rotation = pl.Rotation },
+                Primitive = new PlacedPrimitive { Type = PlacedPrimitive.TypeEnum.Box, Bounds = new P3Float(half.X, half.Y, half.Z), Color = System.Drawing.Color.FromArgb(0, 204, 76, 51), Unknown = 0.15f },
+                VirtualMachineAdapter = new VirtualMachineAdapter
+                {
+                    Scripts = [new ScriptEntry { Name = "TMObTrigger", Properties = [new ScriptObjectProperty { Name = "Owner", Object = owner.ToLink<ISkyrimMajorRecordGetter>() }] }],
+                },
+            };
+            cell.Temporary.Add(box);
+            TriggersPlaced++;
+        }
     }
 
     /// <summary>Every interior cell of the active plugins.</summary>
@@ -256,17 +322,56 @@ public sealed partial class ObPluginBuilder
         return n;
     }
 
-    Cell NewInterior(Ob.ICellGetter source) => new(mod)
+    Cell NewInterior(Ob.ICellGetter source)
     {
-        EditorID = "OB" + Sanitize(source.EditorID ?? source.FormKey.ID.ToString("X6")),
-        Name = source.Name,
-        Flags = Cell.Flag.IsInteriorCell | (source.Flags is { } f && f.HasFlag(Ob.Cell.Flag.HasWater) ? Cell.Flag.HasWater : 0),
-        LightingTemplate = LightingTemplate.ToLink<ILightingTemplateGetter>(),
-        Lighting = Lighting(source.Lighting),
-        WaterHeight = source.WaterHeight,
-        Persistent = [],
-        Temporary = [],
-    };
+        var cell = new Cell(mod)
+        {
+            EditorID = "OB" + Sanitize(source.EditorID ?? source.FormKey.ID.ToString("X6")),
+            Name = source.Name,
+            Flags = Cell.Flag.IsInteriorCell | (source.Flags is { } f && f.HasFlag(Ob.Cell.Flag.HasWater) ? Cell.Flag.HasWater : 0),
+            LightingTemplate = LightingTemplate.ToLink<ILightingTemplateGetter>(),
+            Lighting = Lighting(source.Lighting),
+            WaterHeight = source.WaterHeight,
+            Persistent = [],
+            Temporary = [],
+        };
+        // A water that hurts (lava) as lava that hurts (HurtingWater).
+        if (!source.Water.IsNull && HurtingWater(source.Water.FormKey) is { } lava) cell.Water.SetTo(lava);
+        return cell;
+    }
+
+    // ---- water ----
+
+    Dictionary<FormKey, Ob.IWaterGetter>? obWaterRecords;
+    readonly Dictionary<FormKey, Water?> hurtingWaters = new();
+
+    /// <summary>Oblivion's water type by its FormKey (the last plugin's).</summary>
+    Ob.IWaterGetter? ObWater(FormKey key)
+    {
+        obWaterRecords ??= plugins.SelectMany(p => p.Waters).GroupBy(w => w.FormKey).ToDictionary(g => g.Key, g => g.Last());
+        return obWaterRecords.GetValueOrDefault(key);
+    }
+
+    /// <summary>
+    /// Oblivion's water types that hurt (CausesDamage), as Skyrim lava: Skyrim's own LavaWater (Skyrim.esm, its surface
+    /// and its underwater look from Update.esm), flagged CausesDamage as Apocrypha's water is, with Oblivion's damage a
+    /// second (2026-10-20, ob-waters: OblivionLavaTest01, 50 a second, the water of the 14 Oblivion planes and 31
+    /// interiors; OblivionCitadelLavaPlane, 5000, 15 interiors; CamoranLava02, 1). Null for a water that doesn't hurt.
+    /// Whether Skyrim applies a water's damage can't be seen without the game; the navmesh keeps off it either way.
+    /// </summary>
+    Water? HurtingWater(FormKey key)
+    {
+        if (hurtingWaters.TryGetValue(key, out var made)) return made;
+        Water? lava = null;
+        if (ObWater(key) is { } ob && ob.Flags?.HasFlag(Ob.Water.Flag.CausesDamage) == true && Vanilla.Get<IWaterGetter>("LavaWater") is { } skyrimLava)
+        {
+            lava = mod.Waters.DuplicateInAsNewRecord(skyrimLava);
+            lava.EditorID = "OB" + Sanitize(ob.EditorID ?? key.ID.ToString("X6"));
+            lava.Flags |= Water.Flag.CausesDamage;
+            lava.DamagePerSecond = (ushort)Math.Clamp((int)(ob.Data?.Damage ?? 0), 0, ushort.MaxValue);
+        }
+        return hurtingWaters[key] = lava;
+    }
 
     // ---- landscape ----
 
@@ -440,6 +545,8 @@ public sealed partial class ObPluginBuilder
                 }
             }
             if (cells.Count == 0) { cells[(0, 0)] = CellAt((0, 0)); }
+            // Its water: lava where Oblivion's hurts (HurtingWater), else Skyrim's.
+            var lavaHere = src.Water.IsNull ? null : HurtingWater(src.Water.FormKey);
             int minX = cells.Keys.Min(k => k.X), maxX = cells.Keys.Max(k => k.X), minY = cells.Keys.Min(k => k.Y), maxY = cells.Keys.Max(k => k.Y);
             var ws = new Worldspace(mod)
             {
@@ -447,8 +554,8 @@ public sealed partial class ObPluginBuilder
                 // Oblivion's Tamriel has no name; Skyrim's map shows the world's.
                 Name = string.IsNullOrEmpty(src.Name) && src.EditorID == "Tamriel" ? "Cyrodiil" : src.Name,
                 Climate = tamriel.Climate.AsNullable(),
-                Water = tamriel.Water.AsNullable(),
-                LodWater = tamriel.LodWater.AsNullable(),
+                Water = lavaHere is null ? tamriel.Water.AsNullable() : lavaHere.ToNullableLink<IWaterGetter>(),
+                LodWater = lavaHere is null ? tamriel.LodWater.AsNullable() : lavaHere.ToNullableLink<IWaterGetter>(),
                 LodWaterHeight = 0,
                 LandDefaults = new WorldspaceLandDefaults { DefaultLandHeight = -2048, DefaultWaterHeight = 0 },
                 ObjectBoundsMin = new P2Float(minX, minY),
@@ -514,8 +621,10 @@ public sealed partial class ObPluginBuilder
             // Faces as wound where a model's are wound one way, outward; turned up only where not (measured: TM_OB_WINDING).
             var (navCount, navTriangles) = navmeshes.BuildExteriorCells(ws, cells,
                 (x, y) => cells.TryGetValue((x, y), out var c) ? Solids(c.Temporary.OfType<PlacedObject>(), turnUntrusted: true) : [],
-                c => water.TryGetValue(c, out var w) ? w : null,
-                top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true);
+                // Lava is no water to swim (no Water flag) and nothing under it is floor (a hazard level).
+                c => lavaHere is null && water.TryGetValue(c, out var w) ? w : null,
+                top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true,
+                hazardLevelOf: lavaHere is null ? null : c => water.TryGetValue(c, out var lw) ? lw : null);
             ExteriorNavmeshes += navCount;
             NavmeshTriangles += navTriangles;
             // Distant terrain, for worldspaces that don't use their parent's.
@@ -537,6 +646,9 @@ public sealed partial class ObPluginBuilder
         if (terrainLod is not null) Problems.AddRange(terrainLod.Problems);
         return (worldspaces.Count, cellCount);
     }
+
+    /// <summary>Interiors whose navmesh kept off lava (their water hurts: HurtingWater).</summary>
+    public int HazardCells { get; private set; }
 
     /// <summary>TM_OB_WINDING's counts: by kind, the models and references; the models not wound one way outward.</summary>
     readonly Dictionary<string, (int Models, int Refs)> windingKinds = new();
@@ -704,8 +816,15 @@ public sealed partial class ObPluginBuilder
         try
         {
             var actors = cell.Temporary.OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
+            // The cell's water: lava (HurtingWater) is a hazard level, nothing under it floor; other water is swum over
+            // (the Water flag on ground wholly under it).
+            float? level = cell.Flags.HasFlag(Cell.Flag.HasWater) ? cell.WaterHeight ?? 0 : null;
+            bool lavaCell = level is not null && !cell.Water.IsNull && hurtingWaters.Values.Any(w => w is not null && w.FormKey == cell.Water.FormKey);
+            var hazards = lavaCell ? new Skyrim.Navmesh.NavmeshBuilder.Hazards(null, (_, _) => level) : null;
+            if (lavaCell) HazardCells++;
+            Func<P3Float, bool>? underwater = level is { } wl && !lavaCell ? p => p.Z < wl : null;
             var r = navmeshes.BuildInterior(cell, solid, turnedUp, loadDoors,
-                cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors);
+                cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors, hazards, underwater);
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
             // Who stands on it: the cell's actors and load doors within 64 units of a navmesh triangle.

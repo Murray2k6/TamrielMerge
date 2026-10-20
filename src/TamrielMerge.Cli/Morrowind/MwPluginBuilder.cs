@@ -297,7 +297,15 @@ public sealed partial class MwPluginBuilder
         };
         if (source.HasWater && source.WaterHeight is { } wh) cell.WaterHeight = wh;
         if (source.HasWater) cell.Water = MwWater().ToNullableLink<IWaterGetter>();
+        // An interior that behaves like an exterior (Mournhold's districts): the sky, and its region's weather.
+        if (source.QuasiExterior && source.Region is { } skyRegionName && SkyRegion(skyRegionName) is { } skyRegion)
+        {
+            cell.Flags |= Cell.Flag.ShowSky;
+            cell.SkyAndWeatherFromRegion.SetTo(skyRegion);
+            SkyInteriors++;
+        }
         var solid = new List<Vector3[]>();
+        var hazard = new List<Vector3[]>();
         var visible = new List<(string Model, Vector3[] Tri)>();
         foreach (var r in source.Refs)
         {
@@ -307,6 +315,7 @@ public sealed partial class MwPluginBuilder
             if (world.Model(r.BaseId) is { Length: > 0 } model && converted.GetValueOrDefault(model) is { } mesh)
             {
                 solid.AddRange(mesh.Solid.Select(t => t.Select(v => ToWorld(v, r)).ToArray()));
+                if (Hurting.Contains(r.BaseId)) hazard.AddRange(mesh.Solid.Select(t => t.Select(v => ToWorld(v, r)).ToArray()));
                 if (Environment.GetEnvironmentVariable("TM_MW_PROBE")?.Split(',') is [var pc, var px, var py] && pc == "MW" + Sanitize(source.Name)
                     && float.TryParse(px, out var qx) && float.TryParse(py, out var qy))
                     foreach (var w in mesh.Solid.Select(t => t.Select(v => ToWorld(v, r)).ToArray()))
@@ -351,7 +360,7 @@ public sealed partial class MwPluginBuilder
         }
         AddAnchor(source.Name, cell);
         CellSolids[source.Name] = solid;
-        BuildNavmesh(cell, solid);
+        BuildNavmesh(cell, solid, hazard);
         if (Start is { } start && string.Equals(start.Cell, source.Name, StringComparison.OrdinalIgnoreCase))
         {
             var spot = ClearSpot(start.Position, solid);
@@ -444,7 +453,7 @@ public sealed partial class MwPluginBuilder
     /// can walk; load doors are linked, and the areas around actors are kept even when nothing else connects to them.
     /// Items, swinging doors and actors aren't part of the collision, so it runs through doorways.
     /// </summary>
-    void BuildNavmesh(Cell cell, List<Vector3[]> solid)
+    void BuildNavmesh(Cell cell, List<Vector3[]> solid, List<Vector3[]> hazard)
     {
         if (solid.Count == 0) return;
         if (Environment.GetEnvironmentVariable("TM_MW_WINDING") == "1") Console.WriteLine($"  winding {cell.EditorID}: {Skyrim.Navmesh.NavmeshBuilder.Winding(solid)}");
@@ -469,7 +478,10 @@ public sealed partial class MwPluginBuilder
         var actorsHere = cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
         try
         {
-            var r = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp && cell.Persistent.Contains(StartMarker) ? sp.Position : null, actorsHere);
+            // What hurts to stand on (Hurting: the lava pools) is no floor.
+            var hazards = hazard.Count > 0 ? new Skyrim.Navmesh.NavmeshBuilder.Hazards(new Skyrim.Navmesh.WoundInput(hazard), null) : null;
+            if (hazards is not null) HazardCells++;
+            var r = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp && cell.Persistent.Contains(StartMarker) ? sp.Position : null, actorsHere, hazards);
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
             // Who stands on it: the cell's actors within 64 units of a navmesh triangle.
@@ -771,7 +783,9 @@ public sealed partial class MwPluginBuilder
         var (navCount, navTriangles) = navmeshes.BuildExteriorCells(ws, cells,
             (x, y) => solids.TryGetValue((x, y), out var list) ? list.SelectMany(s => { bool asWound = Trusted(s.Mesh); return s.Mesh.Solid.Select(t => Placed(t, s.Ref, asWound)); }) : [],
             c => c.Flags.HasFlag(Cell.Flag.HasWater) ? 0f : null,
-            top.Persistent.OfType<PlacedObject>().Where(p => !scriptPersistent.Contains(p)).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true);
+            top.Persistent.OfType<PlacedObject>().Where(p => !scriptPersistent.Contains(p)).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true,
+            // What hurts to stand on (Hurting) is no floor.
+            hazardsOf: (x, y) => solids.TryGetValue((x, y), out var list) ? list.Where(s => Hurting.Contains(s.Ref.BaseId)).SelectMany(s => s.Mesh.Solid.Select(t => t.Select(v => ToWorld(v, s.Ref)).ToArray())) : []);
         ExteriorWoundTrusted = trusted.Count(t => t.Value);
         ExteriorWoundTurned = trusted.Count(t => !t.Value);
         ExteriorNavmeshes += navCount;
@@ -787,6 +801,27 @@ public sealed partial class MwPluginBuilder
     }
 
     public int TerrainLodChunks { get; private set; }
+
+    /// <summary>Interiors whose navmesh kept off something that hurts (<see cref="Hurting"/>).</summary>
+    public int HazardCells { get; private set; }
+
+    /// <summary>
+    /// The objects that hurt whoever stands on or touches them, by ID: those whose script calls HurtStandingActor or
+    /// HurtCollidingActor with more than nothing (2026-10-20: Morrowind's lava pools, In_lava_256/512/1024/256A/oval,
+    /// whose script "lava" hurts a standing actor 20 a second; placed 315 times indoors, 348 outdoors). The navmesh keeps
+    /// off them (NavmeshBuilder.Hazards); their scripts still hurt (TMMwScript.HurtTouching).
+    /// </summary>
+    HashSet<string> Hurting => hurting ??= FindHurting();
+    HashSet<string>? hurting;
+    HashSet<string> FindHurting()
+    {
+        var hurt = new System.Text.RegularExpressions.Regex(@"(?im)^\s*[^;\r\n]*\bHurt(Standing|Colliding)Actor\b[\s,]*(-?[\d.]+)");
+        var scripts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in world.Objects.Values.Where(o => o.Type == "SCPT"))
+            foreach (System.Text.RegularExpressions.Match m in hurt.Matches(s.Str("SCTX") ?? ""))
+                if (float.TryParse(m.Groups[2].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var amount) && amount > 0) scripts.Add(s.Id);
+        return world.Objects.Values.Where(o => o.Str("SCRI") is { Length: > 0 } sc && scripts.Contains(sc)).Select(o => o.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
 
     /// <summary>Exterior references left out of the navmeshes as taken away for good (<see cref="DisabledForGood"/>).</summary>
     public int ExteriorGoneForGood { get; private set; }
@@ -909,6 +944,44 @@ public sealed partial class MwPluginBuilder
                         }
         }
     }
+
+    readonly Dictionary<string, Region?> skyRegions = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The region an interior that behaves like an exterior takes its sky and weather from (Skyrim's interiors with
+    /// Show Sky take them from a region: 268 of vanilla's 286, vanilla-interior-sky, Apocrypha among them): Morrowind's
+    /// region (REGN) of that name, with Morrowind's own weathers at its chances, in no worldspace (2026-10-20, mw-quasi:
+    /// Mournhold's five districts, Godsreach, the Great Bazaar, Plaza Brindisi Dorom, the Royal Palace's courtyard and the
+    /// Temple Courtyard, name "Mournhold Region", which no exterior cell names: clear 25, cloudy 35, foggy 5, overcast
+    /// 20, rain 10, thunder 5). Null when there is no such region.
+    /// </summary>
+    Region? SkyRegion(string name)
+    {
+        if (skyRegions.TryGetValue(name, out var known)) return known;
+        Region? region = null;
+        if (world.Objects.TryGetValue(name, out var rec) && rec.Type == "REGN" && SkyrimEsm.Regions.FirstOrDefault(r => r.Weather is { Weathers.Count: > 0 }) is { } template)
+        {
+            var weathers = MwWeathers();
+            region = mod.Regions.DuplicateInAsNewRecord(template);
+            region.EditorID = "MWRegion" + Sanitize(name);
+            region.Worldspace.Clear();
+            region.RegionAreas.Clear();
+            region.Objects = null;
+            region.Grasses = null;
+            region.Sounds = null;
+            region.Land = null;
+            region.Map = null;
+            if (rec.Get("CNAM") is { } color) region.MapColor = System.Drawing.Color.FromArgb(color.Data[0], color.Data[1], color.Data[2]);
+            var chances = Chances(rec);
+            region.Weather!.Weathers = [];
+            for (int i = 0; i < Math.Min(chances.Length, weathers.Length); i++)
+                if (chances[i] > 0) region.Weather.Weathers.Add(new WeatherType { Weather = weathers[i].ToLink<IWeatherGetter>(), Chance = chances[i] });
+        }
+        return skyRegions[name] = region;
+    }
+
+    /// <summary>Interiors that behave like exteriors, given the sky (<see cref="SkyRegion"/>).</summary>
+    public int SkyInteriors { get; private set; }
 
     /// <summary>
     /// Makes Morrowind's teleporting doors Skyrim load doors. Morrowind stores only where a door takes you (DODT:

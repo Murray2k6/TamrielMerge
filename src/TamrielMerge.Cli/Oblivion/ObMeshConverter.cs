@@ -83,6 +83,9 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         /// <summary>Whether parts of the model move (its own controllers or sequences).</summary>
         public bool Moves { get; init; }
         public bool Plays(string sequence) => Sequences.Any(s => s.Name.Equals(sequence, StringComparison.OrdinalIgnoreCase));
+        /// <summary>The model's trigger shapes (Havok phantoms, which nothing collides with but which tell a script
+        /// what enters them: OnTrigger), each as the box it spans in model space (<see cref="PhantomBoxes"/>).</summary>
+        public List<(V3 Min, V3 Max)> Triggers { get; init; } = [];
     }
 
     /// <summary>Output path; <paramref name="moving"/> variants (keyframed collision, for swinging doors) get "_moving".</summary>
@@ -144,6 +147,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         string rel = OutputPath(model, moving, itemMass);
         var solid = new List<(V3[] Pts, V3 N)>();
         List<(string Name, float Length)>? sequences = null;
+        var triggers = new List<(V3 Min, V3 Max)>();
         try
         {
             using var nif = new NifFile();
@@ -152,6 +156,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             var types = Enumerable.Range(0, (int)hdr.GetNumBlocks()).Select(i => hdr.GetBlockTypeStringById((uint)i)).ToList();
             hasHavok = types.Any(t => t == "bhkCollisionObject");
             if (hasHavok) havokTris = HavokTriangles(nif);
+            triggers = PhantomBoxes(nif);
             animated = types.Any(t => t.EndsWith("Controller"));
             // Moving parts (secret walls, gates, levers, drawbridges): the node tree is kept with the animation.
             var anim = itemMass is null ? ReadAnimation(nif, bytes) : null;
@@ -238,7 +243,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         return new Result(rel, pieces.Count, solid.Count,
             all.Count > 0 ? all.Aggregate(new V3(float.MaxValue), V3.Min) : V3.Zero,
             all.Count > 0 ? all.Aggregate(new V3(float.MinValue), V3.Max) : V3.Zero, animated, solid.Select(t => t.Pts).ToList())
-        { Emitters = emitters, Sequences = sequences ?? [], Moves = sequences is not null };
+        { Emitters = emitters, Sequences = sequences ?? [], Moves = sequences is not null, Triggers = triggers };
     }
 
     /// <summary>
@@ -304,6 +309,37 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         }
         if (ok && pending.Count > 0) ok = ReadStrips(nif, pending, tris);
         return ok ? tris : null;
+    }
+
+    /// <summary>
+    /// The model's trigger shapes: each phantom (bhkSimpleShapePhantom, on a bhkSPCollisionObject) through its transform
+    /// (in Havok units) onto its target node, its shape read as the solid collision's is, as the box it spans in model
+    /// space. Oblivion's triggers are these (2026-10-20, ob-nif-collision: TrigZone01, FireOpenSmall's flame,
+    /// KillBox01, TriggerAreaFireColumn, FrostFireGasTrap, the pressure plate's and the tripwire's), the solid
+    /// collision skipping them.
+    /// </summary>
+    internal static List<(V3 Min, V3 Max)> PhantomBoxes(NifFile nif)
+    {
+        var hdr = nif.GetHeader();
+        var boxes = new List<(V3 Min, V3 Max)>();
+        for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+        {
+            if (hdr.GetBlockTypeStringById(i) != "bhkSPCollisionObject") continue;
+            if (hdr.GetBlockById(i) is not bhkNiCollisionObject col || hdr.GetBlockById(col.bodyRef.index) is not bhkSimpleShapePhantom phantom) continue;
+            var m = phantom.transform;
+            V3 ToNode(V3 p)
+            {
+                var r = m.opMult(new nifly.Vector3(p.X / HavokScale, p.Y / HavokScale, p.Z / HavokScale));
+                return new V3(r.x, r.y, r.z) * HavokScale;
+            }
+            var tris = new List<(uint, V3[])>();
+            var pending = new List<(uint Data, Func<V3, V3> Xf, V3 Scale, uint Target)>();
+            if (!Shape(nif, hdr, phantom.shapeRef.index, ToNode, col.targetRef.index, tris, pending)) continue;
+            if (pending.Count > 0 && !ReadStrips(nif, pending, tris)) continue;
+            var pts = tris.SelectMany(t => t.Item2.Select(p => ToModel(nif, t.Item1, p))).ToList();
+            if (pts.Count > 0) boxes.Add((pts.Aggregate(new V3(float.MaxValue), V3.Min), pts.Aggregate(new V3(float.MinValue), V3.Max)));
+        }
+        return boxes;
     }
 
     /// <summary>A point in a node's space (a collision target) in model space.</summary>

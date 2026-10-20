@@ -1321,6 +1321,43 @@ static class Program
                 }
                 return 0;
             }
+            case "rg-hazards":
+            {
+                // Dev aid: Redguard's hazards over every scene: objects whose model or script names --text (default
+                // lava|fire|trap|spike|blade|acid|poison|burn|hot|steam|pit), counted by model and script; and every script
+                // call to a function whose name says it hurts (hurt|damage|health|kill|die|burn|poison|fall), by actor.
+                string rg = GameInstalls.DataDir(Game.Redguard)!;
+                var fn = Redguard.RgScript.FunctionNames(Path.Combine(rg, "soup386", "SOUP386.DEF"));
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("text", "lava|fire|trap|spike|blade|acid|poison|burn|hot|steam|pit"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var hurtRx = new System.Text.RegularExpressions.Regex("hurt|damage|health|kill|die|burn|poison|fall", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var hurtFns = Enumerable.Range(0, fn.Count).Where(i => hurtRx.IsMatch(fn[i])).ToHashSet();
+                Console.WriteLine($"functions that may hurt: {string.Join(", ", hurtFns.Select(i => fn[i]))}");
+                var objects = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var calls = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var f in Directory.GetFiles(Path.Combine(rg, "maps"), "*.RGM"))
+                {
+                    var bytes = File.ReadAllBytes(f);
+                    if (Redguard.RgScene.Load(bytes) is not { } sc) continue;
+                    string scene = Path.GetFileNameWithoutExtension(f);
+                    foreach (var o in sc.Statics.Concat(sc.Objects))
+                        if (rx.IsMatch(o.Model) || rx.IsMatch(o.Script)) objects[$"{scene}: {o.Model}{(o.Script.Length > 0 ? " / " + o.Script : "")}"] = objects.GetValueOrDefault($"{scene}: {o.Model}{(o.Script.Length > 0 ? " / " + o.Script : "")}") + 1;
+                    try
+                    {
+                        var script = Redguard.RgScript.Load(bytes, sc);
+                        foreach (var c in script.Calls.Where(c => hurtFns.Contains(c.Function)))
+                        {
+                            string k = $"{scene}: {c.Actor} {fn[c.Function]}({string.Join(", ", c.Args.Select(a => a?.ToString() ?? "?"))})";
+                            calls[k] = calls.GetValueOrDefault(k) + 1;
+                        }
+                    }
+                    catch (Exception e) { Console.WriteLine($"  {scene}: script unreadable ({e.Message})"); }
+                }
+                Console.WriteLine($"--- objects ({objects.Count} kinds)");
+                foreach (var (k, n) in objects.OrderBy(k => k.Key)) Console.WriteLine($"  {k} x{n}");
+                Console.WriteLine($"--- calls ({calls.Count} kinds)");
+                foreach (var (k, n) in calls.OrderBy(k => k.Key).Take(200)) Console.WriteLine($"  {k} x{n}");
+                return 0;
+            }
             case "rg-calls":
             {
                 // Dev aid: an actor's script calls (--scene, --actor), with 4-character arguments shown as text.
@@ -3473,6 +3510,8 @@ static class Program
                 }
                 Console.WriteLine($"  {cells} interiors, {refs} references, {builder.Navmeshes} navmeshes ({builder.NavmeshTriangles} triangles) ({sw.Elapsed.TotalSeconds:F0}s)");
                 Console.WriteLine($"  on the interiors' navmeshes (within 64 units): {builder.ActorsOnNavmesh:N0} of {builder.ActorsChecked:N0} actors");
+                Console.WriteLine($"  hazards: {builder.HazardCells} interiors' navmeshes kept off what hurts to stand on ({Skyrim.Navmesh.NavmeshBuilder.HazardSpans:N0} voxel spans)");
+                Console.WriteLine($"  sky: {builder.SkyInteriors} interiors behaving like exteriors given the sky and their region's weather");
                 if (Skyrim.Navmesh.NavmeshBuilder.MemoryTrace)
                     Console.WriteLine($"  memory after the interiors: {GC.GetTotalMemory(false) / 1073741824.0:F1} GB managed, {System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64 / 1073741824.0:F1} GB private");
                 // --doors <cell name>: that cell's teleporting doors and where they lead.
@@ -3960,6 +3999,7 @@ static class Program
                 }
                 var (linked, unlinked) = builder.LinkDoors();
                 Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} partners not built");
+                Console.WriteLine($"  hazards: {builder.TriggersPlaced} trigger boxes for Oblivion's trigger shapes (TMObTrigger), of {builder.TriggerShapesSeen} references with one (none listening: {string.Join(", ", builder.TriggerUnheard)}); {builder.HazardCells} interiors' navmeshes kept off their lava ({Skyrim.Navmesh.NavmeshBuilder.HazardSpans:N0} voxel spans)");
                 Console.WriteLine($"  effects: {builder.EffectCount} vanilla effects standing in for particle systems");
                 Console.WriteLine($"  locks: {builder.LockCount} locked doors and containers (Oblivion lockpicking)");
                 if (!opts.ContainsKey("no-dialogue"))
@@ -5982,6 +6022,44 @@ static class Program
                     Console.WriteLine($"{r.Kind}\t{r.Edid}\t{r.Name}\t{r.Model}");
                 return 0;
             }
+            case "ob-nif-collision":
+            {
+                // Dev aid: Oblivion models' collision (--models a;b, under meshes\): each collision object's body type, Havok
+                // layer, motion and shape chain, its phantoms, and the box the collision spans (game units).
+                var obData = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion)!);
+                string tmp = Path.Combine(Path.GetTempPath(), "tm_obcol.nif");
+                foreach (var model in opts["models"].Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    if (obData.Read(@"meshes\" + model) is not { } bytes) { Console.WriteLine($"{model}: not found"); continue; }
+                    File.WriteAllBytes(tmp, bytes);
+                    using var nif = new nifly.NifFile();
+                    if (nif.Load(tmp) != 0) { Console.WriteLine($"{model}: unreadable"); continue; }
+                    var hdr = nif.GetHeader();
+                    using var cache = new nifly.niflycpp.BlockCache(hdr);
+                    var lines = new List<string>();
+                    for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                    {
+                        string type = hdr.GetBlockById(i).GetBlockName();
+                        if (type.Contains("Phantom")) lines.Add($"  {type}");
+                        if (type is not ("bhkRigidBody" or "bhkRigidBodyT")) continue;
+                        var body = cache.EditableBlockById<nifly.bhkRigidBody>(i);
+                        var chain = new List<string>();
+                        uint shape = body.shapeRef.index;
+                        for (int depth = 0; depth < 4 && shape != uint.MaxValue && shape < hdr.GetNumBlocks(); depth++)
+                        {
+                            string st = hdr.GetBlockById(shape).GetBlockName();
+                            chain.Add(st);
+                            if (st == "bhkMoppBvTreeShape") shape = cache.EditableBlockById<nifly.bhkMoppBvTreeShape>(shape).shapeRef.index;
+                            else break;
+                        }
+                        lines.Add($"  {type} layer {body.collisionFilter.layer} motion {body.motionSystem} quality {body.qualityType}: {string.Join(" > ", chain)}");
+                    }
+                    Console.WriteLine($"{model}:");
+                    foreach (var l in lines) Console.WriteLine(l);
+                    foreach (var (lo, hi) in Oblivion.ObMeshConverter.PhantomBoxes(nif)) Console.WriteLine($"  trigger box {lo} to {hi} (size {hi - lo})");
+                }
+                return 0;
+            }
             case "ob-model":
             {
                 // Dev aid: Oblivion records by EditorID (--edids a,b): type, plugin, name and model, and whether the model
@@ -5995,6 +6073,276 @@ static class Program
                     {
                         string? model = (r as Mutagen.Bethesda.Oblivion.IModeledGetter)?.Model?.File;
                         Console.WriteLine($"{r.EditorID} ({r.GetType().Name.Replace("BinaryOverlay", "")}, {p}) : model {(model is { Length: > 0 } ? model + (obData.Exists(@"meshes\" + model) ? " (there)" : " (NOT in the data)") : "(none)")}");
+                    }
+                }
+                return 0;
+            }
+            case "mw-quasi":
+            {
+                // Dev aid: Morrowind's interiors that behave like exteriors (sky and weather: Mournhold's districts), with the
+                // region each names, its water; and the regions (REGN) no exterior cell names, with their weather chances.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                foreach (var c in world.Interiors.Values.Where(c => c.QuasiExterior))
+                    Console.WriteLine($"  {c.Name}: region {c.Region ?? "none"}, water {(c.HasWater ? c.WaterHeight?.ToString() ?? "default" : "none")}, {c.Refs.Count} references");
+                var used = world.Exteriors.Values.Select(c => c.Region).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in world.Objects.Values.Where(o => o.Type == "REGN" && !used.Contains(o.Id)))
+                    Console.WriteLine($"  region named by no exterior: {r.Id} ({r.Str("FNAM")}), WEAT {string.Join(",", r.Get("WEAT")?.Data ?? [])}");
+                return 0;
+            }
+            case "mw-lava-paths":
+            {
+                // Dev aid: whether Morrowind's own AI goes onto what hurts to stand on: its pathgrids' points (PGRD; outdoors
+                // relative to the cell's corner) on a lava pool (In_lava_256/512/1024/256A/oval and whatever else carries
+                // a script calling HurtStandingActor: a square of its size, scaled and turned with it, within 64 units of
+                // its height), and those within 128 units of one's edge.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                var hurtRx = new System.Text.RegularExpressions.Regex(@"(?im)^\s*[^;\r\n]*\bHurt(Standing|Colliding)Actor\b");
+                var hurtScripts = world.Objects.Values.Where(o => o.Type == "SCPT" && hurtRx.IsMatch(o.Str("SCTX") ?? "")).Select(o => o.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var hurting = world.Objects.Values.Where(o => o.Str("SCRI") is { } sc && hurtScripts.Contains(sc)).Select(o => o.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                static float Size(string id) => System.Text.RegularExpressions.Regex.Match(id, @"(\d{3,4})") is { Success: true } m ? float.Parse(m.Value) : 512;
+                // The pools by where they are: an interior's name, or the exterior.
+                var pools = new Dictionary<string, List<(System.Numerics.Vector3 At, float Rot, float Half)>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var c in world.Interiors.Values)
+                    foreach (var r in c.Refs.Where(r => hurting.Contains(r.BaseId)))
+                        (pools.TryGetValue(c.Name, out var l) ? l : pools[c.Name] = []).Add((r.Position, r.Rotation.Z, Size(r.BaseId) * r.Scale / 2));
+                foreach (var c in world.Exteriors.Values)
+                    foreach (var r in c.Refs.Where(r => hurting.Contains(r.BaseId)))
+                        (pools.TryGetValue("", out var l) ? l : pools[""] = []).Add((r.Position, r.Rotation.Z, Size(r.BaseId) * r.Scale / 2));
+                long points = 0, on = 0, nearEdge = 0; var onAt = new List<string>();
+                foreach (var plugin in world.Plugins)
+                    foreach (var rec in plugin.Records.Where(r => r.Type == "PGRD"))
+                    {
+                        if (rec.Get("DATA") is not { } data || rec.Get("PGRP") is not { } pgrp) continue;
+                        int gx = BitConverter.ToInt32(data.Data, 0), gy = BitConverter.ToInt32(data.Data, 4);
+                        string name = rec.Str("NAME") ?? "";
+                        bool interior = world.Interiors.ContainsKey(name);
+                        if (!pools.TryGetValue(interior ? name : "", out var here)) continue;
+                        float ox = interior ? 0 : gx * 8192f, oy = interior ? 0 : gy * 8192f;
+                        for (int k = 0; k + 16 <= pgrp.Data.Length; k += 16)
+                        {
+                            var p = new System.Numerics.Vector3(ox + BitConverter.ToInt32(pgrp.Data, k), oy + BitConverter.ToInt32(pgrp.Data, k + 4), BitConverter.ToInt32(pgrp.Data, k + 8));
+                            bool any = false;
+                            foreach (var (at, rot, half) in here)
+                            {
+                                if (MathF.Abs(p.Z - at.Z) > 64) continue;
+                                float dx = p.X - at.X, dy = p.Y - at.Y;
+                                float lx = dx * MathF.Cos(rot) - dy * MathF.Sin(rot), ly = dx * MathF.Sin(rot) + dy * MathF.Cos(rot);
+                                float edge = MathF.Max(MathF.Abs(lx), MathF.Abs(ly)) - half;
+                                if (edge <= 0) { on++; any = true; if (onAt.Count < 8) onAt.Add($"{(interior ? name : $"exterior {gx},{gy}")} {p} (pool at {at}, half {half})"); break; }
+                                if (edge <= 128) any = true;
+                            }
+                            points++;
+                            if (any && !onAt.Contains("")) { }
+                            if (any) nearEdge++;
+                        }
+                    }
+                Console.WriteLine($"objects that hurt to stand on: {hurting.Count} ({string.Join(", ", hurting.Take(12))}); pathgrid points where they are: {points:N0}, on one {on:N0}, on or within 128 of one {nearEdge:N0}");
+                foreach (var o in onAt) Console.WriteLine($"  on one: {o}");
+                return 0;
+            }
+            case "mw-hazards":
+            {
+                // Dev aid: Morrowind's objects whose ID, model or script names --text (default lava|acid|blight|poison|
+                // magma), with their type, model and script, how often they are placed indoors and out, and those
+                // scripts' text.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("text", "lava|acid|blight|poison|magma"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var placedIn = world.Interiors.Values.SelectMany(c => c.Refs).GroupBy(r => r.BaseId, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+                var placedOut = world.Exteriors.Values.SelectMany(c => c.Refs).GroupBy(r => r.BaseId, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+                var scripts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var o in world.Objects.Values.Where(o => o.Type != "SCPT" && (rx.IsMatch(o.Id) || rx.IsMatch(o.Str("MODL") ?? "") || rx.IsMatch(o.Str("SCRI") ?? ""))))
+                {
+                    int i = placedIn.GetValueOrDefault(o.Id), e = placedOut.GetValueOrDefault(o.Id);
+                    if (i + e == 0) continue;
+                    Console.WriteLine($"{o.Type} {o.Id}: model {o.Str("MODL")}, script {o.Str("SCRI") ?? "none"}; placed {i} indoors, {e} outdoors");
+                    if (o.Str("SCRI") is { Length: > 0 } sc) scripts.Add(sc);
+                }
+                foreach (var sc in scripts)
+                    if (world.Objects.TryGetValue(sc, out var s) && s.Str("SCTX") is { } text)
+                        Console.WriteLine($"--- script {sc}: {string.Join(" | ", text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0 && !l.StartsWith(';')).Take(14))}");
+                return 0;
+            }
+            case "vanilla-interior-sky":
+            {
+                // Dev aid: Skyrim's interiors (Skyrim.esm and the DLC) that show the sky: their flags, the region their sky
+                // and weather come from (XCCM), their lighting template and water, as examples of how an interior gets a sky.
+                // --plugin: a built plugin instead.
+                foreach (var master in opts.TryGetValue("plugin", out var builtPlugin) ? [Path.GetFullPath(builtPlugin)] : new[] { "Skyrim.esm", "Dawnguard.esm", "Dragonborn.esm" })
+                {
+                    using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.IsPathRooted(master) ? master : Path.Combine(skyrimData, master), SkyrimRelease.SkyrimSE);
+                    var regions = sk.Regions.ToDictionary(r => r.FormKey, r => r.EditorID ?? r.FormKey.ToString());
+                    var cells = sk.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Where(c => c.Flags.HasFlag(Cell.Flag.ShowSky)).ToList();
+                    Console.WriteLine($"{master}: {cells.Count} interiors show the sky; {cells.Count(c => !c.SkyAndWeatherFromRegion.IsNull)} take it from a region; flags {string.Join(", ", cells.GroupBy(c => c.Flags).Select(g => $"{g.Key} x{g.Count()}"))}");
+                    foreach (var c in cells.Take(12))
+                        Console.WriteLine($"  {c.EditorID}: region {(c.SkyAndWeatherFromRegion.IsNull ? "none" : regions.GetValueOrDefault(c.SkyAndWeatherFromRegion.FormKey, c.SkyAndWeatherFromRegion.FormKey.ToString()))}, lighting template {c.LightingTemplate.FormKey}, water {c.Water.FormKey}");
+                }
+                return 0;
+            }
+            case "vanilla-primitives":
+            {
+                // Dev aid: Skyrim.esm's placed objects with a primitive (XPRM): by the base's kind, whether the base has a
+                // model and a script, the primitive's type and unknown value and the reference's collision layer, with
+                // examples.
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var baseOf = sk.EnumerateMajorRecords().ToDictionary(r => r.FormKey, r => r);
+                var tally = new Dictionary<string, (int N, string Example)>();
+                foreach (var c in sk.EnumerateMajorRecords<ICellGetter>())
+                    foreach (var r in c.Temporary.Concat(c.Persistent).OfType<IPlacedObjectGetter>().Where(r => r.Primitive is not null))
+                    {
+                        var b = baseOf.GetValueOrDefault(r.Base.FormKey);
+                        bool model = (b as IModeledGetter)?.Model?.File is { } mf && mf.DataRelativePath.Path.Length > 0;
+                        bool script = (b as IScriptedGetter)?.VirtualMachineAdapter?.Scripts.Count > 0 || r.VirtualMachineAdapter?.Scripts.Count > 0;
+                        string k = $"{b?.GetType().Name.Replace("BinaryOverlay", "")} model {model} script {script}: {r.Primitive!.Type} unknown {r.Primitive.Unknown} layer {r.CollisionLayer}";
+                        var v = tally.GetValueOrDefault(k);
+                        tally[k] = (v.N + 1, v.Example ?? $"{b?.EditorID} ({(b as IModeledGetter)?.Model?.File})");
+                    }
+                foreach (var (k, v) in tally.OrderByDescending(t => t.Value.N).Take(30)) Console.WriteLine($"{v.N,6}  {k}   e.g. {v.Example}");
+                return 0;
+            }
+            case "vanilla-waters":
+            {
+                // Dev aid: Skyrim's water types (Skyrim.esm and the DLC): EditorID, FormKey, flags, damage, and how many
+                // worldspaces and cells use each.
+                foreach (var master in new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" })
+                {
+                    if (!File.Exists(Path.Combine(skyrimData, master))) continue;
+                    using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, master), SkyrimRelease.SkyrimSE);
+                    var cellWater = sk.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Where(c => !c.Water.IsNull).GroupBy(c => c.Water.FormKey).ToDictionary(g => g.Key, g => g.Count());
+                    foreach (var w in sk.Waters)
+                    {
+                        var worlds = sk.Worldspaces.Where(ws => ws.Water.FormKey == w.FormKey).Select(ws => ws.EditorID).ToList();
+                        Console.WriteLine($"{w.EditorID} {w.FormKey} ({master}): flags {w.Flags}, damage {w.DamagePerSecond}, material {w.Material.FormKey}, spell {w.Spell.FormKey}, image space {w.ImageSpace.FormKey}; " +
+                            $"worldspaces {(worlds.Count > 0 ? string.Join(", ", worlds) : "none")}, interiors {cellWater.GetValueOrDefault(w.FormKey)}");
+                    }
+                }
+                return 0;
+            }
+            case "ob-where":
+            {
+                // Dev aid: the interiors (EditorIDs) where Oblivion's bases --edids a,b are placed, most first.
+                string obDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var wanted = opts["edids"].Split(',', StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var where = new Dictionary<string, int>();
+                foreach (var p in Mods.ModCatalog.Selected(Game.Oblivion, obDir, []))
+                {
+                    using var ob = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(obDir, p), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                    var keys = ob.EnumerateMajorRecords().Where(r => r.EditorID is { } e && wanted.Contains(e)).Select(r => r.FormKey).ToHashSet();
+                    foreach (var c in ob.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                    {
+                        int n = c.Persistent.Concat(c.Temporary).OfType<Mutagen.Bethesda.Oblivion.IPlacedObjectGetter>().Count(r => keys.Contains(r.Base.FormKey));
+                        if (n > 0) where[c.EditorID ?? c.FormKey.ToString()] = where.GetValueOrDefault(c.EditorID ?? "") + n;
+                    }
+                }
+                foreach (var (c, n) in where.OrderByDescending(w => w.Value).Take(15)) Console.WriteLine($"  {c}: {n}");
+                return 0;
+            }
+            case "ob-lava-paths":
+            {
+                // Dev aid: whether Oblivion's own AI goes into the water that hurts (lava): in every cell whose water causes
+                // damage (interiors by their water, exterior cells by their worldspace's), its pathgrid's points: how
+                // many, how many under the water's surface, and how many within 32 units over it.
+                string obDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var mods = Mods.ModCatalog.Selected(Game.Oblivion, obDir, []).Select(p => Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(obDir, p), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion)).ToList();
+                var waters = mods.SelectMany(m => m.Waters).GroupBy(w => w.FormKey).ToDictionary(g => g.Key, g => g.Last());
+                bool Hurts(FormKey k) => waters.TryGetValue(k, out var w) && w.Flags?.HasFlag(Mutagen.Bethesda.Oblivion.Water.Flag.CausesDamage) == true;
+                long cellsWith = 0, points = 0, under = 0, near = 0, dry = 0; var underAt = new List<string>();
+                void Count(Mutagen.Bethesda.Oblivion.ICellGetter c, string where)
+                {
+                    if (c.PathGrid is not { } pg) return;
+                    // Only where the cell has its water (the flag): a height alone is no water.
+                    if (c.Flags is not { } cf || !cf.HasFlag(Mutagen.Bethesda.Oblivion.Cell.Flag.HasWater)) { dry++; return; }
+                    float level = c.WaterHeight ?? 0;
+                    cellsWith++;
+                    foreach (var p in pg.PointToPointConnections)
+                    {
+                        points++;
+                        if (p.Point.Z < level) { under++; if (underAt.Count < 8) underAt.Add($"{where} {p.Point} (surface {level})"); }
+                        else if (p.Point.Z < level + 32) near++;
+                    }
+                }
+                foreach (var m in mods)
+                {
+                    foreach (var c in m.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                        if (!c.Water.IsNull && Hurts(c.Water.FormKey)) Count(c, c.EditorID ?? "");
+                    foreach (var ws in m.Worldspaces.Where(w => !w.Water.IsNull && Hurts(w.Water.FormKey)))
+                        foreach (var c in ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                            Count(c, $"{ws.EditorID} {c.Grid}");
+                }
+                Console.WriteLine($"cells with a pathgrid whose water hurts but that have no water (flag off): {dry:N0}");
+                Console.WriteLine($"cells in water that hurts with a pathgrid: {cellsWith:N0}; its points {points:N0}: under the surface {under:N0}, within 32 over it {near:N0}");
+                foreach (var u in underAt) Console.WriteLine($"  under it: {u}");
+                foreach (var m in mods) m.Dispose();
+                return 0;
+            }
+            case "ob-hazards":
+            {
+                // Dev aid: Oblivion's hazards in the selected plugins: interiors whose water causes damage (and which), and
+                // the placed objects whose script hurts (Cast, ModActorValue/DamageActorValue/ModAV Health, KillActor,
+                // PushActorAway, a trigger block), by base and script, with their placements and the script's lines.
+                string obDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var plugins = Mods.ModCatalog.Selected(Game.Oblivion, obDir, []);
+                var mods = plugins.Select(p => Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(obDir, p), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion)).ToList();
+                var waters = mods.SelectMany(m => m.Waters).GroupBy(w => w.FormKey).ToDictionary(g => g.Key, g => g.Last());
+                var hurtRx = new System.Text.RegularExpressions.Regex(@"(?im)^\s*[^;\r\n]*\b(Cast\b|ModActorValue\s+Health|DamageActorValue\s+Health|ModAV\s+Health|DamageAV\s+Health|KillActor|Kill\b|PushActorAway|SetActorValue\s+Health)|^\s*begin\s+(OnTrigger\w*|OnTriggerActor|OnTriggerMob)");
+                var scripts = mods.SelectMany(m => m.Scripts).GroupBy(s => s.FormKey).ToDictionary(g => g.Key, g => g.Last());
+                var hurting = scripts.Values.Where(s => s.Fields?.SourceCode is { } src && hurtRx.IsMatch(src)).ToDictionary(s => s.FormKey);
+                var bases = new Dictionary<FormKey, (string Edid, string Type, FormKey Script)>();
+                foreach (var m in mods)
+                    foreach (var r in m.EnumerateMajorRecords())
+                        if ((r switch
+                            {
+                                Mutagen.Bethesda.Oblivion.IActivatorGetter a => a.Script.FormKey,
+                                Mutagen.Bethesda.Oblivion.IDoorGetter d => d.Script.FormKey,
+                                Mutagen.Bethesda.Oblivion.IContainerGetter co => co.Script.FormKey,
+                                Mutagen.Bethesda.Oblivion.IFurnitureGetter fu => fu.Script.FormKey,
+                                Mutagen.Bethesda.Oblivion.ILightGetter li => li.Script.FormKey,
+                                Mutagen.Bethesda.Oblivion.IFloraGetter fl => fl.Script.FormKey,
+                                _ => FormKey.Null,
+                            }) is { IsNull: false } key && hurting.ContainsKey(key))
+                            bases[r.FormKey] = (r.EditorID ?? r.FormKey.ToString(), r.GetType().Name.Replace("BinaryOverlay", ""), key);
+                var placed = new Dictionary<FormKey, (int In, int Out)>();
+                int damagingWaterCells = 0; var byWater = new Dictionary<string, int>(); var lavaCells = new List<string>();
+                foreach (var m in mods)
+                    foreach (var c in m.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                    {
+                        if (!c.Water.IsNull && waters.TryGetValue(c.Water.FormKey, out var w) && w.Flags?.HasFlag(Mutagen.Bethesda.Oblivion.Water.Flag.CausesDamage) == true)
+                        { damagingWaterCells++; byWater[w.EditorID ?? ""] = byWater.GetValueOrDefault(w.EditorID ?? "") + 1; if (lavaCells.Count < 60) lavaCells.Add(c.EditorID ?? c.FormKey.ToString()); }
+                        foreach (var r in c.Persistent.Concat(c.Temporary))
+                            if (r is Mutagen.Bethesda.Oblivion.IPlacedObjectGetter po && bases.ContainsKey(po.Base.FormKey)) { var v = placed.GetValueOrDefault(po.Base.FormKey); placed[po.Base.FormKey] = (v.In + 1, v.Out); }
+                            else if (r is Mutagen.Bethesda.Oblivion.IPlacedCreatureGetter) { }
+                    }
+                foreach (var m in mods)
+                    foreach (var ws in m.Worldspaces)
+                        foreach (var c in ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Concat(ws.TopCell is { } t ? [t] : []))
+                            foreach (var r in c.Persistent.Concat(c.Temporary))
+                                if (r is Mutagen.Bethesda.Oblivion.IPlacedObjectGetter po && bases.ContainsKey(po.Base.FormKey)) { var v = placed.GetValueOrDefault(po.Base.FormKey); placed[po.Base.FormKey] = (v.In, v.Out + 1); }
+                Console.WriteLine($"interiors with water that causes damage: {damagingWaterCells} ({string.Join(", ", byWater.Select(kv => $"{kv.Key} {kv.Value}"))}): {string.Join(",", lavaCells.Distinct())}");
+                Console.WriteLine($"scripts that hurt: {hurting.Count}; objects carrying them: {bases.Count}; placed: {placed.Values.Sum(v => v.In)} indoors, {placed.Values.Sum(v => v.Out)} outdoors");
+                foreach (var g in bases.Where(b => placed.ContainsKey(b.Key)).GroupBy(b => b.Value.Script).OrderByDescending(g => g.Sum(b => placed[b.Key].In + placed[b.Key].Out)))
+                {
+                    var s = hurting[g.Key];
+                    var lines = (s.Fields?.SourceCode ?? "").Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0 && !l.StartsWith(';') && hurtRx.IsMatch(l)).Distinct().Take(4);
+                    Console.WriteLine($"  {s.EditorID}: {string.Join(", ", g.Select(b => $"{b.Value.Type.Replace("Mutagen.Bethesda.Oblivion.", "")} {b.Value.Edid} x{placed[b.Key].In + placed[b.Key].Out}"))}; {string.Join(" | ", lines)}");
+                }
+                foreach (var m in mods) m.Dispose();
+                return 0;
+            }
+            case "ob-waters":
+            {
+                // Dev aid: Oblivion's water types (WATR) in the selected plugins: EditorID, FormKey, texture, flags,
+                // damage, and the worldspaces using each.
+                string obDir = GameInstalls.DataDir(Game.Oblivion)!;
+                foreach (var p in Mods.ModCatalog.Selected(Game.Oblivion, obDir, []))
+                {
+                    using var ob = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(obDir, p), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                    foreach (var w in ob.Waters)
+                    {
+                        var users = ob.Worldspaces.Where(ws => ws.Water.FormKey == w.FormKey).Select(ws => ws.EditorID).ToList();
+                        Console.WriteLine($"{w.EditorID} {w.FormKey} ({p}): texture {w.Texture}, flags {w.Flags}, damage {w.Data?.Damage}, " +
+                            $"colours shallow {w.Data?.ShallowColor} deep {w.Data?.DeepColor}; worldspaces {(users.Count > 0 ? string.Join(", ", users) : "none here")}");
                     }
                 }
                 return 0;
@@ -7701,6 +8049,30 @@ static class Program
             {
                 // Packs one .wav (--wav) with its text (--text) into a .fuz (--fuz), to test the tools.
                 Console.WriteLine(Skyrim.VoiceFiles.Pack(skyrimData, opts["wav"], opts["text"], opts["fuz"]) ? $"wrote {opts["fuz"]}" : "failed");
+                return 0;
+            }
+            case "trigger-check":
+            {
+                // Dev aid: the trigger boxes (references carrying TMObTrigger) of --plugin: each one's Owner property, whether
+                // that reference is in the plugin, persistent, and what scripts its base carries; the box's size.
+                using var built = SkyrimMod.CreateFromBinaryOverlay(Path.GetFullPath(opts["plugin"]), SkyrimRelease.SkyrimSE);
+                var refs = built.EnumerateMajorRecords<IPlacedObjectGetter>().ToDictionary(r => r.FormKey);
+                var bases = built.EnumerateMajorRecords().ToDictionary(r => r.FormKey);
+                int boxes = 0, ownerFound = 0, ownerPersistent = 0, ownerScripted = 0;
+                var scriptNames = new Dictionary<string, int>();
+                foreach (var r in refs.Values)
+                {
+                    if (r.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == "TMObTrigger") is not { } entry) continue;
+                    boxes++;
+                    if (entry.Properties.OfType<IScriptObjectPropertyGetter>().FirstOrDefault(p => p.Name == "Owner")?.Object.FormKey is not { } ok || !refs.TryGetValue(ok, out var owner)) continue;
+                    ownerFound++;
+                    if (((int)owner.SkyrimMajorRecordFlags & 0x400) != 0) ownerPersistent++;
+                    var names = (bases.GetValueOrDefault(owner.Base.FormKey) as IScriptedGetter)?.VirtualMachineAdapter?.Scripts.Select(s => s.Name).ToList() ?? [];
+                    if (names.Count > 0) ownerScripted++;
+                    foreach (var n in names) scriptNames[n] = scriptNames.GetValueOrDefault(n) + 1;
+                }
+                Console.WriteLine($"trigger boxes {boxes}: owner found {ownerFound}, persistent {ownerPersistent}, its base scripted {ownerScripted}");
+                foreach (var (n, c) in scriptNames.OrderByDescending(s => s.Value).Take(12)) Console.WriteLine($"  {n} x{c}");
                 return 0;
             }
             case "doors-into":
