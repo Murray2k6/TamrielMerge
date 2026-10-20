@@ -3999,7 +3999,7 @@ static class Program
                 }
                 var (linked, unlinked) = builder.LinkDoors();
                 Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} partners not built");
-                Console.WriteLine($"  hazards: {builder.TriggersPlaced} trigger boxes for Oblivion's trigger shapes (TMObTrigger), of {builder.TriggerShapesSeen} references with one (none listening: {string.Join(", ", builder.TriggerUnheard)}); {builder.HazardCells} interiors' navmeshes kept off their lava ({Skyrim.Navmesh.NavmeshBuilder.HazardSpans:N0} voxel spans)");
+                Console.WriteLine($"  hazards: {builder.TriggersPlaced} trigger boxes for Oblivion's trigger shapes (TMObTrigger), of {builder.TriggerShapesSeen} references with one (none listening: {string.Join(", ", builder.TriggerUnheard)}); {builder.HazardCells} interiors in lava (swum over as water, flagged Water)");
                 Console.WriteLine($"  effects: {builder.EffectCount} vanilla effects standing in for particle systems");
                 Console.WriteLine($"  locks: {builder.LockCount} locked doors and containers (Oblivion lockpicking)");
                 if (!opts.ContainsKey("no-dialogue"))

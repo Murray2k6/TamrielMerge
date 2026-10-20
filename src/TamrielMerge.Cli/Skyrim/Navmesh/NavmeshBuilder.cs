@@ -991,8 +991,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// What hurts to stand on or in, kept off the navmesh as vanilla keeps actors off its hazards (it has no navmesh over
     /// them): <paramref name="Faces"/>, the faces of objects that hurt whoever stands on or touches them (a span resting
     /// on one is no floor; Morrowind's lava pools, In_lava_*, whose script hurts a standing actor 20 a second), and
-    /// <paramref name="Level"/>, the surface of a liquid that hurts (Oblivion's lava water, 50 a second, in its planes and
-    /// 47 interiors), under which nothing is floor.
+    /// <paramref name="Level"/>, the surface of a liquid that hurts that is not to be swum, under which nothing is floor
+    /// (Oblivion's lava is swum as water is, its bed flagged Water: user, 2026-10-20, "lava is swimmable though and its
+    /// hazard in case you fall in").
     /// </summary>
     public sealed record Hazards(WoundInput? Faces, Func<float, float, float?>? Level)
     {

@@ -621,10 +621,10 @@ public sealed partial class ObPluginBuilder
             // Faces as wound where a model's are wound one way, outward; turned up only where not (measured: TM_OB_WINDING).
             var (navCount, navTriangles) = navmeshes.BuildExteriorCells(ws, cells,
                 (x, y) => cells.TryGetValue((x, y), out var c) ? Solids(c.Temporary.OfType<PlacedObject>(), turnUntrusted: true) : [],
-                // Lava is no water to swim (no Water flag) and nothing under it is floor (a hazard level).
-                c => lavaHere is null && water.TryGetValue(c, out var w) ? w : null,
-                top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true,
-                hazardLevelOf: lavaHere is null ? null : c => water.TryGetValue(c, out var lw) ? lw : null);
+                // Lava is swum as water is (user, 2026-10-20: "lava is swimmable though and its hazard in case you fall in"):
+                // its bed navmeshed and flagged Water, so whoever falls in can swim out; the lava itself hurts (HurtingWater).
+                c => water.TryGetValue(c, out var w) ? w : null,
+                top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true);
             ExteriorNavmeshes += navCount;
             NavmeshTriangles += navTriangles;
             // Distant terrain, for worldspaces that don't use their parent's.
@@ -647,7 +647,7 @@ public sealed partial class ObPluginBuilder
         return (worldspaces.Count, cellCount);
     }
 
-    /// <summary>Interiors whose navmesh kept off lava (their water hurts: HurtingWater).</summary>
+    /// <summary>Interiors whose water is lava (HurtingWater), swum over as water is.</summary>
     public int HazardCells { get; private set; }
 
     /// <summary>TM_OB_WINDING's counts: by kind, the models and references; the models not wound one way outward.</summary>
@@ -816,15 +816,13 @@ public sealed partial class ObPluginBuilder
         try
         {
             var actors = cell.Temporary.OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
-            // The cell's water: lava (HurtingWater) is a hazard level, nothing under it floor; other water is swum over
-            // (the Water flag on ground wholly under it).
+            // The cell's water, lava (HurtingWater) as any other: swum over, the ground wholly under it flagged Water, so
+            // whoever falls into lava can swim out (the lava hurts).
             float? level = cell.Flags.HasFlag(Cell.Flag.HasWater) ? cell.WaterHeight ?? 0 : null;
-            bool lavaCell = level is not null && !cell.Water.IsNull && hurtingWaters.Values.Any(w => w is not null && w.FormKey == cell.Water.FormKey);
-            var hazards = lavaCell ? new Skyrim.Navmesh.NavmeshBuilder.Hazards(null, (_, _) => level) : null;
-            if (lavaCell) HazardCells++;
-            Func<P3Float, bool>? underwater = level is { } wl && !lavaCell ? p => p.Z < wl : null;
+            if (level is not null && !cell.Water.IsNull && hurtingWaters.Values.Any(w => w is not null && w.FormKey == cell.Water.FormKey)) HazardCells++;
+            Func<P3Float, bool>? underwater = level is { } wl ? p => p.Z < wl : null;
             var r = navmeshes.BuildInterior(cell, solid, turnedUp, loadDoors,
-                cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors, hazards, underwater);
+                cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors, underwater: underwater);
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
             // Who stands on it: the cell's actors and load doors within 64 units of a navmesh triangle.
