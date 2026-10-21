@@ -10,17 +10,22 @@ namespace TamrielMerge.Skyrim.Creatures;
 /// graph answers what Skyrim's engine sends every creature (every one of the 53 vanilla creature graphs has these:
 /// `hkx-graph --contract`) and sets the variables it reads, laid out as vanilla graphs are (`hkx-graph` on the wisp's):
 /// <list type="bullet">
-/// <item>at rest: idle, and its walk on moveStart until moveStop;</item>
+/// <item>at rest: standing, picking its idles by its own chances as Morrowind's wander package does (<see cref="Standing"/>),
+/// walking any way on moveStart until moveStop (<see cref="Ways"/>), a biped turning on turnLeft / turnRight;</item>
 /// <item>weapEquip draws (weaponDraw on leaving), weapUnequip sheathes (weaponSheathe on entering);</item>
-/// <item>in combat: its idle with IsAttackReady, its run while moving, and each of its attacks on that attack's
-/// attackStart_ event (the race names them) with IsAttacking, ending in attackStop;</item>
-/// <item>staggerStart and recoilStart play its hit with IsStaggering / IsRecoiling, ending in staggerStop / recoilStop;</item>
+/// <item>in combat: its idle with IsAttackReady, running any way while moving, turning, and each of its attacks on that
+/// attack's attackStart_ event (the race names them) with IsAttacking, ending in attackStop;</item>
+/// <item>struck: its hit script's TMHit plays one of its hits at random, TMKnockDown its knockdown, TMKnockOut its knock-out
+/// until it comes to; staggerStart and recoilStart one of its hits too;</item>
+/// <item>in water (swimStart until swimStop) all of it with its swimming animations, a dry one where it has none;</item>
 /// <item>DeathAnimation, Ragdoll and RagdollInstant from anywhere play its death once and hold its last frame (no ragdoll:
-/// it stays where it fell); GetUpStart brings it back;</item>
+/// it stays where it fell), the one Morrowind would pick from where it is; GetUpStart brings it back;</item>
 /// <item>look-at on its head bone when it has one.</item>
 /// </list>
-/// Its animation data is its own too: every clip generator's events (its own sounds, hit moments, the ends above),
-/// motion for its walk and run at its own speeds (Y forward, as vanilla's), and attack sets naming its attacks.
+/// Nothing blends: Morrowind switches animations outright. Moving clips play at the actor's speed over Morrowind's pace
+/// for them. Its animation data is its own too: every clip generator's events (its own sounds, hit moments, the ends
+/// above), motion for its moving clips at their speeds and ways (Y forward, as vanilla's), and attack sets naming its
+/// attacks. `creature-groups` checks it against the game.
 /// </summary>
 public sealed class CreatureGraph
 {
@@ -86,19 +91,30 @@ public sealed class CreatureGraph
     string Clip(string preferred, params string[] fallbacks) =>
         new[] { preferred }.Concat(fallbacks).FirstOrDefault(rig.Clips.ContainsKey) ?? (rig.Clips.ContainsKey("idle") ? "idle" : rig.Clips.Keys.First());
 
-    readonly hkbBlendingTransitionEffect blend = new() { m_name = "TMBlend", m_duration = 0.2f, m_selfTransitionMode = 0, m_eventMode = 0 };
+    // From one animation to the next at once: Morrowind's engine blends none (as vanilla's DefaultBlendTransition, 0 s).
+    readonly hkbBlendingTransitionEffect cut = new() { m_name = "TMCut", m_duration = 0, m_selfTransitionMode = 0, m_eventMode = 0 };
+    // The same, starting a state's animation over when it goes to itself.
+    readonly hkbBlendingTransitionEffect restart = new() { m_name = "TMRestart", m_duration = 0, m_selfTransitionMode = 2, m_eventMode = 0 };
 
-    hkbStateMachineTransitionInfo To(string evt, int state) => new()
+    /// <summary>A transition on <paramref name="evt"/> to <paramref name="state"/>: only while <paramref name="when"/> holds
+    /// (a Havok expression, as vanilla's "IsNPC == 1"); <paramref name="local"/> a random machine's wildcard (vanilla's
+    /// flags 2304), <paramref name="self"/> one that may go to the state it is in, starting it over (2816).</summary>
+    hkbStateMachineTransitionInfo To(string evt, int state, string? when = null, bool local = false, bool self = false) => new()
     {
         m_triggerInterval = new hkbStateMachineTimeInterval { m_enterEventId = -1, m_exitEventId = -1 },
         m_initiateInterval = new hkbStateMachineTimeInterval { m_enterEventId = -1, m_exitEventId = -1 },
-        m_transition = blend,
+        m_transition = self ? restart : cut,
+        m_condition = when is null ? null : new hkbExpressionCondition { m_expression = when },
         m_eventId = Ev(evt),
         m_toStateId = state,
-        m_flags = 256,   // no condition
+        m_flags = (short)((when is null ? 256 : 0) | (self ? 512 : 0) | (local ? 2048 : 0)),
     };
 
-    hkbClipGenerator ClipGen(string name, string clip, bool loop, string? endEvent = null)
+    /// <summary>The variable a moving clip's playback speed is bound to (<see cref="CreatureRig.MovePaces"/>).</summary>
+    static string RateVar(string clip) => "fTMRate_" + new string(clip.Where(char.IsLetterOrDigit).ToArray());
+
+    /// <param name="triggers">More events it sends: at a time into it, or that long before its end.</param>
+    hkbClipGenerator ClipGen(string name, string clip, bool loop, string? endEvent = null, IEnumerable<(float Time, string Event, bool FromEnd)>? triggers = null)
     {
         generators.Add((name, clip, endEvent));
         var g = new hkbClipGenerator
@@ -109,9 +125,120 @@ public sealed class CreatureGraph
             m_animationBindingIndex = -1,
             m_mode = (sbyte)(loop ? 1 : 0),
         };
+        var list = new List<hkbClipTrigger>();
         if (endEvent is not null)
-            g.m_triggers = new hkbClipTriggerArray { m_triggers = [new hkbClipTrigger { m_localTime = Math.Max(0, rig.Duration(clip) - 0.02f), m_event = new hkbEventProperty { m_id = Ev(endEvent) } }] };
+            list.Add(new hkbClipTrigger { m_localTime = Math.Max(0, rig.Duration(clip) - 0.02f), m_event = new hkbEventProperty { m_id = Ev(endEvent) } });
+        foreach (var (time, evt, fromEnd) in triggers ?? [])
+            list.Add(new hkbClipTrigger { m_localTime = fromEnd ? -time : time, m_relativeToEndOfClip = fromEnd, m_event = new hkbEventProperty { m_id = Ev(evt) } });
+        if (list.Count > 0) g.m_triggers = new hkbClipTriggerArray { m_triggers = list };
+        // Moving at the actor's own speed over Morrowind's pace for it (the root's expressions keep the rate).
+        if (rig.MovePaces.ContainsKey(clip))
+            g.m_variableBindingSet = new hkbVariableBindingSet
+            {
+                m_indexOfBindingToEnable = -1,
+                m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "playbackSpeed", m_variableIndex = Var(RateVar(clip), 4, Real(1)), m_bitIndex = -1 }],
+            };
         return g;
+    }
+
+    /// <summary>The clips of a family as Morrowind counts them ("hit1", "hit2"... up from 1 while there is one: OpenMW's
+    /// chooseRandomGroup), else the one bare name a rig from another game has ("hit").</summary>
+    List<string> Family(string prefix)
+    {
+        var list = new List<string>();
+        for (int i = 1; rig.Clips.ContainsKey(prefix + i); i++) list.Add(prefix + i);
+        if (list.Count == 0 && rig.Clips.ContainsKey(prefix)) list.Add(prefix);
+        return list;
+    }
+
+    /// <summary>One of <paramref name="clips"/> at random each time it starts, all as likely (as Morrowind picks a hit or
+    /// a death): a state machine starting in a random state, as vanilla's DeathBehavior (start mode 2).</summary>
+    hkbGenerator OneOf(string name, IReadOnlyList<string> clips, bool loop, string? endEvent)
+    {
+        if (clips.Count == 1) return ClipGen(name, clips[0], loop, endEvent);
+        var m = Machine($"TM{name}Pick", 0, clips.Select((c, i) => State(i, $"{name}_{c}", ClipGen($"{name}_{c}", c, loop, endEvent))).ToList());
+        m.m_startStateMode = 2;
+        return m;
+    }
+
+    /// <summary>
+    /// Moving any way: forward, right, back or left by the engine's Direction (0 forward, .25 right, .5 back, .75 left, as
+    /// vanilla's directional blends), switched outright where Morrowind switches (OpenMW's update: sideways once the
+    /// sideways movement is more than twice the forward, atan 2 = 63.43° off straight; backwards past 116.57°), never
+    /// blended. A way the creature has no animation for plays <paramref name="none"/> (Morrowind plays no movement group
+    /// then: its idle stays).
+    /// </summary>
+    hkbGenerator Ways(string name, Func<string, hkbGenerator?> way, Func<hkbGenerator> none)
+    {
+        var forward = way("forward") ?? none();
+        var right = way("right"); var back = way("back"); var left = way("left");
+        if (right is null && back is null && left is null) return forward;
+        Var("iTMWay", 3);
+        hkbGenerator? still = null;
+        hkbGenerator Still() => still ??= none();
+        return new hkbManualSelectorGenerator
+        {
+            m_name = name,
+            m_generators = [forward, right ?? Still(), back ?? Still(), left ?? Still()],
+            m_variableBindingSet = new hkbVariableBindingSet
+            {
+                m_indexOfBindingToEnable = -1,
+                m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "selectedGeneratorIndex", m_variableIndex = Var("iTMWay", 3), m_bitIndex = -1 }],
+            },
+        };
+    }
+
+    /// <summary>Its standing idle and the idles its wander package picks (<see cref="CreatureRig.IdleSets"/>): per set of
+    /// chances a state machine standing in its idle and rolling every 1/30 s (Morrowind rolls each frame while the actor
+    /// stands; OpenMW's AiWander), each roll going to Idle2..9 by that set's odds or staying, an idle once through and
+    /// then rolling again; the set the actor's iTMIdleSet names (a manual selector when the model's creatures differ).</summary>
+    hkbGenerator Standing(string idle)
+    {
+        var sets = rig.IdleSets.Select((odds, k) => IdleSet(k, odds, idle)).ToList();
+        if (sets.Count == 0) return ClipGen("Idle", idle, loop: true);
+        if (sets.Count == 1) return sets[0];
+        return new hkbManualSelectorGenerator
+        {
+            m_name = "TMIdleSets",
+            m_generators = sets,
+            m_variableBindingSet = new hkbVariableBindingSet
+            {
+                m_indexOfBindingToEnable = -1,
+                m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "selectedGeneratorIndex", m_variableIndex = Var("iTMIdleSet", 3), m_bitIndex = -1 }],
+            },
+        };
+    }
+
+    hkbGenerator IdleSet(int k, float[] odds, string idle)
+    {
+        string pick = $"TMIdlePick{k}", any = $"TMIdleAny{k}";
+        // A pick of an idle it has no animation for leaves it standing (Morrowind: playIdle fails, it rolls again).
+        float stand = odds[0];
+        var picks = new List<(int N, float P)>();
+        for (int n = 2; n <= 9; n++)
+            if (odds[n - 1] > 0)
+            {
+                if (rig.Clips.ContainsKey($"idle{n}")) picks.Add((n, odds[n - 1]));
+                else stand += odds[n - 1];
+            }
+        if (picks.Count == 0) return ClipGen($"Idle_{k}", idle, loop: true);
+        int rolls = Math.Max(1, (int)MathF.Round(rig.Duration(idle) * 30));
+        var states = new List<hkbStateMachineStateInfo>
+        {
+            State(0, "Stand", ClipGen($"Idle_{k}", idle, loop: true, triggers: Enumerable.Range(0, rolls).Select(f => (f / 30f, pick, false)))),
+        };
+        states[0].m_probability = stand;
+        foreach (var (n, p) in picks)
+        {
+            var s = State(n, $"Idle{n}", ClipGen($"Idle{n}_{k}", $"idle{n}", loop: false, triggers: [(0f, pick, true)]));
+            s.m_probability = p;
+            states.Add(s);
+        }
+        var wild = new List<hkbStateMachineTransitionInfo> { To(any, 0, local: true) };
+        wild.AddRange(picks.Select(p => To(any, p.N, local: true, self: true)));
+        var m = Machine($"TMIdleSet{k}", 0, states, wild);
+        m.m_randomTransitionEventId = Ev(pick);
+        return m;
     }
 
     /// <summary>
@@ -203,14 +330,31 @@ public sealed class CreatureGraph
         // Each clip's look: its event, sent as it starts (the body's own graph plays that sequence).
         foreach (var clip in rig.Looks.Keys) Ev(CreatureRig.LookEvent(clip));
 
-        string idle = Clip("idle"), walk = Clip("walk", "run"), run = Clip("run", "walk"), hit = Clip("hit", "idle"), death = Clip("death", "idle");
+        // Variables of its own: the idle set (per actor), knocked out and in combat (its hit script sets them), and where it is.
+        foreach (var b in new[] { "bTMKnockedOut", "bTMInCombat", "bTMSwimming", "bTMKnockedDownNow", "bTMKnockedOutNow" }) Var(b);
+        Var("iTMIdleSet", 3); Var("iTMRun", 3);
 
-        // At rest.
-        var nonCombat = Machine("TMNonCombat", 0,
-        [
-            State(0, "Idle", ClipGen("Idle", idle, loop: true), [To("moveStart", 1)]),
-            State(1, "Walk", ClipGen("Walk", walk, loop: true), [To("moveStop", 0)]),
-        ]);
+        string idle = Clip("idle"), walk = Clip("walk", "run"), run = Clip("run", "walk");
+        var hits = Family("hit"); if (hits.Count == 0) hits.Add(idle);
+        var deaths = Family("death"); if (deaths.Count == 0) deaths.Add(idle);
+        bool turns = rig.Biped && (rig.Clips.ContainsKey("turnleft") || rig.Clips.ContainsKey("turnright"));
+        hkbGenerator? Plain(string name, string? clip) => clip is not null && rig.Clips.ContainsKey(clip) ? ClipGen(name, clip, loop: true) : null;
+        // A moving clip, else Morrowind's fallbacks for it: a run's walk ("run" for "walk" when there is no run group).
+        string? Moving(string clip) => rig.Clips.ContainsKey(clip) ? clip : clip.Contains("run") && rig.Clips.ContainsKey(clip.Replace("run", "walk")) ? clip.Replace("run", "walk") : null;
+        string Suffix(string w) => w == "forward" ? "" : w;
+
+        // At rest: standing (and its idles), walking any way, a biped turning on the spot.
+        var nonCombatStates = new List<hkbStateMachineStateInfo>
+        {
+            State(0, "Idle", Standing(idle), [To("moveStart", 1), .. turns ? new[] { To("turnLeft", 2), To("turnRight", 3) } : []]),
+            State(1, "Walk", Ways("Walk", w => Plain($"Walk_{w}", w == "forward" ? walk : Moving("walk" + w)), () => ClipGen("Walk_still", idle, loop: true)), [To("moveStop", 0)]),
+        };
+        if (turns)
+        {
+            nonCombatStates.Add(State(2, "TurnLeft", ClipGen("TurnLeft", Clip("turnleft", "turnright"), loop: true), [To("turnStop", 0), To("turnRight", 3), To("moveStart", 1)]));
+            nonCombatStates.Add(State(3, "TurnRight", ClipGen("TurnRight", Clip("turnright", "turnleft"), loop: true), [To("turnStop", 0), To("turnLeft", 2), To("moveStart", 1)]));
+        }
+        var nonCombat = Machine("TMNonCombat", 0, nonCombatStates);
 
         // In combat: each attack is its own state, entered from idle or moving on its event. A creature with weapons plays its
         // held weapon's style (its idle, run, blows, drawing and putting away) by the engine's iRightHandType, as Skyrim's own
@@ -222,10 +366,26 @@ public sealed class CreatureGraph
         if (bowStyle is not null) attackTransitions.Add(("bowAttackStart", 10));
         hkbGenerator Gen(string name, string clip, bool loop, string? end = null, Func<string, string>? styleClip = null) =>
             styled && styleClip is not null ? ByWeapon(name, styleClip, clip, loop, end) : ClipGen(name, clip, loop, end);
+        var combatTurns = turns ? new[] { To("turnLeft", 20), To("turnRight", 21) } : [];
         combatStates.Add(State(0, "CombatIdle", While(Gen("CombatIdle", idle, true, null, s => $"cidle_{s}"), "CombatIdle", "IsAttackReady"),
-            [To("moveStart", 1), .. attackTransitions.Select(a => To(a.Event, a.State))]));
-        combatStates.Add(State(1, "CombatRun", While(Gen("CombatRun", run, true, null, s => $"crun_{s}"), "CombatRun", "IsAttackReady"),
+            [To("moveStart", 1), .. combatTurns, .. attackTransitions.Select(a => To(a.Event, a.State))]));
+        // Running any way with what it holds (its style's RunBack1h..., else the plain group, else a walk, else standing).
+        hkbGenerator? CombatWay(string w)
+        {
+            string plain = w == "forward" ? run : Moving("run" + w) ?? "";
+            if (styled) return rig.Clips.ContainsKey(plain) || rig.WeaponStyles.Any(s => rig.Clips.ContainsKey(w == "forward" ? $"crun_{s}" : $"crun{w}_{s}"))
+                ? ByWeapon($"CombatRun_{w}", s => w == "forward" ? $"crun_{s}" : $"crun{w}_{s}", rig.Clips.ContainsKey(plain) ? plain : idle, loop: true, endEvent: null) : null;
+            return Plain($"CombatRun_{w}", plain);
+        }
+        combatStates.Add(State(1, "CombatRun", While(Ways("CombatRun", CombatWay, () => Gen("CombatRun_still", idle, true, null, s => $"cidle_{s}")), "CombatRun", "IsAttackReady"),
             [To("moveStop", 0), .. attackTransitions.Select(a => To(a.Event, a.State))]));
+        if (turns)
+        {
+            combatStates.Add(State(20, "CombatTurnLeft", While(Gen("CombatTurnLeft", Clip("turnleft", "turnright"), true, null, s => $"cturnleft_{s}"), "CombatTurnLeft", "IsAttackReady"),
+                [To("turnStop", 0), To("turnRight", 21), To("moveStart", 1), .. attackTransitions.Select(a => To(a.Event, a.State))]));
+            combatStates.Add(State(21, "CombatTurnRight", While(Gen("CombatTurnRight", Clip("turnright", "turnleft"), true, null, s => $"cturnright_{s}"), "CombatTurnRight", "IsAttackReady"),
+                [To("turnStop", 0), To("turnLeft", 20), To("moveStart", 1), .. attackTransitions.Select(a => To(a.Event, a.State))]));
+        }
         for (int i = 0; i < Attacks.Count; i++)
         {
             string clip = Attacks[i].Clip;
@@ -262,16 +422,108 @@ public sealed class CreatureGraph
             equip = e; unequip = u;
         }
 
-        var baseMachine = Machine("TMBase", 0,
-        [
+        // Struck (its hit script, on every blow that lands: Morrowind's hit recovery, or knocked down by Creature::onHit's
+        // odds; knocked out while its fatigue is below zero): one of its hits at random, knocked down, knocked out until it
+        // comes to (the loop part again and again, then on to the end), all of it unable to act or move (IsStaggering, and
+        // its animation driving it), then back to fighting. In water the same with its swimming ones (a dry one where it
+        // has none: OpenMW's refreshHitRecoilAnims).
+        var swimHits = Family("swimhit");
+        hkbGenerator KnockOut(string name, string prefix, string fallbackPrefix)
+        {
+            string p = rig.Clips.ContainsKey(prefix + "_loop") || rig.Clips.ContainsKey(prefix) ? prefix : fallbackPrefix;
+            if (rig.Clips.ContainsKey(p + "_loop"))
+            {
+                bool hasIn = rig.Clips.ContainsKey(p + "_in"), hasOut = rig.Clips.ContainsKey(p + "_out");
+                var parts = new List<hkbStateMachineStateInfo>();
+                if (hasIn) parts.Add(State(0, "In", ClipGen($"{name}_in", p + "_in", loop: false, triggers: [(0f, "TMKnockOutLooping", true)]), [To("TMKnockOutLooping", 1)]));
+                parts.Add(State(1, "Loop", ClipGen($"{name}_loop", p + "_loop", loop: true, triggers: [(0f, "TMKnockOutCycle", true)]),
+                    hasOut ? [To("TMKnockOutCycle", 2, "bTMKnockedOut == 0")] : []));
+                if (hasOut) parts.Add(State(2, "Out", ClipGen($"{name}_out", p + "_out", loop: false, endEvent: "TMKnockStop")));
+                return Machine($"TM{name}", hasIn ? 0 : 1, parts);
+            }
+            // No loop keys: the whole group again while still out (OpenMW starts it over while knocked out).
+            string whole = rig.Clips.ContainsKey(p) ? p : rig.Clips.ContainsKey("knockdown") ? "knockdown" : hits[0];
+            return Machine($"TM{name}", 0, [State(0, "Whole", ClipGen($"{name}_whole", whole, loop: false, triggers: [(0f, "TMKnockOutCycle", true)]),
+                [To("TMKnockOutCycle", 0, "bTMKnockedOut == 1", self: true)])]);
+        }
+        bool KnockOutEndsInLoop(string prefix, string fallbackPrefix)
+        {
+            string p = rig.Clips.ContainsKey(prefix + "_loop") || rig.Clips.ContainsKey(prefix) ? prefix : fallbackPrefix;
+            return !rig.Clips.ContainsKey(p + "_loop") || !rig.Clips.ContainsKey(p + "_out");
+        }
+        // Leaving a knock-out: at its end, or (no part after the loop) when a cycle ends with it come to.
+        IEnumerable<hkbStateMachineTransitionInfo> OutOf(string prefix, string fallbackPrefix, int to) =>
+            KnockOutEndsInLoop(prefix, fallbackPrefix) ? [To("TMKnockOutCycle", to, "bTMKnockedOut == 0"), To("TMKnockStop", to)] : [To("TMKnockStop", to)];
+        string knockdown = Clip("knockdown", hits[0]);
+        string swimKnockdown = Clip("swimknockdown", knockdown);
+
+        bool swims = rig.Clips.Keys.Any(c => c.StartsWith("swim", StringComparison.OrdinalIgnoreCase) || c == "idleswim");
+        var baseStates = new List<hkbStateMachineStateInfo>
+        {
             State(0, "NonCombat", nonCombat),
             State(1, "Combat", combat, [To("weapUnequip", 6)]),
-            State(3, "Stagger", While(ClipGen("Stagger", hit, loop: false, endEvent: "staggerStop"), "Stagger", "IsStaggering"), [To("staggerStop", 1)]),
-            State(4, "Recoil", While(ClipGen("Recoil", hit, loop: false, endEvent: "recoilStop"), "Recoil", "IsRecoiling"), [To("recoilStop", 1)]),
+            State(3, "Stagger", While(OneOf("Stagger", hits, loop: false, endEvent: "staggerStop"), "Stagger", "IsStaggering"), [To("staggerStop", 1)]),
+            State(4, "Recoil", While(OneOf("Recoil", hits, loop: false, endEvent: "recoilStop"), "Recoil", "IsRecoiling"), [To("recoilStop", 1)]),
             State(5, "Equip", equip, [To("weapEquipOut", 1)], exitEvents: [Ev("weaponDraw")]),
             State(6, "Unequip", unequip, [To("weapUnequipOut", 0)], enterEvents: [Ev("weaponSheathe")]),
-        ],
-        [To("staggerStart", 3), To("staggerForwardStart", 3), To("recoilStart", 4), To("recoilLargeStart", 4), To("weapEquip", 5), To("returnToDefault", 0)]);
+            State(8, "Hit", While(OneOf("Hit", hits, loop: false, endEvent: "TMHitStop"), "Hit", "IsStaggering", "bAnimationDriven"), [To("TMHitStop", 1)]),
+            State(9, "KnockDown", While(ClipGen("KnockDown", knockdown, loop: false, endEvent: "TMKnockStop"), "KnockDown", "IsStaggering", "bAnimationDriven", "bTMKnockedDownNow"), [To("TMKnockStop", 1)]),
+            State(10, "KnockOut", While(KnockOut("KnockOut", "knockout", "knockout"), "KnockOut", "IsStaggering", "bAnimationDriven", "bTMKnockedOutNow"), OutOf("knockout", "knockout", 1)),
+        };
+        var baseWild = new List<hkbStateMachineTransitionInfo>
+        {
+            To("staggerStart", 3), To("staggerForwardStart", 3), To("recoilStart", 4), To("recoilLargeStart", 4), To("weapEquip", 5), To("returnToDefault", 0),
+        };
+        if (swims)
+        {
+            // In water: swimming still and moving any way (running in a fight, as Morrowind's combat runs), a biped turning, its
+            // swimming attacks (each attack's own, else the dry one), and its swimming hits and knocks.
+            hkbGenerator? SwimWay(string w, bool running)
+            {
+                string? c = running ? Moving("swimrun" + Suffix(w)) ?? Moving("run" + Suffix(w)) : Moving("swimwalk" + Suffix(w)) ?? Moving("walk" + Suffix(w));
+                if (w == "forward") c ??= running ? Moving("swimrun") ?? run : Moving("swimwalk") ?? walk;
+                return Plain($"Swim{(running ? "Run" : "Walk")}_{w}", c);
+            }
+            string swimIdle = Clip("idleswim", "idle");
+            var swimMove = new hkbManualSelectorGenerator
+            {
+                m_name = "TMSwimMove",
+                m_generators = [Ways("SwimWalk", w => SwimWay(w, false), () => ClipGen("SwimWalk_still", swimIdle, loop: true)), Ways("SwimRun", w => SwimWay(w, true), () => ClipGen("SwimRun_still", swimIdle, loop: true))],
+                m_variableBindingSet = new hkbVariableBindingSet { m_indexOfBindingToEnable = -1, m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "selectedGeneratorIndex", m_variableIndex = Var("iTMRun", 3), m_bitIndex = -1 }] },
+            };
+            var swimAttacks = Attacks.Select((a, i) => (a.Event, State: 4 + i)).ToList();
+            var swimStates = new List<hkbStateMachineStateInfo>
+            {
+                State(0, "SwimIdle", ClipGen("SwimIdle", swimIdle, loop: true), [To("moveStart", 1), .. turns ? new[] { To("turnLeft", 2), To("turnRight", 3) } : [], .. swimAttacks.Select(a => To(a.Event, a.State))]),
+                State(1, "SwimMove", swimMove, [To("moveStop", 0), .. swimAttacks.Select(a => To(a.Event, a.State))]),
+            };
+            if (turns)
+            {
+                swimStates.Add(State(2, "SwimTurnLeft", ClipGen("SwimTurnLeft", Clip("swimturnleft", "turnleft", "turnright"), loop: true), [To("turnStop", 0), To("turnRight", 3), To("moveStart", 1)]));
+                swimStates.Add(State(3, "SwimTurnRight", ClipGen("SwimTurnRight", Clip("swimturnright", "turnright", "turnleft"), loop: true), [To("turnStop", 0), To("turnLeft", 2), To("moveStart", 1)]));
+            }
+            for (int i = 0; i < Attacks.Count; i++)
+            {
+                string clip = Attacks[i].Clip;
+                var gen = clip.StartsWith("weapon:")
+                    ? ByWeapon($"SwimAttack{i + 1}", s => $"weapon_{s}_{clip[7..]}", idle, loop: false, endEvent: "attackStop")
+                    : ClipGen($"SwimAttack{i + 1}", Clip("swim" + clip, clip), loop: false, endEvent: "attackStop");
+                swimStates.Add(State(4 + i, $"SwimAttack{i + 1}", While(gen, $"SwimAttack{i + 1}", "IsAttacking", "bAllowRotation"), [To("attackStop", 0)]));
+            }
+            baseStates.Add(State(7, "Swim", While(Machine("TMSwim", 0, swimStates), "Swim", "bTMSwimming"), [To("swimStop", 0)]));
+            baseStates.Add(State(11, "SwimHit", While(OneOf("SwimHit", swimHits.Count > 0 ? swimHits : hits, loop: false, endEvent: "TMHitStop"), "SwimHit", "IsStaggering", "bAnimationDriven", "bTMSwimming"), [To("TMHitStop", 7)]));
+            baseStates.Add(State(12, "SwimKnockDown", While(ClipGen("SwimKnockDown", swimKnockdown, loop: false, endEvent: "TMKnockStop"), "SwimKnockDown", "IsStaggering", "bAnimationDriven", "bTMKnockedDownNow", "bTMSwimming"), [To("TMKnockStop", 7)]));
+            baseStates.Add(State(13, "SwimKnockOut", While(KnockOut("SwimKnockOut", "swimknockout", "knockout"), "SwimKnockOut", "IsStaggering", "bAnimationDriven", "bTMKnockedOutNow", "bTMSwimming"), OutOf("swimknockout", "knockout", 7)));
+            baseWild.Add(To("swimStart", 7));
+            baseWild.Add(To("TMHit", 11, "(bTMSwimming == 1) && (IsAttacking == 0)"));
+            baseWild.Add(To("TMKnockDown", 12, "bTMSwimming == 1"));
+            baseWild.Add(To("TMKnockOut", 13, "bTMSwimming == 1"));
+        }
+        // A blow lands while it strikes: its attack goes on (Morrowind's attack outranks a hit's animation); knocks interrupt.
+        baseWild.Add(To("TMHit", 8, swims ? "(bTMSwimming == 0) && (IsAttacking == 0)" : "IsAttacking == 0"));
+        baseWild.Add(To("TMKnockDown", 9, swims ? "bTMSwimming == 0" : null));
+        baseWild.Add(To("TMKnockOut", 10, swims ? "bTMSwimming == 0" : null));
+        var baseMachine = Machine("TMBase", 0, baseStates, baseWild);
 
         hkbGenerator baseGen = baseMachine;
         if (headBone >= 0)
@@ -287,13 +539,50 @@ public sealed class CreatureGraph
             baseGen = new hkbModifierGenerator { m_name = "TMLookAt_MG", m_modifier = look, m_generator = baseMachine };
         }
 
-        // Dying: its death once, held.
-        var root = Machine("TMRoot", 0,
-        [
+        // Dying: once, held. As Morrowind picks it (OpenMW's playRandomDeath): knocked down or out, its death from there
+        // (swimming, its swimming one); else swimming, its swimming death; else one of its deaths at random. One it has no
+        // animation for is a random death.
+        var rootStates = new List<hkbStateMachineStateInfo>
+        {
             State(0, "Base", baseGen),
-            State(1, "Death", ClipGen("Death", death, loop: false), [To("GetUpStart", 0)]),
-        ],
-        [To("DeathAnimation", 1), To("Ragdoll", 1), To("RagdollInstant", 1)]);
+            State(1, "Death", OneOf("Death", deaths, loop: false, endEvent: null), [To("GetUpStart", 0)]),
+        };
+        var deathWays = new List<(string Clip, string When)>
+        {
+            ("swimdeathknockout", "(bTMKnockedOutNow == 1) && (bTMSwimming == 1)"),
+            ("swimdeathknockdown", "(bTMKnockedDownNow == 1) && (bTMSwimming == 1)"),
+            ("deathknockout", "(bTMKnockedOutNow == 1) && (bTMSwimming == 0)"),
+            ("deathknockdown", "(bTMKnockedDownNow == 1) && (bTMSwimming == 0)"),
+            ("swimdeath", "(bTMSwimming == 1) && (bTMKnockedOutNow == 0) && (bTMKnockedDownNow == 0)"),
+        };
+        var rootWild = new List<hkbStateMachineTransitionInfo>();
+        foreach (var evt in new[] { "DeathAnimation", "Ragdoll", "RagdollInstant" })
+        {
+            for (int i = 0; i < deathWays.Count; i++)
+                if (rig.Clips.ContainsKey(deathWays[i].Clip)) rootWild.Add(To(evt, 2 + i, deathWays[i].When));
+            rootWild.Add(To(evt, 1));
+        }
+        for (int i = 0; i < deathWays.Count; i++)
+            if (rig.Clips.ContainsKey(deathWays[i].Clip))
+                rootStates.Add(State(2 + i, $"Death_{deathWays[i].Clip}", ClipGen($"Death_{deathWays[i].Clip}", deathWays[i].Clip, loop: false), [To("GetUpStart", 0)]));
+        var root = Machine("TMRoot", 0, rootStates, rootWild);
+
+        // What the graph works out every frame while it lives (the base state's modifier): which way it moves (Morrowind's
+        // switch), whether it runs in water (in a fight), and each moving clip's playback speed (the actor's Speed over
+        // Morrowind's pace for it, at most 10).
+        var expressions = new List<string>();
+        if (variables.Any(v => v.Name == "iTMWay"))
+            expressions.Add("iTMWay = cond(Direction < 0.176208, 0, cond(Direction < 0.323792, 1, cond(Direction < 0.676208, 2, cond(Direction < 0.823792, 3, 0))))");
+        expressions.Add("iTMRun = cond(bTMInCombat, 1, 0)");
+        foreach (var (clip, pace) in rig.MovePaces.OrderBy(p => p.Key, StringComparer.Ordinal))
+            if (variables.Any(v => v.Name == RateVar(clip)))
+                expressions.Add($"{RateVar(clip)} = clamp(Speed / {pace.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture)}, 0, 10)");
+        var evaluate = new hkbEvaluateExpressionModifier
+        {
+            m_name = "TMEvaluate", m_enable = true,
+            m_expressions = new hkbExpressionDataArray { m_expressionsData = expressions.Select(e => new hkbExpressionData { m_expression = e, m_assignmentVariableIndex = -1, m_assignmentEventIndex = -1, m_eventMode = 0 }).ToList() },
+        };
+        rootStates[0].m_generator = new hkbModifierGenerator { m_name = "TMEvaluate_MG", m_modifier = evaluate, m_generator = baseGen };
 
         return new hkbBehaviorGraph
         {
@@ -518,8 +807,9 @@ public sealed class CreatureGraph
         foreach (var (clip, cid) in clipIds)
         {
             float dur = rig.Duration(clip), speed = rig.MoveSpeeds.GetValueOrDefault(clip);
+            var way = rig.MoveWays.GetValueOrDefault(clip, new Vector2(0, 1));
             motion.Add(cid.ToString()); motion.Add(Num(dur));
-            motion.Add("1"); motion.Add($"{Num(dur)} 0 {Num(speed * dur)} 0");
+            motion.Add("1"); motion.Add($"{Num(dur)} {Num(way.X * speed * dur)} {Num(way.Y * speed * dur)} 0");
             motion.Add("1"); motion.Add($"{Num(dur)} 0 0 0 1");
             motion.Add("");
         }

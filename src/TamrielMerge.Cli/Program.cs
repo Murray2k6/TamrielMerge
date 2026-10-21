@@ -11215,6 +11215,44 @@ static class Program
                 return 0;
                 static bool Vector3Differs(System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Distance(a, b) > 0.004f;
             }
+            case "mw-group-census":
+            {
+                // Dev aid: the animation groups Morrowind's creature models have (their own .kf, a biped's humanoid one too):
+                // how many models have each group, and which the converter's plan takes; --model lists one model's groups.
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var world = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                var have = new SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var taken = new SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var g in world.Objects.Values.Where(o => o.Type == "CREA" && o.Str("MODL") is { Length: > 0 }).GroupBy(o => o.Str("MODL")!.ToLowerInvariant()).OrderBy(g => g.Key))
+                {
+                    if (opts.TryGetValue("model", out var only) && !g.Key.Equals(only, StringComparison.OrdinalIgnoreCase)) continue;
+                    string model = @"meshes\" + g.Key;
+                    if (opts.ContainsKey("chances"))
+                    {
+                        // --chances: the idle chances (AI_W, idles 2..9) and agility (NPDT) of each creature drawn with the model,
+                        // as distinct sets: whether one graph per model can carry them.
+                        var sets = g.Select(c => (Id: c.Id,
+                                Idles: c.Get("AI_W") is { Data.Length: >= 13 } w ? string.Join(" ", w.Data.Skip(5).Take(8)) : "none",
+                                Agility: c.Get("NPDT") is { Data.Length: >= 24 } n ? BitConverter.ToInt32(n.Data, 20) : -1))
+                            .GroupBy(x => x.Idles).ToList();
+                        Console.WriteLine($"{g.Key}: {g.Count()} creatures, {sets.Count} idle sets: " + string.Join(" | ", sets.Select(s => $"[{s.Key}] x{s.Count()} (agility {string.Join(",", s.Select(x => x.Agility).Distinct())})")));
+                        continue;
+                    }
+                    var (biped, styles) = Skyrim.Creatures.MwCreatureSource.Kind(world, model);
+                    var sources = Skyrim.Creatures.MwCreatureSource.Sources(mwData, model, biped);
+                    var plan = Skyrim.Creatures.MwCreatureSource.Plan(sources, styles, biped);
+                    var groups = sources.SelectMany(s => s.Groups.Where(p => p.Value.Whole).Select(p => p.Key)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    foreach (var name in groups) have[name] = have.GetValueOrDefault(name) + 1;
+                    var used = plan.Select(p => p.Group).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    foreach (var name in used) taken[name] = taken.GetValueOrDefault(name) + 1;
+                    if (opts.ContainsKey("model"))
+                        foreach (var s in sources)
+                            foreach (var (name, t) in s.Groups.OrderBy(p => p.Value.Start))
+                                Console.WriteLine($"{s.Path} {name}: {t.Start:F2}..{t.Stop:F2}{(t.Loops ? $" loop {t.LoopStart:F2}..{t.LoopStop:F2}" : "")}{(used.Contains(name, StringComparer.OrdinalIgnoreCase) ? " (taken)" : "")}");
+                }
+                foreach (var (name, n) in have.OrderByDescending(p => p.Value)) Console.WriteLine($"  {name}: {n} models, taken in {taken.GetValueOrDefault(name)}");
+                return 0;
+            }
             case "mw-particle-arrays":
             {
                 // Dev aid: every particle array (NiBSPArrayController) on Morrowind's creature models, with how Morrowind places
@@ -11368,6 +11406,39 @@ static class Program
                 Console.WriteLine($"particle systems: Morrowind {systemsMw}, in the bodies {systemsSk}; {total} issues");
                 return total == 0 ? 0 : 2;
             }
+            case "creature-groups":
+            {
+                // Whether built Morrowind creatures play every animation group Morrowind plays, the way it plays them
+                // (Skyrim/Creatures/CreatureGroups): --creature <id> or --all (every Morrowind creature built under --data,
+                // default out\creatures). --quiet: issues and totals only.
+                string data = Path.GetFullPath(opts.GetValueOrDefault("data", "out/creatures"));
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var gw = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                var ids = opts.ContainsKey("all")
+                    ? Directory.GetDirectories(Path.Combine(data, "meshes", "actors", "tamrielmerge")).Select(Path.GetFileName).OfType<string>().Order().ToList()
+                    : [opts["creature"]];
+                int total = 0, groupsAll = 0, carriedAll = 0, checkedCount = 0;
+                var notCarried = new SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var cid in ids)
+                {
+                    var spec = Skyrim.Creatures.CreatureSpec.Find(cid, () => gw);
+                    if (spec is not { Game: "morrowind", Model: { } model }) continue;
+                    var rep = Skyrim.Creatures.CreatureGroups.Check(mwData, gw, model, data, cid);
+                    checkedCount++;
+                    Console.WriteLine($"{cid}: {rep.Groups} groups, {rep.Carried} carried and played, {rep.Issues} issues");
+                    foreach (var l in rep.Lines.Where(l => !opts.ContainsKey("quiet") || l.Contains("ISSUE"))) Console.WriteLine(l);
+                    foreach (var l in rep.Lines.Where(l => l.Contains("ISSUE") && (l.Contains("not carried") || l.Contains("written, but"))))
+                    {
+                        var m = System.Text.RegularExpressions.Regex.Match(l, @"not carried \((.*)\)$|written, but (.*)$");
+                        string why = !m.Success ? "?" : m.Groups[1].Success ? "not carried: " + m.Groups[1].Value : "not played: " + m.Groups[2].Value;
+                        notCarried[why] = notCarried.GetValueOrDefault(why) + 1;
+                    }
+                    total += rep.Issues; groupsAll += rep.Groups; carriedAll += rep.Carried;
+                }
+                Console.WriteLine($"{checkedCount} creatures: {groupsAll} groups, {carriedAll} carried and played; {total} issues");
+                foreach (var (why, n) in notCarried) Console.WriteLine($"  {n,4} {why}");
+                return total == 0 ? 0 : 2;
+            }
             case "creature-looks":
             {
                 // Whether built Morrowind creatures look as Morrowind draws them (Skyrim/Creatures/CreatureLooks): each shape's
@@ -11506,7 +11577,8 @@ static class Program
                         var skel = (HKX2.hkRootLevelContainer)new HKX2.PackFileDeserializer().Deserialize(new HKX2.BinaryReaderEx(File.ReadAllBytes(Path.Combine(plOut, Skyrim.Creatures.CreatureRig.MeshFolder(id), "character assets", "skeleton.hkx"))));
                         var boneNames = ((HKX2.hkaAnimationContainer)skel.m_namedVariants[0]!.m_variant!).m_skeletons[0].m_bones.Select(b => b.m_name).ToList();
                         var guessed = Skyrim.Creatures.CreatureSpec.GuessBones(boneNames);
-                        int own = records.AddOwn(id, spec.Name, plOut, raceStats, actorStats, spec.Torso ?? guessed.Torso, spec.Head ?? guessed.Head);
+                        int own = records.AddOwn(id, spec.Name, plOut, raceStats, actorStats, spec.Torso ?? guessed.Torso, spec.Head ?? guessed.Head,
+                            spec.Game == "morrowind" ? Skyrim.Creatures.MwCreatureSource.HitRules(World()) : null);
                         Console.WriteLine($"{id} ({spec.Name}): its own race and records; {own} actors switched in {records.PluginName} (health {raceStats.Health}, attack {raceStats.AttackMin}-{raceStats.AttackMax}, speed {raceStats.WalkSpeed:F0}/{raceStats.RunSpeed:F0})");
                         continue;
                     }
@@ -11740,6 +11812,148 @@ static class Program
                     Console.WriteLine($"{graphs} creature graphs");
                     Console.WriteLine("events: " + string.Join(", ", events.Where(kv => kv.Value >= min).OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}")));
                     Console.WriteLine("variables: " + string.Join(", ", vars.Where(kv => kv.Value >= min).OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}")));
+                    return 0;
+                }
+                // --who-sends <events, comma list>: across every vanilla behaviour graph, which graphs act on each event (a
+                // transition on it) and which raise it themselves (a clip's trigger, a state's enter or exit event, an expression's
+                // "X if ...", an event to send on change): one acted on and raised by no graph comes from the engine.
+                if (opts.TryGetValue("who-sends", out var whoSends))
+                {
+                    var asked = whoSends.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    var acts = asked.ToDictionary(a => a, _ => new List<string>(), StringComparer.OrdinalIgnoreCase);
+                    var raises = asked.ToDictionary(a => a, _ => new List<string>(), StringComparer.OrdinalIgnoreCase);
+                    foreach (var path in arch.Keys.Where(k => k.StartsWith(@"meshes\actors\", StringComparison.OrdinalIgnoreCase) && k.Contains(@"\behaviors\", StringComparison.OrdinalIgnoreCase) && k.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase)).OrderBy(k => k))
+                    {
+                        HKX2.hkbBehaviorGraph g;
+                        try { g = Graph(path); } catch { continue; }
+                        var names = g.m_data?.m_stringData?.m_eventNames ?? [];
+                        string N(int i) => i >= 0 && i < names.Count ? names[i] : "";
+                        var actedOn = new HashSet<string>(StringComparer.OrdinalIgnoreCase); var raised = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                        void Scan(object? o)
+                        {
+                            if (o is null || o is string || o.GetType().IsPrimitive || o.GetType().IsEnum || !visited.Add(o)) return;
+                            if (o is System.Collections.IEnumerable list) { foreach (var it in list) Scan(it); return; }
+                            switch (o)
+                            {
+                                case HKX2.hkbStateMachineTransitionInfo t: actedOn.Add(N(t.m_eventId)); break;
+                                case HKX2.hkbClipTrigger ct: raised.Add(N(ct.m_event.m_id)); break;
+                                case HKX2.hkbStateMachineStateInfo st:
+                                    foreach (var e in st.m_enterNotifyEvents?.m_events ?? []) raised.Add(N(e.m_id));
+                                    foreach (var e in st.m_exitNotifyEvents?.m_events ?? []) raised.Add(N(e.m_id));
+                                    break;
+                                case HKX2.hkbExpressionData ed:
+                                    var m = System.Text.RegularExpressions.Regex.Match(ed.m_expression, @"^\s*([A-Za-z_][\w.]*)\s+if\b");
+                                    if (m.Success) raised.Add(m.Groups[1].Value);
+                                    break;
+                                case HKX2.hkbStateMachine sm: raised.Add(N(sm.m_eventToSendWhenStateOrTransitionChanges.m_id)); break;
+                            }
+                            if (o.GetType().IsValueType) return;
+                            foreach (var p in o.GetType().GetProperties().Where(p => p.Name.StartsWith("m_") && p.GetIndexParameters().Length == 0)) { try { Scan(p.GetValue(o)); } catch { } }
+                        }
+                        Scan(g.m_rootGenerator);
+                        foreach (var a in asked)
+                        {
+                            if (actedOn.Contains(a)) acts[a].Add(Path.GetFileNameWithoutExtension(path));
+                            if (raised.Contains(a)) raises[a].Add(Path.GetFileNameWithoutExtension(path));
+                        }
+                    }
+                    foreach (var a in asked)
+                        Console.WriteLine($"{a}: acted on in {acts[a].Count} graphs ({string.Join(", ", acts[a].Take(10))}), raised by {raises[a].Count} ({string.Join(", ", raises[a].Take(10))})");
+                    return 0;
+                }
+                // --idioms: across every vanilla behaviour graph (creatures and the character's), how vanilla does what Morrowind's
+                // animation groups need: state machines that pick a state at random (m_randomTransitionEventId: the event, who
+                // sends it, each state's probability and whether it is bound), the graphs that listen for swimming, turning and
+                // knockdown events, and blenders bound to Direction (walking any way) with their children's weights.
+                if (opts.ContainsKey("idioms"))
+                {
+                    string? match = opts.GetValueOrDefault("match");
+                    var listens = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                    int shownRandom = 0, shownBlend = 0, limit = int.Parse(opts.GetValueOrDefault("limit", "12"));
+                    foreach (var path in arch.Keys.Where(k => k.StartsWith(@"meshes\actors\", StringComparison.OrdinalIgnoreCase) && k.Contains(@"\behaviors\", StringComparison.OrdinalIgnoreCase)
+                        && k.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase) && (match is null || k.Contains(match, StringComparison.OrdinalIgnoreCase))).OrderBy(k => k))
+                    {
+                        HKX2.hkbBehaviorGraph g;
+                        try { g = Graph(path); } catch { continue; }
+                        var names = g.m_data?.m_stringData?.m_eventNames ?? [];
+                        var varNames = g.m_data?.m_stringData?.m_variableNames ?? [];
+                        string E(int id) => id >= 0 && id < names.Count ? names[id] : id.ToString();
+                        string V(int id) => id >= 0 && id < varNames.Count ? varNames[id] : id.ToString();
+                        // Which events the graph acts on (a transition's event), for the ones asked about.
+                        var seenNodes = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                        var machines = new List<HKX2.hkbStateMachine>(); var blenders = new List<HKX2.hkbBlenderGenerator>();
+                        void Walk(object? o)
+                        {
+                            if (o is null || o is string || o.GetType().IsPrimitive || o.GetType().IsEnum || o.GetType().IsValueType || !seenNodes.Add(o)) return;
+                            if (o is System.Collections.IEnumerable list) { foreach (var it in list) Walk(it); return; }
+                            if (o is HKX2.hkbStateMachine sm) machines.Add(sm);
+                            if (o is HKX2.hkbBlenderGenerator bl) blenders.Add(bl);
+                            foreach (var p in o.GetType().GetProperties().Where(p => p.Name.StartsWith("m_") && p.GetIndexParameters().Length == 0)) { try { Walk(p.GetValue(o)); } catch { } }
+                        }
+                        Walk(g.m_rootGenerator);
+                        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var sm in machines)
+                        {
+                            foreach (var t in sm.m_wildcardTransitions?.m_transitions ?? []) used.Add(E(t.m_eventId));
+                            foreach (var st in sm.m_states) foreach (var t in st.m_transitions?.m_transitions ?? []) used.Add(E(t.m_eventId));
+                        }
+                        foreach (var e in used.Where(e => e.Contains("swim", StringComparison.OrdinalIgnoreCase) || e.Contains("turn", StringComparison.OrdinalIgnoreCase)
+                            || e.Contains("knock", StringComparison.OrdinalIgnoreCase) || e.Contains("bleed", StringComparison.OrdinalIgnoreCase) || e.Contains("paraly", StringComparison.OrdinalIgnoreCase)
+                            || e.Contains("getup", StringComparison.OrdinalIgnoreCase) || e.Contains("hitreact", StringComparison.OrdinalIgnoreCase) || e.Contains("flinch", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            if (!listens.TryGetValue(e, out var who)) listens[e] = who = [];
+                            who.Add(Path.GetFileNameWithoutExtension(path));
+                        }
+                        foreach (var sm in machines.Where(m => m.m_randomTransitionEventId >= 0))
+                        {
+                            if (shownRandom++ >= limit) continue;
+                            Console.WriteLine($"{path}: machine {sm.m_name} random on {E(sm.m_randomTransitionEventId)}, start {sm.m_startStateId}, wildcards {sm.m_wildcardTransitions?.m_transitions.Count ?? 0}");
+                            foreach (var st in sm.m_states)
+                            {
+                                var pb = st.m_variableBindingSet?.m_bindings.Select(b => $"{b.m_memberPath}<-{V(b.m_variableIndex)}");
+                                Console.WriteLine($"   state {st.m_stateId} {st.m_name} p {st.m_probability}{(pb is null ? "" : " bound " + string.Join(",", pb))}"
+                                    + $"{(st.m_enterNotifyEvents is { } en ? " enter[" + string.Join(",", en.m_events.Select(x => E(x.m_id))) + "]" : "")}"
+                                    + $" out[{string.Join(",", (st.m_transitions?.m_transitions ?? []).Select(t => $"{E(t.m_eventId)}->{t.m_toStateId} f{t.m_flags}"))}] gen {st.m_generator?.GetType().Name} {(st.m_generator as HKX2.hkbNode)?.m_name}");
+                            }
+                            foreach (var t in sm.m_wildcardTransitions?.m_transitions ?? []) Console.WriteLine($"   any --{E(t.m_eventId)}--> {t.m_toStateId} f{t.m_flags}");
+                        }
+                        foreach (var bl in blenders.Where(b => b.m_variableBindingSet?.m_bindings.Any(x => V(x.m_variableIndex).Equals("Direction", StringComparison.OrdinalIgnoreCase)) == true))
+                        {
+                            if (shownBlend++ >= limit) continue;
+                            Console.WriteLine($"{path}: blender {bl.m_name} flags {bl.m_flags} bound {string.Join(",", bl.m_variableBindingSet!.m_bindings.Select(x => $"{x.m_memberPath}<-{V(x.m_variableIndex)}"))} children "
+                                + string.Join(" ", bl.m_children.Select(c => $"{c.m_weight:0.###}:{(c.m_generator as HKX2.hkbClipGenerator)?.m_animationName ?? (c.m_generator as HKX2.hkbNode)?.m_name}")));
+                        }
+                    }
+                    Console.WriteLine($"random machines {shownRandom}, Direction blenders {shownBlend}");
+                    // The expressions vanilla writes (conditions, and computed variables: "x = ..."), distinct, with how many graphs.
+                    var expressions = new Dictionary<string, int>(StringComparer.Ordinal);
+                    foreach (var path in arch.Keys.Where(k => k.StartsWith(@"meshes\actors\", StringComparison.OrdinalIgnoreCase) && k.Contains(@"\behaviors\", StringComparison.OrdinalIgnoreCase) && k.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        HKX2.hkbBehaviorGraph g;
+                        try { g = Graph(path); } catch { continue; }
+                        var seenX = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                        var found = new HashSet<string>(StringComparer.Ordinal);
+                        void Collect(object? o)
+                        {
+                            if (o is null || o is string || o.GetType().IsPrimitive || o.GetType().IsEnum || !seenX.Add(o)) return;
+                            if (o is System.Collections.IEnumerable list) { foreach (var it in list) Collect(it); return; }
+                            if (o is HKX2.hkbExpressionCondition ec) found.Add("if " + ec.m_expression);
+                            if (o is HKX2.hkbStateMachine smx && smx.m_startStateMode != 0) found.Add($"machine start mode {smx.m_startStateMode}: {smx.m_name} ({smx.m_states.Count} states, p {string.Join("/", smx.m_states.Select(st => st.m_probability))})");
+                            if (o is HKX2.hkbExpressionData ed) found.Add("set " + ed.m_expression + (opts.ContainsKey("exprfields") ? $"  [var {ed.m_assignmentVariableIndex} event {ed.m_assignmentEventIndex} mode {ed.m_eventMode}]" : ""));
+                            if (o is HKX2.hkbEvaluateExpressionModifier em && opts.ContainsKey("exprfields")) found.Add($"modifier {em.m_name} enable {em.m_enable} bound {em.m_variableBindingSet?.m_bindings.Count ?? 0}");
+                            if (o.GetType().IsValueType) return;
+                            foreach (var p in o.GetType().GetProperties().Where(p => p.Name.StartsWith("m_") && p.GetIndexParameters().Length == 0)) { try { Collect(p.GetValue(o)); } catch { } }
+                        }
+                        Collect(g.m_rootGenerator);
+                        foreach (var e in found) expressions[e] = expressions.GetValueOrDefault(e) + 1;
+                    }
+                    Console.WriteLine($"{expressions.Count} distinct expressions; with ?, comparisons summed or arithmetic on comparisons:");
+                    foreach (var (e, n) in expressions.Where(kv => kv.Key.Contains('?') || System.Text.RegularExpressions.Regex.IsMatch(kv.Key, @"\)\s*[\+\*]|[\+\*]\s*\(")).OrderByDescending(kv => kv.Value).Take(25)) Console.WriteLine($"  {n} {e}");
+                    Console.WriteLine("most used:");
+                    foreach (var (e, n) in expressions.OrderByDescending(kv => kv.Value).Take(int.Parse(opts.GetValueOrDefault("expressions", "40")))) Console.WriteLine($"  {n} {e}");
+                    foreach (var (e, who) in listens.OrderByDescending(kv => kv.Value.Count))
+                        Console.WriteLine($"listens for {e}: {who.Count} graphs ({string.Join(", ", who.Distinct().Take(14))}{(who.Distinct().Count() > 14 ? ", ..." : "")})");
                     return 0;
                 }
                 // --fields: every class in the file once (the first of each), with its plain fields, nested objects' too.

@@ -14,19 +14,53 @@ namespace TamrielMerge.Skyrim.Creatures;
 /// </summary>
 public static class MwCreatureSource
 {
-    /// <summary>Skyrim clip names and the Morrowind animation groups that give them (first found wins).</summary>
-    static readonly (string Clip, string[] Groups)[] Wanted =
+    /// <summary>
+    /// Skyrim clip names and the Morrowind animation groups that give them (first found wins): every group Morrowind's engine
+    /// plays on a creature (OpenMW's reading, apps/openmw/mwmechanics/character.cpp and aiwander.cpp): its idle and the idles
+    /// its wander package picks (Idle2..9), walking and running every way, turning (a biped's only: "It seems only bipedal
+    /// actors use turning animations"), its three attacks (Morrowind picks one at random; they are chop, slash and thrust),
+    /// its hits and deaths (one at random of those it has, counting up from 1), knocked down and knocked out (and the deaths
+    /// from them), and all of it again in water (IdleSwim, SwimRunForward... SwimDeath; a swimming hit it lacks is a dry one).
+    /// <c>Biped</c> true: only a biped's; false: only a non-biped's (OpenMW's chooseRandomAttackAnimation: "Randomize attacks for
+    /// non-bipedal creatures"; a biped fights with its weapon's groups, hand to hand without one).
+    /// </summary>
+    static readonly (string Clip, string[] Groups, bool? Biped)[] Wanted =
     [
-        ("idle", ["Idle", "Idle1", "Idle2"]),
-        ("walk", ["WalkForward", "Walkforward", "SwimWalkForward"]),
-        ("run", ["RunForward", "Runforward", "SwimRunForward"]),
-        ("attack", ["Attack1", "Attack2", "Attack3"]),
-        ("attack2", ["Attack2"]),
-        ("hit", ["Hit1", "Hit2", "Hit3"]),
-        ("death", ["Death1", "Death2", "Death3"]),
-        ("knockdown", ["KnockDown"]),
+        ("idle", ["Idle", "Idle1"], null),
+        .. Enumerable.Range(2, 8).Select(i => ($"idle{i}", new[] { $"Idle{i}" }, (bool?)null)),
+        ("walk", ["WalkForward", "SwimWalkForward"], null),
+        ("run", ["RunForward", "SwimRunForward"], null),
+        ("walkback", ["WalkBack"], null), ("walkleft", ["WalkLeft"], null), ("walkright", ["WalkRight"], null),
+        ("runback", ["RunBack"], null), ("runleft", ["RunLeft"], null), ("runright", ["RunRight"], null),
+        ("turnleft", ["TurnLeft"], true), ("turnright", ["TurnRight"], true),
+        .. Enumerable.Range(1, 3).Select(i => ($"attack{i}", new[] { $"Attack{i}" }, false)),
+        .. Enumerable.Range(1, 5).Select(i => ($"hit{i}", new[] { $"Hit{i}" }, (bool?)null)),
+        .. Enumerable.Range(1, 5).Select(i => ($"death{i}", new[] { $"Death{i}" }, (bool?)null)),
+        ("knockdown", ["KnockDown"], null), ("deathknockdown", ["DeathKnockDown"], null), ("deathknockout", ["DeathKnockOut"], null),
+        ("idleswim", ["IdleSwim"], null),
+        ("swimwalk", ["SwimWalkForward"], null), ("swimrun", ["SwimRunForward"], null),
+        ("swimwalkback", ["SwimWalkBack"], null), ("swimwalkleft", ["SwimWalkLeft"], null), ("swimwalkright", ["SwimWalkRight"], null),
+        ("swimrunback", ["SwimRunBack"], null), ("swimrunleft", ["SwimRunLeft"], null), ("swimrunright", ["SwimRunRight"], null),
+        ("swimturnleft", ["SwimTurnLeft"], true), ("swimturnright", ["SwimTurnRight"], true),
+        .. Enumerable.Range(1, 3).Select(i => ($"swimattack{i}", new[] { $"SwimAttack{i}" }, false)),
+        .. Enumerable.Range(1, 3).Select(i => ($"swimhit{i}", new[] { $"SwimHit{i}" }, (bool?)null)),
+        ("swimknockdown", ["SwimKnockDown"], null), ("swimdeath", ["SwimDeath"], null),
+        ("swimdeathknockdown", ["SwimDeathKnockDown"], null), ("swimdeathknockout", ["SwimDeathKnockOut"], null),
     ];
+
+    /// <summary>The groups knocked out plays (Morrowind repeats the loop part while the actor's fatigue is below zero, then
+    /// plays on to the end): as three clips "&lt;clip&gt;_in", "_loop", "_out", or one that repeats whole when the group has no
+    /// loop keys (the engine starts it again while still out).</summary>
+    static readonly (string Clip, string Group)[] KnockOuts = [("knockout", "KnockOut"), ("swimknockout", "SwimKnockOut")];
     const float Fps = 30;
+
+    /// <summary>The Morrowind groups the engine never plays on a creature, so none of ours comes from them (OpenMW's
+    /// character.cpp names every group it plays; these it does not): what each is for.</summary>
+    public static readonly Dictionary<string, string> NeverPlayed = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["SwimDeath2"] = "a swimming death is SwimDeath alone (deathStateToAnimGroup)",
+        ["SwimDeath3"] = "a swimming death is SwimDeath alone (deathStateToAnimGroup)",
+    };
 
     /// <summary>The node whose horizontal travel is the actor's movement (as Morrowind's engine takes it): "Bip01", else
     /// "Root Bone". Its X and Y stay where they are at the start of each animation group, so a flight or a walk plays in
@@ -66,18 +100,24 @@ public static class MwCreatureSource
         return groups;
     }
 
-    /// <summary>Our clips that repeat (Skyrim loops them): Morrowind plays their group once from its start, then repeats
-    /// the loop part, so the loop part is what they are.</summary>
-    static readonly HashSet<string> Looping = ["idle", "walk", "run"];
+    /// <summary>Whether our clip repeats (Skyrim loops it): standing, moving and turning, and a knock-out's loop part.
+    /// Morrowind plays such a group once from its start, then repeats the loop part, so the loop part is what they are.</summary>
+    public static bool IsLooping(string clip)
+    {
+        string c = clip.ToLowerInvariant();
+        string bare = c.StartsWith("swim") ? c[4..] : c;
+        if (c.StartsWith("cidle_") || c.StartsWith("cwalk") || c.StartsWith("crun") || c.StartsWith("cturn") || c.EndsWith("_loop")) return true;
+        return bare is "idle" or "idleswim" || c == "idleswim" || bare.StartsWith("walk") || bare.StartsWith("run") || bare.StartsWith("turn");
+    }
 
-    /// <summary>The group each of our clips comes from (the first of its candidates the .kf has whole), and the time span
-    /// taken: the loop part for repeating clips that have one, else the whole group.</summary>
-    public static List<(string Clip, string Group, float Start, float Stop)> ChosenGroups(Dictionary<string, GroupTimes> groups) =>
-        Wanted.Select(w => (w.Clip, Group: w.Groups.FirstOrDefault(c => groups.TryGetValue(c, out var g) && g.Whole)))
+    /// <summary>The group each of our plain clips comes from (the first of its candidates the .kf has whole), and the time
+    /// span taken: the loop part for repeating clips that have one, else the whole group.</summary>
+    public static List<(string Clip, string Group, float Start, float Stop)> ChosenGroups(Dictionary<string, GroupTimes> groups, bool biped = true) =>
+        Wanted.Where(w => w.Biped is null || w.Biped == biped).Select(w => (w.Clip, Group: w.Groups.FirstOrDefault(c => groups.TryGetValue(c, out var g) && g.Whole)))
             .Where(x => x.Group is not null).Select(x =>
             {
                 var g = groups[x.Group!];
-                return Looping.Contains(x.Clip) && g.Loops ? (x.Clip, x.Group!, g.LoopStart, g.LoopStop) : (x.Clip, x.Group!, g.Start, g.Stop);
+                return IsLooping(x.Clip) && g.Loops ? (x.Clip, x.Group!, g.LoopStart, g.LoopStop) : (x.Clip, x.Group!, g.Start, g.Stop);
             }).ToList();
 
     /// <summary>A .kf a creature's clips come from: its own (x&lt;model&gt;.kf) and, for a biped, the humanoid one
@@ -108,7 +148,12 @@ public static class MwCreatureSource
     /// <summary>A weapon style: its letters in our clip names, Morrowind's attack group, its idle, walk and run groups, and
     /// its attacks (each a part of the attack group: "&lt;Kind&gt; Start" .. its follow-through's stop, landing at
     /// "&lt;Kind&gt; Hit", or a shot's "Release").</summary>
-    public sealed record WeaponStyle(string Key, string Group, string Idle, string Walk, string Run, string[] Kinds);
+    public sealed record WeaponStyle(string Key, string Group, string Idle, string Walk, string Run, string[] Kinds)
+    {
+        /// <summary>The letters its other movement groups end in (RunBack1h, TurnLeft2c): a bow's, a crossbow's and a thrown
+        /// weapon's are the one-handed ones (OpenMW's fallbackShortWeaponGroup).</summary>
+        public string Moves => Key is "bow" or "xbow" or "throw" ? "1h" : Key;
+    }
 
     public static readonly WeaponStyle[] WeaponStyles =
     [
@@ -146,14 +191,26 @@ public static class MwCreatureSource
         return (true, WeaponStyles.Select(s => s.Key).Where(styles.Contains).ToList());
     }
 
-    /// <summary>
-    /// Every clip a creature gets and where it comes from: the plain ones (idle, walk, run, its own attacks, hit, death,
-    /// knockdown) from the first source with the group (its own .kf first); and for each weapon style it holds, that
-    /// style's idle, walk and run ("cidle_1h", "cwalk_1h", "crun_1h"), its attacks ("weapon_1h_chop" .. a shot's
-    /// "weapon_bow_shoot"), its drawing and putting away ("equip_1h", "unequip_1h": "Equip Start" .. "Equip Stop").
-    /// </summary>
-    public static List<ClipPlan> Plan(IReadOnlyList<ClipSource> sources, IReadOnlyCollection<string> styles)
+    /// <summary>The weapon styles a creature fights in: a biped every style its animations have (Morrowind picks the style by
+    /// what it holds when it holds it, whatever its items were to start with), its items' styles first; else none.</summary>
+    public static List<string> Styles(IReadOnlyList<ClipSource> sources, IReadOnlyCollection<string> held, bool biped)
     {
+        if (!biped) return [];
+        // (Not a thrown weapon's: thrown weapons are misc items in Skyrim, so nothing ever holds one to throw.)
+        var animated = WeaponStyles.Where(w => w.Key != "throw" && sources.Any(s => (s.Keys?.Keys ?? []).Any(k => k.Text.Split('\n').Any(l => l.Trim().StartsWith(w.Group + ":", StringComparison.OrdinalIgnoreCase)))))
+            .Select(w => w.Key).ToHashSet();
+        return WeaponStyles.Select(w => w.Key).Where(k => held.Contains(k) || animated.Contains(k)).ToList();
+    }
+
+    /// <summary>
+    /// Every clip a creature gets and where it comes from: the plain ones (<see cref="Wanted"/>, knocked out's parts) from
+    /// the first source with the group (its own .kf first); and for each weapon style it fights in (<see cref="Styles"/>),
+    /// that style's idle, walk and run ("cidle_1h", "cwalk_1h", "crun_1h"), running other ways and turning, its attacks
+    /// ("weapon_1h_chop" .. a shot's "weapon_bow_shoot"), its drawing and putting away ("equip_1h", "unequip_1h").
+    /// </summary>
+    public static List<ClipPlan> Plan(IReadOnlyList<ClipSource> sources, IReadOnlyCollection<string> held, bool biped)
+    {
+        var styles = Styles(sources, held, biped);
         var plan = new List<ClipPlan>();
         ClipPlan? Whole(string clip, IEnumerable<string> candidates, bool loop, string? hit = null)
         {
@@ -163,8 +220,22 @@ public static class MwCreatureSource
                         return loop && g.Loops ? new ClipPlan(clip, s, c, g.LoopStart, g.LoopStop, null) : new ClipPlan(clip, s, c, g.Start, g.Stop, hit is null ? null : $"{c}: {hit}");
             return null;
         }
-        foreach (var (clip, candidates) in Wanted)
-            if (Whole(clip, candidates, Looping.Contains(clip), clip.StartsWith("attack") ? "Hit" : null) is { } p) plan.Add(p);
+        foreach (var (clip, candidates, who) in Wanted)
+            if ((who is null || who == biped) && Whole(clip, candidates, IsLooping(clip), clip.Contains("attack") ? "Hit" : null) is { } p) plan.Add(p);
+        // Knocked out: up to its loop, the loop, and on from it (one clip repeated whole when it has no loop keys).
+        foreach (var (clip, group) in KnockOuts)
+            for (int s = 0; s < sources.Count; s++)
+            {
+                if (!sources[s].Groups.TryGetValue(group, out var g) || !g.Whole) continue;
+                if (g.Loops && g.LoopStart >= g.Start && g.LoopStop <= g.Stop)
+                {
+                    if (g.LoopStart - g.Start >= 1 / Fps) plan.Add(new ClipPlan($"{clip}_in", s, group, g.Start, g.LoopStart, null));
+                    plan.Add(new ClipPlan($"{clip}_loop", s, group, g.LoopStart, g.LoopStop, null));
+                    if (g.Stop - g.LoopStop >= 1 / Fps) plan.Add(new ClipPlan($"{clip}_out", s, group, g.LoopStop, g.Stop, null));
+                }
+                else plan.Add(new ClipPlan(clip, s, group, g.Start, g.Stop, null));
+                break;
+            }
         // A part of an attack group between two of its keys, from the first source that has both.
         ClipPlan? Part(string clip, string group, string from, string[] to, string? hit)
         {
@@ -184,6 +255,12 @@ public static class MwCreatureSource
             if (Whole($"cidle_{style.Key}", [style.Idle, "Idle1h", "Idle"], loop: true) is { } i) plan.Add(i);
             if (Whole($"cwalk_{style.Key}", [style.Walk, "WalkForward1h", "WalkForward"], loop: true) is { } w) plan.Add(w);
             if (Whole($"crun_{style.Key}", [style.Run, "RunForward1h", "RunForward"], loop: true) is { } r) plan.Add(r);
+            // Running any other way and turning with it drawn (Morrowind's RunBack1h, TurnLeft2c...; the plain group where the
+            // style has none, as OpenMW falls back), and the same in water (the swimming groups have no weapon letters).
+            foreach (var (way, group) in new[] { ("back", "RunBack"), ("left", "RunLeft"), ("right", "RunRight") })
+                if (Whole($"crun{way}_{style.Key}", [group + style.Moves, group + "1h", group], loop: true) is { } rw) plan.Add(rw);
+            foreach (var (way, group) in new[] { ("left", "TurnLeft"), ("right", "TurnRight") })
+                if (Whole($"cturn{way}_{style.Key}", [group + style.Moves, group + "1h", group], loop: true) is { } tw) plan.Add(tw);
             foreach (var kind in style.Kinds)
             {
                 if (kind == "Shoot")
@@ -247,9 +324,16 @@ public static class MwCreatureSource
         var (biped, styles) = world is not null ? Kind(world, model) : (false, []);
         var sources = Sources(data, model, biped);
         if (sources.Count == 0) problems.Add($"{model}: no animations (no x{Path.GetFileNameWithoutExtension(model)}.kf, not a biped)");
-        var plan = Plan(sources, styles);
+        var plan = Plan(sources, styles, biped);
         var rig = BuildBody(data, model, textures, modOutDir, problems, sources, plan);
-        rig.WeaponStyles.AddRange(styles);
+        rig.WeaponStyles.AddRange(Styles(sources, styles, biped));
+        rig.Biped = biped;
+        if (world is not null)
+        {
+            float multiplier = Setting(world, "fIdleChanceMultiplier", float.NaN);
+            if (float.IsNaN(multiplier)) problems.Add($"{model}: no fIdleChanceMultiplier in the game's settings (idles taken as always rolled)");
+            rig.IdleSets.AddRange(IdleSets(world, model).Sets.Select(c => IdleOdds(c, float.IsNaN(multiplier) ? 1 : multiplier)));
+        }
         if (world is not null && id is not null) AddGameData(rig, data, world, model, id, problems, sources, plan);
         return rig;
     }
@@ -267,6 +351,64 @@ public static class MwCreatureSource
     /// and maximum, gold.</summary>
     public static int[] Stats(Tes3Record crea) => crea.Get("NPDT") is { Data.Length: >= 96 } d ? Enumerable.Range(0, 24).Select(i => BitConverter.ToInt32(d.Data, i * 4)).ToArray() : new int[24];
 
+    /// <summary>The idle chances (AI_W: Idle2..Idle9, 0..100) of the creatures drawn with <paramref name="model"/>, as the
+    /// distinct sets among them, and which set each creature (by Morrowind ID) has: none for one without a wander package
+    /// (only wandering picks idles). The original's set is first.</summary>
+    public static (List<int[]> Sets, Dictionary<string, int> Of) IdleSets(MwWorld world, string model)
+    {
+        var sets = new List<int[]>();
+        var of = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in CreaturesWith(world, model))
+        {
+            int[] chances = c.Get("AI_W") is { Data.Length: >= 13 } w ? w.Data.Skip(5).Take(8).Select(b => (int)b).ToArray() : new int[8];
+            int i = sets.FindIndex(s => s.SequenceEqual(chances));
+            if (i < 0) { sets.Add(chances); i = sets.Count - 1; }
+            of[c.Id] = i;
+        }
+        return (sets, of);
+    }
+
+    /// <summary>
+    /// How often each idle follows a roll, as Morrowind's wander package rolls them (OpenMW's AiWander::getRandomIdle): no
+    /// idle at all unless a first roll passes <paramref name="multiplier"/> (fIdleChanceMultiplier); then each idle rolls 0..100
+    /// and is a candidate when the roll is within its chance, the highest candidate playing. [0] is no idle (the actor stands
+    /// in its plain idle and rolls again), [1..8] Idle2..Idle9. Exact: idle i wins at roll r when every other j either misses
+    /// its chance or rolls below r, so P(i) = multiplier ∫₀^cᵢ ∏ⱼ≠ᵢ (1 − max(0, cⱼ − r)/100) dr/100, integrated in 0.001 steps
+    /// (the integrand is a polynomial between the chances: midpoint error below 1e-7).
+    /// </summary>
+    public static float[] IdleOdds(int[] chances, float multiplier)
+    {
+        var c = chances.Select(x => Math.Min(100.0, x)).ToArray();
+        var odds = new double[9];
+        const int Steps = 100000;
+        for (int i = 0; i < 8; i++)
+        {
+            if (c[i] <= 0) continue;
+            double sum = 0;
+            int n = (int)Math.Ceiling(c[i] / 100 * Steps);
+            double dr = c[i] / n;
+            for (int k = 0; k < n; k++)
+            {
+                double r = (k + 0.5) * dr, p = 1;
+                for (int j = 0; j < 8; j++) if (j != i) p *= 1 - Math.Max(0, c[j] - r) / 100;
+                sum += p * dr / 100;
+            }
+            odds[i + 1] = multiplier * sum;
+        }
+        odds[0] = 1 - odds.Skip(1).Sum();
+        return odds.Select(o => (float)o).ToArray();
+    }
+
+    /// <summary>Morrowind's knockdown settings (GMST fKnockDownMult, iKnockDownOddsMult, iKnockDownOddsBase), for its
+    /// creatures' hit ability; a missing one is an error, not a guess.</summary>
+    public static CreatureRecords.HitRules HitRules(MwWorld world)
+    {
+        int Int(string name) => world.Settings.TryGetValue(name, out var s) && s.Get("INTV") is { Data.Length: >= 4 } v ? v.Int() : throw new InvalidDataException($"no {name} in Morrowind's settings");
+        float mult = Setting(world, "fKnockDownMult", float.NaN);
+        if (float.IsNaN(mult)) throw new InvalidDataException("no fKnockDownMult in Morrowind's settings");
+        return new CreatureRecords.HitRules(mult, Int("iKnockDownOddsMult"), Int("iKnockDownOddsBase"));
+    }
+
     static float Setting(MwWorld world, string name, float fallback) =>
         world.Settings.TryGetValue(name, out var s) && s.Get("FLTV") is { Data.Length: >= 4 } f ? BitConverter.ToSingle(f.Data, 0) : fallback;
 
@@ -277,8 +419,8 @@ public static class MwCreatureSource
     /// original's ID), else the game's defaults; "Sound: X" the sound X) as its own sounds at the same moments, but no
     /// footfalls for a creature that flies (none in the air); "Attack1: Hit" as the moment its attack lands (HitFrame);</item>
     /// <item>its "Bounding Box" node as the actor's collision box;</item>
-    /// <item>its speeds from the game's settings and its Speed: flying fMinFlySpeed + Speed% of the way to fMaxFlySpeed,
-    /// walking fMinWalkSpeedCreature .. fMaxWalkSpeedCreature and running that times fBaseRunMultiplier.</item>
+    /// <item>its speeds from the game's settings and its Speed (<see cref="Speeds"/>, <see cref="SwimSpeed"/>): each
+    /// moving clip's speed and way (<see cref="Motion"/>).</item>
     /// </list>
     /// </summary>
     static void AddGameData(CreatureRig rig, Tes3Data data, MwWorld world, string model, string id, List<string> problems, List<ClipSource> sources, List<ClipPlan> plan)
@@ -353,10 +495,82 @@ public static class MwCreatureSource
             rig.Box = (new Vector3(c.X, c.Y, top / 2), new Vector3(e.X, e.Y, top / 2));
         }
 
-        // Speeds.
-        var (walk, run) = Speeds(world, Stats(creatures[0])[6], flies);
-        rig.MoveSpeeds["walk"] = walk;
-        rig.MoveSpeeds["run"] = run;
+        // Speeds: each moving clip's, its way too (the animation data's motion).
+        var first = Stats(creatures[0]);
+        var (walk, run) = Speeds(world, first[6], flies);
+        float swim = SwimSpeed(world, first, walk, problems);
+        foreach (var clip in rig.Clips.Keys)
+            if (Motion(clip, walk, run, swim) is { Speed: > 0 } m) { rig.MoveSpeeds[clip] = m.Speed; rig.MoveWays[clip] = m.Way; }
+
+        // How fast its moving clips play: Morrowind plays a movement group at the actor's speed over the group's own pace
+        // (OpenMW 0.48 CharacterController::update: speed / mMovementAnimSpeed, at most 10), that pace being the walking
+        // group's for a creature that doesn't fly (even when it runs: "MW uses the Walk animation to calculate the animation
+        // velocity even if we are running") and the played group's own for one that does; a walking pace of 1 or less, none
+        // (played as it is).
+        var groupOf = plan.ToDictionary(p => p.Clip, p => p.Group, StringComparer.OrdinalIgnoreCase);
+        foreach (var clip in rig.MoveSpeeds.Keys)
+        {
+            if (!groupOf.TryGetValue(clip, out var played)) continue;
+            float pace;
+            if (!flies)
+            {
+                pace = Velocity(sources, WalkEquivalent(clip));
+                if (pace <= 1) continue;
+            }
+            else
+            {
+                pace = Velocity(sources, played);
+                if (pace <= 1) pace = clip.Contains("run", StringComparison.OrdinalIgnoreCase) ? 222.857f : 154.064f;
+            }
+            rig.MovePaces[clip] = pace;
+        }
+    }
+
+    /// <summary>The walking group whose pace a creature's moving clip is played by (OpenMW's runStateToWalkState then
+    /// movementStateToAnimGroup: no weapon letters, no fallback): "crunback_1h" and "runback" → WalkBack, "swimrun" →
+    /// SwimWalkForward.</summary>
+    public static string WalkEquivalent(string clip)
+    {
+        string c = clip.ToLowerInvariant();
+        bool swim = c.StartsWith("swim");
+        string bare = swim ? c[4..] : c.StartsWith("crun") ? "run" + c[4..c.IndexOf('_')] : c.StartsWith("cwalk") ? "walk" + c[5..c.IndexOf('_')] : c;
+        string way = bare.EndsWith("back") ? "Back" : bare.EndsWith("left") ? "Left" : bare.EndsWith("right") ? "Right" : "Forward";
+        return (swim ? "SwimWalk" : "Walk") + way;
+    }
+
+    /// <summary>
+    /// A group's pace (units a second) as Morrowind takes it (OpenMW 0.48 Animation::getVelocity, calcAnimVelocity): in the
+    /// newest source with the group (our first: the model's own .kf before the humanoid one), the movement root's ("Bip01",
+    /// else "Root Bone") horizontal travel between the group's last "Start" or "Loop Start" key and its last "Loop Stop" key
+    /// (else its "Stop"), over that time; 1 or less there, the next source's. 0 for none.
+    /// </summary>
+    public static float Velocity(IReadOnlyList<ClipSource> sources, string group)
+    {
+        float Of(ClipSource s)
+        {
+            var track = MovementRoots.Select(r => s.Tracks.FirstOrDefault(t => t.Key.Equals(r, StringComparison.OrdinalIgnoreCase)).Value).FirstOrDefault(t => t is not null);
+            if (track is null || track.Translations.Count == 0) return 0;
+            var keys = (s.Keys?.Keys ?? []).SelectMany(k => k.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(l => (k.Time, Text: l.ToLowerInvariant()))).ToList();
+            string g = group.ToLowerInvariant();
+            float start = float.MaxValue, stop = 0;
+            for (int i = keys.Count - 1; i >= 0; i--)
+                if (keys[i].Text == $"{g}: start" || keys[i].Text == $"{g}: loop start") { start = keys[i].Time; break; }
+            for (int i = keys.Count - 1; i >= 0; i--)
+            {
+                if (keys[i].Text == $"{g}: stop") stop = keys[i].Time;
+                else if (keys[i].Text == $"{g}: loop stop") { stop = keys[i].Time; break; }
+            }
+            if (stop <= start) return 0;
+            var a = MwKeys.Vector(track.Translations, track.TranslationType, track.TranslationExtra, start);
+            var b = MwKeys.Vector(track.Translations, track.TranslationType, track.TranslationExtra, stop);
+            return new Vector2(a.X - b.X, a.Y - b.Y).Length() / (stop - start);
+        }
+        int first = -1;
+        for (int i = 0; i < sources.Count; i++) if (sources[i].Groups.ContainsKey(group)) { first = i; break; }
+        if (first < 0) return 0;
+        float v = 0;
+        for (int i = first; i < sources.Count && !(v > 1); i++) v = Of(sources[i]);
+        return v;
     }
 
     /// <summary>
@@ -370,6 +584,7 @@ public static class MwCreatureSource
     {
         var creatures = CreaturesWith(world, model);
         if (creatures.Count == 0) throw new InvalidDataException($"{model}: no creature uses it");
+        var idle = IdleSets(world, model);
         CreatureRecords.Stats Of(Tes3Record c)
         {
             var s = Stats(c);
@@ -380,13 +595,22 @@ public static class MwCreatureSource
             int flee = c.Get("AIDT") is { Data.Length: >= 4 } ai ? ai.Data[3] : 0;
             var kind = s[0] switch { 1 => CreatureRecords.CreatureKind.Daedra, 2 => CreatureRecords.CreatureKind.Undead, 3 => CreatureRecords.CreatureKind.Humanoid, _ => CreatureRecords.CreatureKind.Animal };
             return new CreatureRecords.Stats(s[10], s[11], s[12], attacks.Count > 0 ? (float)attacks.Average(a => a.Min) : 0, attacks.Count > 0 ? (float)attacks.Average(a => a.Max) : 0,
-                Setting(world, "fCombatDistance", 128), flee, kind, walk, run, flies, Swims: (flag & 0x10) != 0, Walks: (flag & 0x40) != 0);
+                Setting(world, "fCombatDistance", 128), flee, kind, walk, run, flies, Swims: (flag & 0x10) != 0, Walks: (flag & 0x40) != 0)
+            {
+                SwimSpeed = SwimSpeed(world, s, walk),
+                Agility = s[5],
+                IdleSet = idle.Of.GetValueOrDefault(c.Id),
+                // Each attack's average blow (Morrowind: least + (most - least) × the attack's strength; chop, slash, thrust).
+                AttackAverages = Enumerable.Range(0, 3).Select(i => (s[17 + i * 2] + s[18 + i * 2]) / 2f).ToArray(),
+            };
         }
         return (Of(creatures[0]), creatures.ToDictionary(c => "MW" + MwPluginBuilder.Sanitize(c.Id), Of, StringComparer.OrdinalIgnoreCase));
     }
 
-    /// <summary>Walking and running speeds (units a second) for a creature's Speed: a flier's fMinFlySpeed + Speed% of the
-    /// way to fMaxFlySpeed both; else fMinWalkSpeedCreature .. fMaxWalkSpeedCreature, running fBaseRunMultiplier times that.</summary>
+    /// <summary>Walking and running speeds (units a second) for a creature's Speed, as Morrowind's engine moves creatures
+    /// (OpenMW 0.48 Creature::getMaxSpeed, getWalkSpeed, getRunSpeed): a flier's fMinFlySpeed + Speed% of the way to
+    /// fMaxFlySpeed; else fMinWalkSpeedCreature + Speed% of the way to fMaxWalkSpeedCreature, running the same (a creature's
+    /// run speed is its walk speed: no fBaseRunMultiplier).</summary>
     static (float Walk, float Run) Speeds(MwWorld world, float speed, bool flies)
     {
         if (flies)
@@ -395,7 +619,38 @@ public static class MwCreatureSource
             return (fly, fly);
         }
         float walk = Setting(world, "fMinWalkSpeedCreature", 5) + speed / 100f * (Setting(world, "fMaxWalkSpeedCreature", 300) - Setting(world, "fMinWalkSpeedCreature", 5));
-        return (walk, walk * Setting(world, "fBaseRunMultiplier", 1.75f));
+        return (walk, walk);
+    }
+
+    /// <summary>How much slower than straight on Morrowind moves an actor sideways (OpenMW's Actor::getCurrentSpeed: a
+    /// strafing actor's speed times 0.75; it strafes when its sideways movement is more than twice its forward).</summary>
+    public const float StrafeFactor = 0.75f;
+
+    /// <summary>A creature's swimming speed (OpenMW 0.48 Creature::getSwimSpeed, Actor::getSwimSpeedImpl): its walk speed
+    /// times fSwimRunBase + Athletics × fSwimRunAthleticsMult / 100, a creature's Athletics being its combat, magic or
+    /// stealth value as the Athletics skill's specialization (SKIL 8's SKDT) says.</summary>
+    public static float SwimSpeed(MwWorld world, int[] stats, float walk, List<string>? problems = null)
+    {
+        int spec = -1;
+        foreach (var plugin in world.Plugins)
+            foreach (var r in plugin.Records.Where(r => r.Type == "SKIL"))
+                if (r.Get("INDX") is { Data.Length: >= 4 } i && i.Int() == 8 && r.Get("SKDT") is { Data.Length: >= 8 } d) spec = d.Int(4);
+        if (spec is < 0 or > 2) { problems?.Add("no Athletics skill record (SKIL 8): swimming at fSwimRunBase alone"); spec = -1; }
+        float athletics = spec < 0 ? 0 : stats[14 + spec];
+        return walk * (Setting(world, "fSwimRunBase", 0.5f) + athletics / 100f * Setting(world, "fSwimRunAthleticsMult", 0.1f));
+    }
+
+    /// <summary>The speed and way (+Y forward) a moving clip carries the actor: walking and running at its speed (sideways
+    /// at <see cref="StrafeFactor"/> of it), swimming at its swimming speed; zero for the rest.</summary>
+    public static (float Speed, Vector2 Way) Motion(string clip, float walk, float run, float swim)
+    {
+        string c = clip.ToLowerInvariant();
+        bool swimming = c.StartsWith("swim") && !c.StartsWith("swimattack") && !c.StartsWith("swimhit") && !c.StartsWith("swimdeath") && !c.StartsWith("swimknock") && !c.StartsWith("swimturn");
+        string bare = swimming ? c[4..] : c.StartsWith("crun") ? "run" + c[4..c.IndexOf('_')] : c.StartsWith("cwalk") ? "walk" + c[5..c.IndexOf('_')] : c;
+        if (!bare.StartsWith("walk") && !bare.StartsWith("run")) return (0, Vector2.Zero);
+        float speed = swimming ? swim : bare.StartsWith("run") ? run : walk;
+        var way = bare.EndsWith("back") ? new Vector2(0, -1) : bare.EndsWith("left") ? new Vector2(-1, 0) : bare.EndsWith("right") ? new Vector2(1, 0) : new Vector2(0, 1);
+        return (way.X != 0 ? speed * StrafeFactor : speed, way);
     }
 
     static CreatureRig BuildBody(Tes3Data data, string model, MwTextures textures, string modOutDir, List<string> problems, List<ClipSource> sources, List<ClipPlan> plan)
@@ -790,7 +1045,7 @@ public static class MwCreatureSource
                         }
                         tracks.Add(new CreatureRig.LookTrack(meshOf[a.Shape], a.Variable, Thin(keys)));
                     }
-                    rig.Looks[clip] = new CreatureRig.ClipLook(Looping.Contains(clip), tracks);
+                    rig.Looks[clip] = new CreatureRig.ClipLook(IsLooping(clip), tracks);
                 }
             if (rig.Clips.Count == 0) problems.Add($"{model}: no animation groups found ({string.Join(", ", sources.SelectMany(s => s.Groups.Keys).Take(12))})");
         }

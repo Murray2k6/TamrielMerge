@@ -104,9 +104,25 @@ public sealed class CreatureRecords
 
     /// <summary>A creature's numbers as its game has them (Morrowind's NPDT, AIDT and flags; the speeds its settings give).</summary>
     public sealed record Stats(int Health, int Magicka, int Stamina, float AttackMin, float AttackMax, float Reach, int Flee,
-        CreatureKind Kind, float WalkSpeed, float RunSpeed, bool Flies, bool Swims = false, bool Walks = true);
+        CreatureKind Kind, float WalkSpeed, float RunSpeed, bool Flies, bool Swims = false, bool Walks = true)
+    {
+        /// <summary>Swimming speed (Morrowind's: MwCreatureSource.SwimSpeed); NaN: as it walks.</summary>
+        public float SwimSpeed { get; init; } = float.NaN;
+        /// <summary>Agility (Morrowind's knockdown odds on each hit); -1: none (no knockdowns from its game).</summary>
+        public int Agility { get; init; } = -1;
+        /// <summary>Which of its model's idle sets it picks idles by (CreatureRig.IdleSets).</summary>
+        public int IdleSet { get; init; }
+        /// <summary>Each of its attacks' average blow (Morrowind's chop, slash and thrust: attack 1, 2, 3); null: one blow for all.</summary>
+        public float[]? AttackAverages { get; init; }
+    }
 
     public enum CreatureKind { Animal, Daedra, Undead, Humanoid }
+
+    /// <summary>Its game's rules for a blow that lands (Morrowind's fKnockDownMult, iKnockDownOddsMult, iKnockDownOddsBase):
+    /// with them its race gets the ability that flinches and knocks it down as its game does (TMMwCreatureHits.psc).</summary>
+    public sealed record HitRules(float KnockDownMult, int KnockDownOddsMult, int KnockDownOddsBase);
+
+    public const string HitScript = "TMMwCreatureHits";
 
     T Vanilla<T>(string editorId) where T : class, IMajorRecordGetter =>
         masters.SelectMany(m => m.EnumerateMajorRecords<T>()).FirstOrDefault(r => r.EditorID == editorId) ?? throw new InvalidDataException($"{editorId} not in the masters");
@@ -123,7 +139,9 @@ public sealed class CreatureRecords
     /// sounds, faction or death item, and their own health, magicka and stamina (offsets from the race's), a stronger or
     /// weaker attack than the race's through an ability. Returns how many actors were switched.
     /// </summary>
-    public int AddOwn(string id, string name, string dataDir, Stats raceStats, IReadOnlyDictionary<string, Stats> actorStats, string torsoBone, string? headBone)
+    /// <param name="hits">Its game's rules for a blow that lands (Morrowind's): its race then flinches and is knocked down and
+    /// out as there (<see cref="HitScript"/>, which also gives each actor its idle set).</param>
+    public int AddOwn(string id, string name, string dataDir, Stats raceStats, IReadOnlyDictionary<string, Stats> actorStats, string torsoBone, string? headBone, HitRules? hits = null)
     {
         string pascal = CreatureBehavior.ProjectName(id)[2..^"Project".Length];
         string folder = CreatureRig.MeshFolder(id)["meshes\\".Length..];
@@ -149,18 +167,26 @@ public sealed class CreatureRecords
                 mod.SoundDescriptors.Add(sd);
             }
 
-        // Movement at its game's speeds.
-        var move = new MovementType(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
+        // Movement at its game's speeds: sideways at Morrowind's strafing three quarters (OpenMW's Actor::getCurrentSpeed),
+        // and swimming at its own (Morrowind's: its walk times the swimming settings and its Athletics).
+        MovementType Move(string key, float walk, float run)
         {
-            EditorID = $"TMMove{pascal}",
-            Name = $"TM{pascal}",
-            ForwardWalk = raceStats.WalkSpeed, ForwardRun = raceStats.RunSpeed,
-            LeftWalk = raceStats.WalkSpeed, LeftRun = raceStats.RunSpeed, RightWalk = raceStats.WalkSpeed, RightRun = raceStats.RunSpeed,
-            BackWalk = raceStats.WalkSpeed, BackRun = raceStats.RunSpeed,
-            RotateInPlaceWalk = 180, RotateInPlaceRun = 180, RotateWhileMovingRun = 180,
-            AnimationChangeThresholds = new AnimationChangeThresholds { Directional = float.MaxValue, MovementSpeed = float.MaxValue, RotationSpeed = float.MaxValue },
-        };
-        mod.MovementTypes.Add(move);
+            var m = new MovementType(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
+            {
+                EditorID = $"TMMove{key}{pascal}",
+                Name = $"TM{key}{pascal}",
+                ForwardWalk = walk, ForwardRun = run,
+                LeftWalk = walk * MwCreatureSource.StrafeFactor, LeftRun = run * MwCreatureSource.StrafeFactor,
+                RightWalk = walk * MwCreatureSource.StrafeFactor, RightRun = run * MwCreatureSource.StrafeFactor,
+                BackWalk = walk, BackRun = run,
+                RotateInPlaceWalk = 180, RotateInPlaceRun = 180, RotateWhileMovingRun = 180,
+                AnimationChangeThresholds = new AnimationChangeThresholds { Directional = float.MaxValue, MovementSpeed = float.MaxValue, RotationSpeed = float.MaxValue },
+            };
+            mod.MovementTypes.Add(m);
+            return m;
+        }
+        var move = Move("", raceStats.WalkSpeed, raceStats.RunSpeed);
+        var swimMove = float.IsNaN(raceStats.SwimSpeed) ? move : Move("Swim", raceStats.SwimSpeed, raceStats.SwimSpeed);
 
         var voice = new VoiceType(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE) { EditorID = $"TMVoice{pascal}" };
         mod.VoiceTypes.Add(voice);
@@ -215,7 +241,7 @@ public sealed class CreatureRecords
             CloseLootSound = Vanilla<ISoundDescriptorGetter>("DRScBodyCreatureCloseSD").ToNullableLink(),
             BaseMovementDefaultWalk = move.ToNullableLink<IMovementTypeGetter>(),
             BaseMovementDefaultRun = move.ToNullableLink<IMovementTypeGetter>(),
-            BaseMovementDefaultSwim = move.ToNullableLink<IMovementTypeGetter>(),
+            BaseMovementDefaultSwim = swimMove.ToNullableLink<IMovementTypeGetter>(),
             BaseMovementDefaultSneak = move.ToNullableLink<IMovementTypeGetter>(),
             BaseMovementDefaultSprint = move.ToNullableLink<IMovementTypeGetter>(),
             UnarmedEquipSlot = Vanilla<IEquipTypeGetter>("RightHand").ToNullableLink(),
@@ -245,12 +271,22 @@ public sealed class CreatureRecords
             race.BipedObjectNames[BipedObject.Shield] = "SHIELD";
             if (clipNames.Any(c => c.EndsWith("_draw", StringComparison.OrdinalIgnoreCase))) race.Keywords.Add(Vanilla<IKeywordGetter>("UpdateDuringArchery").ToLink());
         }
-        foreach (var attack in CreatureGraph.AttackEvents(clipNames))
+        // Its attacks, all as likely (Morrowind picks one at random), each with its own blow: Morrowind's attack 1, 2 and 3
+        // (chop, slash, thrust) are its attack clips 1, 2 and 3, each its average over the race's unarmed damage (a weapon's
+        // blows are the weapon's).
+        float unarmed = (raceStats.AttackMin + raceStats.AttackMax) / 2;
+        foreach (var (attackEvent, attackClip) in CreatureGraph.AttackList(clipNames))
+        {
+            float mult = 1;
+            if (raceStats.AttackAverages is { } avg && unarmed > 0 && System.Text.RegularExpressions.Regex.Match(attackClip, @"^attack(\d)$") is { Success: true } am
+                && int.Parse(am.Groups[1].Value) is int n and >= 1 and <= 3)
+                mult = avg[n - 1] / unarmed;
             race.Attacks.Add(new Attack
             {
-                AttackEvent = attack,
-                AttackData = new AttackData { DamageMult = 1, Chance = 1, StrikeAngle = 35, StaminaMult = 1 },
+                AttackEvent = attackEvent,
+                AttackData = new AttackData { DamageMult = mult, Chance = 1, StrikeAngle = 35, StaminaMult = 1 },
             });
+        }
 
         var addon = new ArmorAddon(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
         {
@@ -289,6 +325,7 @@ public sealed class CreatureRecords
         var creatureFaction = Vanilla<IFactionGetter>("CreatureFaction");
 
         int switched = 0;
+        var bases = new List<(FormKey Key, Stats Stats)>();
         float raceAttack = (raceStats.AttackMin + raceStats.AttackMax) / 2;
         foreach (var game in games)
             foreach (var npc in game.Npcs.Where(n => n.EditorID is { } e && actorStats.ContainsKey(e)))
@@ -322,10 +359,81 @@ public sealed class CreatureRecords
                     o.ActorEffect ??= [];
                     o.ActorEffect.Add(AttackAbility($"{pascal}{o.EditorID}", attack / raceAttack).ToLink<ISpellRecordGetter>());
                 }
+                // Faster or slower than the race's first creature (its own Speed): its speed through SpeedMult.
+                if (raceStats.WalkSpeed > 0 && MathF.Abs(st.WalkSpeed / raceStats.WalkSpeed - 1) > 0.005f)
+                {
+                    o.ActorEffect ??= [];
+                    o.ActorEffect.Add(ValueAbility($"Speed{pascal}{o.EditorID}", ActorValue.SpeedMult, (st.WalkSpeed / raceStats.WalkSpeed - 1) * 100).ToLink<ISpellRecordGetter>());
+                }
                 mod.Npcs.Add(o);
+                bases.Add((o.FormKey, st));
                 switched++;
             }
+
+        // Struck as in its game, and its idles by its own chances (TMMwCreatureHits): the race's ability, knowing each of its
+        // creatures' agility and idle set.
+        if (hits is not null)
+        {
+            var entry = new ScriptEntry { Name = HitScript };
+            var list = new ScriptObjectListProperty { Name = "Bases" };
+            foreach (var (key, _) in bases) list.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(key) });
+            entry.Properties.Add(list);
+            entry.Properties.Add(new ScriptIntListProperty { Name = "Agility", Data = [.. bases.Select(b => b.Stats.Agility)] });
+            entry.Properties.Add(new ScriptIntListProperty { Name = "IdleSet", Data = [.. bases.Select(b => b.Stats.IdleSet)] });
+            entry.Properties.Add(new ScriptFloatProperty { Name = "KnockDownMult", Data = hits.KnockDownMult });
+            entry.Properties.Add(new ScriptIntProperty { Name = "KnockDownOddsMult", Data = hits.KnockDownOddsMult });
+            entry.Properties.Add(new ScriptIntProperty { Name = "KnockDownOddsBase", Data = hits.KnockDownOddsBase });
+            var effect = new MagicEffect(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
+            {
+                EditorID = $"TMHitsFx{pascal}",
+                Name = "Struck",
+                Flags = MagicEffect.Flag.Recover | MagicEffect.Flag.HideInUI | MagicEffect.Flag.NoHitEvent | MagicEffect.Flag.NoDuration | MagicEffect.Flag.NoArea,
+                Archetype = new MagicEffectArchetype(MagicEffectArchetype.TypeEnum.Script),
+                CastType = CastType.ConstantEffect,
+                TargetType = TargetType.Self,
+                VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [entry] },
+            };
+            mod.MagicEffects.Add(effect);
+            var spell = new Spell(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
+            {
+                EditorID = $"TMHitsAb{pascal}",
+                Name = "Struck",
+                Type = SpellType.Ability,
+                CastType = CastType.ConstantEffect,
+                TargetType = TargetType.Self,
+                Effects = [new Effect { BaseEffect = effect.ToNullableLink<IMagicEffectGetter>(), Data = new EffectData() }],
+            };
+            mod.Spells.Add(spell);
+            race.ActorEffect ??= [];
+            race.ActorEffect.Add(spell.ToLink<ISpellRecordGetter>());
+        }
         return switched;
+    }
+
+    /// <summary>An ability adding <paramref name="magnitude"/> to an actor value (SpeedMult: a faster or slower actor).</summary>
+    Spell ValueAbility(string key, ActorValue value, float magnitude)
+    {
+        var effect = new MagicEffect(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = $"TMValueFx{key}",
+            Name = value.ToString(),
+            Flags = MagicEffect.Flag.Recover | MagicEffect.Flag.HideInUI | MagicEffect.Flag.NoHitEvent | MagicEffect.Flag.NoDuration | MagicEffect.Flag.NoArea,
+            Archetype = new MagicEffectArchetype(MagicEffectArchetype.TypeEnum.ValueModifier) { ActorValue = value },
+            CastType = CastType.ConstantEffect,
+            TargetType = TargetType.Self,
+        };
+        mod.MagicEffects.Add(effect);
+        var spell = new Spell(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
+        {
+            EditorID = $"TMValueAb{key}",
+            Name = value.ToString(),
+            Type = SpellType.Ability,
+            CastType = CastType.ConstantEffect,
+            TargetType = TargetType.Self,
+            Effects = [new Effect { BaseEffect = effect.ToNullableLink<IMagicEffectGetter>(), Data = new EffectData { Magnitude = magnitude } }],
+        };
+        mod.Spells.Add(spell);
+        return spell;
     }
 
     static IEnumerable<string> KindKeywords(CreatureKind kind) => kind switch

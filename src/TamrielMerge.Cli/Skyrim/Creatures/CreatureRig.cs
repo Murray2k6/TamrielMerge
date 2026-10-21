@@ -72,6 +72,14 @@ public sealed class CreatureRig
     /// the weapon in its hand; none for a creature that fights with its own body.</summary>
     public List<string> WeaponStyles { get; } = [];
 
+    /// <summary>Whether it is a biped (Morrowind's FLAG 0x01): only a biped turns with its turning animations.</summary>
+    public bool Biped { get; set; }
+
+    /// <summary>How its wander package picks idles, one set per distinct set of chances among the creatures drawn with it
+    /// (MwCreatureSource.IdleOdds: [0] no idle, [1..8] Idle2..Idle9 after each roll); none: it never picks one. Its graph
+    /// plays the set the variable iTMIdleSet names (set per actor as its 3D loads: CreatureRecords).</summary>
+    public List<float[]> IdleSets { get; } = [];
+
     /// <summary>What else goes into the body as it is written (a Morrowind creature's particle systems): called with the
     /// body, the data folder, each bone's node block id (by bone index) and each mesh's shape block id (by mesh index).</summary>
     public List<Action<NifFile, string, uint[], uint[]>> BodyExtras { get; } = [];
@@ -98,6 +106,13 @@ public sealed class CreatureRig
     /// <summary>How fast the creature moves (units a second) in its walk and run clips when the source game says (Morrowind's
     /// speed settings and the creature's Speed): their motion, and the movement type's speeds.</summary>
     public Dictionary<string, float> MoveSpeeds { get; } = [];
+
+    /// <summary>Which way a moving clip carries it (+Y forward, -Y back, ∓X left and right); forward when not given.</summary>
+    public Dictionary<string, Vector2> MoveWays { get; } = [];
+
+    /// <summary>The pace (units a second) a moving clip is played by: its graph plays it at the actor's speed over this, at
+    /// most 10 times (Morrowind's: MwCreatureSource.Velocity); a clip without one plays as it is.</summary>
+    public Dictionary<string, float> MovePaces { get; } = [];
 
     /// <summary>Where sounds go: sound\fx\tamrielmerge\creatures\&lt;id&gt;.</summary>
     public static string SoundFolder(string id) => $@"sound\fx\tamrielmerge\creatures\{id}";
@@ -264,6 +279,9 @@ public sealed class CreatureRig
         return Math.Max(c.Frames.Length - 1, 1) / c.Fps;
     }
 
+    /// <summary>A clip it dies with ("death", "death2", "deathknockdown", "swimdeath"...).</summary>
+    public static bool IsDeath(string clip) => clip.StartsWith("death", StringComparison.OrdinalIgnoreCase) || clip.StartsWith("swimdeath", StringComparison.OrdinalIgnoreCase);
+
     public float Duration(string clip) => Math.Max(Clips[clip].Frames.Length - 1, 1) / Clips[clip].Fps;
 
     /// <summary>
@@ -273,7 +291,7 @@ public sealed class CreatureRig
     /// </summary>
     public void EnsureDeath()
     {
-        if (Clips.ContainsKey("death")) return;
+        if (Clips.Keys.Any(IsDeath)) return;
         var start = (Clips.GetValueOrDefault("idle") ?? Clips.Values.First()).Frames[0];
         var world = RestWorld();
         float halfWidth = Meshes.Count > 0 ? Meshes.SelectMany(m => m.V).Max(v => MathF.Abs(v.X)) : world.Max(w => MathF.Abs(w.T.X));

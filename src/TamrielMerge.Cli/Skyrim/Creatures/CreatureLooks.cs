@@ -214,7 +214,7 @@ public static class CreatureLooks
 
         var (biped, styles) = world is not null ? MwCreatureSource.Kind(world, mp) : (false, []);
         var sources = MwCreatureSource.Sources(data, mp, biped);
-        var plan = MwCreatureSource.Plan(sources, styles);
+        var plan = MwCreatureSource.Plan(sources, styles, biped);
         string ownKf = Path.Combine(Path.GetDirectoryName(mp)!, "x" + Path.GetFileNameWithoutExtension(mp) + ".kf");
         int ownSource = sources.FindIndex(s => s.Path.Equals(ownKf, StringComparison.OrdinalIgnoreCase));
         string animDir = Path.Combine(dataDir, CreatureRig.MeshFolder(id), "animations");
