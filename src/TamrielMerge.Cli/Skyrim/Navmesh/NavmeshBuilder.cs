@@ -2077,6 +2077,12 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         // The door model's own height about its origin (its object bounds, by its scale): a floor anywhere along it is the
         // door's floor too (Legge's dark door, 1010 tall about its middle, stands 177 under the tunnel floor it closes).
         var (low, high) = doorSpans.TryGetValue(door.Base.FormKey, out var span) ? (span.Low * (door.Scale ?? 1), span.High * (door.Scale ?? 1)) : (0f, 0f);
+        // Last: the nearest within 384 across and 600 over or under (a door just past 256 from its floor, Anvil's castle
+        // tower door 269 and a Bravil house's 313; a trapdoor in a floor, under the navmesh it is reached from: Oblivion's
+        // Paradise exit 441 under, Morrowind's Mournhold pavilion ladder 182), or straight under it to 2000 (the Imperial
+        // sewers' hearth grate, 1865 over its floor, 2026-10-21).
+        int far = -1, deep = -1;
+        float farD = float.MaxValue, deepD = float.MaxValue;
         for (int i = 0; i < count; i++)
         {
             // Measured to the triangle's nearest point, not its middle: a hall's floor triangles can be large, their
@@ -2084,8 +2090,10 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             var (a, b, c) = corners(i);
             var q = ClosestOnTriangle(p, new Vector3(a.X, a.Y, a.Z), new Vector3(b.X, b.Y, b.Z), new Vector3(c.X, c.Y, c.Z));
             float across = (q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y);
-            if (across > 256f * 256f) continue;
             float up = p.Z - q.Z;
+            if (across <= 384f * 384f && MathF.Abs(up) <= 600 && across + up * up / 4 < farD) { farD = across + up * up / 4; far = i; }
+            if (across <= 64f * 64f && up > 0 && up <= 2000 && up < deepD) { deepD = up; deep = i; }
+            if (across > 256f * 256f) continue;
             if (MathF.Abs(up) <= 150 || (q.Z >= p.Z + low && q.Z <= p.Z + high - 32))
             {
                 float d = across + up * up / 4;
@@ -2093,7 +2101,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             }
             else if (up > 0 && up <= 700 && across < underD) { underD = across; under = i; }
         }
-        return best >= 0 ? best : under;
+        return best >= 0 ? best : under >= 0 ? under : far >= 0 ? far : deep;
     }
 
     static (P3Float A, P3Float B, P3Float C) Corners(List<P3Float> v, (int A, int B, int C) t) => (v[t.A], v[t.B], v[t.C]);

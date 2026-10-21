@@ -8925,6 +8925,7 @@ static class Program
                             if (!doorTris.Contains(po.FormKey))
                                 untriangled.Add($"{bases.GetValueOrDefault(po.Base.FormKey, po.Base.FormKey.ToString())} in {cell.EditorID} at {dp.Position}: "
                                     + (tris.Count == 0 ? "the cell has no navmesh" : $"navmesh {n.Item1:F0} away ({n.Item2:F0} across, {n.Item3:+0;-0} up)")
+                                    + (tris.Count > 0 ? $"; the rule now: {(Skyrim.Navmesh.NavmeshBuilder.DoorTriangleFor(tris.Count, i => (tris[i].Item1, tris[i].Item2, tris[i].Item3), po) is var pick && pick >= 0 ? $"triangle {pick}" : "none")}" : "")
                                     + (opts.ContainsKey("door-detail") ? $"; the cell's {meshes.Count} navmeshes have door triangles for [{string.Join(", ", doorTris)}], door {po.FormKey}, {cell.NavigationMeshes.Count} navmesh records" : ""));
                             if (tris.Count > 0 && n.Item1 > 64) worst.Add((n.Item1, n.Item2, n.Item3, $"door {bases.GetValueOrDefault(po.Base.FormKey, po.Base.FormKey.ToString())} in {cell.EditorID} at {dp.Position}{(doorTris.Contains(po.FormKey) ? "" : ", no door triangle")}"));
                         }

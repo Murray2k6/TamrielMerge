@@ -112,7 +112,14 @@ where the turn puts them. Morrowind's interiors' navmesh input is each face as S
 behind it (AsSlabs), so a face wound inside out has its slab's floor over it as in the game (outdoors that left 74%
 fewer spans marked shut inside something, so the exteriors keep their winding check). On the test interiors: load doors
 with a door triangle 38 of 38 (Morrowind) and 2 of 2 (Oblivion); actors within 64 units of their navmesh 80 of 80 and
-11 of 11. `actor-floor` says, for each actor off its navmesh, what is under it (`--doors` for load doors);
+11 of 11. Over every interior (2026-10-21): Morrowind's 1,229 of 1,230 load doors with a door triangle and 5,315 of
+5,316 actors within 64 of their navmesh; Oblivion's 2,492 of 2,499 and 7,640 of 7,720 (vanilla Skyrim: 99.6% and 93.8%).
+The doors left had their floor past the rule's reach, so the rule now ends with the nearest within 384 across and 600
+over or under (a trapdoor in a floor, under the navmesh it is reached from: Oblivion's Paradise exit, Morrowind's
+Mournhold pavilion ladder) and straight under to 2,000 (the Imperial sewers' hearth grate, 1,865 over its floor): re-run
+on the built plugins it finds a triangle for all six; the last two are in Oblivion's empty TestCastleInterior. Oblivion's
+actors still off: swimmers in water (left where they swim), holding pens and the empty test interiors, prisoners in
+Paradise's cages, Xeddefen's three NPCs 1,316 under everything and Veyond's goblins 120-190 over their floor. `actor-floor` says, for each actor off its navmesh, what is under it (`--doors` for load doors);
 `mw-pathgrid-ground` checks the ground under every Morrowind pathgrid point (43,674: 97.1% on ground to 45 degrees);
 `mw-rot-order --steep` lists interiors with floors tilted past 45. Every place that turns a reference (navmesh, distant LOD,
 the dungeon check, the scene renderer, Daggerfall's props and action objects, Redguard's objects) goes through it.
