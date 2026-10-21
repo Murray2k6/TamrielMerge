@@ -55,7 +55,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
 
     /// <summary>The counts, for a build's log: the retries and the tries that made them whole.</summary>
     public static string RecastSummary =>
-        $"navmeshes: {retriangulated} made again after Recast's first try, {untriangulated} still not whole after every retry, {turnedUpChosen} interiors from faces turned up (more actors on it)" +
+        $"navmeshes: {retriangulated} made again after Recast's first try, {untriangulated} still not whole after every retry, {turnedUpChosen} interiors from faces turned up (more actors on it), {actorsSnapped} actors moved onto their navmesh" +
         (retriangulated > 0 ? " (made whole by " + string.Join(", ", Enumerable.Range(1, Tries.Length - 1).Where(t => tryWins[t] > 0)
             .Select(t => $"{Tries[t].Partition.ToString().ToLowerInvariant()}{(Tries[t].Coarse > 1 ? " coarse" : "")}{(Tries[t].Error < 1 ? $" outline x{Tries[t].Error}" : "")}: {tryWins[t]}")) + ")" : "") +
         Environment.NewLine + "  " + FloorSummary;
@@ -115,6 +115,21 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 int bad = RecastOutput.Bad(warnings) + overlapping;
                 // Only the floor the mesh is kept for: not the margin round an exterior cell (clipped off).
                 var floor = UncoveredFloor(r.CompactHeightfield, r.ContourSet, r.Mesh, r.MeshDetail, (int)MathF.Round(margin / r.CompactHeightfield.cs));
+                // TM_NAV_COLUMN=x,y (dev aid): the compact heightfield's spans at that point after Recast's filters: each
+                // floor's height, the open space over it and its area (0 = not walkable), with its region.
+                if (Environment.GetEnvironmentVariable("TM_NAV_COLUMN")?.Split(',') is [var cxs, var cys] && float.TryParse(cxs, out var colX) && float.TryParse(cys, out var colY))
+                {
+                    var chf = r.CompactHeightfield;
+                    int qx = (int)MathF.Floor((colX - chf.bmin.X) / chf.cs), qz = (int)MathF.Floor((-colY - chf.bmin.Z) / chf.cs);
+                    if (qx >= 0 && qz >= 0 && qx < chf.width && qz < chf.height)
+                    {
+                        var cell = chf.cells[qx + qz * chf.width];
+                        var sb = new StringBuilder($"  column {colX:F0},{colY:F0} (try {t}):");
+                        for (int i = cell.index; i < cell.index + cell.count; i++)
+                            sb.Append($" floor {chf.bmin.Y + chf.spans[i].y * chf.ch:F0} room {chf.spans[i].h * chf.ch:F0} area {chf.areas[i]} region {chf.spans[i].reg};");
+                        Console.WriteLine(sb.ToString());
+                    }
+                }
                 if (Trace)
                 {
                     Console.WriteLine($"  recast try {t} ({partition}, voxels x{coarse}, outline x{outline}) at {Where(r.Mesh)}: {bad} bad ({overlapping} over themselves); {floor}");
@@ -633,12 +648,18 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             if (alt is not null && On(alt) > on) { made = alt; Interlocked.Increment(ref turnedUpChosen); }
         }
         var chosen = made;
-        return new PendingInterior { Owner = this, Cell = cell, Run = () => chosen }.Finish();
+        // Actors off it moved onto it (SnapToMesh: Morrowind's Prelude Shipwreck has a skeleton and a rat 85 under its
+        // deck, and Mortrag Glacier's werewolves stand 90-170 over their floor); those in water stay, as they swim.
+        return new PendingInterior { Owner = this, Cell = cell, Run = () => chosen, SnapActors = true, StaysPut = underwater }.Finish();
     }
 
     /// <summary>Interiors whose navmesh was made from every face turned up (the choice above).</summary>
     public static int TurnedUpChosen => turnedUpChosen;
     static int turnedUpChosen;
+
+    /// <summary>Actors moved onto their interior's navmesh (SnapToMesh), over every builder.</summary>
+    public static int ActorsSnapped => actorsSnapped;
+    static int actorsSnapped;
 
     /// <summary>
     /// An interior navmesh being made: the record is added at <see cref="Finish"/> (or, made in the background, at the
@@ -662,6 +683,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         /// <summary>Actors moved onto the mesh at Finish.</summary>
         public int Snapped { get; private set; }
 
+        /// <summary>Actors left where they are by SnapActors (by position: those in water, who swim).</summary>
+        public Func<P3Float, bool>? StaysPut { get; init; }
+
         public Result Finish()
         {
             if (result is not null) return result;
@@ -672,7 +696,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             navm.Data = g.Data;
             if (Navm is null) Cell.NavigationMeshes.Add(navm);
             Owner.AddInfo(navm, Cell, g.Verts, g.Linked);
-            if (SnapActors) Snapped = SnapToMesh(Cell, g.Verts, g.Data.Triangles);
+            if (SnapActors) { Snapped = SnapToMesh(Cell, g.Verts, g.Data.Triangles, StaysPut); Interlocked.Add(ref actorsSnapped, Snapped); }
             return result = new Result(navm, g.Triangles, g.Verts.Count, g.Linked.Count);
         }
     }
@@ -683,14 +707,14 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// of Daggerfall's dungeon creatures stood off their navmesh, 315 inside objects, 133 in walls and 73 in the air at
     /// their markers; the mesh keeps clear of walls and props, so on it they can move and fight).
     /// </summary>
-    static int SnapToMesh(Cell cell, List<P3Float> verts, IReadOnlyList<INavmeshTriangleGetter> tris)
+    static int SnapToMesh(Cell cell, List<P3Float> verts, IReadOnlyList<INavmeshTriangleGetter> tris, Func<P3Float, bool>? staysPut = null)
     {
         if (tris.Count == 0) return 0;
         static Vector3 V(P3Float p) => new(p.X, p.Y, p.Z);
         int moved = 0;
         foreach (var npc in cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>())
         {
-            if (npc.Placement is not { } pl) continue;
+            if (npc.Placement is not { } pl || staysPut?.Invoke(pl.Position) == true) continue;
             var p = V(pl.Position);
             bool on = false;
             float best = 512f * 512f;
@@ -740,8 +764,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             if (at is not { } to) continue;
             // On its level, its own height, or the mesh's where that is higher: never lower, as the mesh has no detail heights
             // and inside a big polygon lies up to 50 under the floor (2026-10-16: actors set 48 units into a floor). Fallen
-            // or moved to another level, the mesh's.
-            pl.Position = new P3Float(to.X, to.Y, sameLevel ? MathF.Max(p.Z, to.Z - 28) : to.Z + 4);
+            // or moved to another level, the mesh's. High over it (Mortrag Glacier's werewolves, 70-170 over their floor), let
+            // down to 56 over it: still over the floor where the mesh lies 50 under it, and no fall.
+            float z = sameLevel ? MathF.Max(p.Z, to.Z - 28) : to.Z + 4;
+            if (sameLevel && z > to.Z + 64) z = to.Z + 56;
+            pl.Position = new P3Float(to.X, to.Y, z);
             if (MathF.Abs(to.Z - p.Z) > 48 && Environment.GetEnvironmentVariable("TM_SNAP_TRACE") is not null)
                 Console.WriteLine($"  snap: {npc.FormKey} {p.X:F0},{p.Y:F0},{p.Z:F0} -> {to.X:F0},{to.Y:F0},{to.Z:F0}");
             moved++;
@@ -1023,6 +1050,22 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         }
         var geom = new RcSampleInputGeomProvider(verts.ToArray(), faces.ToArray());
         if (Environment.GetEnvironmentVariable("TM_NAV_LAYERS") == "1") Console.WriteLine(TallestStack(polygons));
+        // TM_NAV_COLUMN=x,y (dev aid): the input triangles within 4 units of that point across, with their height there
+        // (or span) and which way they face, as Recast gets them.
+        if (Environment.GetEnvironmentVariable("TM_NAV_COLUMN")?.Split(',') is [var ixs, var iys] && float.TryParse(ixs, out var inX) && float.TryParse(iys, out var inY))
+        {
+            var near = new List<(float Lo, float Hi, float Nz)>();
+            for (int f = 0; f + 2 < faces.Count; f += 3)
+            {
+                Vector3 V(int i) => new(verts[faces[f + i] * 3], -verts[faces[f + i] * 3 + 2], verts[faces[f + i] * 3 + 1]);
+                Vector3 a = V(0), b = V(1), c = V(2);
+                var q = ClosestOnTriangle(new Vector3(inX, inY, (a.Z + b.Z + c.Z) / 3), a, b, c);
+                if ((q.X - inX) * (q.X - inX) + (q.Y - inY) * (q.Y - inY) > 16) continue;
+                var nrm = Vector3.Cross(b - a, c - a);
+                near.Add((MathF.Min(a.Z, MathF.Min(b.Z, c.Z)), MathF.Max(a.Z, MathF.Max(b.Z, c.Z)), nrm.LengthSquared() > 0 ? Vector3.Normalize(nrm).Z : 0));
+            }
+            Console.WriteLine($"  input at {inX:F0},{inY:F0}: {string.Join("; ", near.OrderBy(t => t.Hi).Select(t => $"{t.Lo:F0}..{t.Hi:F0} nz {t.Nz:F2}"))}");
+        }
         var (pmesh, detail) = BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(Config(p, coarse, outline), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()), hazards: hazards)!.Value;
         var (outVerts, tris) = SkyrimTriangles(pmesh, detail);
         if (Environment.GetEnvironmentVariable("TM_DEBUG_NAV") == "1")
@@ -1915,6 +1958,15 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var kept = new HashSet<int>(Enumerable.Range(0, sizes.Count).Where(c => sizes[c] >= minRegion || areas[c] >= minArea));
         foreach (var p in keep.Where(p => p != default))
             kept.Add(comp[Enumerable.Range(0, tris.Count).OrderBy(i => Dist2(Centroid(verts, tris[i]), p)).First()]);
+        if (Trace)
+        {
+            // Each piece: its triangles, area, middle, and whether it is kept.
+            for (int c = 0; c < sizes.Count; c++)
+            {
+                var mine = Enumerable.Range(0, tris.Count).Where(i => comp[i] == c).Select(i => Centroid(verts, tris[i])).ToList();
+                Console.WriteLine($"  piece {c}: {sizes[c]} triangles, {areas[c]:F0} sq units, around ({mine.Average(q => q.X):F0},{mine.Average(q => q.Y):F0},{mine.Average(q => q.Z):F0}){(kept.Contains(c) ? ", kept" : ", left out")}");
+            }
+        }
 
         var remap = new Dictionary<int, int>();
         var newVerts = new List<P3Float>();

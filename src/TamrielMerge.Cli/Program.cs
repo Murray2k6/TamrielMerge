@@ -3535,6 +3535,7 @@ static class Program
                 Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} lead outside or to unbuilt cells; {builder.DoorTrianglesAdded} given their door triangle afterwards");
                 Console.WriteLine($"  effects: {builder.EffectCount} vanilla effects standing in for particle systems");
                 Console.WriteLine($"  locks: {builder.LockCount} locked, {builder.TrapCount} trapped (Morrowind security)");
+                Console.WriteLine($"  tipped back (too steep to walk): {builder.TippedInteriors.Count} interiors{(builder.TippedInteriors.Count > 0 ? ": " + string.Join(", ", builder.TippedInteriors) : "")}");
                 if (!opts.ContainsKey("no-dialogue"))
                 {
                     builder.BuildDialogue();
@@ -6212,6 +6213,187 @@ static class Program
                     Console.WriteLine($"  region named by no exterior: {r.Id} ({r.Str("FNAM")}), WEAT {string.Join(",", r.Get("WEAT")?.Data ?? [])}");
                 return 0;
             }
+            case "mw-pathgrid-ground":
+            {
+                // Whether Skyrim's player and NPCs can stand where Morrowind's AI walks: each interior pathgrid point
+                // (PGRD) and the ground under it in the converted collision (the converter's, placed as Skyrim places
+                // it): the first face up within 64 under it (or 32 over), and its slope. Too steep past 45 (Skyrim's
+                // player walks to 45, 2026-10-09; the navmesh to 50), none within reach, or fine; worst interiors
+                // listed (--worst N, default 25).
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                var data = Morrowind.Tes3Data.Open(dataFiles);
+                string scratch = Path.Combine(Path.GetTempPath(), $"tm_mwground_{Environment.ProcessId}");
+                var converter = new Morrowind.MwMeshConverter(data, new Morrowind.MwTextures(data, scratch));
+                var collision = new Dictionary<string, List<System.Numerics.Vector3[]>?>(StringComparer.OrdinalIgnoreCase);
+                List<System.Numerics.Vector3[]>? CollisionOf(string model)
+                {
+                    if (collision.TryGetValue(model, out var c)) return c;
+                    try { c = converter.Convert(model, scratch).Solid; } catch (Exception) { c = null; }
+                    return collision[model] = c;
+                }
+                var grids = new Dictionary<string, List<System.Numerics.Vector3>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var plugin in world.Plugins)
+                    foreach (var rec in plugin.Records.Where(r => r.Type == "PGRD"))
+                    {
+                        if (rec.Get("PGRP") is not { } pgrp || rec.Str("NAME") is not { } name || !world.Interiors.ContainsKey(name)) continue;
+                        var list = new List<System.Numerics.Vector3>();
+                        for (int k = 0; k + 16 <= pgrp.Data.Length; k += 16)
+                            list.Add(new(BitConverter.ToInt32(pgrp.Data, k), BitConverter.ToInt32(pgrp.Data, k + 4), BitConverter.ToInt32(pgrp.Data, k + 8)));
+                        grids[name] = list;
+                    }
+                static float? ZAt(System.Numerics.Vector3[] t, float x, float y)
+                {
+                    float d = (t[1].Y - t[2].Y) * (t[0].X - t[2].X) + (t[2].X - t[1].X) * (t[0].Y - t[2].Y);
+                    if (MathF.Abs(d) < 1e-6f) return null;
+                    float a = ((t[1].Y - t[2].Y) * (x - t[2].X) + (t[2].X - t[1].X) * (y - t[2].Y)) / d;
+                    float b = ((t[2].Y - t[0].Y) * (x - t[2].X) + (t[0].X - t[2].X) * (y - t[2].Y)) / d;
+                    return a < 0 || b < 0 || a + b > 1 ? null : a * t[0].Z + b * t[1].Z + (1 - a - b) * t[2].Z;
+                }
+                long total = 0, fine = 0, edge = 0, steep = 0, none = 0;
+                var perCell = new List<(string Cell, int Points, int Steep, int None, string Worst)>();
+                foreach (var (name, pts) in grids)
+                {
+                    if (opts.TryGetValue("cell", out var onlyName) && !string.Equals(onlyName, name, StringComparison.OrdinalIgnoreCase)) continue;
+                    var cell = world.Interiors[name];
+                    var world3 = new List<System.Numerics.Vector3[]>();
+                    var owner = new List<string>();
+                    foreach (var r in cell.Refs)
+                    {
+                        if (world.Model(r.BaseId) is not { Length: > 0 } model || CollisionOf(model) is not { } col) continue;
+                        var m = Skyrim.SkyrimRotation.Matrix(r.Rotation);
+                        foreach (var t in col) { world3.Add(t.Select(v => System.Numerics.Vector3.Transform(v * r.Scale, m) + r.Position).ToArray()); owner.Add($"{r.BaseId} ({model})"); }
+                    }
+                    int cs = 0, cn = 0; string worst = "";
+                    float worstSlope = 0;
+                    foreach (var p in pts)
+                    {
+                        total++;
+                        (float Z, float Slope)? ground = null;
+                        foreach (var t in world3)
+                        {
+                            var n = System.Numerics.Vector3.Cross(t[1] - t[0], t[2] - t[0]);
+                            float len = n.Length();
+                            if (len < 1e-6f || n.Z <= 0) continue;
+                            if (ZAt(t, p.X, p.Y) is not { } z || z > p.Z + 32 || z < p.Z - 64) continue;
+                            if (ground is null || z > ground.Value.Z) ground = (z, MathF.Acos(Math.Clamp(n.Z / len, -1, 1)) * 180 / MathF.PI);
+                        }
+                        if (ground is null)
+                        {
+                            none++; cn++;
+                            // --cell <name>: each point with none, and the nearest face under and over it at any distance.
+                            if (opts.TryGetValue("cell", out var detailCell) && string.Equals(detailCell, name, StringComparison.OrdinalIgnoreCase))
+                            {
+                                (float Z, float Nz, string Of)? below = null, above = null;
+                                for (int ti = 0; ti < world3.Count; ti++)
+                                {
+                                    var t = world3[ti];
+                                    if (ZAt(t, p.X, p.Y) is not { } z) continue;
+                                    float nz = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(t[1] - t[0], t[2] - t[0])).Z;
+                                    if (z <= p.Z && (below is null || z > below.Value.Z)) below = (z, nz, owner[ti]);
+                                    if (z > p.Z && (above is null || z < above.Value.Z)) above = (z, nz, owner[ti]);
+                                }
+                                Console.WriteLine($"  none: ({p.X:F0},{p.Y:F0},{p.Z:F0}): under {(below is { } bl ? $"{p.Z - bl.Z:F0} down, normal z {bl.Nz:F2}, of {bl.Of}" : "nothing")}; over {(above is { } ab ? $"{ab.Z - p.Z:F0} up, normal z {ab.Nz:F2}, of {ab.Of}" : "nothing")}");
+                            }
+                            continue;
+                        }
+                        if (ground.Value.Slope <= 45) fine++;
+                        else if (ground.Value.Slope <= 50) edge++;
+                        else { steep++; cs++; if (ground.Value.Slope > worstSlope) { worstSlope = ground.Value.Slope; worst = $"({p.X:F0},{p.Y:F0},{p.Z:F0}) {ground.Value.Slope:F0} deg"; } }
+                    }
+                    if (cs + cn > 0) perCell.Add((name, pts.Count, cs, cn, worst));
+                }
+                try { Directory.Delete(scratch, true); } catch (IOException) { }
+                Console.WriteLine($"mw-pathgrid-ground: {grids.Count} interiors, {total:N0} pathgrid points: ground to 45 deg {fine:N0}, 45-50 {edge:N0}, steeper {steep:N0}, none within reach {none:N0}");
+                foreach (var c in perCell.OrderByDescending(c => c.Steep + c.None).Take(int.Parse(opts.GetValueOrDefault("worst", "25"))))
+                    Console.WriteLine($"  {c.Cell}: {c.Points} points, {c.Steep} on ground past 50 deg{(c.Worst.Length > 0 ? $" (worst {c.Worst})" : "")}, {c.None} with none under them");
+                return 0;
+            }
+            case "mw-rot-order":
+            {
+                // Morrowind's own rotation order, as ob-rot-order finds Oblivion's: its tilted interior statics (X or Y over
+                // --min degrees, default 3) placed by each order, and how near their collision (as the converter reads it)
+                // the cell's pathgrid points (PGRD) around them sit. Morrowind's angles are carried into Skyrim as they are.
+                float minTilt = float.Parse(opts.GetValueOrDefault("min", "3")) * MathF.PI / 180;
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                var data = Morrowind.Tes3Data.Open(dataFiles);
+                string scratch = Path.Combine(Path.GetTempPath(), $"tm_mwrot_{Environment.ProcessId}");
+                var converter = new Morrowind.MwMeshConverter(data, new Morrowind.MwTextures(data, scratch));
+                var collision = new Dictionary<string, List<System.Numerics.Vector3[]>?>(StringComparer.OrdinalIgnoreCase);
+                List<System.Numerics.Vector3[]>? CollisionOf(string model)
+                {
+                    if (collision.TryGetValue(model, out var c)) return c;
+                    try { c = converter.Convert(model, scratch).Solid; } catch (Exception) { c = null; }
+                    if (c is { Count: 0 or > 4000 }) c = null;
+                    return collision[model] = c;
+                }
+                // The interiors' pathgrid points (interior points are in the cell's own space).
+                var points = new Dictionary<string, List<System.Numerics.Vector3>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var plugin in world.Plugins)
+                    foreach (var rec in plugin.Records.Where(r => r.Type == "PGRD"))
+                    {
+                        if (rec.Get("PGRP") is not { } pgrp || rec.Str("NAME") is not { } name || !world.Interiors.ContainsKey(name)) continue;
+                        var list = new List<System.Numerics.Vector3>();
+                        for (int k = 0; k + 16 <= pgrp.Data.Length; k += 16)
+                            list.Add(new(BitConverter.ToInt32(pgrp.Data, k), BitConverter.ToInt32(pgrp.Data, k + 4), BitConverter.ToInt32(pgrp.Data, k + 8)));
+                        points[name] = list;   // a later plugin's grid replaces an earlier one's
+                    }
+                // --steep: the interiors whose big pieces (over 50,000 sq units of collision) stand so tilted that their
+                // floors (faces up in the model) slope more than 45 degrees, steeper than Skyrim's player walks.
+                if (opts.ContainsKey("steep"))
+                {
+                    int steepCells = 0;
+                    foreach (var cell in world.Interiors.Values.OrderBy(c => c.Name))
+                    {
+                        var steep = new List<string>();
+                        foreach (var r in cell.Refs)
+                        {
+                            float tilt = MathF.Acos(Math.Clamp(MathF.Cos(r.Rotation.X) * MathF.Cos(r.Rotation.Y), -1, 1)) * 180 / MathF.PI;
+                            if (tilt <= 45 || world.Model(r.BaseId) is not { Length: > 0 } model || CollisionOf(model) is not { } col) continue;
+                            float floorArea = col.Sum(t => { var n = System.Numerics.Vector3.Cross(t[1] - t[0], t[2] - t[0]); float a = n.Length() / 2; return a > 0 && n.Z / (2 * a) > 0.9f ? a : 0; }) * r.Scale * r.Scale;
+                            if (floorArea > 50000) steep.Add($"{r.BaseId} (floor tilted {tilt:F0} deg, {floorArea:F0} sq units)");
+                        }
+                        if (steep.Count == 0) continue;
+                        steepCells++;
+                        Console.WriteLine($"  {cell.Name}: {string.Join(", ", steep)}; pathgrid points {points.GetValueOrDefault(cell.Name)?.Count ?? 0}");
+                    }
+                    Console.WriteLine($"mw-rot-order --steep: {steepCells} interiors with a floor tilted past 45 degrees");
+                    return 0;
+                }                // --cell <name>: that interior's pathgrid points (where Morrowind's own AI walks there), and stop.
+                if (opts.TryGetValue("cell", out var gridCell))
+                {
+                    var gp = points.GetValueOrDefault(gridCell) ?? [];
+                    foreach (var plugin in world.Plugins)
+                    {
+                        int cells = plugin.Records.Count(r => r.Type == "CELL" && string.Equals(r.Str("NAME"), gridCell, StringComparison.OrdinalIgnoreCase));
+                        int grids = plugin.Records.Count(r => r.Type == "PGRD" && string.Equals(r.Str("NAME"), gridCell, StringComparison.OrdinalIgnoreCase));
+                        if (cells + grids > 0) Console.WriteLine($"  {plugin.FileName}: {cells} CELL, {grids} PGRD");
+                    }
+                    if (world.Interiors.TryGetValue(gridCell, out var gc)) foreach (var r in gc.Refs.Where(r => world.Model(r.BaseId)?.Contains(opts.GetValueOrDefault("part", "shipwreck"), StringComparison.OrdinalIgnoreCase) == true)) Console.WriteLine($"  {r.BaseId} at {r.Position}, turned {r.Rotation * 180 / MathF.PI}, scale {r.Scale}");
+                    Console.WriteLine($"{gridCell}: {gp.Count} pathgrid points{(gp.Count > 0 ? ": " + string.Join(" ", gp.Select(q => $"({q.X:F0},{q.Y:F0},{q.Z:F0})")) : "")}");
+                    return 0;
+                }
+                var refs = new List<Skyrim.RotationOrderCheck.Ref>();
+                foreach (var cell in world.Interiors.Values)
+                {
+                    if (!points.TryGetValue(cell.Name, out var pts) || pts.Count == 0) continue;
+                    // --only <cell name>: that interior alone.
+                    if (opts.TryGetValue("only", out var onlyCell) && !string.Equals(cell.Name, onlyCell, StringComparison.OrdinalIgnoreCase)) continue;
+                    foreach (var r in cell.Refs)
+                    {
+                        if (MathF.Abs(r.Rotation.X) < minTilt && MathF.Abs(r.Rotation.Y) < minTilt) continue;
+                        if (world.Model(r.BaseId) is not { Length: > 0 } model || CollisionOf(model) is not { } col) continue;
+                        float radius = col.SelectMany(t => t).Max(v => v.Length()) * r.Scale + 16;
+                        var near = pts.Where(v => System.Numerics.Vector3.DistanceSquared(v, r.Position) < radius * radius).ToList();
+                        if (near.Count > 0) refs.Add(new(col, r.Position, r.Rotation, r.Scale, near));
+                    }
+                }
+                try { Directory.Delete(scratch, true); } catch (IOException) { }
+                Skyrim.RotationOrderCheck.Report("mw-rot-order", refs, float.Parse(opts.GetValueOrDefault("on", "8")), float.Parse(opts.GetValueOrDefault("off", "24")),
+                    opts.TryGetValue("pair", out var pairText) ? pairText.Split(',').Select(int.Parse).ToArray() : null);
+                return 0;
+            }
             case "mw-lava-paths":
             {
                 // Dev aid: whether Morrowind's own AI goes onto what hurts to stand on: its pathgrids' points (PGRD; outdoors
@@ -8318,6 +8500,189 @@ static class Program
                 Skyrim.RotationOrderCheck.Report("rot-order-vanilla", refs, 4, 16, opts.TryGetValue("pair", out var pairText) ? pairText.Split(',').Select(int.Parse).ToArray() : null);
                 return 0;
             }
+            case "actor-floor":
+            {
+                // Why a built plugin's interior actors (and, with --doors, its load doors) are off their navmesh (--plugin;
+                // --cell EditorID or all; --over N, default 64: only those further than that from it). For each: the
+                // nearest navmesh (across, up), what its placed objects' collision (CollisionReader) gives under it (the
+                // first upward face straight down, how far, of what) and the room over that floor, and whether any of the
+                // cell's navmesh lies at that floor's height within 128 across.
+                string path = opts["plugin"];
+                if (!File.Exists(path)) path = Path.Combine(skyrimData, path);
+                using var m = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+                var finder = new Skyrim.DungeonCheck.FileFinder(skyrimData, Path.GetDirectoryName(Path.GetFullPath(path))!);
+                float over = float.Parse(opts.GetValueOrDefault("over", "64"));
+                var names = new Dictionary<FormKey, string>();
+                var models = new Dictionary<FormKey, string>();
+                foreach (var rec in m.EnumerateMajorRecords())
+                {
+                    names[rec.FormKey] = rec.EditorID ?? rec.FormKey.ToString();
+                    if (rec is IModeledGetter { Model: { } mo } && rec is not INpcGetter) models[rec.FormKey] = mo.File.DataRelativePath.Path;
+                }
+                var collision = new Dictionary<string, List<System.Numerics.Vector3[]>>(StringComparer.OrdinalIgnoreCase);
+                List<System.Numerics.Vector3[]> CollisionOf(string model)
+                {
+                    if (collision.TryGetValue(model, out var c)) return c;
+                    var bytes = finder.Find(model);
+                    try { c = bytes is null ? [] : Skyrim.Meshes.CollisionReader.Read(bytes).Triangles.Where(t => t.Layer != 15 && t.Layer != 12).Select(t => t.Tri).ToList(); }
+                    catch (ArgumentOutOfRangeException) { c = []; }
+                    return collision[model] = c;
+                }
+                // Where a vertical line through (x, y) meets a triangle, or null.
+                static float? ZAt(System.Numerics.Vector3[] t, float x, float y)
+                {
+                    float d = (t[1].Y - t[2].Y) * (t[0].X - t[2].X) + (t[2].X - t[1].X) * (t[0].Y - t[2].Y);
+                    if (MathF.Abs(d) < 1e-6f) return null;
+                    float a = ((t[1].Y - t[2].Y) * (x - t[2].X) + (t[2].X - t[1].X) * (y - t[2].Y)) / d;
+                    float b = ((t[2].Y - t[0].Y) * (x - t[2].X) + (t[0].X - t[2].X) * (y - t[2].Y)) / d;
+                    return a < 0 || b < 0 || a + b > 1 ? null : a * t[0].Z + b * t[1].Z + (1 - a - b) * t[2].Z;
+                }
+                int checkedCount = 0, off = 0;
+                var reasons = new Dictionary<string, int>();
+                foreach (var cell in m.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                {
+                    if (opts.TryGetValue("cell", out var only) && !string.Equals(cell.EditorID, only, StringComparison.OrdinalIgnoreCase)) continue;
+                    var navTris = cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>()
+                        .SelectMany(d => d.Triangles.Select(t => new[] { d.Vertices[t.Vertices.X], d.Vertices[t.Vertices.Y], d.Vertices[t.Vertices.Z] }.Select(v => new System.Numerics.Vector3(v.X, v.Y, v.Z)).ToArray())).ToList();
+                    var who = new List<(string What, Noggog.P3Float At)>();
+                    foreach (var r in cell.Persistent.Concat(cell.Temporary))
+                    {
+                        if (r is IPlacedNpcGetter pn && pn.Placement is { } ap) who.Add(($"actor {names.GetValueOrDefault(pn.Base.FormKey, pn.Base.FormKey.ToString())}", ap.Position));
+                        else if (opts.ContainsKey("doors") && r is IPlacedObjectGetter { TeleportDestination: not null, Placement: { } dp } po) who.Add(($"door {names.GetValueOrDefault(po.Base.FormKey, po.Base.FormKey.ToString())}", dp.Position));
+                    }
+                    if (who.Count == 0) continue;
+                    List<(System.Numerics.Vector3[] Tri, string Of)>? world = null;
+                    foreach (var (what, at) in who)
+                    {
+                        checkedCount++;
+                        var p = new System.Numerics.Vector3(at.X, at.Y, at.Z);
+                        (float D, System.Numerics.Vector3 Q) nearest = (float.MaxValue, default);
+                        foreach (var t in navTris)
+                        {
+                            var q = Skyrim.Navmesh.NavmeshBuilder.ClosestOnTriangle(p, t[0], t[1], t[2]);
+                            float d = System.Numerics.Vector3.Distance(p, q);
+                            if (d < nearest.D) nearest = (d, q);
+                        }
+                        if (nearest.D <= over) continue;
+                        off++;
+                        // The cell's collision in world space (once a cell has someone off its navmesh).
+                        world ??= cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>()
+                            .Where(o => o.Placement is not null && models.ContainsKey(o.Base.FormKey))
+                            .SelectMany(o =>
+                            {
+                                var rot = Skyrim.SkyrimRotation.Matrix(o.Placement!.Rotation);
+                                var pos = new System.Numerics.Vector3(o.Placement.Position.X, o.Placement.Position.Y, o.Placement.Position.Z);
+                                float sc = o.Scale ?? 1;
+                                string of = names.GetValueOrDefault(o.Base.FormKey, o.Base.FormKey.ToString());
+                                return CollisionOf(models[o.Base.FormKey]).Select(t => (t.Select(v => System.Numerics.Vector3.Transform(v * sc, rot) + pos).ToArray(), of));
+                            }).ToList();
+                        // Straight down from 32 over its feet: the first upward face; straight up from that floor: the first face.
+                        (float Z, string Of)? floor = null;
+                        (float Z, string Of, float Nz)? anyBelow = null;
+                        foreach (var (t, of) in world)
+                        {
+                            if (ZAt(t, p.X, p.Y) is not { } z || z > p.Z + 32) continue;
+                            float nz = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(t[1] - t[0], t[2] - t[0])).Z;
+                            if (anyBelow is null || z > anyBelow.Value.Z) anyBelow = (z, of, nz);
+                            if (nz > 0 && (floor is null || z > floor.Value.Z)) floor = (z, of);
+                        }
+                        float? room = null;
+                        if (floor is { } f)
+                            foreach (var (t, _) in world)
+                                if (ZAt(t, p.X, p.Y) is { } z && z > f.Z + 8 && (room is null || z - f.Z < room)) room = z - f.Z;
+                        bool covered = floor is { } ff && navTris.Any(t =>
+                        {
+                            var q = Skyrim.Navmesh.NavmeshBuilder.ClosestOnTriangle(new(p.X, p.Y, ff.Z), t[0], t[1], t[2]);
+                            return MathF.Abs(q.Z - ff.Z) < 24 && (q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y) < 128 * 128;
+                        });
+                        string reason = navTris.Count == 0 ? "cell has no navmesh"
+                            : floor is null ? "nothing under it"
+                            : p.Z - floor.Value.Z > 64 ? "high over its floor"
+                            : room is < 128 ? "floor under 128 of room"
+                            : covered ? "navmesh near on its floor"
+                            : "its floor has no navmesh";
+                        reasons[reason] = reasons.GetValueOrDefault(reason) + 1;
+                        Console.WriteLine($"{what} in {cell.EditorID} at {at}: navmesh {nearest.D:F0} away ({MathF.Sqrt((nearest.Q.X - p.X) * (nearest.Q.X - p.X) + (nearest.Q.Y - p.Y) * (nearest.Q.Y - p.Y)):F0} across, {p.Z - nearest.Q.Z:+0;-0} up); "
+                            + (floor is { } fl ? $"floor {fl.Of} at {fl.Z:F0} ({p.Z - fl.Z:F0} under), room over it {(room is { } rm ? rm.ToString("F0") : "open")}" : "no floor under it")
+                            + (anyBelow is { } ab && (floor is null || ab.Z > floor.Value.Z + 1) ? $"; first face under it {ab.Of} at {ab.Z:F0}, facing {(ab.Nz < 0 ? "down" : "up")} (normal z {ab.Nz:F2})" : "")
+                            + $" -> {reason}");
+                    }
+                }
+                Console.WriteLine($"actor-floor: {checkedCount} checked, {off} more than {over} off their navmesh: {string.Join(", ", reasons.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}"))}");
+                return 0;
+            }
+            case "model-profile":
+            {
+                // A model's collision (CollisionReader) round a circle (--model, --centre x,y, --radius r, --steps n, default
+                // 36) or along a line (--from x,y --to x,y): at each point, every face straight over or under it, ^ facing up
+                // and v down. To see what a stair climbs as.
+                // --plugin P --cell EditorID instead of --model: the whole built cell (every placed object's collision, as
+                // placed), with the navmesh's heights at each point too.
+                List<System.Numerics.Vector3[]> tris;
+                var navAt = new List<System.Numerics.Vector3[]>();
+                if (opts.TryGetValue("plugin", out var profilePlugin))
+                {
+                    using var pm = SkyrimMod.CreateFromBinaryOverlay(profilePlugin, SkyrimRelease.SkyrimSE);
+                    var finder = new Skyrim.DungeonCheck.FileFinder(skyrimData, Path.GetDirectoryName(Path.GetFullPath(profilePlugin))!);
+                    var models = new Dictionary<FormKey, string>();
+                    foreach (var rec in pm.EnumerateMajorRecords())
+                        if (rec is IModeledGetter { Model: { } mo } && rec is not INpcGetter) models[rec.FormKey] = mo.File.DataRelativePath.Path;
+                    var pcell = pm.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).First(x => string.Equals(x.EditorID, opts["cell"], StringComparison.OrdinalIgnoreCase));
+                    var cache = new Dictionary<string, List<System.Numerics.Vector3[]>>(StringComparer.OrdinalIgnoreCase);
+                    tris = [];
+                    foreach (var o in pcell.Persistent.Concat(pcell.Temporary).OfType<IPlacedObjectGetter>())
+                    {
+                        if (o.Placement is not { } pl || !models.TryGetValue(o.Base.FormKey, out var model)) continue;
+                        if (!cache.TryGetValue(model, out var col)) cache[model] = col = finder.Find(model) is { } mb ? Skyrim.Meshes.CollisionReader.Read(mb).Triangles.Select(t => t.Tri).ToList() : [];
+                        var rot = Skyrim.SkyrimRotation.Matrix(pl.Rotation);
+                        var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+                        foreach (var t in col) tris.Add(t.Select(v => System.Numerics.Vector3.Transform(v * (o.Scale ?? 1), rot) + pos).ToArray());
+                    }
+                    foreach (var nav in pcell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>())
+                        foreach (var t in nav.Triangles)
+                            navAt.Add(new[] { nav.Vertices[t.Vertices.X], nav.Vertices[t.Vertices.Y], nav.Vertices[t.Vertices.Z] }.Select(v => new System.Numerics.Vector3(v.X, v.Y, v.Z)).ToArray());
+                }
+                else tris = Skyrim.Meshes.CollisionReader.Read(File.ReadAllBytes(opts["model"])).Triangles.Select(t => t.Tri).ToList();
+                int steps = int.Parse(opts.GetValueOrDefault("steps", "36"));
+                var samples = new List<(string Label, float X, float Y)>();
+                if (opts.TryGetValue("centre", out var centreText))
+                {
+                    var cc = centreText.Split(',').Select(float.Parse).ToArray();
+                    float radius = float.Parse(opts.GetValueOrDefault("radius", "64"));
+                    for (int k = 0; k < steps; k++)
+                    {
+                        float a = k * MathF.Tau / steps;
+                        samples.Add(($"{k * 360f / steps,5:F0} deg", cc[0] + radius * MathF.Cos(a), cc[1] + radius * MathF.Sin(a)));
+                    }
+                }
+                else
+                {
+                    var f = opts["from"].Split(',').Select(float.Parse).ToArray(); var t = opts["to"].Split(',').Select(float.Parse).ToArray();
+                    for (int k = 0; k <= steps; k++) samples.Add(($"{k,3}", f[0] + (t[0] - f[0]) * k / steps, f[1] + (t[1] - f[1]) * k / steps));
+                }
+                foreach (var (label, x, y) in samples)
+                {
+                    var hits = new List<(float Z, bool Up)>();
+                    foreach (var t in tris)
+                    {
+                        float d = (t[1].Y - t[2].Y) * (t[0].X - t[2].X) + (t[2].X - t[1].X) * (t[0].Y - t[2].Y);
+                        if (MathF.Abs(d) < 1e-6f) continue;
+                        float a = ((t[1].Y - t[2].Y) * (x - t[2].X) + (t[2].X - t[1].X) * (y - t[2].Y)) / d, b = ((t[2].Y - t[0].Y) * (x - t[2].X) + (t[0].X - t[2].X) * (y - t[2].Y)) / d;
+                        if (a < 0 || b < 0 || a + b > 1) continue;
+                        hits.Add((a * t[0].Z + b * t[1].Z + (1 - a - b) * t[2].Z, System.Numerics.Vector3.Cross(t[1] - t[0], t[2] - t[0]).Z > 0));
+                    }
+                    var navHere = new List<float>();
+                    foreach (var t in navAt)
+                    {
+                        float d = (t[1].Y - t[2].Y) * (t[0].X - t[2].X) + (t[2].X - t[1].X) * (t[0].Y - t[2].Y);
+                        if (MathF.Abs(d) < 1e-6f) continue;
+                        float a = ((t[1].Y - t[2].Y) * (x - t[2].X) + (t[2].X - t[1].X) * (y - t[2].Y)) / d, b = ((t[2].Y - t[0].Y) * (x - t[2].X) + (t[0].X - t[2].X) * (y - t[2].Y)) / d;
+                        if (a >= 0 && b >= 0 && a + b <= 1) navHere.Add(a * t[0].Z + b * t[1].Z + (1 - a - b) * t[2].Z);
+                    }
+                    Console.WriteLine($"  {label} ({x:F0},{y:F0}): {string.Join(" ", hits.OrderBy(h => h.Z).Select(h => $"{h.Z:F0}{(h.Up ? "^" : "v")}"))}{(navAt.Count > 0 ? $"  | navmesh {string.Join(" ", navHere.Order().Select(z => z.ToString("F0")))}" : "")}");
+                }
+                return 0;
+            }
             case "navmesh-headroom":
             {
                 // How much room above its navmesh a plugin's interiors leave (--plugin, a built plugin or a vanilla master
@@ -8444,12 +8809,41 @@ static class Program
                         heights.Add(q.Z);
                         upArea += area;
                     }
+                    if (opts.ContainsKey("visible") && Skyrim.Distant.DistantModel.Load(bytes) is { } dmv)
+                    {
+                        // --visible: the drawn model's faces straight over or under the point, each with which way it faces.
+                        var faces = new List<string>();
+                        foreach (var part in dmv.Parts)
+                            for (int k = 0; k + 2 < part.T.Length; k += 3)
+                            {
+                                var w = new[] { part.P[part.T[k]], part.P[part.T[k + 1]], part.P[part.T[k + 2]] }.Select(v => System.Numerics.Vector3.Transform(v * scale, rot) + pos).ToArray();
+                                float d = (w[1].Y - w[2].Y) * (w[0].X - w[2].X) + (w[2].X - w[1].X) * (w[0].Y - w[2].Y);
+                                if (MathF.Abs(d) < 1e-6f) continue;
+                                float a = ((w[1].Y - w[2].Y) * (p.X - w[2].X) + (w[2].X - w[1].X) * (p.Y - w[2].Y)) / d, bb = ((w[2].Y - w[0].Y) * (p.X - w[2].X) + (w[0].X - w[2].X) * (p.Y - w[2].Y)) / d;
+                                if (a < 0 || bb < 0 || a + bb > 1) continue;
+                                float nz = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0])).Z;
+                                faces.Add($"{a * w[0].Z + bb * w[1].Z + (1 - a - bb) * w[2].Z:F0}{(nz >= 0 ? "^" : "v")}");
+                            }
+                        if (faces.Count > 0) Console.WriteLine($"    {mm.Name} drawn faces straight over/under the point (^ up, v down): {string.Join(" ", faces.OrderBy(f => float.Parse(f.TrimEnd('^', 'v'))))}");
+                        var cfaces = new List<string>();
+                        foreach (var (tri, _) in Skyrim.Meshes.CollisionReader.Read(bytes).Triangles)
+                        {
+                            var w = tri.Select(v => System.Numerics.Vector3.Transform(v * scale, rot) + pos).ToArray();
+                            float d = (w[1].Y - w[2].Y) * (w[0].X - w[2].X) + (w[2].X - w[1].X) * (w[0].Y - w[2].Y);
+                            if (MathF.Abs(d) < 1e-6f) continue;
+                            float a = ((w[1].Y - w[2].Y) * (p.X - w[2].X) + (w[2].X - w[1].X) * (p.Y - w[2].Y)) / d, bb = ((w[2].Y - w[0].Y) * (p.X - w[2].X) + (w[0].X - w[2].X) * (p.Y - w[2].Y)) / d;
+                            if (a < 0 || bb < 0 || a + bb > 1) continue;
+                            float nz = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0])).Z;
+                            cfaces.Add($"{a * w[0].Z + bb * w[1].Z + (1 - a - bb) * w[2].Z:F0}{(nz >= 0 ? "^" : "v")}");
+                        }
+                        if (cfaces.Count > 0) Console.WriteLine($"    {mm.Name} collision faces straight over/under the point: {string.Join(" ", cfaces.OrderBy(f => float.Parse(f.TrimEnd('^', 'v'))))}");
+                    }
                     if (heights.Count == 0) continue;
                     if (opts.TryGetValue("list", out var listName) && mm.Name.Contains(listName, StringComparison.OrdinalIgnoreCase))
                     {
                         // --list <name part>: that object's upward surfaces here, by height: how far across from the point
                         // the nearest of each lies, and their area.
-                        var surfaces = new SortedDictionary<int, (float Across, float Area)>();
+                        var surfaces = new SortedDictionary<int, (float Across, float Area, float SlopeArea, System.Numerics.Vector3 At)>();
                         foreach (var (tri, _) in Skyrim.Meshes.CollisionReader.Read(bytes).Triangles)
                         {
                             var w = tri.Select(v => System.Numerics.Vector3.Transform(v * scale, rot) + pos).ToArray();
@@ -8460,13 +8854,14 @@ static class Program
                             if (!Near(q)) continue;
                             int h = (int)MathF.Round(q.Z / 8) * 8;
                             float across = MathF.Sqrt((q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y));
-                            var cur = surfaces.GetValueOrDefault(h, (float.MaxValue, 0));
-                            surfaces[h] = (MathF.Min(cur.Across, across), cur.Area + area);
+                            var cur = surfaces.GetValueOrDefault(h, (float.MaxValue, 0, 0, default));
+                            float slope = MathF.Acos(Math.Clamp(n.Z / (2 * area), -1, 1)) * 180 / MathF.PI;
+                            surfaces[h] = (MathF.Min(cur.Across, across), cur.Area + area, cur.SlopeArea + slope * area, across < cur.Across ? q : cur.At);
                         }
-                        foreach (var (h, (across, area)) in surfaces) Console.WriteLine($"    {mm.Name} surface at {h}: {across:F0} across at nearest, {area:F0} sq units");
+                        foreach (var (h, (across, area, slopeArea, nearAt)) in surfaces) Console.WriteLine($"    {mm.Name} surface at {h}: {across:F0} across at nearest ({nearAt.X:F0},{nearAt.Y:F0}), {area:F0} sq units, slope {slopeArea / area:F0} deg");
                     }
                     var hs = heights.Select(h => (int)MathF.Round(h / 8) * 8).Distinct().Order().ToList();
-                    Console.WriteLine($"  {mm.Name} ({mm.Model}) at {pl.Position}: {heights.Count} upward triangles ({upArea:F0} sq units), heights {string.Join(" ", hs.Take(16))}{(hs.Count > 16 ? " ..." : "")}");
+                    Console.WriteLine($"  {mm.Name} ({mm.Model}) at {pl.Position} turned {pl.Rotation.X * 180 / MathF.PI:F1},{pl.Rotation.Y * 180 / MathF.PI:F1},{pl.Rotation.Z * 180 / MathF.PI:F1} deg: {heights.Count} upward triangles ({upArea:F0} sq units), heights {string.Join(" ", hs.Take(16))}{(hs.Count > 16 ? " ..." : "")}");
                 }
                 foreach (var nav in cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>())
                 {

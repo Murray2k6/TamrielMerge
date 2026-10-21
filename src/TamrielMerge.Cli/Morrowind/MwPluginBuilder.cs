@@ -283,8 +283,73 @@ public sealed partial class MwPluginBuilder
     }
 
     /// <summary>Builds an interior cell with every placeable reference. Returns the cell.</summary>
+    /// <summary>
+    /// Placed collision faces as the navmesh should see them: as Skyrim collides, each face is a slab 12 units thick
+    /// behind it (BlockMeshBuilder.ConvexSlab), so the face as wound and the slab's back face, wound the other way, 12
+    /// behind it. A face wound inside out is then a ceiling under a floor 12 over it, as in the game (2026-10-20:
+    /// Hawkmoth Towers' spiral stairs, whose shell is wound inside out, had no navmesh on any flight; their pathgrid
+    /// points stood over faces facing down).
+    /// </summary>
+    static IEnumerable<Vector3[]> AsSlabs(IEnumerable<Vector3[]> faces)
+    {
+        foreach (var t in faces)
+        {
+            yield return t;
+            var c = Vector3.Cross(t[1] - t[0], t[2] - t[0]);
+            if (c.LengthSquared() < 1e-8f) continue;
+            var back = Vector3.Normalize(c) * -12f;
+            yield return [t[0] + back, t[2] + back, t[1] + back];
+        }
+    }
+
+    /// <summary>Interiors turned as one piece by <see cref="TipBack"/>: the point they turned about and the turn (row vectors).</summary>
+    readonly Dictionary<string, (Vector3 Pivot, Matrix4x4 Turn)> tipped = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Interiors <see cref="TipBack"/> turned, with their hull's slope before and after.</summary>
+    public List<string> TippedInteriors { get; } = [];
+
+    /// <summary>
+    /// A wreck too steep to walk in Skyrim tipped back (user, 2026-10-20: "Tip back to ~35"): when one piece holds most of
+    /// an interior's floor and stands tilted more than 40 degrees (Morrowind's shipwrecks: Remote's hull 66, Unmarked's 51,
+    /// Lonely's, Lost's and Neglected's 45-46, none with a pathgrid point; Skyrim's player walks slopes to 45), the whole
+    /// interior is turned about that piece so its floor slopes 35, the way it fell: every object with it, actors moved and
+    /// kept upright. Doors leading in arrive where the turn puts their arrival point (LinkDoors).
+    /// </summary>
+    void TipBack(Tes3Cell source)
+    {
+        const float target = 35, over = 40;
+        // Each piece's floor: its faces up in the model (within 25 degrees), by its scale.
+        (Tes3Ref Ref, float Area)? hull = null;
+        float total = 0;
+        foreach (var r in source.Refs)
+        {
+            if (world.Model(r.BaseId) is not { Length: > 0 } model || Mesh(model) is not { } mesh) continue;
+            float area = mesh.Solid.Sum(t => { var n = Vector3.Cross(t[1] - t[0], t[2] - t[0]); float a = n.Length() / 2; return a > 0 && n.Z / (2 * a) > 0.9f ? a : 0; }) * r.Scale * r.Scale;
+            total += area;
+            if (hull is null || area > hull.Value.Area) hull = (r, area);
+        }
+        if (hull is not { } h || h.Area < 200_000 || h.Area < total / 2) return;
+        var up = Vector3.Normalize(Vector3.TransformNormal(Vector3.UnitZ, Skyrim.SkyrimRotation.Matrix(h.Ref.Rotation)));
+        float tilt = MathF.Acos(Math.Clamp(up.Z, -1, 1)) * 180 / MathF.PI;
+        if (tilt <= over || tilt >= 90) return;
+        // Turned about the axis across its fall, toward upright, by what is over the target.
+        var axis = Vector3.Normalize(Vector3.Cross(up, Vector3.UnitZ));
+        var turn = Matrix4x4.CreateFromAxisAngle(axis, (tilt - target) * MathF.PI / 180);
+        float after = MathF.Acos(Math.Clamp(Vector3.TransformNormal(up, turn).Z, -1, 1)) * 180 / MathF.PI;
+        var pivot = h.Ref.Position;
+        foreach (var r in source.Refs)
+        {
+            r.Position = Vector3.Transform(r.Position - pivot, turn) + pivot;
+            bool actor = world.Objects.TryGetValue(r.BaseId, out var b) && b.Type is "NPC_" or "CREA" or "LEVC";
+            if (!actor) r.Rotation = Skyrim.SkyrimRotation.Angles(Skyrim.SkyrimRotation.Matrix(r.Rotation) * turn);
+        }
+        tipped[source.Name] = (pivot, turn);
+        TippedInteriors.Add($"{source.Name} ({h.Ref.BaseId} {tilt:F0} -> {after:F0} deg)");
+    }
+
     public Cell BuildInterior(Tes3Cell source)
     {
+        TipBack(source);
         var cell = new Cell(mod)
         {
             EditorID = "MW" + Sanitize(source.Name),
@@ -470,8 +535,9 @@ public sealed partial class MwPluginBuilder
         // Each face as wound (a ceiling or an underside is an obstacle, not a floor; Morrowind's collision is wound
         // consistently, 2026-10-19, all 1,335 interiors: 10,784,047 edges shared oppositely, 4,339 the same way), or
         // every face turned up where that puts more actors on the navmesh (NavmeshBuilder.BuildInterior).
-        var polygons = solid.Select(t => (t, Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])))).Where(p => !float.IsNaN(p.Item2.X)).ToList();
-        var turnedUp = polygons.Select(p => (p.t, p.Item2.Z < 0 ? -p.Item2 : p.Item2)).ToList();
+        var raw = solid.Select(t => (t, Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])))).Where(p => !float.IsNaN(p.Item2.X)).ToList();
+        var polygons = AsSlabs(solid).Select(t => (t, Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])))).Where(p => !float.IsNaN(p.Item2.X)).ToList();
+        var turnedUp = raw.Select(p => (p.t, p.Item2.Z < 0 ? -p.Item2 : p.Item2)).ToList();
         // Every persistent placed object here except the start marker is a load door (linked to its partner later).
         var loadDoors = cell.Persistent.OfType<PlacedObject>().Where(d => d != StartMarker && !scriptPersistent.Contains(d)).Cast<IPlacedObjectGetter>().ToList();
         var actorsHere = cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
@@ -780,6 +846,8 @@ public sealed partial class MwPluginBuilder
             return asWound || Vector3.Cross(w[1] - w[0], w[2] - w[0]).Z >= 0 ? w : [w[0], w[2], w[1]];
         }
         var (navCount, navTriangles) = navmeshes.BuildExteriorCells(ws, cells,
+            // (Not as slabs, AsSlabs, as interiors are: outdoors that left 74% fewer spans marked shut inside something and
+            // made 26% more walkable, 2026-10-20 test block, unmeasured where; the winding here is right for 99.8% of references.)
             (x, y) => solids.TryGetValue((x, y), out var list) ? list.SelectMany(s => { bool asWound = Trusted(s.Mesh); return s.Mesh.Solid.Select(t => Placed(t, s.Ref, asWound)); }) : [],
             c => c.Flags.HasFlag(Cell.Flag.HasWater) ? 0f : null,
             top.Persistent.OfType<PlacedObject>().Where(p => !scriptPersistent.Contains(p)).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true,
@@ -997,6 +1065,9 @@ public sealed partial class MwPluginBuilder
         {
             if (r.DoorDestination is not { } dest) continue;
             string destCell = r.DoorDestinationCell ?? Exterior;
+            // Into an interior TipBack turned: the arrival point turned with it (the arrival still upright).
+            if (tipped.TryGetValue(destCell, out var tip))
+                dest = (Vector3.Transform(dest.Position - tip.Pivot, tip.Turn) + tip.Pivot, dest.Rotation);
             if (!byCell.TryGetValue(destCell, out var there))
             {
                 // A one-way door (Mortrag Glacier's maze gate into Huntsman's Hall, left by script in Morrowind): Skyrim

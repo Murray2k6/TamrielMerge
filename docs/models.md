@@ -99,5 +99,20 @@ anywhere along a door model's own height counts (its object bounds: Legge's dark
 stands 177 under its tunnel's floor): 36 of 38 there. `floor-near` lists what can be stood on around a point (each
 object's upward collision and the navmesh's heights); `navmesh-headroom` measures the room over a plugin's interior
 navmesh (Skyrim.esm: only 0.6% of its triangles have 64-128 units over them, the bulk 160 and more, so the 128-unit
-agent height stands). Every place that turns a reference (navmesh, distant LOD,
+agent height stands).
+
+**Doors and actors** (user, 2026-10-20: "do the doors and actors"). Actors not standing on their interior's navmesh are
+moved onto it (NavmeshBuilder.SnapToMesh, as Daggerfall's dungeons already were, now Morrowind's and Oblivion's too;
+those in water stay, as they swim): Morrowind's Prelude Shipwreck has a skeleton and a rat 85 under its deck, as its
+11 pathgrid points are (the wreck was moved in Morrowind's editor after them), and Mortrag Glacier's werewolves stand
+70-170 over their floor. Morrowind's tilted wrecks too steep for Skyrim's player (Remote 66 degrees, Unmarked 51,
+Lonely, Lost and Neglected 45-46; none of them has a pathgrid point) are tipped back as one piece to 35 (user: "Tip
+back to ~35"; MwPluginBuilder.TipBack): hull, doors, loot and actors turn together, and the doors leading in arrive
+where the turn puts them. Morrowind's interiors' navmesh input is each face as Skyrim collides with it, a slab 12 thick
+behind it (AsSlabs), so a face wound inside out has its slab's floor over it as in the game (outdoors that left 74%
+fewer spans marked shut inside something, so the exteriors keep their winding check). On the test interiors: load doors
+with a door triangle 38 of 38 (Morrowind) and 2 of 2 (Oblivion); actors within 64 units of their navmesh 80 of 80 and
+11 of 11. `actor-floor` says, for each actor off its navmesh, what is under it (`--doors` for load doors);
+`mw-pathgrid-ground` checks the ground under every Morrowind pathgrid point (43,674: 97.1% on ground to 45 degrees);
+`mw-rot-order --steep` lists interiors with floors tilted past 45. Every place that turns a reference (navmesh, distant LOD,
 the dungeon check, the scene renderer, Daggerfall's props and action objects, Redguard's objects) goes through it.
