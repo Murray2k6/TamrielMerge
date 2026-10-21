@@ -118,8 +118,15 @@ The doors left had their floor past the rule's reach, so the rule now ends with 
 over or under (a trapdoor in a floor, under the navmesh it is reached from: Oblivion's Paradise exit, Morrowind's
 Mournhold pavilion ladder) and straight under to 2,000 (the Imperial sewers' hearth grate, 1,865 over its floor): re-run
 on the built plugins it finds a triangle for all six; the last two are in Oblivion's empty TestCastleInterior. Oblivion's
-actors still off: swimmers in water (left where they swim), holding pens and the empty test interiors, prisoners in
-Paradise's cages, Xeddefen's three NPCs 1,316 under everything and Veyond's goblins 120-190 over their floor. `actor-floor` says, for each actor off its navmesh, what is under it (`--doors` for load doors);
+actors still off: swimmers in water (left where they swim), holding pens, prisoners in Paradise's cages, Xeddefen's
+three NPCs 1,316 under everything and Veyond's goblins 120-190 over their floor.
+
+**Floors for empty cells** (user, 2026-10-21: "the interiors have navmeshes for the test cells"). Six of Oblivion.esm's
+interiors hold their contents over nothing: TestParticles, TestGrantWarehouseUpper (167 statics, all candles, books and
+plates), TestCastleInterior (a ladder and a trapdoor), ToddDung, WeatherleahInterior02 and FortUrasek02DUPLICATE000 (its
+pathgrid of 138 points and 3 actors, its architecture gone). Each gets an invisible floor, a model of collision only
+(meshes\tamrielmerge\ob\floors\<cell>.nif, ObWorld.InvisibleFloor): along the cell's pathgrid where it has one, else
+under what stands in it, level by level; the navmesh is made on it. ob-build lists them ("floors:"). `actor-floor` says, for each actor off its navmesh, what is under it (`--doors` for load doors);
 `mw-pathgrid-ground` checks the ground under every Morrowind pathgrid point (43,674: 97.1% on ground to 45 degrees);
 `mw-rot-order --steep` lists interiors with floors tilted past 45. Every place that turns a reference (navmesh, distant LOD,
 the dungeon check, the scene renderer, Daggerfall's props and action objects, Redguard's objects) goes through it.

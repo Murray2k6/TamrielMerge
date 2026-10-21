@@ -123,10 +123,23 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                     int qx = (int)MathF.Floor((colX - chf.bmin.X) / chf.cs), qz = (int)MathF.Floor((-colY - chf.bmin.Z) / chf.cs);
                     if (qx >= 0 && qz >= 0 && qx < chf.width && qz < chf.height)
                     {
-                        var cell = chf.cells[qx + qz * chf.width];
                         var sb = new StringBuilder($"  column {colX:F0},{colY:F0} (try {t}):");
-                        for (int i = cell.index; i < cell.index + cell.count; i++)
-                            sb.Append($" floor {chf.bmin.Y + chf.spans[i].y * chf.ch:F0} room {chf.spans[i].h * chf.ch:F0} area {chf.areas[i]} region {chf.spans[i].reg};");
+                        // The column and its four neighbours (west, north, east, south in Recast's x/z), each floor with the
+                        // directions Recast connected it to.
+                        (int Dx, int Dz, string Name)[] around = [(0, 0, "here"), (-1, 0, "x-1"), (0, 1, "z+1"), (1, 0, "x+1"), (0, -1, "z-1")];
+                        foreach (var (dx, dz, nm) in around)
+                        {
+                            int cx = qx + dx, cz = qz + dz;
+                            if (cx < 0 || cz < 0 || cx >= chf.width || cz >= chf.height) continue;
+                            var cell = chf.cells[cx + cz * chf.width];
+                            sb.Append($" [{nm}]");
+                            for (int i = cell.index; i < cell.index + cell.count; i++)
+                            {
+                                var span = chf.spans[i];
+                                string cons = string.Concat(Enumerable.Range(0, 4).Select(d => ((span.con >> (d * 6)) & 0x3f) != 0x3f ? "wnes"[d] : '-'));
+                                sb.Append($" floor {chf.bmin.Y + span.y * chf.ch:F0} room {span.h * chf.ch:F0} area {chf.areas[i]} reg {span.reg} con {cons};");
+                            }
+                        }
                         Console.WriteLine(sb.ToString());
                     }
                 }
@@ -1054,15 +1067,36 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         // (or span) and which way they face, as Recast gets them.
         if (Environment.GetEnvironmentVariable("TM_NAV_COLUMN")?.Split(',') is [var ixs, var iys] && float.TryParse(ixs, out var inX) && float.TryParse(iys, out var inY))
         {
+            // Each triangle clipped to the voxel column Recast puts the point in (its height range there), as rasterized.
+            var bmin = geom.GetMeshBoundsMin();
+            float cs = Env("CS", 8f);
+            int vx = (int)MathF.Floor((inX - bmin.X) / cs), vz = (int)MathF.Floor((-inY - bmin.Z) / cs);
+            float cx0 = bmin.X + vx * cs, cx1 = cx0 + cs, cz0 = bmin.Z + vz * cs, cz1 = cz0 + cs;
             var near = new List<(float Lo, float Hi, float Nz)>();
             for (int f = 0; f + 2 < faces.Count; f += 3)
             {
-                Vector3 V(int i) => new(verts[faces[f + i] * 3], -verts[faces[f + i] * 3 + 2], verts[faces[f + i] * 3 + 1]);
-                Vector3 a = V(0), b = V(1), c = V(2);
-                var q = ClosestOnTriangle(new Vector3(inX, inY, (a.Z + b.Z + c.Z) / 3), a, b, c);
-                if ((q.X - inX) * (q.X - inX) + (q.Y - inY) * (q.Y - inY) > 16) continue;
-                var nrm = Vector3.Cross(b - a, c - a);
-                near.Add((MathF.Min(a.Z, MathF.Min(b.Z, c.Z)), MathF.Max(a.Z, MathF.Max(b.Z, c.Z)), nrm.LengthSquared() > 0 ? Vector3.Normalize(nrm).Z : 0));
+                // Recast space (x, y up, z): clip the triangle to x in [cx0, cx1] and z in [cz0, cz1].
+                var poly = new List<Vector3>();
+                for (int i = 0; i < 3; i++) poly.Add(new Vector3(verts[faces[f + i] * 3], verts[faces[f + i] * 3 + 1], verts[faces[f + i] * 3 + 2]));
+                List<Vector3> Clip(List<Vector3> pin, Func<Vector3, float> side)
+                {
+                    var o = new List<Vector3>();
+                    for (int i = 0; i < pin.Count; i++)
+                    {
+                        var a = pin[i]; var b = pin[(i + 1) % pin.Count];
+                        float da = side(a), db = side(b);
+                        if (da >= 0) o.Add(a);
+                        if ((da >= 0) != (db >= 0)) o.Add(a + (b - a) * (da / (da - db)));
+                    }
+                    return o;
+                }
+                poly = Clip(poly, v => v.X - cx0); if (poly.Count < 3) continue;
+                poly = Clip(poly, v => cx1 - v.X); if (poly.Count < 3) continue;
+                poly = Clip(poly, v => v.Z - cz0); if (poly.Count < 3) continue;
+                poly = Clip(poly, v => cz1 - v.Z); if (poly.Count < 3) continue;
+                Vector3 V(int i) => new(verts[faces[f + i] * 3], verts[faces[f + i] * 3 + 1], verts[faces[f + i] * 3 + 2]);
+                var nrm = Vector3.Cross(V(1) - V(0), V(2) - V(0));   // Recast's own (y up)
+                near.Add((poly.Min(v => v.Y), poly.Max(v => v.Y), nrm.LengthSquared() > 0 ? Vector3.Normalize(nrm).Y : 0));
             }
             Console.WriteLine($"  input at {inX:F0},{inY:F0}: {string.Join("; ", near.OrderBy(t => t.Hi).Select(t => $"{t.Lo:F0}..{t.Hi:F0} nz {t.Nz:F2}"))}");
         }

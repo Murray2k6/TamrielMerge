@@ -302,7 +302,7 @@ public sealed partial class ObPluginBuilder : IDisposable
             if (r is Ob.IPlacedObjectGetter o) Place(o, cell, cell);
             else PlaceActor(r, cell, cell);
         }
-        BuildNavmesh(cell);
+        BuildNavmesh(cell, source);
         AddInteriorCell(cell);
         return cell;
     }
@@ -330,9 +330,13 @@ public sealed partial class ObPluginBuilder : IDisposable
         FinishMagic();
         FinishJails();
         SwingDoorTwinCount = Skyrim.SwingDoorTwins.AddAll(mod);
+        // Each NPC's own Oblivion packages (their conditions name the quests, made by now).
+        FinishNpcPackages();
         Directory.CreateDirectory(modOutDir);
         TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
+        Console.WriteLine($"  finished, to write {Util.Machine.MemoryNote()}");
         mod.WriteToBinary(Path.Combine(modOutDir, PluginName));
+        Console.WriteLine($"  plugin written {Util.Machine.MemoryNote()}");
         // What procedural creatures may use from Oblivion (read by the creatures step when that option is on).
         WriteCreatureCatalog(Path.Combine(modOutDir, PluginName));
         // What the progression build offers on the Mundus stones from Oblivion.

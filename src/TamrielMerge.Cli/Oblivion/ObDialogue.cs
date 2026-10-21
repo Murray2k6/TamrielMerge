@@ -403,7 +403,18 @@ public sealed partial class ObPluginBuilder
             var d = new GetQuestRunningConditionData(); d.Quest = new FormLinkOrIndex<IQuestGetter>(d, owner.FormKey);
             list.Add(Cond(d, CompareOperator.EqualTo, 1, false, false));
         }
-        foreach (var c in item.Conditions)
+        return ObConditions(item.Conditions, source, list);
+    }
+
+    /// <summary>
+    /// Oblivion conditions in Skyrim's terms, added to <paramref name="list"/>, or null when they can never hold: what
+    /// Skyrim can test as Skyrim's own condition, what it can't by whether it holds at Oblivion's usual value. Dialogue
+    /// responses' and AI packages' (both on the actor that has them).
+    /// </summary>
+    internal ExtendedList<Condition>? ObConditions(IEnumerable<Ob.IConditionGetter> conditions, Ob.IOblivionModGetter source, ExtendedList<Condition>? list = null)
+    {
+        list ??= [];
+        foreach (var c in conditions)
         {
             var op = (CompareOperator)(int)c.CompareOperator;
             float value = c.ComparisonValue;

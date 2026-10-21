@@ -117,7 +117,14 @@ public sealed class MwMeshConverter(Tes3Data data, MwTextures textures)
                 }
         }
 
-        Visit(nif.Roots.Count > 0 ? nif.Roots[0] : 0, NifTransform.Identity, [], false);
+        // Morrowind leaves a model's root node turn and move out (its scale kept, as MwVfx does for effects; no placed model's
+        // root is scaled, mw-rest-check), a root that is itself a shape keeping its own: 2026-10-21,
+        // In_impsmall_spiral_01's root is turned 90 degrees, and with it the forts' spiral stairs stood 256 off their
+        // pathgrid; over Morrowind's 43,674 interior pathgrid points, those with no ground under them fell from 988 to 248
+        // with the root's transform left out (285 with only its turn left out); of Morrowind's 39,876 interior items, 95.5% on
+        // what they stand on as drawn (95.1% with every root applied), 1.0% sunk in (its own racks of spears and the like).
+        int rootIndex = nif.Roots.Count > 0 ? nif.Roots[0] : 0;
+        Visit(rootIndex, RootLeftOut(nif, rootIndex), [], false);
         var solid = noCollision ? [] : hasCollisionNode ? collision : allGeometry;
 
         string rel = OutputPath(model, moving, itemMass);
@@ -134,6 +141,23 @@ public sealed class MwMeshConverter(Tes3Data data, MwTextures textures)
     /// Particle emitters: each particle system controller's emitter node, placed by the node transforms down from the
     /// root, with the controller's particle size and rise; the texture is the one on the particle geometry it drives.
     /// </summary>
+    /// <summary>
+    /// The transform that, applied as a root node's parent, leaves the root's own turn and move out (Morrowind places a
+    /// model without them) and keeps its scale: the root's inverse, with its scale.
+    /// </summary>
+    internal static NifTransform RootLeftOut(Nif4 nif, int rootIndex)
+    {
+        // A root that is itself a shape keeps its transform (2026-10-21: Contain_crate_01's root is its box, 32 down; with
+        // it, 301 items stand on crates, without it none).
+        if (nif.Get<NiNode>(rootIndex) is not { } root || root is NiTriShape) return NifTransform.Identity;
+        var t = root.Transform;
+        // Inverse of v' = T + s R v (R a rotation): v = R^T (v' - T) / s; as a parent of the root: R^T, -R^T T, 1, times
+        // the root's scale back (so only the scale stays).
+        var rt = System.Numerics.Matrix4x4.Transpose(t.Rotation);
+        var inv = new NifTransform(rt, -new NifTransform(rt, Vector3.Zero, 1).Rotate(t.Translation), 1);
+        return inv;
+    }
+
     static List<Skyrim.EffectStandIns.Emitter> Emitters(Nif4 nif)
     {
         var controllers = nif.Blocks.OfType<NiParticleSystemController>().ToList();
@@ -146,7 +170,7 @@ public sealed class MwMeshConverter(Tes3Data data, MwTextures textures)
             world[index] = w;
             foreach (var child in node.Children) Walk(child, w);
         }
-        foreach (var root in nif.Roots.Count > 0 ? nif.Roots : [0]) Walk(root, NifTransform.Identity);
+        foreach (var root in nif.Roots.Count > 0 ? nif.Roots : [0]) Walk(root, RootLeftOut(nif, root));
         var result = new List<Skyrim.EffectStandIns.Emitter>();
         foreach (var c in controllers)
         {

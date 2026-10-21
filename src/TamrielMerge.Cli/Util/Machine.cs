@@ -32,4 +32,11 @@ public static class Machine
         var s = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
         return GlobalMemoryStatusEx(ref s) ? s.AvailPageFile / (double)(1L << 30) : 8;
     }
+
+    /// <summary>For a build's log: this process's memory now (private, and the managed heap) and its peak so far.</summary>
+    public static string MemoryNote()
+    {
+        using var self = System.Diagnostics.Process.GetCurrentProcess();
+        return $"[memory {self.PrivateMemorySize64 / (double)(1L << 30):F1} GB, managed {GC.GetTotalMemory(false) / (double)(1L << 30):F1} GB, peak {self.PeakWorkingSet64 / (double)(1L << 30):F1} GB]";
+    }
 }

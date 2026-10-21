@@ -444,6 +444,8 @@ public sealed partial class ObPluginBuilder
         npc.Configuration.Flags = flags;
         SetLevel(npc, n.Configuration?.Flags.HasFlag(Ob.Npc.NpcFlag.PCLevelOffset) == true, n.Configuration?.LevelOffset ?? 1, n.Configuration?.CalcMin ?? 0, n.Configuration?.CalcMax ?? 0);
         npc.Packages.Add(new FormLink<IPackageGetter>(Sk(0x01B217)));   // DefaultSandboxEditorLocation512
+        // Its own Oblivion packages go ahead of it once the quests their conditions name exist (FinishNpcPackages).
+        if (n.AIPackages.Count > 0) npcPackageLists.Add((npc, n.AIPackages.Select(p => p.FormKey).ToList()));
         if (npc.AIData is { } ai) ai.Aggression = (n.AIData?.Aggression ?? 0) >= 80 ? Aggression.VeryAggressive : Aggression.Unaggressive;
         AddInventory(npc, n.Items);
         AddSpells(npc, n.Spells);

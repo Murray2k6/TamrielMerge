@@ -46,6 +46,63 @@ public sealed partial class ObPluginBuilder
         _ => "MS14LamiWait",                   // Find, Travel, UseItemAt, CastMagic: go there
     };
 
+    readonly Dictionary<FormKey, Package?> obScheduledPackages = new();
+    /// <summary>NPCs and the Oblivion packages each had, filled in by <see cref="FinishNpcPackages"/> once the quests their
+    /// conditions name exist.</summary>
+    readonly List<(Npc Npc, List<FormKey> Packages)> npcPackageLists = [];
+    /// <summary>NPCs given their Oblivion packages (<see cref="FinishNpcPackages"/>), and the packages made for them.</summary>
+    public int NpcsWithSchedules { get; private set; }
+    public int ScheduledPackagesMade => obScheduledPackages.Values.Count(p => p is not null);
+
+    /// <summary>
+    /// An Oblivion AI package as an NPC's own Skyrim package (made on first use; null when its conditions can never hold
+    /// in Skyrim): as <see cref="ObPackage"/> makes it, with Oblivion's schedule (month, weekday, date, hour and how long)
+    /// and its conditions, so an NPC keeps Oblivion's day: sleeps, eats, works and travels when Oblivion has it do so
+    /// (user, 2026-10-21: "fix those issues", NPCs moving normally; every Oblivion NPC had only a sandbox before).
+    /// </summary>
+    Package? ObScheduledPackage(FormKey key)
+    {
+        if (obScheduledPackages.TryGetValue(key, out var hit)) return hit;
+        obScheduledPackages[key] = null;
+        if (records.GetValueOrDefault(key) is not Ob.IAIPackageGetter source || ObPackage(key) is not { } made) return null;
+        var sourcePlugin = plugins.LastOrDefault(pl => pl.AIPackages.ContainsKey(key));
+        var conditions = sourcePlugin is null ? [] : ObConditions(source.Conditions, sourcePlugin);
+        if (conditions is null) return null;
+        var package = mod.Packages.DuplicateInAsNewRecord(made);
+        package.EditorID = "OBSched" + Sanitize(source.EditorID ?? key.ID.ToString("X6"));
+        package.Conditions.Clear();
+        package.Conditions.AddRange(conditions);
+        if (source.Schedule is { } s)
+        {
+            package.ScheduleMonth = (sbyte)(int)s.Month;
+            package.ScheduleDayOfWeek = (Package.DayOfWeek)(int)s.DayOfWeek;
+            package.ScheduleDate = s.Day;
+            package.ScheduleHour = s.Time == 255 ? (sbyte)-1 : (sbyte)s.Time;
+            package.ScheduleMinute = 0;
+            package.ScheduleDurationInMinutes = Math.Max(0, s.Duration) * 60;
+        }
+        return obScheduledPackages[key] = package;
+    }
+
+    /// <summary>
+    /// Each NPC's Oblivion packages, in Oblivion's order (Skyrim, like Oblivion, runs the first whose schedule and
+    /// conditions hold), ahead of the sandbox it was given, which stays last for when none holds.
+    /// </summary>
+    void FinishNpcPackages()
+    {
+        foreach (var (npc, keys) in npcPackageLists)
+        {
+            var own = keys.Select(ObScheduledPackage).OfType<Package>().ToList();
+            if (own.Count == 0) continue;
+            var fallback = npc.Packages.ToList();
+            npc.Packages.Clear();
+            foreach (var p in own) npc.Packages.Add(p.ToLink<IPackageGetter>());
+            foreach (var p in fallback) npc.Packages.Add(p);
+            NpcsWithSchedules++;
+        }
+        npcPackageLists.Clear();
+    }
+
     /// <summary>An Oblivion AI package as a Skyrim package (made on first use).</summary>
     Package? ObPackage(FormKey key)
     {

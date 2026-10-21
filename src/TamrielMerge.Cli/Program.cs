@@ -467,8 +467,10 @@ static class Program
                     // Side by side as the memory allows (2026-10-16: all three at once committed 35.9 of the user's 38.9 GB and
                     // their other programs failed with "Not enough memory"): the biggest first, and each next one only when
                     // the free commit holds its peak, what the running ones may still grow by, and 4 GB for everything else.
-                    // With nothing running the next one starts whatever the room.
-                    static double PeakGb(Game g) => g switch { Game.Oblivion => 14, Game.Morrowind => 8, _ => 4 };
+                    // With nothing running the next one starts whatever the room. The free memory itself must hold it too, not
+                    // only the commit (which counts the page file): 2026-10-21, Morrowind started beside Oblivion with 19.5 GB
+                    // free and the PC fell to 4.4 GB free two hours in. Oblivion's build peaks at 15.1 GB.
+                    static double PeakGb(Game g) => g switch { Game.Oblivion => 15, Game.Morrowind => 8, _ => 4 };
                     var waiting = new Queue<(Game Game, string Plugin, string[] Args)>(toBuild.OrderByDescending(g => PeakGb(g.Game)));
                     var runningGames = new List<((Game Game, string Plugin, string[] Args) G, System.Diagnostics.Process P)>();
                     void Finish(((Game Game, string Plugin, string[] Args) G, System.Diagnostics.Process P) r, int code)
@@ -490,7 +492,7 @@ static class Program
                             var next = waiting.Peek();
                             double growth = runningGames.Sum(r => { try { r.P.Refresh(); return Math.Max(0, PeakGb(r.G.Game) - r.P.PrivateMemorySize64 / (double)(1L << 30)); } catch (InvalidOperationException) { return 0; } });
                             double free = Util.Machine.FreeCommitGb();
-                            if (runningGames.Count == 0 || free >= PeakGb(next.Game) + growth + 4)
+                            if (runningGames.Count == 0 || (free >= PeakGb(next.Game) + growth + 4 && Util.Machine.FreeRamGb() >= PeakGb(next.Game) + growth + 2))
                             {
                                 waiting.Dequeue();
                                 var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
@@ -3990,7 +3992,7 @@ static class Program
                 else
                 {
                     // --no-interiors skips the interiors, --worldspaces <regex> builds only those worldspaces (test builds).
-                    if (!opts.ContainsKey("no-interiors")) Console.WriteLine($"  {builder.BuildAllInteriors()} interiors ({sw.Elapsed.TotalSeconds:F0}s)");
+                    if (!opts.ContainsKey("no-interiors")) Console.WriteLine($"  {builder.BuildAllInteriors()} interiors ({sw.Elapsed.TotalSeconds:F0}s) {Util.Machine.MemoryNote()}");
                     // --no-exterior skips the worldspaces (faster when working on interiors).
                     if (!opts.ContainsKey("no-exterior"))
                     {
@@ -3999,11 +4001,12 @@ static class Program
                             ? (bx0, by0, bx1, by1) : ((int, int, int, int)?)null;
                         var (worlds, cells) = builder.BuildWorldspaces(opts.TryGetValue("worldspaces", out var wsOnly)
                             ? new System.Text.RegularExpressions.Regex(wsOnly, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null, navBox);
-                        Console.WriteLine($"  {worlds} worldspaces, {cells} exterior cells, {builder.RegionCount} regions, {builder.ExteriorNavmeshes} exterior navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s)");
+                        Console.WriteLine($"  {worlds} worldspaces, {cells} exterior cells, {builder.RegionCount} regions, {builder.ExteriorNavmeshes} exterior navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s) {Util.Machine.MemoryNote()}");
                     }
                 }
                 var (linked, unlinked) = builder.LinkDoors();
-                Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} partners not built; {builder.DoorTrianglesAdded} given their door triangle afterwards");
+                Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} partners not built; {builder.DoorTrianglesAdded} given their door triangle afterwards {Util.Machine.MemoryNote()}");
+                Console.WriteLine($"  floors: {builder.FlooredInteriors.Count} interiors Oblivion left with nothing to walk on given an invisible floor{(builder.FlooredInteriors.Count > 0 ? ": " + string.Join("; ", builder.FlooredInteriors) : "")}");
                 Console.WriteLine($"  hazards: {builder.TriggersPlaced} trigger boxes for Oblivion's trigger shapes (TMObTrigger), of {builder.TriggerShapesSeen} references with one (none listening: {string.Join(", ", builder.TriggerUnheard)}); {builder.HazardCells} interiors in lava (swum over as water, flagged Water)");
                 Console.WriteLine($"  effects: {builder.EffectCount} vanilla effects standing in for particle systems");
                 Console.WriteLine($"  locks: {builder.LockCount} locked doors and containers (Oblivion lockpicking)");
@@ -4016,6 +4019,7 @@ static class Program
                 }
                 if (scripts)
                 {
+                    Console.WriteLine($"  before scripts {Util.Machine.MemoryNote()}");
                     int compiled = builder.AttachScripts();
                     Console.WriteLine($"  scripts: {compiled} compiled, {builder.ScriptsAttached} attached, {builder.PropertiesFilled} properties filled ({sw.Elapsed.TotalSeconds:F0}s)");
                     File.WriteAllLines(Path.Combine(outDir, "scripts-missing.txt"), builder.ScriptMissing.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Value,6} {kv.Key}"));
@@ -4028,7 +4032,10 @@ static class Program
                 Console.WriteLine($"  on the interiors' navmeshes (within 64 units): {builder.ActorsOnNavmesh:N0} of {builder.ActorsChecked:N0} actors, {builder.DoorsOnNavmesh:N0} of {builder.DoorsChecked:N0} load doors");
                 Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Oblivion's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
                 Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
+                Console.WriteLine($"  before writing {Util.Machine.MemoryNote()}");
                 builder.Write();
+                Console.WriteLine($"  written {Util.Machine.MemoryNote()}");
+                Console.WriteLine($"  schedules: {builder.NpcsWithSchedules} NPCs given their Oblivion packages ({builder.ScheduledPackagesMade} packages, with Oblivion's schedules and conditions), the sandbox kept last");
                 Console.WriteLine($"  levelling (Mundus stones): {builder.LevellingSummary}");
                 var problems = builder.Problems.Distinct().ToList();
                 File.WriteAllLines(Path.Combine(outDir, "problems.txt"), problems);
@@ -4224,7 +4231,8 @@ static class Program
                                 extra += $" SKIN root {nif.Get<Morrowind.NiNode>(sk.SkeletonRoot)?.Name} bones {string.Join("|", sk.Bones.Select(b => nif.Get<Morrowind.NiNode>(b)?.Name))}";
                         }
                         else if (Tex(n) is { Length: > 0 } t) extra = $" tex [{t}]";
-                        Console.WriteLine($"{new string(' ', depth * 2)}{n.Type} \"{n.Name}\"{(n.Hidden ? " hidden" : "")} at {w.Translation:F1} s {w.Scale:F2}{extra}");
+                        var lr = n.Transform.Rotation; float det = lr.M11 * (lr.M22 * lr.M33 - lr.M23 * lr.M32) - lr.M12 * (lr.M21 * lr.M33 - lr.M23 * lr.M31) + lr.M13 * (lr.M21 * lr.M32 - lr.M22 * lr.M31);
+                        Console.WriteLine($"{new string(' ', depth * 2)}{n.Type} \"{n.Name}\"{(n.Hidden ? " hidden" : "")} at {w.Translation:F1} s {w.Scale:F2} local {n.Transform.Translation:F1} rot [{lr.M11:F2} {lr.M12:F2} {lr.M13:F2} | {lr.M21:F2} {lr.M22:F2} {lr.M23:F2} | {lr.M31:F2} {lr.M32:F2} {lr.M33:F2}] det {det:F2}{extra}");
                         foreach (var c in n.Children) Walk(c, w, depth + 1);
                     }
                     foreach (var r in nif.Roots) Walk(r, Morrowind.NifTransform.Identity, 0);
@@ -6161,7 +6169,20 @@ static class Program
                     if (c is { Count: 0 or > 4000 }) c = null;
                     return collision[model] = c;
                 }
-                var refs = new List<Skyrim.RotationOrderCheck.Ref>();
+                // --cell EditorID[,EditorID...]: each cell's pathgrid (points, their bounds, connections) and what it holds, and stop.
+                if (opts.TryGetValue("cell", out var gridCells))
+                {
+                    foreach (var name in gridCells.Split(','))
+                        foreach (var cell in ob.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Where(x => string.Equals(x.EditorID, name, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            var pts = cell.PathGrid?.PointToPointConnections.Select(q => q.Point).ToList() ?? [];
+                            int links = cell.PathGrid?.PointToPointConnections.Sum(q => q.Connections.Count) ?? 0;
+                            var bases = cell.Persistent.Concat(cell.Temporary).Select(r => r switch { Mutagen.Bethesda.Oblivion.IPlacedObjectGetter o => o.Base.FormKey, Mutagen.Bethesda.Oblivion.IPlacedNpcGetter n => n.Base.FormKey, Mutagen.Bethesda.Oblivion.IPlacedCreatureGetter cr => cr.Base.FormKey, _ => FormKey.Null })
+                                .GroupBy(k => ob.EnumerateMajorRecords().FirstOrDefault(m => m.FormKey == k)?.GetType().Name.Replace("BinaryOverlay", "") ?? "elsewhere").Select(g => $"{g.Key} {g.Count()}");
+                            Console.WriteLine($"{name}: {pts.Count} pathgrid points, {links} connections{(pts.Count > 0 ? $", x {pts.Min(q => q.X):F0}..{pts.Max(q => q.X):F0} y {pts.Min(q => q.Y):F0}..{pts.Max(q => q.Y):F0} z {pts.Min(q => q.Z):F0}..{pts.Max(q => q.Z):F0}" : "")}; holds {string.Join(", ", bases)}");
+                        }
+                    return 0;
+                }                var refs = new List<Skyrim.RotationOrderCheck.Ref>();
                 foreach (var cell in ob.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
                 {
                     var points = cell.PathGrid?.PointToPointConnections.Select(p => new System.Numerics.Vector3(p.Point.X, p.Point.Y, p.Point.Z)).ToList() ?? [];
@@ -6211,6 +6232,206 @@ static class Program
                 var used = world.Exteriors.Values.Select(c => c.Region).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
                 foreach (var r in world.Objects.Values.Where(o => o.Type == "REGN" && !used.Contains(o.Id)))
                     Console.WriteLine($"  region named by no exterior: {r.Id} ({r.Str("FNAM")}), WEAT {string.Join(",", r.Get("WEAT")?.Data ?? [])}");
+                return 0;
+            }
+            case "mw-path-connect":
+            {
+                // Whether NPCs can go where Morrowind's own AI went (user, 2026-10-21: "did we fix npc pathing so they move
+                // normally"): a built plugin's interiors (--plugin) against Morrowind's pathgrids. Each pathgrid point on the
+                // navmesh piece under it (its nearest triangle within 64; pieces by the triangles' own edge links), and each
+                // pathgrid connection: whole (both ends on one piece), broken (two pieces: NPCs can't follow it), or with an
+                // end off the navmesh. Worst interiors listed (--worst N).
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                var grids = new Dictionary<string, (List<System.Numerics.Vector3> Points, List<(int A, int B)> Links)>(StringComparer.OrdinalIgnoreCase);
+                foreach (var plugin in world.Plugins)
+                    foreach (var rec in plugin.Records.Where(r => r.Type == "PGRD"))
+                    {
+                        if (rec.Get("PGRP") is not { } pgrp || rec.Str("NAME") is not { } name || !world.Interiors.ContainsKey(name)) continue;
+                        var pts = new List<System.Numerics.Vector3>();
+                        var counts = new List<int>();
+                        for (int k = 0; k + 16 <= pgrp.Data.Length; k += 16)
+                        {
+                            pts.Add(new(BitConverter.ToInt32(pgrp.Data, k), BitConverter.ToInt32(pgrp.Data, k + 4), BitConverter.ToInt32(pgrp.Data, k + 8)));
+                            counts.Add(pgrp.Data[k + 13]);   // connection count (after x, y, z and the auto-generated flag)
+                        }
+                        var links = new List<(int, int)>();
+                        if (rec.Get("PGRC") is { } pgrc)
+                        {
+                            int at = 0;
+                            for (int i = 0; i < pts.Count; i++)
+                                for (int c = 0; c < counts[i] && at + 4 <= pgrc.Data.Length; c++, at += 4)
+                                {
+                                    int j = BitConverter.ToInt32(pgrc.Data, at);
+                                    if (j > i && j < pts.Count) links.Add((i, j));
+                                }
+                        }
+                        grids[name] = (pts, links);
+                    }
+                static string Sanitized(string s) => new(s.Where(char.IsLetterOrDigit).ToArray());
+                var byEditorId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var k in grids.Keys) byEditorId.TryAdd("MW" + Sanitized(k), k);
+                using var m = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                long whole = 0, broken = 0, off = 0, points = 0, pointsOff = 0;
+                var perCell = new List<(string Cell, int Links, int Broken, int Off)>();
+                foreach (var cell in m.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                {
+                    if (cell.EditorID is null || !byEditorId.TryGetValue(cell.EditorID, out var name)) continue;
+                    var (pts, links) = grids[name];
+                    // Every triangle of the cell's navmeshes, with its piece (union over the edge links inside one navmesh).
+                    var tris = new List<(System.Numerics.Vector3 A, System.Numerics.Vector3 B, System.Numerics.Vector3 C, int Piece)>();
+                    int pieceBase = 0;
+                    foreach (var nav in cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>())
+                    {
+                        int n = nav.Triangles.Count;
+                        var parent = Enumerable.Range(0, n).ToArray();
+                        int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+                        for (int i = 0; i < n; i++)
+                        {
+                            var t = nav.Triangles[i];
+                            foreach (int e in new[] { (int)t.EdgeLink_0_1, t.EdgeLink_1_2, t.EdgeLink_2_0 })
+                                if (e >= 0 && e < n) parent[Find(i)] = Find(e);
+                        }
+                        for (int i = 0; i < n; i++)
+                        {
+                            var t = nav.Triangles[i];
+                            System.Numerics.Vector3 V(int k) => new(nav.Vertices[k].X, nav.Vertices[k].Y, nav.Vertices[k].Z);
+                            tris.Add((V(t.Vertices.X), V(t.Vertices.Y), V(t.Vertices.Z), pieceBase + Find(i)));
+                        }
+                        pieceBase += n;
+                    }
+                    int PieceOf(System.Numerics.Vector3 p)
+                    {
+                        float best = 64f * 64f; int piece = -1;
+                        foreach (var t in tris)
+                        {
+                            var q = Skyrim.Navmesh.NavmeshBuilder.ClosestOnTriangle(p, t.A, t.B, t.C);
+                            float d = System.Numerics.Vector3.DistanceSquared(p, q);
+                            if (d < best) { best = d; piece = t.Piece; }
+                        }
+                        return piece;
+                    }
+                    var pieceOfPoint = pts.Select(PieceOf).ToArray();
+                    points += pts.Count; pointsOff += pieceOfPoint.Count(p => p < 0);
+                    int cb = 0, co = 0;
+                    foreach (var (a, b) in links)
+                    {
+                        if (pieceOfPoint[a] < 0 || pieceOfPoint[b] < 0) { off++; co++; }
+                        else if (pieceOfPoint[a] != pieceOfPoint[b]) { broken++; cb++; }
+                        else whole++;
+                    }
+                    if (cb + co > 0) perCell.Add((cell.EditorID, links.Count, cb, co));
+                }
+                long all = whole + broken + off;
+                Console.WriteLine($"mw-path-connect: {points:N0} pathgrid points ({pointsOff:N0} more than 64 off the navmesh); {all:N0} connections: whole {whole:N0} ({whole * 100.0 / Math.Max(1, all):F1}%), broken across two pieces {broken:N0} ({broken * 100.0 / Math.Max(1, all):F1}%), an end off the navmesh {off:N0}");
+                foreach (var c in perCell.OrderByDescending(c => c.Broken + c.Off).Take(int.Parse(opts.GetValueOrDefault("worst", "20"))))
+                    Console.WriteLine($"  {c.Cell}: {c.Links} connections, {c.Broken} broken, {c.Off} with an end off");
+                return 0;
+            }
+            case "mw-rest-check":
+            {
+                // Whether Morrowind's items sit where its makers set them, nothing sunk in and nothing floating (user,
+                // 2026-10-21: "make sure not to overscale", "make sure nothing clips"): every item in every interior
+                // (books, potions, weapons, clutter you can take), its model's lowest drawn point as placed against the
+                // collision of what it stands on (statics, furniture, containers, doors; the face up straight under its
+                // middle). Sunk in more than 4 (clipping), on it within 4, over it 4-32, further or nothing under it. Also
+                // how many of the models placed have a root node scaled, turned or moved. --worst N lists the most sunk.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                var data = Morrowind.Tes3Data.Open(dataFiles);
+                string scratch = Path.Combine(Path.GetTempPath(), $"tm_mwrest_{Environment.ProcessId}");
+                var converter = new Morrowind.MwMeshConverter(data, new Morrowind.MwTextures(data, scratch));
+                var meshes = new Dictionary<string, Morrowind.MwMeshConverter.Result?>(StringComparer.OrdinalIgnoreCase);
+                Morrowind.MwMeshConverter.Result? MeshOf(string model)
+                {
+                    if (meshes.TryGetValue(model, out var m)) return m;
+                    try { m = converter.Convert(model, scratch); } catch (Exception) { m = null; }
+                    return meshes[model] = m;
+                }
+                var itemTypes = new HashSet<string> { "MISC", "BOOK", "ALCH", "INGR", "WEAP", "ARMO", "CLOT", "APPA", "LOCK", "PROB", "REPA" };
+                var supportTypes = new HashSet<string> { "STAT", "CONT", "ACTI", "DOOR" };
+                static float? ZAt(System.Numerics.Vector3[] t, float x, float y)
+                {
+                    float d = (t[1].Y - t[2].Y) * (t[0].X - t[2].X) + (t[2].X - t[1].X) * (t[0].Y - t[2].Y);
+                    if (MathF.Abs(d) < 1e-6f) return null;
+                    float a = ((t[1].Y - t[2].Y) * (x - t[2].X) + (t[2].X - t[1].X) * (y - t[2].Y)) / d;
+                    float b = ((t[2].Y - t[0].Y) * (x - t[2].X) + (t[0].X - t[2].X) * (y - t[2].Y)) / d;
+                    return a < 0 || b < 0 || a + b > 1 ? null : a * t[0].Z + b * t[1].Z + (1 - a - b) * t[2].Z;
+                }
+                System.Numerics.Vector3 Place(System.Numerics.Vector3 v, Morrowind.Tes3Ref r) => System.Numerics.Vector3.Transform(v * r.Scale, Skyrim.SkyrimRotation.Matrix(r.Rotation)) + r.Position;
+                long items = 0, sunk = 0, on = 0, over = 0, far = 0, rootItems = 0, rootSunk = 0, rootOn = 0;
+                var onRootedSupport = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var gapsOn = new Dictionary<string, (float Sum, int Count)>(StringComparer.OrdinalIgnoreCase);
+                var rootTurned = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                bool RootTurned(string model)
+                {
+                    if (rootTurned.TryGetValue(model, out var known)) return known;
+                    string path = model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
+                    bool turnedRoot = data.Read(path) is { } bytes && Morrowind.Nif4.Read(bytes, path) is var nf && nf.Get<Morrowind.NiNode>(nf.Roots.Count > 0 ? nf.Roots[0] : 0) is { } rn
+                        && (rn.Transform.Rotation != System.Numerics.Matrix4x4.Identity || rn.Transform.Translation.LengthSquared() > 1e-4f);
+                    return rootTurned[model] = turnedRoot;
+                }
+                var worst = new List<(float Gap, string What)>();
+                foreach (var cell in world.Interiors.Values)
+                {
+                    var surfaces = new List<System.Numerics.Vector3[]>();
+                    var surfaceOf = new List<string>();
+                    foreach (var r in cell.Refs)
+                        if (world.Objects.TryGetValue(r.BaseId, out var b) && supportTypes.Contains(b.Type) && world.Model(r.BaseId) is { Length: > 0 } model && MeshOf(model) is { } mesh)
+                            // --drawn: what is under it as drawn (what clips to the eye), else its collision.
+                            foreach (var t in opts.ContainsKey("drawn") ? mesh.Visible : mesh.Solid)
+                            {
+                                var w = t.Select(v => Place(v, r)).ToArray();
+                                if (System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0]).Z > 0) { surfaces.Add(w); surfaceOf.Add(model); }
+                            }
+                    foreach (var r in cell.Refs)
+                    {
+                        if (!world.Objects.TryGetValue(r.BaseId, out var b) || !itemTypes.Contains(b.Type) || world.Model(r.BaseId) is not { Length: > 0 } model || MeshOf(model) is not { Visible.Count: > 0 } mesh) continue;
+                        items++;
+                        bool rooted = RootTurned(model);
+                        if (rooted) rootItems++;
+                        var pts = mesh.Visible.SelectMany(t => t).Select(v => Place(v, r)).ToList();
+                        float bottom = pts.Min(p => p.Z);
+                        float cx = (pts.Min(p => p.X) + pts.Max(p => p.X)) / 2, cy = (pts.Min(p => p.Y) + pts.Max(p => p.Y)) / 2;
+                        // The surface nearest its bottom, from 16 over it (sunk in) to 64 under it (over it).
+                        float? under = null;
+                        string underOf = "";
+                        for (int si = 0; si < surfaces.Count; si++)
+                            if (ZAt(surfaces[si], cx, cy) is { } z && z <= bottom + 16 && z >= bottom - 64 && (under is null || MathF.Abs(bottom - z) < MathF.Abs(bottom - under.Value))) { under = z; underOf = surfaceOf[si]; }
+                        if (opts.TryGetValue("item", out var itemName) && r.BaseId.Contains(itemName, StringComparison.OrdinalIgnoreCase) && cell.Name.Contains(opts.GetValueOrDefault("in", ""), StringComparison.OrdinalIgnoreCase))
+                        {
+                            var allUnder = new List<string>();
+                            for (int si = 0; si < surfaces.Count; si++) if (ZAt(surfaces[si], cx, cy) is { } z && z > bottom - 200 && z < bottom + 200) allUnder.Add($"{z - bottom:+0.0;-0.0} {Path.GetFileName(surfaceOf[si])}");
+                            Console.WriteLine($"  item {r.BaseId} in {cell.Name} at {r.Position}, bottom {bottom:F1}: chosen {(under is null ? "none" : $"{under.Value - bottom:+0.0;-0.0} {Path.GetFileName(underOf)}")}; faces up over/under its middle: {string.Join(", ", allUnder.Distinct().Take(12))}");
+                        }
+                        if (under is null) { far++; continue; }
+                        float gap = bottom - under.Value;
+                        if (opts.TryGetValue("support", out var supportName) && underOf.Contains(supportName, StringComparison.OrdinalIgnoreCase)) Console.WriteLine($"  item {r.BaseId} in {cell.Name} at {r.Position}: gap {gap:F1}");
+                        if (RootTurned(underOf) && MathF.Abs(gap) <= 12) gapsOn[underOf] = (gapsOn.GetValueOrDefault(underOf).Sum + gap, gapsOn.GetValueOrDefault(underOf).Count + 1);
+                        if (gap < -4) { sunk++; if (rooted) rootSunk++; worst.Add((gap, $"{r.BaseId} ({model}) in {cell.Name} at {r.Position}")); }
+                        else if (gap <= 4) { on++; if (rooted) rootOn++; if (RootTurned(underOf)) onRootedSupport[underOf] = onRootedSupport.GetValueOrDefault(underOf) + 1; }
+                        else if (gap <= 32) over++;
+                        else far++;
+                    }
+                }
+                // The models with a root node scaled, turned or moved, of those placed.
+                int scaled = 0, turned = 0, total = 0;
+                foreach (var model in meshes.Keys)
+                {
+                    string path = model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
+                    if (data.Read(path) is not { } bytes) continue;
+                    var nif = Morrowind.Nif4.Read(bytes, path);
+                    if (nif.Get<Morrowind.NiNode>(nif.Roots.Count > 0 ? nif.Roots[0] : 0) is not { } root) continue;
+                    total++;
+                    if (MathF.Abs(root.Transform.Scale - 1) > 1e-3f) scaled++;
+                    if (root.Transform.Rotation != System.Numerics.Matrix4x4.Identity || root.Transform.Translation.LengthSquared() > 1e-4f) turned++;
+                }
+                try { Directory.Delete(scratch, true); } catch (IOException) { }
+                Console.WriteLine($"mw-rest-check: {items:N0} items: sunk in past 4 {sunk:N0} ({sunk * 100.0 / Math.Max(1, items):F1}%), on what is under them {on:N0} ({on * 100.0 / Math.Max(1, items):F1}%), 4-32 over it {over:N0}, further or nothing under {far:N0}");
+                Console.WriteLine($"  models: {total:N0}, root scaled {scaled:N0}, root turned or moved {turned:N0}; items of those {rootItems:N0}: sunk in {rootSunk:N0}, on what is under them {rootOn:N0}");
+                foreach (var w in worst.OrderBy(w => w.Gap).Take(int.Parse(opts.GetValueOrDefault("worst", "10")))) Console.WriteLine($"  {w.Gap:F0}: {w.What}");
+                // Items resting on each model whose root is turned or moved (to compare the root applied and left out).
+                foreach (var kv in onRootedSupport.OrderByDescending(kv => kv.Value)) Console.WriteLine($"  on {kv.Key}: {kv.Value}{(gapsOn.TryGetValue(kv.Key, out var gs) ? $" (items within 12: {gs.Count}, their mean gap {gs.Sum / gs.Count:+0.0;-0.0})" : "")}");
                 return 0;
             }
             case "mw-pathgrid-ground":
@@ -8683,6 +8904,88 @@ static class Program
                 }
                 return 0;
             }
+            case "npc-packages":
+            {
+                // A built plugin's NPCs (--plugin; --npc EditorID part, default all, at most --max 12) and their packages in
+                // order: each one's kind (its template), schedule (month, weekday, date, hour, how long) and conditions.
+                using var m = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var packages = m.Packages.ToDictionary(p => p.FormKey);
+                using var esm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var vanilla = esm.Packages.ToDictionary(p => p.FormKey, p => p.EditorID ?? "");
+                string part = opts.GetValueOrDefault("npc", "");
+                int shown = 0, max = int.Parse(opts.GetValueOrDefault("max", "12"));
+                foreach (var npc in m.Npcs.Where(n => (n.EditorID ?? "").Contains(part, StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (shown++ >= max) break;
+                    Console.WriteLine($"{npc.EditorID}:");
+                    foreach (var link in npc.Packages)
+                    {
+                        if (packages.TryGetValue(link.FormKey, out var p))
+                            Console.WriteLine($"  {p.EditorID}: month {p.ScheduleMonth}, {p.ScheduleDayOfWeek}, date {p.ScheduleDate}, from {p.ScheduleHour}:00 for {p.ScheduleDurationInMinutes / 60}h, {p.Conditions.Count} conditions [{string.Join("; ", p.Conditions.Select(c => c.Data.GetType().Name.Replace("ConditionData", "").Replace("BinaryOverlay", "")))}]");
+                        else Console.WriteLine($"  {vanilla.GetValueOrDefault(link.FormKey, link.FormKey.ToString())} (Skyrim's)");
+                    }
+                }
+                return 0;
+            }
+            case "navmesh-flags":
+            {
+                // How a plugin's interior navmeshes are flagged (--plugin; --cells N, default 600, spread through the list):
+                // triangles by flag, and for NoLargeCreatures how wide the walkable room there is: from each triangle's middle
+                // to the nearest edge of the navmesh (an edge with no neighbour), flagged against not, as percentiles. Run
+                // on Skyrim.esm it shows where Bethesda keeps large creatures out.
+                string path = opts["plugin"];
+                if (!File.Exists(path)) path = Path.Combine(skyrimData, path);
+                using var m = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+                var cells = m.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Where(c => c.NavigationMeshes.Any()).ToList();
+                int want = Math.Min(int.Parse(opts.GetValueOrDefault("cells", "600")), cells.Count);
+                var byFlag = new Dictionary<string, long>();
+                long tris = 0;
+                var flaggedRoom = new List<float>();
+                var otherRoom = new List<float>();
+                var rnd = new Random(1);
+                for (int ci = 0; ci < want; ci++)
+                {
+                    var cell = cells[(int)((long)ci * cells.Count / want)];
+                    foreach (var nav in cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>())
+                    {
+                        System.Numerics.Vector3 V(int k) => new(nav.Vertices[k].X, nav.Vertices[k].Y, nav.Vertices[k].Z);
+                        // The navmesh's open edges: an edge with no neighbour and no link out.
+                        var open = new List<(System.Numerics.Vector3 A, System.Numerics.Vector3 B)>();
+                        foreach (var t in nav.Triangles)
+                        {
+                            (int Link, int A, int B, NavmeshTriangle.Flag F)[] edges = [(t.EdgeLink_0_1, t.Vertices.X, t.Vertices.Y, NavmeshTriangle.Flag.EdgeLink_0_1), (t.EdgeLink_1_2, t.Vertices.Y, t.Vertices.Z, NavmeshTriangle.Flag.EdgeLink_1_2), (t.EdgeLink_2_0, t.Vertices.Z, t.Vertices.X, NavmeshTriangle.Flag.EdgeLink_2_0)];
+                            foreach (var e in edges) if (e.Link < 0 && !t.Flags.HasFlag(e.F)) open.Add((V(e.A), V(e.B)));
+                        }
+                        foreach (var t in nav.Triangles)
+                        {
+                            tris++;
+                            foreach (NavmeshTriangle.Flag f in Enum.GetValues<NavmeshTriangle.Flag>())
+                                if (f != 0 && t.Flags.HasFlag(f)) byFlag[f.ToString()] = byFlag.GetValueOrDefault(f.ToString()) + 1;
+                            bool flagged = t.Flags.HasFlag(NavmeshTriangle.Flag.NoLargeCreatures);
+                            if (!flagged && rnd.Next(20) != 0) continue;   // a sample of the rest
+                            var mid = (V(t.Vertices.X) + V(t.Vertices.Y) + V(t.Vertices.Z)) / 3;
+                            float best = float.MaxValue;
+                            foreach (var (a, b) in open)
+                            {
+                                // Distance across (in plan) from the middle to the edge.
+                                var ab = new System.Numerics.Vector2(b.X - a.X, b.Y - a.Y); var am = new System.Numerics.Vector2(mid.X - a.X, mid.Y - a.Y);
+                                float s = ab.LengthSquared() > 0 ? Math.Clamp(System.Numerics.Vector2.Dot(am, ab) / ab.LengthSquared(), 0, 1) : 0;
+                                float d = (am - ab * s).Length();
+                                if (MathF.Abs(mid.Z - (a.Z + b.Z) / 2) < 128 && d < best) best = d;
+                            }
+                            if (best == float.MaxValue) continue;
+                            (flagged ? flaggedRoom : otherRoom).Add(best);
+                        }
+                    }
+                }
+                flaggedRoom.Sort(); otherRoom.Sort();
+                string Q(List<float> l) => l.Count == 0 ? "none" : $"10% {l[(int)(l.Count * 0.1)]:F0}, 25% {l[(int)(l.Count * 0.25)]:F0}, median {l[l.Count / 2]:F0}, 75% {l[(int)(l.Count * 0.75)]:F0}, 90% {l[(int)(l.Count * 0.9)]:F0}";
+                Console.WriteLine($"navmesh-flags {Path.GetFileName(path)}: {want} cells, {tris:N0} triangles: {string.Join(", ", byFlag.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value:N0} ({kv.Value * 100.0 / Math.Max(1, tris):F1}%)"))}");
+                Console.WriteLine($"  room to the navmesh's edge, NoLargeCreatures triangles ({flaggedRoom.Count:N0}): {Q(flaggedRoom)}");
+                Console.WriteLine($"  room to the navmesh's edge, the rest (a twentieth, {otherRoom.Count:N0}): {Q(otherRoom)}");
+                Console.WriteLine($"  of the rest within 48 of an edge: {otherRoom.Count(x => x <= 48) * 100.0 / Math.Max(1, otherRoom.Count):F1}%; of the flagged: {flaggedRoom.Count(x => x <= 48) * 100.0 / Math.Max(1, flaggedRoom.Count):F1}%");
+                return 0;
+            }
             case "navmesh-headroom":
             {
                 // How much room above its navmesh a plugin's interiors leave (--plugin, a built plugin or a vanilla master
@@ -8782,12 +9085,30 @@ static class Program
                 var p = new System.Numerics.Vector3(at[0], at[1], at[2]);
                 float r = float.Parse(opts.GetValueOrDefault("r", "300"));
                 var models = new Dictionary<FormKey, (string Name, string Model)>();
+                var names = new Dictionary<FormKey, string>();
                 foreach (var rec in m.EnumerateMajorRecords())
+                {
                     if (rec is IModeledGetter { Model: { } mo }) models[rec.FormKey] = (rec.EditorID ?? rec.FormKey.ToString(), mo.File.DataRelativePath.Path);
+                    names[rec.FormKey] = $"{rec.GetType().Name.Replace("BinaryOverlay", "")} {rec.EditorID}";
+                }
                 var cell = m.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).FirstOrDefault(c => string.Equals(c.EditorID, opts["cell"], StringComparison.OrdinalIgnoreCase));
                 if (cell is null) { Console.WriteLine($"no cell {opts["cell"]}"); return 2; }
                 bool Near(System.Numerics.Vector3 q) => (q.X - p.X) * (q.X - p.X) + (q.Y - p.Y) * (q.Y - p.Y) <= r * r;
-                Console.WriteLine($"{cell.EditorID} around {p} (within {r} across):");
+                // --all: every placed object of the cell, by model: how many, its collision triangles and its box (to see
+                // why a cell has nothing to walk on).
+                if (opts.ContainsKey("all"))
+                {
+                    foreach (var g in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>().Where(o => models.ContainsKey(o.Base.FormKey)).GroupBy(o => models[o.Base.FormKey].Model, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()))
+                    {
+                        var mb = finder.Find(g.Key);
+                        var tris = mb is null ? null : Skyrim.Meshes.CollisionReader.Read(mb).Triangles;
+                        var vis = mb is null ? null : Skyrim.Distant.DistantModel.Load(mb);
+                        Console.WriteLine($"  {g.Count(),4} x {g.Key}: {(mb is null ? "MODEL NOT FOUND" : $"{tris!.Count} collision triangles, visible {(vis is { Triangles: > 0 } ? $"{vis.Min.X:F0},{vis.Min.Y:F0},{vis.Min.Z:F0}..{vis.Max.X:F0},{vis.Max.Y:F0},{vis.Max.Z:F0}" : "none")}")}");
+                    }
+                    var unmodelled = cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>().Count(o => !models.ContainsKey(o.Base.FormKey));
+                    Console.WriteLine($"  {unmodelled} references to bases with no model in this plugin: {string.Join(", ", cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>().Where(o => !models.ContainsKey(o.Base.FormKey)).GroupBy(o => o.Base.FormKey).Select(g => $"{g.Key} ({names.GetValueOrDefault(g.Key, "?")}) x{g.Count()}"))}");
+                    return 0;
+                }                Console.WriteLine($"{cell.EditorID} around {p} (within {r} across):");
                 foreach (var refr in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>())
                 {
                     if (refr.Placement is not { } pl || !models.TryGetValue(refr.Base.FormKey, out var mm)) continue;
