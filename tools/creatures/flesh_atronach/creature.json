@@ -1,4 +1,5 @@
 {
+  "dfMonster": 37,
   "source": "source/troll.blend",
   "armature": "Armature",
   "meshes": [
@@ -8,7 +9,6 @@
     "cloth.001"
   ],
   "height": 270,
-  "template": "atronachfrost",
   "name": "Flesh Atronach",
   "actions": {
     "walk": "ArmatureAction"

@@ -80,6 +80,134 @@ public static class MwCreatureSource
                 return Looping.Contains(x.Clip) && g.Loops ? (x.Clip, x.Group!, g.LoopStart, g.LoopStop) : (x.Clip, x.Group!, g.Start, g.Stop);
             }).ToList();
 
+    /// <summary>A .kf a creature's clips come from: its own (x&lt;model&gt;.kf) and, for a biped, the humanoid one
+    /// (meshes\xbase_anim.kf) under it, as Morrowind loads them (the own file's groups win).</summary>
+    public sealed record ClipSource(string Path, NiTextKeyExtraData? Keys, Dictionary<string, NiKeyframeData> Tracks, Dictionary<string, GroupTimes> Groups);
+
+    /// <summary>One of our clips: the source and group it comes from, its time span there, and the text key marking the
+    /// moment its blow lands ("Attack1: Hit", "WeaponOneHand: Chop Hit"; null for none).</summary>
+    public sealed record ClipPlan(string Clip, int Source, string Group, float Start, float Stop, string? HitKey, string HitEvent = "HitFrame", string? AttachKey = null);
+
+    public const string HumanoidKf = @"meshes\xbase_anim.kf";
+
+    public static List<ClipSource> Sources(Tes3Data data, string model, bool biped)
+    {
+        model = model.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
+        var paths = new List<string> { Path.Combine(Path.GetDirectoryName(model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf") };
+        if (biped) paths.Add(HumanoidKf);
+        var result = new List<ClipSource>();
+        foreach (var p in paths)
+            if (data.Read(p) is { } bytes)
+            {
+                var (keys, tracks) = ReadKf(Nif4.Read(bytes, p));
+                result.Add(new ClipSource(p, keys, tracks, Groups(keys)));
+            }
+        return result;
+    }
+
+    /// <summary>A weapon style: its letters in our clip names, Morrowind's attack group, its idle, walk and run groups, and
+    /// its attacks (each a part of the attack group: "&lt;Kind&gt; Start" .. its follow-through's stop, landing at
+    /// "&lt;Kind&gt; Hit", or a shot's "Release").</summary>
+    public sealed record WeaponStyle(string Key, string Group, string Idle, string Walk, string Run, string[] Kinds);
+
+    public static readonly WeaponStyle[] WeaponStyles =
+    [
+        new("hh", "HandToHand", "Idlehh", "WalkForwardhh", "RunForwardhh", ["Chop", "Slash", "Thrust"]),
+        new("1h", "WeaponOneHand", "Idle1h", "WalkForward1h", "RunForward1h", ["Chop", "Slash", "Thrust"]),
+        new("2c", "WeaponTwoHand", "Idle2c", "WalkForward2c", "RunForward2c", ["Chop", "Slash", "Thrust"]),
+        new("2w", "WeaponTwoWide", "Idle2w", "WalkForward2w", "RunForward2w", ["Chop", "Slash", "Thrust"]),
+        new("bow", "BowAndArrow", "Idle1h", "WalkForward1h", "RunForward1h", ["Shoot"]),
+        new("xbow", "Crossbow", "IdleCrossbow", "WalkForward1h", "RunForward1h", ["Shoot"]),
+        new("throw", "ThrowWeapon", "Idle1h", "WalkForward1h", "RunForward1h", ["Shoot"]),
+    ];
+
+    /// <summary>Whether the creatures drawn with <paramref name="model"/> are bipeds (FLAG 0x01: Morrowind gives them the
+    /// humanoid animations) and the weapon styles their inventories hold (leveled lists opened; none: hand to hand).</summary>
+    public static (bool Biped, List<string> Styles) Kind(MwWorld world, string model)
+    {
+        var creatures = CreaturesWith(world, model);
+        bool biped = creatures.Any(c => ((c.Get("FLAG")?.Int() ?? 0) & 0x01) != 0);
+        if (!biped) return (false, []);
+        var styles = new HashSet<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Collect(string id)
+        {
+            if (!seen.Add(id) || !world.Objects.TryGetValue(id, out var r)) return;
+            if (r.Type == "WEAP" && r.Get("WPDT") is { Data.Length: >= 10 } d)
+            {
+                string? style = BitConverter.ToInt16(d.Data, 8) switch { 0 or 1 or 3 or 7 => "1h", 2 or 4 or 8 => "2c", 5 or 6 => "2w", 9 => "bow", 10 => "xbow", _ => null };   // thrown weapons are misc items in Skyrim: hand to hand
+                if (style is not null) styles.Add(style);
+            }
+            else if (r.Type == "LEVI") foreach (var f in r.All("INAM")) Collect(f.Text.TrimEnd('\0'));
+        }
+        foreach (var c in creatures)
+            foreach (var f in c.All("NPCO")) Collect(Tes3Plugin.Encoding.GetString(f.Data, 4, f.Data.Length - 4).TrimEnd('\0'));
+        if (styles.Count == 0) styles.Add("hh");
+        return (true, WeaponStyles.Select(s => s.Key).Where(styles.Contains).ToList());
+    }
+
+    /// <summary>
+    /// Every clip a creature gets and where it comes from: the plain ones (idle, walk, run, its own attacks, hit, death,
+    /// knockdown) from the first source with the group (its own .kf first); and for each weapon style it holds, that
+    /// style's idle, walk and run ("cidle_1h", "cwalk_1h", "crun_1h"), its attacks ("weapon_1h_chop" .. a shot's
+    /// "weapon_bow_shoot"), its drawing and putting away ("equip_1h", "unequip_1h": "Equip Start" .. "Equip Stop").
+    /// </summary>
+    public static List<ClipPlan> Plan(IReadOnlyList<ClipSource> sources, IReadOnlyCollection<string> styles)
+    {
+        var plan = new List<ClipPlan>();
+        ClipPlan? Whole(string clip, IEnumerable<string> candidates, bool loop, string? hit = null)
+        {
+            foreach (var c in candidates)
+                for (int s = 0; s < sources.Count; s++)
+                    if (sources[s].Groups.TryGetValue(c, out var g) && g.Whole)
+                        return loop && g.Loops ? new ClipPlan(clip, s, c, g.LoopStart, g.LoopStop, null) : new ClipPlan(clip, s, c, g.Start, g.Stop, hit is null ? null : $"{c}: {hit}");
+            return null;
+        }
+        foreach (var (clip, candidates) in Wanted)
+            if (Whole(clip, candidates, Looping.Contains(clip), clip.StartsWith("attack") ? "Hit" : null) is { } p) plan.Add(p);
+        // A part of an attack group between two of its keys, from the first source that has both.
+        ClipPlan? Part(string clip, string group, string from, string[] to, string? hit)
+        {
+            for (int s = 0; s < sources.Count; s++)
+            {
+                var keys = sources[s].Keys?.Keys ?? [];
+                float? Time(string label) => keys.Where(k => k.Text.Split('\n').Any(l => l.Trim().Equals($"{group}: {label}", StringComparison.OrdinalIgnoreCase))).Select(k => (float?)k.Time).FirstOrDefault();
+                if (Time(from) is not { } start) continue;
+                var stop = to.Select(Time).FirstOrDefault(t => t is not null && t > start);
+                if (stop is null) continue;
+                return new ClipPlan(clip, s, group, start, stop.Value, hit is null ? null : $"{group}: {hit}");
+            }
+            return null;
+        }
+        foreach (var style in WeaponStyles.Where(w => styles.Contains(w.Key)))
+        {
+            if (Whole($"cidle_{style.Key}", [style.Idle, "Idle1h", "Idle"], loop: true) is { } i) plan.Add(i);
+            if (Whole($"cwalk_{style.Key}", [style.Walk, "WalkForward1h", "WalkForward"], loop: true) is { } w) plan.Add(w);
+            if (Whole($"crun_{style.Key}", [style.Run, "RunForward1h", "RunForward"], loop: true) is { } r) plan.Add(r);
+            foreach (var kind in style.Kinds)
+            {
+                if (kind == "Shoot")
+                {
+                    // A shot as Skyrim's bow attack wants it: the draw (the arrow in hand at "Shoot Attach") up to full draw, that
+                    // pose held, and the release from there (the arrow away at "Shoot Release").
+                    if (Part($"weapon_{style.Key}_draw", style.Group, "Shoot Start", ["Shoot Max Attack"], null) is { } draw)
+                    {
+                        plan.Add(draw with { AttachKey = $"{style.Group}: Shoot Attach" });
+                        plan.Add(new ClipPlan($"weapon_{style.Key}_hold", draw.Source, draw.Group, draw.Stop, draw.Stop + 1 / Fps, null));
+                    }
+                    if (Part($"weapon_{style.Key}_release", style.Group, "Shoot Max Attack", ["Shoot Follow Stop"], "Shoot Release") is { } rel)
+                        plan.Add(rel with { HitEvent = "arrowRelease" });
+                    continue;
+                }
+                if (Part($"weapon_{style.Key}_{kind.ToLowerInvariant()}", style.Group, $"{kind} Start",
+                    [$"{kind} Large Follow Stop", $"{kind} Medium Follow Stop", $"{kind} Small Follow Stop", $"{kind} Follow Stop"], $"{kind} Hit") is { } a) plan.Add(a);
+            }
+            if (Part($"equip_{style.Key}", style.Group, "Equip Start", ["Equip Stop"], null) is { } e) plan.Add(e);
+            if (Part($"unequip_{style.Key}", style.Group, "Unequip Start", ["Unequip Stop"], null) is { } u) plan.Add(u);
+        }
+        return plan;
+    }
+
     /// <summary>Morrowind's sound generator types (SNDG DATA) by the name its animations' "SoundGen:" keys use.</summary>
     static readonly Dictionary<string, int> SoundGenTypes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -116,8 +244,13 @@ public static class MwCreatureSource
     /// its attacks' hit moments, and its speeds (<see cref="AddGameData"/>); <paramref name="id"/> names its sounds.</param>
     public static CreatureRig Build(Tes3Data data, string model, MwTextures textures, string modOutDir, List<string> problems, MwWorld? world = null, string? id = null)
     {
-        var rig = BuildBody(data, model, textures, modOutDir, problems);
-        if (world is not null && id is not null) AddGameData(rig, data, world, model, id, problems);
+        var (biped, styles) = world is not null ? Kind(world, model) : (false, []);
+        var sources = Sources(data, model, biped);
+        if (sources.Count == 0) problems.Add($"{model}: no animations (no x{Path.GetFileNameWithoutExtension(model)}.kf, not a biped)");
+        var plan = Plan(sources, styles);
+        var rig = BuildBody(data, model, textures, modOutDir, problems, sources, plan);
+        rig.WeaponStyles.AddRange(styles);
+        if (world is not null && id is not null) AddGameData(rig, data, world, model, id, problems, sources, plan);
         return rig;
     }
 
@@ -148,7 +281,7 @@ public static class MwCreatureSource
     /// walking fMinWalkSpeedCreature .. fMaxWalkSpeedCreature and running that times fBaseRunMultiplier.</item>
     /// </list>
     /// </summary>
-    static void AddGameData(CreatureRig rig, Tes3Data data, MwWorld world, string model, string id, List<string> problems)
+    static void AddGameData(CreatureRig rig, Tes3Data data, MwWorld world, string model, string id, List<string> problems, List<ClipSource> sources, List<ClipPlan> plan)
     {
         var creatures = CreaturesWith(world, model);
         if (creatures.Count == 0) { problems.Add($"{model}: no creature uses it"); return; }
@@ -171,14 +304,12 @@ public static class MwCreatureSource
             return name;
         }
 
-        // The model's .kf again for its text keys (the clips' times are the groups' or their loop parts').
-        string kfPath = Path.Combine(Path.GetDirectoryName(model.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf");
-        if (data.Read(kfPath) is { } kb)
+        // Each clip's text keys from the source it was taken from (its times are the group's, a loop part's or an attack's part).
         {
-            var (keys, _) = ReadKf(Nif4.Read(kb, kfPath));
-            foreach (var (clip, group, start, stop) in ChosenGroups(Groups(keys)))
+            foreach (var (clip, source, group, start, stop, hitKey, hitEvent, attachKey) in plan)
             {
                 if (!rig.Clips.ContainsKey(clip)) continue;
+                var keys = sources[source].Keys;
                 var events = new List<(float Time, string Text)>();
                 foreach (var (time, text) in keys?.Keys ?? [])
                 {
@@ -198,11 +329,13 @@ public static class MwCreatureSource
                         {
                             if (Sound(arg, arg) is { } name) events.Add((at, "SoundPlay." + name));
                         }
-                        else if (what.Equals(group, StringComparison.OrdinalIgnoreCase) && arg.Equals("Hit", StringComparison.OrdinalIgnoreCase) && clip.StartsWith("attack"))
+                        else if (hitKey is not null && line.Equals(hitKey, StringComparison.OrdinalIgnoreCase))
                         {
-                            events.Add((Math.Max(0, at - 0.1f), "preHitFrame"));
-                            events.Add((at, "HitFrame"));
+                            if (hitEvent == "HitFrame") events.Add((Math.Max(0, at - 0.1f), "preHitFrame"));
+                            events.Add((at, hitEvent));
                         }
+                        else if (attachKey is not null && line.Equals(attachKey, StringComparison.OrdinalIgnoreCase))
+                            events.Add((at, "arrowAttach"));
                     }
                 }
                 if (events.Count > 0) rig.Events[clip] = events.OrderBy(e => e.Time).ToList();
@@ -265,31 +398,28 @@ public static class MwCreatureSource
         return (walk, walk * Setting(world, "fBaseRunMultiplier", 1.75f));
     }
 
-    static CreatureRig BuildBody(Tes3Data data, string model, MwTextures textures, string modOutDir, List<string> problems)
+    static CreatureRig BuildBody(Tes3Data data, string model, MwTextures textures, string modOutDir, List<string> problems, List<ClipSource> sources, List<ClipPlan> plan)
     {
         model = model.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
         var nif = Nif4.Read(data.Read(model) ?? throw new FileNotFoundException(model), model);
-        string kfPath = Path.Combine(Path.GetDirectoryName(model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf");
-        var kf = data.Read(kfPath) is { } kb ? Nif4.Read(kb, kfPath) : null;
-        if (kf is null) problems.Add($"{model}: no {kfPath}");
 
         var root = nif.Root as NiNode ?? throw new InvalidDataException($"{model}: no root node");
         // Nodes parents-first; shapes and collision left out of the skeleton.
         var parent = new Dictionary<int, int>();
         var order = new List<NiNode>();
-        var queue = new Queue<NiNode>();
-        queue.Enqueue(root);
-        while (queue.Count > 0)
+        // Depth first, children in order: the order Morrowind's engine meets them in, so of two nodes with one name the first
+        // here is the one its animation tracks drive (Almalexia's two "Dummy07": breadth first took the other, 80 units off).
+        void Walk(NiNode n)
         {
-            var n = queue.Dequeue();
             foreach (int c in n.Children)
                 if (nif.Get<NiNode>(c) is { } child && child is not NiTriShape && child.Type != "RootCollisionNode")
                 {
                     parent[child.Index] = n.Index;
                     order.Add(child);
-                    queue.Enqueue(child);
+                    Walk(child);
                 }
         }
+        Walk(root);
         var world = new Dictionary<int, NifTransform> { [root.Index] = root.Transform };
         foreach (var n in order) world[n.Index] = n.Transform.Then(world[parent[n.Index]]);
 
@@ -304,12 +434,31 @@ public static class MwCreatureSource
             var local = p == root.Index ? n.Transform.Then(root.Transform) : n.Transform;
             boneOf[n.Index] = rig.Bones.Count;
             // Skyrim binds bones by name: a repeated name (Morrowind's "Dummy15" twice) gets a number.
-            string name = n.Name;
-            for (int k = 2; rig.Bones.Any(b => b.Name == name); k++) name = $"{n.Name} {k}";
+            // Skyrim binds bones by name, and a name with a control character (the lich king's "Liche_thigh_left" ends in a tab)
+            // doesn't survive the skeleton's files: such characters and the ends' spaces go.
+            string name = BoneName(n.Name);
+            string bare = name;
+            for (int k = 2; rig.Bones.Any(b => b.Name == name); k++) name = $"{bare} {k}";
             rig.Bones.Add(new CreatureRig.Bone(name, p == root.Index ? 0 : boneOf[p], local.Translation, Rot(local.Rotation)));
             restLocal.Add(local);
             if (MathF.Abs(n.Transform.Scale - 1) > 1e-3f) problems.Add($"{model}: bone {n.Name} scale {n.Transform.Scale} (taken as 1)");
         }
+        // Where Skyrim hangs a held weapon and shield: exactly on Morrowind's "Weapon Bone" and "Shield Bone" (both games'
+        // weapons point along +Y from the grip: `weapon-frames`). Sheathed weapons Morrowind never shows: Skyrim's sheath
+        // nodes are there, hidden (scale 0), so a weapon put away is out of sight as in Morrowind.
+        foreach (var (node, holder) in new[] { ("WEAPON", "Weapon Bone"), ("SHIELD", "Shield Bone") })
+            if (rig.Bones.FindIndex(b => b.Name == holder) is > 0 and var hi && !rig.Bones.Any(b => b.Name == node))
+            {
+                rig.Bones.Add(new CreatureRig.Bone(node, hi, Vector3.Zero, Quaternion.Identity));
+                restLocal.Add(NifTransform.Identity);
+            }
+        if (rig.Bones.Any(b => b.Name == "WEAPON"))
+            foreach (var sheath in new[] { "WeaponSword", "WeaponDagger", "WeaponAxe", "WeaponMace", "WeaponBack", "WeaponBow", "QUIVER", "WeaponStaff" })
+            {
+                rig.HiddenBones.Add(rig.Bones.Count);
+                rig.Bones.Add(new CreatureRig.Bone(sheath, 0, Vector3.Zero, Quaternion.Identity));
+                restLocal.Add(NifTransform.Identity);
+            }
 
         // Meshes: skinned shapes from their bind, the rest riding their parent node.
         var shapeParent = new Dictionary<int, int>();
@@ -382,23 +531,25 @@ public static class MwCreatureSource
             rig.Meshes.Add(new CreatureRig.Mesh(shape.Name.Length > 0 ? shape.Name : $"shape{shape.Index}", v, nrm, uv, weights, tris, tex, skinToBone));
         }
 
-        // Animations from the .kf: controllers in order, each named by the next string extra data after the text keys.
-        if (kf is not null && kf.Root is NiObjectNET)
+        // Animations, clip by clip from the source the plan names (its own .kf, or the humanoid one under a biped): each source's
+        // tracks by the model's node name (the first node of that name, as Morrowind binds them).
+        var tracksBySource = sources.Select(src =>
         {
-            var (keys, byName) = ReadKf(kf);
-            // By the model's node name (the first node of that name, as Morrowind binds them).
-            var tracks = new Dictionary<int, NiKeyframeData>();
-            foreach (var (name, kd) in byName)
-                if (order.FirstOrDefault(n => n.Name == name) is { } node && boneOf.TryGetValue(node.Index, out int bi)) tracks[bi] = kd;
-            foreach (var kd in tracks.Values.Where(kd => kd.RotationType == 4).Take(1))
-                problems.Add($"{model}: a track with per-axis rotation keys (not carried)");
-            // Scale keys (the Heart of Akulakhan's beat, a riekling's) are carried, frame by frame.
-            bool scaled = tracks.Values.Any(kd => kd.Scales.Any(s => MathF.Abs(s.Value.X - 1) > 1e-4f));
-            int movementRoot = MovementRoots.Select(m => rig.Bones.FindIndex(b => b.Name.Equals(m, StringComparison.OrdinalIgnoreCase))).FirstOrDefault(i => i > 0, -1);
-            var groups = Groups(keys);
-            foreach (var (clip, _, start, stop) in ChosenGroups(groups))
+            var t = new Dictionary<int, NiKeyframeData>();
+            foreach (var (name, kd) in src.Tracks)
+                if (order.FirstOrDefault(n => n.Name == name) is { } node && boneOf.TryGetValue(node.Index, out int bi)) t[bi] = kd;
+            return t;
+        }).ToList();
+        foreach (var kd in tracksBySource.SelectMany(t => t.Values).Where(kd => kd.RotationType == 4).Take(1))
+            problems.Add($"{model}: a track with per-axis rotation keys (not carried)");
+        int movementRoot = MovementRoots.Select(m => rig.Bones.FindIndex(b => b.Name.Equals(m, StringComparison.OrdinalIgnoreCase))).FirstOrDefault(i => i > 0, -1);
+        {
+            foreach (var (clip, source, _, start, stop, _, _, _) in plan)
             {
                 if (rig.Clips.ContainsKey(clip)) continue;
+                var tracks = tracksBySource[source];
+                // Scale keys (the Heart of Akulakhan's beat, a riekling's) are carried, frame by frame.
+                bool scaled = tracks.Values.Any(kd => kd.Scales.Any(s => MathF.Abs(s.Value.X - 1) > 1e-4f)) || restLocal.Any(r => MathF.Abs(r.Scale - 1) > 1e-4f) || rig.HiddenBones.Count > 0;
                 int frames = Math.Max(2, (int)MathF.Round((stop - start) * Fps) + 1);
                 var clipFrames = new (Vector3, Quaternion)[frames][];
                 var clipScales = scaled ? new float[frames][] : null;
@@ -413,7 +564,7 @@ public static class MwCreatureSource
                     {
                         var rest = restLocal[b];
                         var tr = rest.Translation; var q = Rot(rest.Rotation);
-                        float s = 1;
+                        float s = rest.Scale;
                         if (tracks.TryGetValue(b, out var kd))
                         {
                             if (kd.Translations.Count > 0) tr = Sample(kd.Translations, t, Vector3.Lerp);
@@ -425,12 +576,13 @@ public static class MwCreatureSource
                             if (kd.Rotations.Count > 0) q = Sample(kd.Rotations, t, Quaternion.Slerp);
                             if (kd.Scales.Count > 0) s = Sample(kd.Scales, t, Vector3.Lerp).X;
                             // Keys are relative to the node's parent; under the model root they carry its transform too.
-                            if (rig.Bones[b].Parent == 0)
+                            if (rig.Bones[b].Parent == 0 && !rig.HiddenBones.Contains(b))
                             {
                                 var lt = new NifTransform(Matrix(q), tr, s).Then(root.Transform);
                                 tr = lt.Translation; q = Rot(lt.Rotation); s = lt.Scale;
                             }
                         }
+                        if (rig.HiddenBones.Contains(b)) s = 0;
                         pose[b] = (tr, q);
                         scales[b] = s;
                     }
@@ -439,7 +591,7 @@ public static class MwCreatureSource
                 }
                 rig.Clips[clip] = new CreatureRig.Clip(Fps, clipFrames, clipScales);
             }
-            if (rig.Clips.Count == 0) problems.Add($"{model}: no animation groups found ({string.Join(", ", groups.Keys.Take(12))})");
+            if (rig.Clips.Count == 0) problems.Add($"{model}: no animation groups found ({string.Join(", ", sources.SelectMany(s => s.Groups.Keys).Take(12))})");
         }
         return rig;
     }
@@ -457,6 +609,9 @@ public static class MwCreatureSource
     }
 
     /// <summary>A NIF transform (p' = T + s·R·p) as a row-vector matrix (p' = p·M).</summary>
+    /// <summary>A Morrowind node's name as a Skyrim bone's: control characters out, the ends' spaces trimmed.</summary>
+    public static string BoneName(string name) => new string(name.Where(c => !char.IsControl(c)).ToArray()).Trim();
+
     internal static Matrix4x4 RowMatrix(NifTransform t)
     {
         var r = t.Rotation; float s = t.Scale;

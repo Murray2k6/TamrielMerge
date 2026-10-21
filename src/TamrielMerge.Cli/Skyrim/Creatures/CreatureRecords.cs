@@ -132,17 +132,20 @@ public sealed class CreatureRecords
         // Its own sounds.
         string soundDir = Path.Combine(dataDir, CreatureRig.SoundFolder(id));
         if (Directory.Exists(soundDir))
-            foreach (var wav in Directory.GetFiles(soundDir, "*.wav").Order(StringComparer.OrdinalIgnoreCase))
+            // One descriptor per sound name; "Name#1", "Name#2"... are its files, one picked at random each time it plays (a
+            // Daggerfall creature's attract sound: four barks and a move for its 80 / 20, silences for how often).
+            foreach (var group in Directory.GetFiles(soundDir, "*.wav").Order(StringComparer.OrdinalIgnoreCase).GroupBy(f => Path.GetFileNameWithoutExtension(f).Split('#')[0], StringComparer.OrdinalIgnoreCase))
             {
                 var sd = new SoundDescriptor(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
                 {
-                    EditorID = Path.GetFileNameWithoutExtension(wav),
+                    EditorID = group.Key,
                     Type = SoundDescriptor.DescriptorType.Standard,
                     Category = Vanilla<ISoundCategoryGetter>("AudioCategorySFX").ToNullableLink(),
                     OutputModel = Vanilla<ISoundOutputModelGetter>("SOMMono03000").ToNullableLink(),
                     Priority = 128,
                 };
-                sd.SoundFiles.Add(new Mutagen.Bethesda.Plugins.Assets.AssetLink<Mutagen.Bethesda.Skyrim.Assets.SkyrimSoundAssetType>(Path.GetRelativePath(Path.Combine(dataDir, "sound"), wav)));
+                foreach (var wav in group)
+                    sd.SoundFiles.Add(new Mutagen.Bethesda.Plugins.Assets.AssetLink<Mutagen.Bethesda.Skyrim.Assets.SkyrimSoundAssetType>(Path.GetRelativePath(Path.Combine(dataDir, "sound"), wav)));
                 mod.SoundDescriptors.Add(sd);
             }
 
@@ -230,7 +233,19 @@ public sealed class CreatureRecords
         race.EquipmentSlots.Add(Vanilla<IEquipTypeGetter>("RightHand").ToLink());
         race.BipedObjectNames[BipedObject.Body] = "BODY";
         race.Keywords = [.. KindKeywords(raceStats.Kind).Select(k => Vanilla<IKeywordGetter>(k).ToLink())];
-        foreach (var attack in CreatureGraph.AttackEvents(Directory.GetFiles(Path.Combine(dataDir, CreatureRig.MeshFolder(id), "animations"), "*.hkx").Select(Path.GetFileNameWithoutExtension).OfType<string>()))
+        // One that fights with weapons (Morrowind's dremora, skeletons, liches...): both hands, a shield on its SHIELD node, any
+        // weapon its inventory gives it, as Skyrim's armed creatures (the draugr) have; aiming while it draws a bow.
+        var clipNames = Directory.GetFiles(Path.Combine(dataDir, CreatureRig.MeshFolder(id), "animations"), "*.hkx").Select(Path.GetFileNameWithoutExtension).OfType<string>().ToList();
+        if (clipNames.Any(c => c.StartsWith("weapon_", StringComparison.OrdinalIgnoreCase)))
+        {
+            race.EquipmentSlots.Add(Vanilla<IEquipTypeGetter>("LeftHand").ToLink());
+            race.UnarmedEquipSlot = Vanilla<IEquipTypeGetter>("EitherHand").ToNullableLink();
+            race.EquipmentFlags = (EquipTypeFlag)Enum.ToObject(typeof(EquipTypeFlag), -6401L);
+            race.ShieldBipedObject = BipedObject.Shield;
+            race.BipedObjectNames[BipedObject.Shield] = "SHIELD";
+            if (clipNames.Any(c => c.EndsWith("_draw", StringComparison.OrdinalIgnoreCase))) race.Keywords.Add(Vanilla<IKeywordGetter>("UpdateDuringArchery").ToLink());
+        }
+        foreach (var attack in CreatureGraph.AttackEvents(clipNames))
             race.Attacks.Add(new Attack
             {
                 AttackEvent = attack,

@@ -1,0 +1,8 @@
+{
+  "dfMonster": 33,
+  "sameAs": "lich",
+  "name": "Ancient Lich",
+  "actors": [
+    "DFCreatureAncientLich"
+  ]
+}

@@ -45,9 +45,18 @@ public sealed class CreatureGraph
         Attacks.AddRange(AttackList(rig.Clips.Keys));
     }
 
-    /// <summary>The attacks a creature with these clips has: each "attack…" clip (in order) on attackStart_Attack1, 2...</summary>
-    public static List<(string Event, string Clip)> AttackList(IEnumerable<string> clips) =>
-        clips.Where(c => c.StartsWith("attack", StringComparison.OrdinalIgnoreCase)).Select(c => c.ToLowerInvariant()).OrderBy(c => c, StringComparer.Ordinal).Select((c, i) => ($"attackStart_Attack{i + 1}", c)).ToList();
+    static readonly string[] MeleeKinds = ["chop", "slash", "thrust"];
+
+    /// <summary>The attacks a creature with these clips has: each "attack…" clip (in order) on attackStart_Attack1, 2...; for one
+    /// that fights with weapons ("weapon_&lt;style&gt;_&lt;kind&gt;" clips), each kind of blow any of its styles has (chop, slash,
+    /// thrust), its clip then "weapon:&lt;kind&gt;" (the graph picks the style by the weapon in hand).</summary>
+    public static List<(string Event, string Clip)> AttackList(IEnumerable<string> clips)
+    {
+        var list = clips.Select(c => c.ToLowerInvariant()).ToList();
+        if (list.Any(c => c.StartsWith("weapon_")))
+            return MeleeKinds.Where(k => list.Any(c => c.StartsWith("weapon_") && c.EndsWith("_" + k))).Select((k, i) => ($"attackStart_Attack{i + 1}", "weapon:" + k)).ToList();
+        return list.Where(c => c.StartsWith("attack")).OrderBy(c => c, StringComparer.Ordinal).Select((c, i) => ($"attackStart_Attack{i + 1}", c)).ToList();
+    }
 
     public static IEnumerable<string> AttackEvents(IEnumerable<string> clips) => AttackList(clips).Select(a => a.Event);
 
@@ -105,6 +114,44 @@ public sealed class CreatureGraph
         return g;
     }
 
+    /// <summary>
+    /// A clip picked by the weapon in its right hand, as Skyrim's armed creatures pick theirs (a manual selector on
+    /// iRightHandType: 0 hand to hand, 1 sword, 2 dagger, 3 war axe, 4 mace, 5 greatsword, 6 battleaxe or warhammer, 7 bow,
+    /// as the draugr's graph has them; 8 staff; 9 and up the rest): that type's style among the creature's, else the
+    /// nearest it has, else <paramref name="fallback"/>.
+    /// </summary>
+    hkbGenerator ByWeapon(string name, Func<string, string> clipFor, string fallback, bool loop, string? endEvent)
+    {
+        string Pick(int type)
+        {
+            string[] wanted = type switch
+            {
+                0 => ["hh"], 1 or 2 or 3 or 4 or 10 => ["1h"], 5 => ["2c"], 6 => ["2c", "2w"], 7 => ["bow", "xbow"], 8 => ["2w"], 9 or 11 or 12 => ["xbow", "bow"], _ => ["hh"],
+            };
+            foreach (var s in wanted.Concat(["1h", "2c", "2w", "hh", "bow", "xbow"]))
+                if (rig.WeaponStyles.Contains(s) && rig.Clips.ContainsKey(clipFor(s))) return clipFor(s);
+            return fallback;
+        }
+        var made = new Dictionary<string, hkbGenerator>();
+        var children = new List<hkbGenerator>();
+        for (int type = 0; type <= 12; type++)
+        {
+            string clip = Pick(type);
+            if (!made.TryGetValue(clip, out var g)) made[clip] = g = ClipGen($"{name}_{clip}", clip, loop, endEvent);
+            children.Add(g);
+        }
+        return new hkbManualSelectorGenerator
+        {
+            m_name = name,
+            m_generators = children,
+            m_variableBindingSet = new hkbVariableBindingSet
+            {
+                m_indexOfBindingToEnable = -1,
+                m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "selectedGeneratorIndex", m_variableIndex = Var("iRightHandType", 3), m_bitIndex = -1 }],
+            },
+        };
+    }
+
     /// <summary>A generator with the named bool variables true while it plays (BSIsActiveModifier, as vanilla's).</summary>
     hkbGenerator While(hkbGenerator g, string name, params string[] flags)
     {
@@ -144,13 +191,14 @@ public sealed class CreatureGraph
         // The variables the engine reads and writes (every vanilla creature graph has them).
         foreach (var b in new[] { "bAnimationDriven", "IsAttackReady", "bEquipOK", "bAllowRotation", "IsRecoiling", "IsStaggering", "IsAttacking", "bHeadTrackingOn", "bHeadTracking" })
             Var(b);
-        Var("iSyncIdleLocomotion", 3); Var("iState", 3); Var("iSyncTurnState", 3, 1);
+        Var("iSyncIdleLocomotion", 3); Var("iState", 3); Var("iSyncTurnState", 3, 1); Var("iRightHandType", 3);
         Var("Direction", 4); Var("Speed", 4); Var("TurnDelta", 4); Var("staggerMagnitude", 4, Real(1));
         // The events the engine sends and listens for (the same).
         foreach (var e in new[] { "moveStart", "moveStop", "preHitFrame", "HitFrame", "weaponDraw", "weaponSheathe", "weapEquip", "weapUnequip", "weapEquipOut", "weapUnequipOut",
             "attackStop", "weaponSwing", "recoilStart", "recoilStop", "recoilLargeStart", "staggerStart", "staggerStop", "staggerForwardStart", "turnLeft", "turnRight", "turnStop",
             "GetUpStart", "GetUpEnd", "GetUpBegin", "Getup", "Ragdoll", "RagdollInstant", "DeathAnimation", "AddCharacterControllerToWorld", "RemoveCharacterControllerFromWorld",
-            "Reanimated", "AddRagdollToWorld", "IdleStop", "SoundPlay", "returnToDefault", "PickNewIdle" })
+            "Reanimated", "AddRagdollToWorld", "IdleStop", "SoundPlay", "returnToDefault", "PickNewIdle",
+            "bowAttackStart", "bowDrawn", "attackRelease", "BowRelease", "bowReset", "arrowAttach", "arrowRelease" })
             Ev(e);
 
         string idle = Clip("idle"), walk = Clip("walk", "run"), run = Clip("run", "walk"), hit = Clip("hit", "idle"), death = Clip("death", "idle");
@@ -162,23 +210,55 @@ public sealed class CreatureGraph
             State(1, "Walk", ClipGen("Walk", walk, loop: true), [To("moveStop", 0)]),
         ]);
 
-        // In combat: each attack is its own state, entered from idle or moving on its event.
+        // In combat: each attack is its own state, entered from idle or moving on its event. A creature with weapons plays its
+        // held weapon's style (its idle, run, blows, drawing and putting away) by the engine's iRightHandType, as Skyrim's own
+        // armed creatures do; a bow's shot is the engine's draw / hold / release (bowAttackStart, bowDrawn, attackRelease).
+        bool styled = rig.WeaponStyles.Count > 0;
+        string? bowStyle = rig.WeaponStyles.FirstOrDefault(s => s is "bow" or "xbow" && rig.Clips.ContainsKey($"weapon_{s}_draw") && rig.Clips.ContainsKey($"weapon_{s}_release"));
         var combatStates = new List<hkbStateMachineStateInfo>();
         var attackTransitions = Attacks.Select((a, i) => (a.Event, State: 2 + i)).ToList();
-        combatStates.Add(State(0, "CombatIdle", While(ClipGen("CombatIdle", idle, loop: true), "CombatIdle", "IsAttackReady"),
+        if (bowStyle is not null) attackTransitions.Add(("bowAttackStart", 10));
+        hkbGenerator Gen(string name, string clip, bool loop, string? end = null, Func<string, string>? styleClip = null) =>
+            styled && styleClip is not null ? ByWeapon(name, styleClip, clip, loop, end) : ClipGen(name, clip, loop, end);
+        combatStates.Add(State(0, "CombatIdle", While(Gen("CombatIdle", idle, true, null, s => $"cidle_{s}"), "CombatIdle", "IsAttackReady"),
             [To("moveStart", 1), .. attackTransitions.Select(a => To(a.Event, a.State))]));
-        combatStates.Add(State(1, "CombatRun", While(ClipGen("CombatRun", run, loop: true), "CombatRun", "IsAttackReady"),
+        combatStates.Add(State(1, "CombatRun", While(Gen("CombatRun", run, true, null, s => $"crun_{s}"), "CombatRun", "IsAttackReady"),
             [To("moveStop", 0), .. attackTransitions.Select(a => To(a.Event, a.State))]));
         for (int i = 0; i < Attacks.Count; i++)
-            combatStates.Add(State(2 + i, $"Attack{i + 1}", While(ClipGen($"Attack{i + 1}", Attacks[i].Clip, loop: false, endEvent: "attackStop"), $"Attack{i + 1}", "IsAttacking", "bAllowRotation"),
-                [To("attackStop", 0)]));
+        {
+            string clip = Attacks[i].Clip;
+            var gen = clip.StartsWith("weapon:")
+                ? ByWeapon($"Attack{i + 1}", s => $"weapon_{s}_{clip[7..]}", idle, loop: false, endEvent: "attackStop")
+                : ClipGen($"Attack{i + 1}", clip, loop: false, endEvent: "attackStop");
+            combatStates.Add(State(2 + i, $"Attack{i + 1}", While(gen, $"Attack{i + 1}", "IsAttacking", "bAllowRotation"), [To("attackStop", 0)]));
+        }
+        if (bowStyle is not null)
+        {
+            var shot = Machine("TMBowShot", 0,
+            [
+                State(0, "BowDraw", ClipGen("BowDraw", $"weapon_{bowStyle}_draw", loop: false, endEvent: "bowDrawn"), [To("bowDrawn", 1)]),
+                State(1, "BowDrawn", ClipGen("BowHold", $"weapon_{bowStyle}_hold", loop: true), [To("attackRelease", 2)]),
+                State(2, "BowRelease", ClipGen("BowRelease", $"weapon_{bowStyle}_release", loop: false, endEvent: "attackStop"), enterEvents: [Ev("BowRelease")]),
+            ]);
+            combatStates.Add(State(10, "BowAttack", While(shot, "BowAttack", "IsAttacking", "bAllowRotation"), [To("attackStop", 0)], exitEvents: [Ev("bowReset")]));
+        }
         var combat = Machine("TMCombat", 0, combatStates);
 
-        // Drawing and sheathing (the engine waits for weaponDraw before it attacks).
-        var equip = ClipGen("Equip", idle, loop: false);
-        equip.m_triggers = new hkbClipTriggerArray { m_triggers = [new hkbClipTrigger { m_localTime = 0.1f, m_event = new hkbEventProperty { m_id = Ev("weapEquipOut") } }] };
-        var unequip = ClipGen("Unequip", idle, loop: false);
-        unequip.m_triggers = new hkbClipTriggerArray { m_triggers = [new hkbClipTrigger { m_localTime = 0.1f, m_event = new hkbEventProperty { m_id = Ev("weapUnequipOut") } }] };
+        // Drawing and sheathing (the engine waits for weaponDraw before it attacks): a weapon's own drawing and putting away.
+        hkbGenerator equip, unequip;
+        if (styled)
+        {
+            equip = ByWeapon("Equip", s => $"equip_{s}", idle, loop: false, endEvent: "weapEquipOut");
+            unequip = ByWeapon("Unequip", s => $"unequip_{s}", idle, loop: false, endEvent: "weapUnequipOut");
+        }
+        else
+        {
+            var e = ClipGen("Equip", idle, loop: false);
+            e.m_triggers = new hkbClipTriggerArray { m_triggers = [new hkbClipTrigger { m_localTime = 0.1f, m_event = new hkbEventProperty { m_id = Ev("weapEquipOut") } }] };
+            var u = ClipGen("Unequip", idle, loop: false);
+            u.m_triggers = new hkbClipTriggerArray { m_triggers = [new hkbClipTrigger { m_localTime = 0.1f, m_event = new hkbEventProperty { m_id = Ev("weapUnequipOut") } }] };
+            equip = e; unequip = u;
+        }
 
         var baseMachine = Machine("TMBase", 0,
         [

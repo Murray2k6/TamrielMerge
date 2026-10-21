@@ -548,7 +548,8 @@ static class Program
                             string cid = Path.GetFileName(cdir), gamePlugin;
                             using (var cfg = System.Text.Json.JsonDocument.Parse(File.ReadAllText(cfgPath)))
                                 gamePlugin = Skyrim.Creatures.CreatureRecords.GamePlugin(cfg.RootElement.TryGetProperty("game", out var cg) ? cg.GetString() : null);
-                            if (!plugins.Contains(gamePlugin)) continue;
+                            // Morrowind's are all built together below (every model its creatures are drawn with).
+                            if (!plugins.Contains(gamePlugin) || gamePlugin == "Morrowind.esm") continue;
                             string[] buildArgs = opts.ContainsKey("gpu") ? ["creature-build", "--creature", cid, "--out", outDir] : ["creature-build", "--creature", cid, "--out", outDir, "--no-remaster"];
                             try
                             {
@@ -557,10 +558,23 @@ static class Program
                             }
                             catch (Exception e) { Console.WriteLine($"Creature model {cid}: failed: {e.Message}"); failed.Add($"creature model {cid}"); }
                         }
-                        if (builtCreatures.Count > 0)
+                        // Every Morrowind creature as itself (user, 2026-10-21: "all creatures"): each model its creatures are drawn
+                        // with, its configs' and the rest, in one run (the game's records loaded once).
+                        bool morrowindCreatures = false;
+                        if (plugins.Contains("Morrowind.esm"))
+                            try
+                            {
+                                int rc = Main(opts.ContainsKey("gpu") ? ["creature-build", "--all-morrowind", "--out", outDir] : ["creature-build", "--all-morrowind", "--out", outDir, "--no-remaster"]);
+                                morrowindCreatures = true;
+                                if (rc != 0) failed.Add("some Morrowind creature models");
+                            }
+                            catch (Exception e) { Console.WriteLine($"Morrowind creature models: failed: {e.Message}"); failed.Add("Morrowind creature models"); }
+                        if (builtCreatures.Count > 0 || morrowindCreatures)
                         {
                             var gamePaths = plugins.Where(p => p is "Daggerfall.esm" or "Redguard.esm" or "Morrowind.esm" or "Oblivion.esm").Select(p => Path.Combine(outDir, p));
-                            if (Main(["creature-plugin", "--creatures", string.Join(",", builtCreatures), "--plugins", string.Join(";", gamePaths), "--out", outDir]) == 0)
+                            string[] pluginArgs = ["creature-plugin", .. builtCreatures.Count > 0 ? new[] { "--creatures", string.Join(",", builtCreatures) } : [], .. morrowindCreatures ? new[] { "--all-morrowind" } : [],
+                                "--plugins", string.Join(";", gamePaths), "--out", outDir];
+                            if (Main(pluginArgs) == 0)
                             {
                                 foreach (var gp in new[] { "Daggerfall.esm", "Redguard.esm", "Morrowind.esm", "Oblivion.esm" }.Select(Skyrim.Creatures.CreatureRecords.PluginFor))
                                     if (File.Exists(Path.Combine(outDir, gp))) plugins.Add(gp);
@@ -10806,6 +10820,14 @@ static class Program
                                 if (code != 0 || !File.Exists(exported)) { Console.WriteLine($"{id}: export failed ({code})"); failedCreatures.Add(id); continue; }
                             }
                             rig = Skyrim.Creatures.CreatureRig.Load(exported);
+                            // A Daggerfall creature (config "dfMonster"): its own sounds, blow timing and pace from the game.
+                            if (spec.DfMonster is int dfId)
+                            {
+                                var problems = new List<string>();
+                                if (Daggerfall.DfMonsters.All.TryGetValue(dfId, out var monster)) Skyrim.Creatures.DfCreatureSource.Apply(rig, monster, arena2, id, problems);
+                                else problems.Add($"no Daggerfall monster {dfId}");
+                                foreach (var pr in problems) Console.WriteLine($"  {id} problem: " + pr);
+                            }
                             rig.EnsureDeath();   // a fall for models without a death of their own
                             var files = rig.Write(outDir, id);
                             files.AddRange(WriteBehaviour(spec, rig));
@@ -10998,6 +11020,29 @@ static class Program
                         clips = string.Join(",", Skyrim.Creatures.MwCreatureSource.ChosenGroups(Skyrim.Creatures.MwCreatureSource.Groups(keys)).Select(c => c.Clip));
                     }
                     string f = $"{((flags & 1) != 0 ? "biped " : "")}{((flags & 4) != 0 ? "weapon " : "")}{((flags & 0x10) != 0 ? "swims " : "")}{((flags & 0x20) != 0 ? "flies " : "")}{((flags & 0x40) != 0 ? "walks" : "")}";
+                    // What the converter leaves out of the body, and the vertices on more than four bones (Skyrim's limit).
+                    if (nifBytes is not null)
+                    {
+                        var mn = Morrowind.Nif4.Read(nifBytes, model);
+                        var held = new HashSet<int>();
+                        foreach (var b in mn.Blocks.OfType<Morrowind.NiNode>()) foreach (int c in b.Children) held.Add(c);
+                        var tri = mn.Blocks.OfType<Morrowind.NiTriShape>().ToList();
+                        int V(Morrowind.NiTriShape s) => mn.Get<Morrowind.NiGeometryData>(s.Data)?.Vertices.Length ?? 0;
+                        var hidden = tri.Where(s => s is not Morrowind.NiParticles && s.Hidden).ToList();
+                        var particles = tri.Where(s => s is Morrowind.NiParticles).ToList();
+                        var orphan = tri.Where(s => s is not Morrowind.NiParticles && !s.Hidden && !held.Contains(s.Index)).ToList();
+                        int overFour = 0;
+                        foreach (var s in tri.Where(s => s is not Morrowind.NiParticles && !s.Hidden))
+                            if (mn.Get<Morrowind.NiSkinInstance>(s.Skin) is { } si && mn.Get<Morrowind.NiSkinData>(si.Data) is { } sd)
+                                overFour += sd.Bones.SelectMany(b => b.Weights.Where(w => w.Weight > 0).Select(w => w.Vertex)).GroupBy(v => v).Count(g => g.Count() > 4);
+                        int kept = tri.Except(hidden).Except(particles).Except(orphan).Sum(V);
+                        // Every controller animating something in the model and in its .kf, by type (and, for visibility, what it shows).
+                        var ctrl = mn.Blocks.OfType<Morrowind.NiController>().GroupBy(c => c.Type).Select(c => $"{c.Key} {c.Count()}");
+                        var kfCtrl = kfBytes is null ? [] : Morrowind.Nif4.Read(kfBytes, kf).Blocks.OfType<Morrowind.NiController>().GroupBy(c => c.Type).Select(c => $"{c.Key} {c.Count()}");
+                        var visTargets = mn.Blocks.OfType<Morrowind.NiController>().Where(c => c.Type == "NiVisController").Select(c => mn.Get<Morrowind.NiObjectNET>(c.Target)?.Name.Trim() ?? "?");
+                        f += $" | nif controllers: {string.Join(", ", ctrl)}; kf controllers: {string.Join(", ", kfCtrl)}; visibility on: {string.Join(";", visTargets)}";
+                        f += $" | kept {kept} vertices; left out: hidden {hidden.Count} ({hidden.Sum(V)} v: {string.Join(";", hidden.Select(s => s.Name.Trim()))}), particles {particles.Count}, unattached {orphan.Count}; >4 bones {overFour}";
+                    }
                     Console.WriteLine($"{g.Key,-40} {g.Count(),3} creatures  {f,-28} {(nifBytes is null ? "NO MODEL" : "")}{(kfBytes is null ? "no kf" : "kf")} {(bip ? "Bip01" : "")}  {clips}  ({string.Join(", ", g.Select(c => c.Id).Take(4))})");
                 }
                 Console.WriteLine($"{models} models, {withKf} with their own .kf");
@@ -11040,7 +11085,9 @@ static class Program
                 string id = opts["creature"];
                 string model = opts.TryGetValue("model", out var mm) ? mm : Skyrim.Creatures.CreatureSpec.Find(id, () => Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!))?.Model ?? throw new InvalidDataException($"no creature {id}");
                 string data = Path.GetFullPath(opts.GetValueOrDefault("data", "out/creatures"));
-                var results = Skyrim.Creatures.MwCreatureCheck.Run(mwData, model, data, id, Console.WriteLine);
+                // --probe <clip>:<frame>: that frame's bones compared one by one.
+                (string, int)? probe = opts.TryGetValue("probe", out var pv) && pv.Split(':') is [var pc, var pf] ? (pc, int.Parse(pf)) : null;
+                var results = Skyrim.Creatures.MwCreatureCheck.Run(mwData, model, data, id, Console.WriteLine, Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!), probe);
                 foreach (var r in results)
                     Console.WriteLine($"  {r.Clip} (Morrowind {r.Group}, {r.Frames} frames): vertices off by {r.Mean:F3} on average, {r.Worst:F3} at worst (frame {r.WorstFrame}{(r.Worst > 0.1f ? ": " + r.WorstWhere : "")})");
                 // --keys: the .kf's text keys inside each group used (sounds, hits), at their time from the group's start.
@@ -11097,6 +11144,11 @@ static class Program
                         Dictionary<string, Skyrim.Creatures.CreatureRecords.Stats> actorStats;
                         if (spec.Game == "morrowind")
                             (raceStats, actorStats) = Skyrim.Creatures.MwCreatureSource.RecordStats(World(), spec.Model!);
+                        else if (spec.DfMonster is int dfId && Daggerfall.DfMonsters.All.TryGetValue(dfId, out var monster))
+                        {
+                            raceStats = Skyrim.Creatures.DfCreatureSource.Stats(monster, arena2);
+                            actorStats = spec.Actors.ToDictionary(a2 => a2, _ => raceStats, StringComparer.OrdinalIgnoreCase);
+                        }
                         else
                         {
                             var st = spec.Stats ?? throw new InvalidDataException($"{id}: its config has no \"stats\" (its game's numbers)");
@@ -11234,6 +11286,60 @@ static class Program
                 Walk(root, "root");
                 Console.WriteLine(string.Join(", ", counts.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}")));
                 foreach (var g in notes.GroupBy(x => x).OrderBy(g => g.Key)) Console.WriteLine($"  {g.Key}{(g.Count() > 1 ? $" (x{g.Count()})" : "")}");
+                return 0;
+            }
+            case "weapon-frames":
+            {
+                // Dev aid: where a held weapon sits. Morrowind's "Weapon Bone" and "Shield Bone" against its hands in --mw-model
+                // (default meshes\base_anim.nif) and Skyrim's WEAPON and SHIELD against theirs in the vanilla male skeleton, as each
+                // node's axes in its hand's frame; and the farthest vertex of --mw-weapon and --sk-weapon (their long axis).
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                string mwModel = opts.GetValueOrDefault("mw-model", @"meshes\base_anim.nif");
+                var mwNif = Morrowind.Nif4.Read(mwData.Read(mwModel)!, mwModel);
+                var mwWorld = new Dictionary<string, Morrowind.NifTransform>();
+                void Down(Morrowind.NiNode n, Morrowind.NifTransform parent)
+                {
+                    var w = n.Transform.Then(parent); mwWorld.TryAdd(n.Name, w);
+                    foreach (int c in n.Children) if (mwNif.Get<Morrowind.NiNode>(c) is { } ch && ch is not Morrowind.NiTriShape) Down(ch, w);
+                }
+                Down((Morrowind.NiNode)mwNif.Root!, Morrowind.NifTransform.Identity);
+                string Axes(System.Numerics.Matrix4x4 m) => $"x({m.M11:F2},{m.M12:F2},{m.M13:F2}) y({m.M21:F2},{m.M22:F2},{m.M23:F2}) z({m.M31:F2},{m.M32:F2},{m.M33:F2}) t({m.M41:F1},{m.M42:F1},{m.M43:F1})";
+                System.Numerics.Matrix4x4 Rel(System.Numerics.Matrix4x4 child, System.Numerics.Matrix4x4 parent) { System.Numerics.Matrix4x4.Invert(parent, out var inv); return child * inv; }
+                foreach (var (node, hand) in new[] { ("Weapon Bone", "Bip01 R Hand"), ("Shield Bone", "Bip01 L Forearm"), ("Weapon Bone", "Bip01 R Forearm") })
+                    if (mwWorld.TryGetValue(node, out var nw) && mwWorld.TryGetValue(hand, out var hw))
+                        Console.WriteLine($"Morrowind {node} in {hand}: {Axes(Rel(Skyrim.Creatures.MwCreatureSource.RowMatrix(nw), Skyrim.Creatures.MwCreatureSource.RowMatrix(hw)))}");
+                    else Console.WriteLine($"Morrowind {mwModel}: no {node} or {hand}");
+                var sk = new Skyrim.Meshes.SkyrimCharacterAssets(skyrimData).Skeleton(false);
+                foreach (var (node, hand) in new[] { ("WEAPON", "NPC R Hand [RHnd]"), ("SHIELD", "NPC L ForearmTwist1 [LLt1]"), ("SHIELD", "NPC L Hand [LHnd]") })
+                    if (sk.World.TryGetValue(node, out var nw) && sk.World.TryGetValue(hand, out var hw))
+                        Console.WriteLine($"Skyrim {node} in {hand}: {Axes(Rel(nw, hw))}");
+                if (opts.TryGetValue("mw-weapon", out var mwWeapon))
+                {
+                    var wn = Morrowind.Nif4.Read(mwData.Read(mwWeapon)!, mwWeapon);
+                    var pts = wn.Blocks.OfType<Morrowind.NiTriShape>().Where(s => wn.Get<Morrowind.NiTriShapeData>(s.Data) is not null)
+                        .SelectMany(s => wn.Get<Morrowind.NiTriShapeData>(s.Data)!.Vertices.Select(v => s.Transform.Apply(v))).ToList();
+                    var far = pts.MaxBy(p => p.Length());
+                    Console.WriteLine($"Morrowind {mwWeapon}: {pts.Count} vertices, farthest {far} (length {far.Length():F1})");
+                }
+                if (opts.TryGetValue("sk-weapon", out var skWeapon))
+                {
+                    var bytes = Directory.GetFiles(skyrimData, "Skyrim - Meshes*.bsa").Select(b => Mutagen.Bethesda.Archives.Archive.CreateReader(Mutagen.Bethesda.GameRelease.SkyrimSE, b))
+                        .SelectMany(a2 => a2.Files).First(f => f.Path.Equals(skWeapon, StringComparison.OrdinalIgnoreCase)).GetBytes();
+                    string tmp = Path.Combine(Path.GetTempPath(), "tm-weapon.nif"); File.WriteAllBytes(tmp, bytes);
+                    using var wn = new nifly.NifFile(); wn.Load(tmp);
+                    var pts = new List<System.Numerics.Vector3>();
+                    foreach (var s in wn.GetShapes())
+                    {
+                        foreach (var v in wn.GetVertsForShape(s))
+                        {
+                            var q = s.transform.ApplyTransform(v);
+                            for (var p = wn.GetParentNode(s); p is not null; p = wn.GetParentNode(p)) q = p.transform.ApplyTransform(q);
+                            pts.Add(new System.Numerics.Vector3(q.x, q.y, q.z));
+                        }
+                    }
+                    var far = pts.MaxBy(p => p.Length());
+                    Console.WriteLine($"Skyrim {skWeapon}: {pts.Count} vertices, farthest {far} (length {far.Length():F1})");
+                }
                 return 0;
             }
             case "anim-data":

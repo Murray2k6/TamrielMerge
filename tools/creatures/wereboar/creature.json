@@ -1,4 +1,5 @@
 {
+  "dfMonster": 14,
   "source": "source/unpacked/source/PigMan_SketchFab.fbx",
   "armature": "PW_armature",
   "meshes": [
@@ -15,7 +16,6 @@
     "PW_teeth"
   ],
   "height": 215,
-  "template": "atronachfrost",
   "name": "Wereboar",
   "actions": {
     "idle": "PW_armature|PW_armature|pig_idle",

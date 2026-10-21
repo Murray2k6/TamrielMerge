@@ -60,6 +60,44 @@ Models, licences and credits: `tools\creatures\<creature>\`, `tools\creatures\CR
   D.Cipher's robed lich on the Dark Priest's skeleton and animations.
 - The exporter reports how much each animation moves (" <-- STILL" when nothing does).
 
+## Every creature as itself (2026-10-21)
+
+User: "the cliffracers need to be identical to the originals in morrowind", "ice wraith and cliffracer arent the same",
+"same goes for daggerfalls imp", "all creatures". Nothing of another creature is borrowed any more:
+
+- **Its own behaviour** (`CreatureGraph`, a config without `template`): written from its own clips only. It answers what
+  Skyrim's engine sends every creature (the events and variables all 53 vanilla creature graphs share: `hkx-graph
+  --contract`), laid out as vanilla's are (`hkx-graph` on the wisp's and the draugr's): idle and walk at rest, drawing and
+  putting away, combat idle and run with IsAttackReady, each attack on its attackStart_ event with IsAttacking and
+  attackStop, hit on staggerStart and recoilStart, its death held on DeathAnimation, Ragdoll or RagdollInstant, look-at on
+  its head. Armed creatures pick their held weapon's style by iRightHandType (0 hand to hand .. 7 bow, as the draugr's
+  selectors), a bow's shot as the engine's draw / hold / release (bowAttackStart, bowDrawn, attackRelease, arrowRelease).
+  Its animation data (clips' events, motion at its own speeds with Y forward, attack sets) is its own.
+- **Its own records** (`CreatureRecords.AddOwn`): a race made new (its game's health, magicka and stamina, its average blow
+  as unarmed damage, its reach; flesh that bleeds; flies, swims or stays put as its game has it; both hands and a shield for
+  an armed one), body parts on its own bones, a movement type at its game's speeds, and its own voice type, class, combat
+  style and sound descriptors; the game plugin's actors overridden with them, their own numbers as offsets, no stand-in's
+  sounds, faction or death item, a stronger or weaker blow than the race's through an ability.
+- **Morrowind, every model** (`CreatureSpec.MorrowindAuto`, `creature-build --all-morrowind`): 89 models, each from the
+  game's own NIF and .kf (a biped's also from meshes\xbase_anim.kf, its own groups first, as Morrowind loads them):
+  - its .kf's sound keys play its own sounds (its SNDG through its original's ID, else the game's defaults; "Sound: X"
+    the sound X; no footfalls in the air for a flier), converted to 16-bit WAVs under sound\fx\tamrielmerge\creatures;
+  - "Attack1: Hit" (and a weapon's "Chop Hit", a bow's "Shoot Release") times its blow;
+  - looping clips are the groups' loop parts; the movement root's (Bip01 / Root Bone) X and Y held as Morrowind holds
+    them (left in, the cliff racer flew 1,888 units ahead in 20 frames);
+  - its own skin binds (Morrowind's creatures are bound in other poses than the skeleton's rest: carried, the ash
+    ghoul's worst vertex went from 7.3 units to 0.011) and its scale keys (the Heart of Akulakhan's beat: 71 -> 0.001);
+  - its "Bounding Box" node as the actor's box (from the ground up to the box's top);
+  - WEAPON and SHIELD on its "Weapon Bone" and "Shield Bone" (both games' weapons point along +Y from the grip:
+    `weapon-frames`), sheath nodes hidden (Morrowind never shows a weapon put away);
+  - weapon styles from its creatures' inventories (leveled lists opened): idle, walk, run, chop / slash / thrust (each
+    "Start" to its follow-through), drawing and putting away.
+- **Checks**: `mw-creature-check --creature <id>` skins every frame of every clip as Morrowind does (its own node tree, keys
+  and NiSkinData, with arithmetic of its own) against the written files skinned as Skyrim does, vertex by vertex, naming
+  the worst vertex and its bones; `creature-bones [--all]` checks skeleton.hkx against skeleton.nif, the body's binds
+  (against the source's own for a Morrowind model) and weights, every animation's tracks, the graph's look-at bone, the
+  head and torso, and each bone against the Morrowind node it came from.
+
 ## Still to do
 
 - Ragdolls (the templates die into one); body part data for the new skeletons.

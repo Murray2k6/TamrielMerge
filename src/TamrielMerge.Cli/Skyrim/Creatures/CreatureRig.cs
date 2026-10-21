@@ -35,6 +35,13 @@ public sealed class CreatureRig
     public List<Mesh> Meshes { get; } = [];
     public Dictionary<string, Clip> Clips { get; } = [];
 
+    /// <summary>The weapon styles it holds (MwCreatureSource.WeaponStyles keys: "1h", "2c"...), whose clips its graph picks by
+    /// the weapon in its hand; none for a creature that fights with its own body.</summary>
+    public List<string> WeaponStyles { get; } = [];
+
+    /// <summary>Bones drawn at scale 0 (sheath nodes: what hangs there is out of sight).</summary>
+    public HashSet<int> HiddenBones { get; } = [];
+
     /// <summary>The creature's own animation events per clip (time in seconds, text): "SoundPlay.&lt;sound&gt;" for its own
     /// sounds (<see cref="Sounds"/>), "HitFrame" where its attack lands. A clip with any replaces the borrowed graph's
     /// sounds and hit timing with these.</summary>
@@ -150,18 +157,24 @@ public sealed class CreatureRig
 
     // ---- Havok ----
 
-    static Matrix4x4 QsTransform(Vector3 t, Quaternion q, float s = 1) => new(
+    /// <summary>A Havok QS transform; the rotation made unit length (an interpolated quaternion that isn't turns a bone by
+    /// the wrong angle: 2026-10-21, the clannfear's spine 0.046 degrees off from System.Numerics Slerp's unnormalised blend).</summary>
+    static Matrix4x4 QsTransform(Vector3 t, Quaternion q, float s = 1)
+    {
+        q = Quaternion.Normalize(q);
+        return new(
         t.X, t.Y, t.Z, 0,
         q.X, q.Y, q.Z, q.W,
         s, s, s, 0,
         0, 0, 0, 0);
+    }
 
     hkaSkeleton Skeleton() => new()
     {
         m_name = RootBone,
         m_parentIndices = Bones.Select(b => (short)b.Parent).ToList(),
         m_bones = Bones.Select(b => new hkaBone { m_name = b.Name, m_lockTranslation = false }).ToList(),
-        m_referencePose = Bones.Select(b => QsTransform(b.T, b.Q)).ToList(),
+        m_referencePose = Bones.Select((b, i) => QsTransform(b.T, b.Q, HiddenBones.Contains(i) ? 0 : 1)).ToList(),
         m_referenceFloats = [],
         m_floatSlots = [],
         m_localFrames = [],
@@ -173,7 +186,7 @@ public sealed class CreatureRig
         int tracks = Bones.Count, frames = clip.Frames.Length;
         var transforms = new List<Matrix4x4>(frames * tracks);
         for (int fi = 0; fi < frames; fi++)
-            for (int b = 0; b < tracks; b++) transforms.Add(QsTransform(clip.Frames[fi][b].T, clip.Frames[fi][b].Q, clip.Scales?[fi][b] ?? 1));
+            for (int b = 0; b < tracks; b++) transforms.Add(QsTransform(clip.Frames[fi][b].T, clip.Frames[fi][b].Q, HiddenBones.Contains(b) ? 0 : clip.Scales?[fi][b] ?? 1));
         var anim = new hkaInterleavedUncompressedAnimation
         {
             m_type = 1,   // HK_INTERLEAVED_ANIMATION
@@ -255,7 +268,7 @@ public sealed class CreatureRig
             posed[b] = Bones[b].Parent < 0 ? pose[b] : (posed[Bones[b].Parent].T + Vector3.Transform(pose[b].T, posed[Bones[b].Parent].Q), posed[Bones[b].Parent].Q * pose[b].Q);
         float lowest = float.MaxValue;
         foreach (var m in Meshes)
-            for (int i = 0; i < m.V.Length; i += Math.Max(1, m.V.Length / 4000))
+            for (int i = 0; i < m.V.Length; i++)   // every vertex (user, 2026-10-21: "dont skip vertices")
             {
                 var p = Vector3.Zero;
                 foreach (var (b, w) in m.Weights[i])
@@ -306,7 +319,7 @@ public sealed class CreatureRig
     {
         var nodes = new List<NiNode>();
         foreach (var b in Bones)
-            nodes.Add(b.Parent < 0 ? nif.AddNode(b.Name, Transform(b.T, b.Q)) : nif.AddNode(b.Name, Transform(b.T, b.Q), nodes[b.Parent]));
+            nodes.Add(b.Parent < 0 ? nif.AddNode(b.Name, Transform(b.T, b.Q)) : nif.AddNode(b.Name, Transform(b.T, b.Q, HiddenBones.Contains(nodes.Count) ? 0 : 1), nodes[b.Parent]));
         return nodes;
     }
 
@@ -401,10 +414,10 @@ public sealed class CreatureRig
                 nn.Add(new nifly.Vector3(m.N[i].X, m.N[i].Y, m.N[i].Z));
             }
             foreach (var t in m.Tris) tt.Add(new Triangle((ushort)t[0], (ushort)t[1], (ushort)t[2]));
-            string shapeName = $"{id}_{m.Name}";
+            string shapeName = FileSafe($"{id}_{m.Name}");
             var shape = nif.CreateShapeFromData(shapeName, vv, tt, uu, nn);
-            string? diffuse = Texture(m.Textures.GetValueOrDefault("diffuse"), texDir, $"{id}_{m.Name}", "", alpha: false);
-            string? normal = Texture(m.Textures.GetValueOrDefault("normal"), texDir, $"{id}_{m.Name}", "_n", alpha: false);
+            string? diffuse = Texture(m.Textures.GetValueOrDefault("diffuse"), texDir, FileSafe($"{id}_{m.Name}"), "", alpha: false);
+            string? normal = Texture(m.Textures.GetValueOrDefault("normal"), texDir, FileSafe($"{id}_{m.Name}"), "_n", alpha: false);
             if (diffuse is not null) nif.SetTextureSlot(shape, Path.GetRelativePath(dataDir, diffuse), 0);
             nif.SetTextureSlot(shape, normal is not null ? Path.GetRelativePath(dataDir, normal) : DfTextureExport.FlatNormal, 1);
             nif.CalcTangentsForShape(shape);
@@ -481,6 +494,9 @@ public sealed class CreatureRig
         uint data = inst?.dataRef.index ?? uint.MaxValue;
         return data == uint.MaxValue ? null : data;
     }
+
+    /// <summary>A name made fit for a file: what a file name can't hold (a Morrowind shape's trailing tab) as "_", trimmed.</summary>
+    static string FileSafe(string name) => new string(name.Select(c => char.IsControl(c) || Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray()).Trim('_', ' ');
 
     /// <summary>A source picture as a DDS beside the creature's others; null without one.</summary>
     static string? Texture(string? source, string dir, string stem, string suffix, bool alpha)

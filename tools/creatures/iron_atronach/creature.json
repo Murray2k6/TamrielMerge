@@ -1,4 +1,5 @@
 {
+  "dfMonster": 36,
   "source": "source/unpacked/source/skeletonLord.fbx",
   "armature": "Armature",
   "meshes": [
@@ -6,7 +7,6 @@
     "helm"
   ],
   "height": 235,
-  "template": "atronachfrost",
   "name": "Iron Atronach",
   "actions": {
     "idle": "Armature|CINEMA_4D_Main|Layer0"

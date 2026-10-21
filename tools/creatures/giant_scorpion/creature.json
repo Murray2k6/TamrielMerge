@@ -1,4 +1,5 @@
 {
+  "dfMonster": 20,
   "source": "source/unpacked/source/scorpion/scorpion.fbx",
   "armature": "Armature",
   "height": 110,
@@ -16,7 +17,6 @@
     "glow": "source/unpacked/source/scorpion/scorpion_low_scorpion_Emission.png",
     "specular": "source/unpacked/source/scorpion/scorpion_low_scorpion_MetallicSmoothness.png"
   },
-  "template": "scrib",
   "head": "body",
   "name": "Giant Scorpion",
   "actors": [

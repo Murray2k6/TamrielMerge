@@ -78,7 +78,7 @@ public static class CreatureBones
             foreach (var b in src.Blocks.OfType<NiNode>()) foreach (int c in b.Children) if (src.Get<NiTriShape>(c) is { } s) holder.Add(s.Index);
             sourceBinds = src.Blocks.OfType<NiTriShape>().Where(s => s is not NiParticles && !s.Hidden && holder.Contains(s.Index) && src.Get<NiTriShapeData>(s.Data) is { Vertices.Length: > 0 })
                 .Select(s => src.Get<NiSkinInstance>(s.Skin) is { } inst && src.Get<NiSkinData>(inst.Data) is { } sd
-                    ? inst.Bones.Select((node, bi) => (Name: src.Get<NiNode>(node)?.Name ?? "", bi)).Where(x => x.bi < sd.Bones.Count).GroupBy(x => x.Name).ToDictionary(g => g.Key, g => MwCreatureSource.RowMatrix(sd.Bones[g.First().bi].Transform))
+                    ? inst.Bones.Select((node, bi) => (Name: MwCreatureSource.BoneName(src.Get<NiNode>(node)?.Name ?? ""), bi)).Where(x => x.bi < sd.Bones.Count).GroupBy(x => x.Name).ToDictionary(g => g.Key, g => MwCreatureSource.RowMatrix(sd.Bones[g.First().bi].Transform))
                     : []).ToList();
         }
         using (var body = new nifly.NifFile())
@@ -183,7 +183,7 @@ public static class CreatureBones
             void Down(NiNode node, NifTransform parent)
             {
                 var w = node.Transform.Then(parent);
-                mwWorld.TryAdd(node.Name, w);
+                mwWorld.TryAdd(MwCreatureSource.BoneName(node.Name), w);
                 foreach (int c in node.Children) if (src.Get<NiNode>(c) is { } ch && ch is not NiTriShape) Down(ch, w);
             }
             foreach (int c in mwRoot.Children) if (src.Get<NiNode>(c) is { } ch && ch is not NiTriShape) Down(ch, mwRoot.Transform);

@@ -33,6 +33,26 @@ public sealed class DfSound
     public bool WriteWav(uint id, string path)
     {
         if (Samples(id) is not { Length: > 0 } raw) return false;
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        using var fs = File.Create(path);
+        WriteWav(raw, fs);
+        return true;
+    }
+
+    /// <summary>The sound at a position in the file (Daggerfall Unity's SoundClips are positions: a creature's move, bark and
+    /// attack sounds) as a 16-bit mono WAV at 44100 Hz, or null.</summary>
+    public byte[]? WavAt(int index)
+    {
+        if (index < 0 || index >= bsa.Entries.Count) return null;
+        var raw = bsa.Record(index).ToArray();
+        if (raw.Length == 0) return null;
+        using var ms = new MemoryStream();
+        WriteWav(raw, ms);
+        return ms.ToArray();
+    }
+
+    static void WriteWav(byte[] raw, Stream to)
+    {
         const int rate = 44100, factor = rate / SampleRate;
         var pcm = new short[raw.Length * factor];
         for (int i = 0; i < raw.Length; i++)
@@ -40,12 +60,10 @@ public sealed class DfSound
             int a = (raw[i] - 128) << 8, b = ((i + 1 < raw.Length ? raw[i + 1] : raw[i]) - 128) << 8;
             for (int k = 0; k < factor; k++) pcm[i * factor + k] = (short)(a + (b - a) * k / factor);
         }
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        using var w = new BinaryWriter(File.Create(path));
+        using var w = new BinaryWriter(to, System.Text.Encoding.ASCII, leaveOpen: true);
         w.Write("RIFF"u8); w.Write(36 + pcm.Length * 2); w.Write("WAVE"u8);
         w.Write("fmt "u8); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(rate); w.Write(rate * 2); w.Write((short)2); w.Write((short)16);
         w.Write("data"u8); w.Write(pcm.Length * 2);
         foreach (var s in pcm) w.Write(s);
-        return true;
     }
 }

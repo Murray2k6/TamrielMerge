@@ -1,11 +1,11 @@
 {
+  "dfMonster": 1,
   "source": "source/Imp/Imp/Imp.blend",
   "armature": "Skeleton",
   "meshes": [
     "Imp"
   ],
   "height": 95,
-  "template": "chaurushunter",
   "name": "Imp",
   "actions": {
     "idle": "Idle",

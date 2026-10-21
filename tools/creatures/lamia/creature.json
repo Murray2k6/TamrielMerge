@@ -1,11 +1,11 @@
 {
+  "dfMonster": 42,
   "source": "source/unpacked/source/rig export fix1.fbx",
   "armature": "rig",
   "meshes": [
     "body mesh"
   ],
   "height": 200,
-  "template": "slaughterfish",
   "name": "Lamia",
   "actions": {
     "idle": "rig|idol",

@@ -15,34 +15,42 @@ public static class MwCreatureCheck
 {
     public sealed record Result(string Clip, string Group, int Frames, float Worst, float Mean, int WorstFrame, string WorstWhere = "");
 
-    public static List<Result> Run(Tes3Data data, string model, string skyrimDataDir, string id, Action<string> say)
+    /// <param name="world">The game's records: with them a biped's humanoid animations and weapon styles are checked too.</param>
+    /// <param name="probe">A clip and frame whose bones to compare one by one (the first where Morrowind's and ours part).</param>
+    public static List<Result> Run(Tes3Data data, string model, string skyrimDataDir, string id, Action<string> say, MwWorld? world = null, (string Clip, int Frame)? probe = null)
     {
         model = model.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
         var nif = Nif4.Read(data.Read(model) ?? throw new FileNotFoundException(model), model);
-        string kfPath = Path.Combine(Path.GetDirectoryName(model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf");
-        var kf = Nif4.Read(data.Read(kfPath) ?? throw new FileNotFoundException(kfPath), kfPath);
-        var (keys, tracks) = MwCreatureSource.ReadKf(kf);
+        // The clips as the converter plans them (its own .kf, a biped's humanoid one, weapon styles), each against its source.
+        var (biped, styles) = world is not null ? MwCreatureSource.Kind(world, model) : (false, []);
+        var sources = MwCreatureSource.Sources(data, model, biped);
+        var plan = MwCreatureSource.Plan(sources, styles);
         var root = nif.Root as NiNode ?? throw new InvalidDataException($"{model}: no root node");
 
         // The node tree, parents first; the first node of a name is the one a track drives.
         var parent = new Dictionary<int, int>();
         var order = new List<NiNode>();
-        var queue = new Queue<NiNode>();
-        queue.Enqueue(root);
-        while (queue.Count > 0)
+        // Depth first, children in order: the order Morrowind's engine meets them in, so of two nodes with one name the first
+        // here is the one its animation tracks drive (Almalexia's two "Dummy07": breadth first took the other, 80 units off).
+        void Walk(NiNode n)
         {
-            var n = queue.Dequeue();
             foreach (int c in n.Children)
                 if (nif.Get<NiNode>(c) is { } child && child is not NiTriShape && child.Type != "RootCollisionNode")
                 {
                     parent[child.Index] = n.Index;
                     order.Add(child);
-                    queue.Enqueue(child);
+                    Walk(child);
                 }
         }
+        Walk(root);
+        var trackOfSource = sources.Select(src =>
+        {
+            var t = new Dictionary<int, NiKeyframeData>();
+            foreach (var (name, kd) in src.Tracks)
+                if (order.FirstOrDefault(n => n.Name == name) is { } node) t[node.Index] = kd;
+            return t;
+        }).ToList();
         var trackOf = new Dictionary<int, NiKeyframeData>();
-        foreach (var (name, kd) in tracks)
-            if (order.FirstOrDefault(n => n.Name == name) is { } node) trackOf[node.Index] = kd;
         int movementRoot = MwCreatureSource.MovementRoots.Select(m => order.FirstOrDefault(n => n.Name.Equals(m, StringComparison.OrdinalIgnoreCase))?.Index ?? -1).FirstOrDefault(i => i >= 0, -1);
 
         // Visible skinned shapes, in the order the converter writes them.
@@ -72,9 +80,10 @@ public static class MwCreatureCheck
             ? string.Join(", ", sdat.Bones.Select((b, bi) => (b, bi)).Where(x => x.b.Weights.Any(w => w.Vertex == v && w.Weight > 0)).Select(x => $"{nif.Get<NiNode>(inst.Bones[x.bi])?.Name} {x.b.Weights.First(w => w.Vertex == v).Weight:F2}"))
             : "(not skinned)";
 
+        Dictionary<int, Matrix4x4> lastWorld = [];
         Vector3[][] Morrowind(float time, float groupStart)
         {
-            var world = new Dictionary<int, Matrix4x4> { [root.Index] = Local(root.Transform) };
+            var world = lastWorld = new Dictionary<int, Matrix4x4> { [root.Index] = Local(root.Transform) };
             foreach (var n in order)
             {
                 var t = n.Transform;
@@ -130,8 +139,9 @@ public static class MwCreatureCheck
             int mwTris = nif.Get<NiTriShapeData>(shapes[i].Data)!.Triangles.Length / 3;
             if (mw != sk || mwTris != body.ShapeTriangleCounts[i]) say($"  {shapes[i].Name}: Morrowind {mw} vertices {mwTris} triangles, Skyrim {sk} vertices {body.ShapeTriangleCounts[i]} triangles");
         }
-        foreach (var (clip, group, start, stop) in MwCreatureSource.ChosenGroups(MwCreatureSource.Groups(keys)))
+        foreach (var (clip, source, group, start, stop, _, _, _) in plan)
         {
+            trackOf = trackOfSource[source];
             string file = Path.Combine(folder, "animations", clip + ".hkx");
             if (!File.Exists(file)) { say($"  {clip}: no {file}"); continue; }
             var anim = body.Animation(file);
@@ -141,6 +151,42 @@ public static class MwCreatureCheck
                 float t = Math.Min(start + f / anim.Fps, stop);
                 var reference = Morrowind(t, start);
                 var ours = body.Pose(anim, f);
+                if (probe is { } pr && pr.Clip == clip && pr.Frame == f)
+                {
+                    // Each bone's origin, Morrowind's against ours, by name (the first of a name, as the converter names them).
+                    var oursWorld = body.BoneWorlds(anim, f);
+                    var rows = new List<(float D, string Line)>();
+                    foreach (var n in order)
+                    {
+                        int bi = body.BoneNames.IndexOf(MwCreatureSource.BoneName(n.Name));
+                        if (bi < 0 || !lastWorld.TryGetValue(n.Index, out var mw)) continue;
+                        float d = Vector3.Distance(mw.Translation, oursWorld[bi].Translation);
+                        // The angle between the two frames' rotations.
+                        // The angle between the two rotations from the off-diagonal part of one times the other's inverse (exact for
+                        // small angles, where the cosine's float steps alone are 0.04 degrees).
+                        var dm = Normalized(mw) * Matrix4x4.Transpose(Normalized(oursWorld[bi]));
+                        double sx = dm.M32 - dm.M23, sy = dm.M13 - dm.M31, sz = dm.M21 - dm.M12;
+                        float angle = (float)(Math.Asin(Math.Min(1, 0.5 * Math.Sqrt(sx * sx + sy * sy + sz * sz))) * 180 / Math.PI);
+                        var r0 = n.Transform.Rotation; var rtr = Matrix4x4.Transpose(r0) * r0;
+                        float skew = MathF.Max(MathF.Max(MathF.Abs(rtr.M11 - 1), MathF.Abs(rtr.M22 - 1)), MathF.Max(MathF.Abs(rtr.M33 - 1), MathF.Max(MathF.Abs(rtr.M12), MathF.Max(MathF.Abs(rtr.M13), MathF.Abs(rtr.M23)))));
+                        string keys = trackOf.TryGetValue(n.Index, out var tk) ? $"{tk.Rotations.Count} rotation keys (type {tk.RotationType}), {tk.Translations.Count} translation" : "no track";
+                        rows.Add((d + angle, $"    {n.Name} (under {order.FirstOrDefault(p => p.Index == parent[n.Index])?.Name ?? "root"}): {d:F4} apart, turned {angle:F4} degrees apart; {mw.Translation.Length():F1} from the root; {keys}; rest matrix off a rotation by {skew:G3}"));
+                    }
+                    // The worst-turned keyed bone's own local rotation both ways, and the keys around the time.
+                    foreach (var n in order.Where(n => trackOf.TryGetValue(n.Index, out var k) && k.Rotations.Count > 0).Take(6))
+                    {
+                        var kd = trackOf[n.Index]; int bi = body.BoneNames.IndexOf(MwCreatureSource.BoneName(n.Name));
+                        var refQ = Key(kd.Rotations, t, Nlerp);
+                        var qs = anim.Transforms[f * anim.Tracks + bi];
+                        int k1 = kd.Rotations.FindIndex(k => k.Time >= t);
+                        say($"    {n.Name} keys within 0.05 s of t={t:R}: {string.Join(" | ", kd.Rotations.Where(k => MathF.Abs(k.Time - t) < 0.05f).Select(k => $"{k.Time:R} {k.Value}"))}");
+                        say($"    {n.Name} at t={t:F5}: Morrowind key {refQ}, ours {new Quaternion(qs.M21, qs.M22, qs.M23, qs.M24)}; keys around: {(k1 > 0 ? $"{kd.Rotations[k1 - 1].Time:F5} {kd.Rotations[k1 - 1].Value}" : "-")} | {(k1 >= 0 ? $"{kd.Rotations[k1].Time:F5} {kd.Rotations[k1].Value}" : "-")}");
+                    }
+                    say($"  {clip} frame {f}: the bones furthest apart");
+                    foreach (var r in rows.OrderByDescending(r => r.D).Take(16)) say(r.Line);
+                    say($"  {clip} frame {f}: the first bones, in the tree's order");
+                    foreach (var r in rows.Take(14)) say(r.Line);
+                }
                 for (int s = 0; s < Math.Min(reference.Length, ours.Length); s++)
                     for (int i = 0; i < Math.Min(reference[s].Length, ours[s].Length); i++)
                     {
@@ -152,6 +198,13 @@ public static class MwCreatureCheck
             results.Add(new Result(clip, group, anim.Frames, worst, count > 0 ? sum / count : 0, worstFrame, worstWhere));
         }
         return results;
+    }
+
+    /// <summary>A transform's rotation alone (its axes made unit length, translation dropped).</summary>
+    static Matrix4x4 Normalized(Matrix4x4 m)
+    {
+        var x = Vector3.Normalize(new Vector3(m.M11, m.M12, m.M13)); var y = Vector3.Normalize(new Vector3(m.M21, m.M22, m.M23)); var z = Vector3.Normalize(new Vector3(m.M31, m.M32, m.M33));
+        return new Matrix4x4(x.X, x.Y, x.Z, 0, y.X, y.Y, y.Z, 0, z.X, z.Y, z.Z, 0, 0, 0, 0, 1);
     }
 
     static bool IsIdentity(NifTransform t) => t.Translation.Length() < 1e-3f && MathF.Abs(t.Scale - 1) < 1e-4f
@@ -173,8 +226,11 @@ public static class MwCreatureCheck
     static Quaternion Nlerp(Quaternion a, Quaternion b, float u)
     {
         if (Quaternion.Dot(a, b) < 0) b = -b;
-        float angle = MathF.Acos(Math.Clamp(Quaternion.Dot(a, b), -1, 1));
-        if (angle < 1e-5f) return a;
+        // Close keys blend linearly (then made unit length): their angle's cosine rounds to 1 in floats (2026-10-21: returning
+        // the first key there put the clannfear's spine 0.046 degrees off at a key's own time; the check's fault, not the converter's).
+        double dot = Math.Clamp((double)a.X * b.X + (double)a.Y * b.Y + (double)a.Z * b.Z + (double)a.W * b.W, -1, 1);
+        float angle = (float)Math.Acos(dot);
+        if (angle < 1e-4f) return Quaternion.Normalize(new Quaternion(a.X + (b.X - a.X) * u, a.Y + (b.Y - a.Y) * u, a.Z + (b.Z - a.Z) * u, a.W + (b.W - a.W) * u));
         float s = MathF.Sin(angle);
         float wa = MathF.Sin((1 - u) * angle) / s, wb = MathF.Sin(u * angle) / s;
         return Quaternion.Normalize(new Quaternion(a.X * wa + b.X * wb, a.Y * wa + b.Y * wb, a.Z * wa + b.Z * wb, a.W * wa + b.W * wb));
@@ -264,7 +320,9 @@ public static class MwCreatureCheck
             return new Anim(tracks, frames, frames > 1 ? (frames - 1) / a.m_duration : 30, a.m_transforms);
         }
 
-        public Vector3[][] Pose(Anim anim, int frame)
+        public List<string> BoneNames => skeleton.m_bones.Select(b => b.m_name).ToList();
+
+        public Matrix4x4[] BoneWorlds(Anim anim, int frame)
         {
             var world = new Matrix4x4[anim.Tracks];
             for (int b = 0; b < anim.Tracks; b++)
@@ -273,6 +331,12 @@ public static class MwCreatureCheck
                 var local = Matrix4x4.CreateScale(qs.M31) * Matrix4x4.CreateFromQuaternion(new Quaternion(qs.M21, qs.M22, qs.M23, qs.M24)) * Matrix4x4.CreateTranslation(qs.M11, qs.M12, qs.M13);
                 world[b] = skeleton.m_parentIndices[b] < 0 ? local : local * world[skeleton.m_parentIndices[b]];
             }
+            return world;
+        }
+
+        public Vector3[][] Pose(Anim anim, int frame)
+        {
+            var world = BoneWorlds(anim, frame);
             var result = new Vector3[shapes.Count][];
             for (int s = 0; s < shapes.Count; s++)
             {

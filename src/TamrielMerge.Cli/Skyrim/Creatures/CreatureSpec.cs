@@ -10,7 +10,7 @@ namespace TamrielMerge.Skyrim.Creatures;
 /// name; name, actors (every creature drawn with it, as the conversion names them) and bones from the game.
 /// </summary>
 public sealed record CreatureSpec(string Id, string Game, string? Model, string Name, string? Head, string? Torso, List<string> Actors,
-    string? Template, string? TemplateRace, int? Remaster, JsonElement? Stats)
+    string? Template, string? TemplateRace, int? Remaster, JsonElement? Stats, int? DfMonster = null)
 {
     public static string ConfigDir => Path.Combine(Setup.Dependencies.Root, "creatures");
 
@@ -24,7 +24,8 @@ public sealed record CreatureSpec(string Id, string Game, string? Model, string 
         return new CreatureSpec(id, S("game") ?? "daggerfall", S("model"), S("name") ?? id, S("head"), S("torso"),
             r.TryGetProperty("actors", out var a) ? a.EnumerateArray().Select(x => x.GetString()!).ToList() : [],
             S("template"), S("templateRace"), r.TryGetProperty("remaster", out var rm) ? rm.GetInt32() : null,
-            r.TryGetProperty("stats", out var st) ? st.Clone() : null);
+            r.TryGetProperty("stats", out var st) ? st.Clone() : null,
+            r.TryGetProperty("dfMonster", out var dm) ? dm.GetInt32() : null);
     }
 
     /// <summary>Every configured creature.</summary>

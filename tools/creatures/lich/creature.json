@@ -1,11 +1,11 @@
 {
+  "dfMonster": 32,
   "source": "source/Dark_Priest.blend",
   "armature": "varsoi_male.002",
   "meshes": [
     "Cultist"
   ],
   "height": 195,
-  "template": "hagraven",
   "name": "Lich",
   "actions": {
     "idle": "VM_idle",
@@ -14,8 +14,7 @@
     "attack": "VM_attack_melee_1h.R"
   },
   "actors": [
-    "DFCreatureLich",
-    "DFCreatureAncientLich"
+    "DFCreatureLich"
   ],
   "materials": {
     "lambert6": {

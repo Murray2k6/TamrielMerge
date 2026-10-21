@@ -1,11 +1,11 @@
 {
+  "dfMonster": 27,
   "source": "source/raptile/raptile_rig_fin.blend",
   "armature": "Armature.000",
   "meshes": [
     "lizardman"
   ],
   "height": 250,
-  "template": "atronachfrost",
   "name": "Daedroth",
   "actions": {
     "idle": "Armature.000Action"
