@@ -61,8 +61,8 @@ public sealed class CreatureBehavior
 
     byte[] Read(string path) => archive.TryGetValue(path, out var f) ? f.GetBytes() : throw new FileNotFoundException(path);
     string Text(string path) => Encoding.ASCII.GetString(Read(path));
-    static hkRootLevelContainer Hkx(byte[] b) => (hkRootLevelContainer)new PackFileDeserializer().Deserialize(new BinaryReaderEx(b));
-    static T Variant<T>(hkRootLevelContainer r) where T : class => r.m_namedVariants.Select(v => v?.m_variant).OfType<T>().First();
+    internal static hkRootLevelContainer Hkx(byte[] b) => (hkRootLevelContainer)new PackFileDeserializer().Deserialize(new BinaryReaderEx(b));
+    internal static T Variant<T>(hkRootLevelContainer r) where T : class => r.m_namedVariants.Select(v => v?.m_variant).OfType<T>().First();
 
     /// <summary>The creature's clip for one of the template's animation files: attacks, moves, hits, the rest idle.</summary>
     public static string ClipFor(string templateAnimation, CreatureRig rig)
@@ -516,7 +516,7 @@ public sealed class CreatureBehavior
         yield return Path.Combine(dataDir, "meshes", "animationdata", "boundanims", $"anims_{project}.txt");
     }
 
-    static void RemoveFromIndex(string path, string entry)
+    internal static void RemoveFromIndex(string path, string entry)
     {
         if (!File.Exists(path)) return;
         var lines = File.ReadAllText(path).Replace("\r", "").Split('\n').Where(l => l.Length > 0 && !l.Equals(entry, StringComparison.OrdinalIgnoreCase)).ToList();

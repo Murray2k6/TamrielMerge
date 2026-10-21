@@ -134,7 +134,7 @@ public static class NiflyRaw
 
     const int TemplateLinks = 128;
     static NifFile? template;
-    static uint templateSequence, templatePalette;
+    static uint templateSequence, templatePalette, templateTextKeys;
 
     /// <summary>
     /// A new controller sequence with <paramref name="links"/> controlled blocks to fill (through <see cref="Links"/>):
@@ -155,9 +155,13 @@ public static class NiflyRaw
                     nif.Create(NiVersion.getSSE());
                     // A manager on the root holding the sequence and the palette (nifly saves what the root reaches).
                     var hdr0 = nif.GetHeader();
+                    var textKeys = new NiTextKeyExtraData();
+                    GC.SuppressFinalize(textKeys);
+                    uint textKeysId = hdr0.AddBlock(textKeys);
                     var seq = new NiControllerSequence();
                     GC.SuppressFinalize(seq);
                     seq.name = new NiStringRef("Template");
+                    seq.textKeyRef.index = textKeysId;
                     uint seqId = hdr0.AddBlock(seq);
                     var palette = new NiDefaultAVObjectPalette();
                     GC.SuppressFinalize(palette);
@@ -177,6 +181,8 @@ public static class NiflyRaw
                 link[8] = 0;
                 var bytes = WithBlank(File.ReadAllBytes(tmp), "NiControllerSequence", 4, 12, link, TemplateLinks);
                 bytes = WithBlank(bytes, "NiDefaultAVObjectPalette", 4, 8, [0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF], TemplateLinks);
+                // A text key: its time and no string (8 bytes), after the extra data's name and the key count.
+                bytes = WithBlank(bytes, "NiTextKeyExtraData", 4, 8, [0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF], TemplateLinks);
                 File.WriteAllBytes(tmp, bytes);
                 template = new NifFile();
                 if (template.Load(tmp) != 0) throw new IOException("nifly couldn't read the sequence template");
@@ -186,6 +192,7 @@ public static class NiflyRaw
                 {
                     if (hdr.GetBlockTypeStringById(i) == "NiControllerSequence") templateSequence = i;
                     if (hdr.GetBlockTypeStringById(i) == "NiDefaultAVObjectPalette") templatePalette = i;
+                    if (hdr.GetBlockTypeStringById(i) == "NiTextKeyExtraData") templateTextKeys = i;
                 }
             }
             // A new copy each time (EditableBlockById hands out the same one for a block).
@@ -193,6 +200,24 @@ public static class NiflyRaw
             var slots = Links(copy);
             if (slots.Count != TemplateLinks) throw new InvalidOperationException($"the sequence template has {slots.Count} controlled blocks");
             Truncate(copy.controlledBlocks, slots, links);
+            copy.textKeyRef.index = uint.MaxValue;   // the template's own text keys aren't the copy's
+            return copy;
+        }
+    }
+
+    /// <summary>New text keys, <paramref name="keys"/> of them (time, text), copied from the template as
+    /// <see cref="NewSequence"/>'s sequences are.</summary>
+    public static NiTextKeyExtraData NewTextKeys(IReadOnlyList<(float Time, string Text)> keys)
+    {
+        if (keys.Count > TemplateLinks) throw new ArgumentOutOfRangeException(nameof(keys), $"at most {TemplateLinks} text keys");
+        NewSequence(0);   // the template, made once
+        lock (offsets)
+        {
+            var copy = niflycpp.BlockCache.SafeClone<NiTextKeyExtraData>(template!.GetHeader().GetBlockById(templateTextKeys));
+            var slots = TextKeys(copy);
+            if (slots.Count != TemplateLinks) throw new InvalidOperationException($"the text key template has {slots.Count} keys");
+            Truncate(copy.textKeys, slots, keys.Count);
+            for (int k = 0; k < keys.Count; k++) { slots[k].time = keys[k].Time; slots[k].value = new NiStringRef(keys[k].Text); }
             return copy;
         }
     }

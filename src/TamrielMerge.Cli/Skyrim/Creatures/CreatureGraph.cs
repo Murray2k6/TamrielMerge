@@ -200,6 +200,8 @@ public sealed class CreatureGraph
             "Reanimated", "AddRagdollToWorld", "IdleStop", "SoundPlay", "returnToDefault", "PickNewIdle",
             "bowAttackStart", "bowDrawn", "attackRelease", "BowRelease", "bowReset", "arrowAttach", "arrowRelease" })
             Ev(e);
+        // Each clip's look: its event, sent as it starts (the body's own graph plays that sequence).
+        foreach (var clip in rig.Looks.Keys) Ev(CreatureRig.LookEvent(clip));
 
         string idle = Clip("idle"), walk = Clip("walk", "run"), run = Clip("run", "walk"), hit = Clip("hit", "idle"), death = Clip("death", "idle");
 
@@ -369,7 +371,107 @@ public sealed class CreatureGraph
         written.Add(behaviorPath);
 
         written.AddRange(AnimationData(dataDir, project, character, behavior));
+        written.AddRange(LooksGraph(dataDir));
         return written.Select(f => Path.GetRelativePath(dataDir, f)).ToList();
+    }
+
+    /// <summary>
+    /// The behaviour graph the body plays its looks with (<see cref="CreatureRig.Looks"/>; the body's BGED names its project,
+    /// <see cref="CreatureRig.LookProject"/>), laid out as vanilla's own for a body's sequences (the spriggan matron's
+    /// SprigganFX01): a project, a character on a one-bone skeleton that drives nothing, and a behaviour whose states each
+    /// play one sequence (BGSGamebryoSequenceGenerator), entered from any state - itself too, so a repeating clip restarts
+    /// its look - on that clip's event, with no blend; its animation data names the three files and has no clips. Without
+    /// looks, an earlier build's are taken out.
+    /// </summary>
+    List<string> LooksGraph(string dataDir)
+    {
+        var written = new List<string>();
+        string projectFile = Path.Combine(dataDir, "meshes", CreatureRig.LookProject(id));
+        string folder = Path.GetDirectoryName(projectFile)!, project = Path.GetFileNameWithoutExtension(projectFile);
+        string meshes = Path.Combine(dataDir, "meshes"), dataFile = Path.Combine(meshes, "animationdata", project + ".txt");
+        if (rig.Looks.Count == 0)
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, true);
+            if (File.Exists(dataFile)) File.Delete(dataFile);
+            CreatureBehavior.RemoveFromIndex(Path.Combine(meshes, "animationdata", "dirlist.txt"), project + ".txt");
+            return written;
+        }
+        string character = project + "Character", behavior = project + "Behavior";
+        Save(projectFile, "hkbProjectData", new hkbProjectData
+        {
+            m_worldUpWS = new Vector4(0, 0, 1, 0),
+            m_defaultEventMode = 2,
+            m_stringData = new hkbProjectStringData { m_characterFilenames = [$@"Characters\{character}.hkx"], m_animationFilenames = [], m_behaviorFilenames = [], m_eventNames = [] },
+        });
+        written.Add(projectFile);
+
+        string skeletonFile = Path.Combine(folder, "CharacterAssets", "SingleBoneSkeleton.hkx");
+        Directory.CreateDirectory(Path.GetDirectoryName(skeletonFile)!);
+        CreatureRig.WriteHavok(skeletonFile, new hkaAnimationContainer
+        {
+            m_skeletons = [new hkaSkeleton
+            {
+                m_name = "x_SingleBone", m_parentIndices = [-1], m_bones = [new hkaBone { m_name = "x_SingleBone", m_lockTranslation = false }],
+                m_referencePose = [CreatureRig.QsTransform(Vector3.Zero, Quaternion.Identity)], m_referenceFloats = [], m_floatSlots = [], m_localFrames = [],
+            }],
+            m_animations = [], m_bindings = [], m_attachments = [], m_skins = [],
+        });
+        written.Add(skeletonFile);
+
+        string characterFile = Path.Combine(folder, "Characters", character + ".hkx");
+        Save(characterFile, "hkbCharacterData", new hkbCharacterData
+        {
+            m_characterControllerInfo = new hkbCharacterDataCharacterControllerInfo { m_capsuleHeight = 1.7f, m_capsuleRadius = 0.4f, m_collisionFilterInfo = 1 },
+            m_modelUpMS = new Vector4(0, 0, 1, 0), m_modelForwardMS = new Vector4(1, 0, 0, 0), m_modelRightMS = new Vector4(0, -1, 0, 0),
+            m_characterPropertyInfos = [], m_numBonesPerLod = [],
+            m_characterPropertyValues = new hkbVariableValueSet { m_wordVariableValues = [], m_quadVariableValues = [], m_variantVariableValues = [] },
+            m_stringData = new hkbCharacterStringData
+            {
+                m_name = character, m_rigName = @"CharacterAssets\SingleBoneSkeleton.hkx", m_ragdollName = "", m_behaviorFilename = $@"Behaviors\{behavior}.hkx",
+                m_animationNames = [], m_deformableSkinNames = [], m_rigidSkinNames = [], m_animationFilenames = [], m_characterPropertyNames = [],
+                m_retargetingSkeletonMapperFilenames = [], m_lodNames = [], m_mirroredSyncPointSubstringsA = [], m_mirroredSyncPointSubstringsB = [],
+            },
+            m_mirroredSkeletonInfo = new hkbMirroredSkeletonInfo { m_mirrorAxis = new Vector4(1, 0, 0, 0), m_bonePairMap = [0] },
+            m_scale = 1,
+        });
+        written.Add(characterFile);
+
+        var clips = rig.Looks.Keys.ToList();
+        var noBlend = new hkbBlendingTransitionEffect { m_name = "ZeroDuration", m_duration = 0, m_selfTransitionMode = 2, m_eventMode = 0 };   // a self transition starts it over
+        var states = clips.Select((c, i) => new hkbStateMachineStateInfo
+        {
+            m_stateId = i, m_name = c + "Look", m_probability = 1, m_enable = true,
+            m_generator = new BGSGamebryoSequenceGenerator { m_name = c + "Look", m_pSequence = CreatureRig.LookEvent(c), m_eBlendModeFunction = 0, m_fPercent = 1 },
+        }).ToList();
+        var wildcards = clips.Select((c, i) => new hkbStateMachineTransitionInfo
+        {
+            m_triggerInterval = new hkbStateMachineTimeInterval { m_enterEventId = -1, m_exitEventId = -1 },
+            m_initiateInterval = new hkbStateMachineTimeInterval { m_enterEventId = -1, m_exitEventId = -1 },
+            m_transition = noBlend, m_eventId = i, m_toStateId = i,
+            m_flags = 256 | 512,   // no condition; may go from a state to itself
+        }).ToList();
+        int start = Math.Max(0, clips.IndexOf("idle"));
+        var root = Machine($"{project}Root", start, states, wildcards);
+        Save(Path.Combine(folder, "Behaviors", behavior + ".hkx"), "hkbBehaviorGraph", new hkbBehaviorGraph
+        {
+            m_name = behavior + ".hkb",
+            m_variableMode = 0,
+            m_rootGenerator = root,
+            m_data = new hkbBehaviorGraphData
+            {
+                m_attributeDefaults = [], m_variableInfos = [], m_characterPropertyInfos = [],
+                m_eventInfos = clips.Select(_ => new hkbEventInfo()).ToList(),
+                m_wordMinVariableValues = [], m_wordMaxVariableValues = [],
+                m_variableInitialValues = new hkbVariableValueSet { m_wordVariableValues = [], m_quadVariableValues = [], m_variantVariableValues = [] },
+                m_stringData = new hkbBehaviorGraphStringData { m_eventNames = clips.Select(CreatureRig.LookEvent).ToList(), m_attributeNames = [], m_variableNames = [], m_characterPropertyNames = [] },
+            },
+        });
+        written.Add(Path.Combine(folder, "Behaviors", behavior + ".hkx"));
+
+        // Its animation data: the three files and no clips (as SprigganFX01's in the game's single file).
+        written.Add(WriteText(dataFile, ["1", "3", $@"Behaviors\{behavior}.hkx", $@"Characters\{character}.hkx", @"CharacterAssets\SingleBoneSkeleton.hkx", "0"]));
+        written.Add(archive.AddToIndex(Path.Combine(meshes, "animationdata", "dirlist.txt"), @"meshes\animationdata\dirlist.txt", project + ".txt"));
+        return written;
     }
 
     static void Save(string path, string className, hkReferencedObject root)
@@ -400,6 +502,9 @@ public sealed class CreatureGraph
             if (end is not null) evs.Add((Math.Max(0, rig.Duration(clip) - 0.02f), end));
             if (name == "Equip") evs.Add((0.1f, "weapEquipOut"));
             if (name == "Unequip") evs.Add((0.1f, "weapUnequipOut"));
+            // Its look as it starts (and each time it repeats), as vanilla's clips start their attached models' sequences
+            // (the benthic lurker's MouthWhipLong, WhipDustLtoR).
+            if (rig.Looks.ContainsKey(clip)) evs.Add((0, CreatureRig.LookEvent(clip)));
             lines.Add(name); lines.Add(clipIds[clip].ToString()); lines.Add("1"); lines.Add("0"); lines.Add("0");
             lines.Add(evs.Count.ToString());
             lines.AddRange(evs.OrderBy(e => e.Time).Select(e => $"{e.Text}:{Num(e.Time)}"));

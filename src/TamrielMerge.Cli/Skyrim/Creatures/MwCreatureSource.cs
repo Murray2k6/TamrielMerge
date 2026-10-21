@@ -524,18 +524,12 @@ public static class MwCreatureSource
                     weights[i] = [(bone, 1f)];
                 }
             }
-            var uv = d.UVSets.Length > 0 ? d.UVSets[0] : new Vector2[nv];
+            var (tex, look, uvSet) = Look(nif, scene, shape, d, textures, modOutDir, model, problems);
+            var uv = d.UVSets.Length > uvSet ? d.UVSets[uvSet] : d.UVSets.Length > 0 ? d.UVSets[0] : new Vector2[nv];
             var tris = Enumerable.Range(0, d.Triangles.Length / 3).Select(t => new[] { (int)d.Triangles[t * 3], d.Triangles[t * 3 + 1], d.Triangles[t * 3 + 2] }).ToArray();
-            var tex = new Dictionary<string, string>();
-            foreach (int pi in shape.Properties)
-                if (nif.Get<NiTexturingProperty>(pi)?.Base is { } bt && nif.Get<NiSourceTexture>(bt.Source)?.FileName is { } file)
-                {
-                    var (rel, _) = textures.Ensure(file);
-                    if (rel is not null) tex["diffuse"] = Path.Combine(modOutDir, rel);
-                }
             meshOf[shape.Index] = rig.Meshes.Count;
             rig.Meshes.Add(new CreatureRig.Mesh(shape.Name.Length > 0 ? shape.Name : $"shape{shape.Index}", v, nrm, uv, weights, tris, tex, skinToBone,
-                Hidden: NeverShown(nif, scene, visKeys, shape.Index)));
+                Hidden: NeverShown(nif, scene, visKeys, shape.Index), Look: look));
         }
 
         // Showing and hiding as Morrowind does (its visibility keys: the dremora's armour pieces, the fire atronach's sword
@@ -572,8 +566,80 @@ public static class MwCreatureSource
             if (keyed.Count > 0) particleParent[parentNode] = VisBone(parentBone, keyed);
         }
 
+        // Vertex morphs (NiGeomMorpherController: a bear's or a wolf's jaw, a netch's swell, a kwama's feelers), every one
+        // on a rigid shape: the vertices that move alike in every target ride one "morph bone" under the bone they hang
+        // from, which moves each frame by Morrowind's weighted sum of those targets' offsets (relative morphs: the base and
+        // the targets at their weights). Exact: only vertices whose offsets agree in every target share a bone.
+        var morphOf = new Dictionary<int, (NiMorphData Data, Vector3[] Offsets)>();   // morph bone -> its targets' offsets (bone space)
+        foreach (var c in nif.Blocks.OfType<NiController>().Where(c => c.Type == "NiGeomMorpherController"))
+        {
+            if (nif.Get<NiTriShape>(c.Target) is not { } shape || !meshOf.TryGetValue(shape.Index, out int mi)) continue;
+            if (nif.Get<NiMorphData>(c.Data) is not { } md || md.Morphs.Count < 2) continue;
+            if (!md.Relative) { problems.Add($"{model}: {shape.Name}: an absolute morph (not carried)"); continue; }
+            var m = rig.Meshes[mi];
+            if (m.SkinToBone is not null) { problems.Add($"{model}: {shape.Name}: a morph on a skinned shape (not carried)"); continue; }
+            // The shape's own turn and size within its node: offsets are in the shape's space.
+            var local = shape.Transform;
+            var groups = new Dictionary<string, int>();
+            var weights = m.Weights.ToArray();
+            for (int vi = 0; vi < md.Morphs[0].Length && vi < weights.Length; vi++)
+            {
+                var offsets = Enumerable.Range(1, md.Morphs.Count - 1).Select(k => local.Scale * local.Rotate(md.Morphs[k][vi])).ToArray();
+                if (offsets.All(o => o.Length() <= 1e-4f)) continue;
+                int holder = weights[vi][0].Bone;
+                string key = holder + ":" + string.Join(";", offsets.Select(o => $"{MathF.Round(o.X * 1e4f)},{MathF.Round(o.Y * 1e4f)},{MathF.Round(o.Z * 1e4f)}"));
+                if (!groups.TryGetValue(key, out int mb))
+                {
+                    mb = rig.Bones.Count;
+                    rig.Bones.Add(new CreatureRig.Bone($"{rig.Bones[holder].Name} [morph {morphOf.Count + 1}]", holder, Vector3.Zero, Quaternion.Identity));
+                    restLocal.Add(NifTransform.Identity);
+                    morphOf[mb] = (md, offsets);
+                    groups[key] = mb;
+                }
+                weights[vi] = [(mb, 1f)];
+            }
+            rig.Meshes[mi] = m with { Weights = weights };
+        }
+
+        // Where its particle arrays emit (EmitterPoints: along the bones of each emitter's subtree, as Morrowind places them):
+        // a hidden mesh per array, a vertex per point, skinned so each sits exactly on its bone (between the node's own bone
+        // and an "emit bone" under it that follows the parent's origin in the node's frame: the blend of the two is the point
+        // between them, whatever either does), facing the node's +Z, which Morrowind shoots its particles along.
+        var emitBoneOf = new Dictionary<int, (int Bone, int ParentNode)>();   // node -> its emit bone, and the parent it follows
+        var emitterMeshOf = new Dictionary<int, int>();                       // particle controller -> its emitter mesh
+        foreach (var c in nif.Blocks.OfType<NiParticleSystemController>().Where(c => c.Type == "NiBSPArrayController"))
+        {
+            var points = EmitterPoints(nif, scene, c);
+            if (points.Count == 0) continue;
+            var pv = new List<Vector3>(); var pn = new List<Vector3>(); var pw = new List<(int Bone, float W)[]>();
+            foreach (var p in points)
+            {
+                if (!boneOf.TryGetValue(p.Node, out int nb)) { problems.Add($"{model}: particle array {c.Index}: emitter node {p.Node} isn't a bone"); continue; }
+                var nodeWorld = world.GetValueOrDefault(p.Node, NifTransform.Identity);
+                var parentOrigin = p.Parent >= 0 && world.TryGetValue(p.Parent, out var pwld) ? pwld.Translation : root.Transform.Translation;
+                if (!emitBoneOf.TryGetValue(p.Node, out var eb))
+                {
+                    // At rest: the parent's origin in the node's frame.
+                    Matrix4x4.Invert(RowMatrix(nodeWorld), out var toNode);
+                    var rest = Vector3.Transform(parentOrigin, toNode);
+                    eb = (rig.Bones.Count, p.Parent);
+                    rig.Bones.Add(new CreatureRig.Bone($"{rig.Bones[nb].Name} [emit]", nb, rest, Quaternion.Identity));
+                    restLocal.Add(new NifTransform(Matrix4x4.Identity, rest, 1));
+                    emitBoneOf[p.Node] = eb;
+                }
+                pv.Add(Vector3.Lerp(parentOrigin, nodeWorld.Translation, p.Along) + nodeWorld.Rotate(p.Offset));
+                pn.Add(Vector3.Normalize(nodeWorld.Rotate(Vector3.UnitZ)));
+                pw.Add(p.Along >= 1 ? [(nb, 1f)] : [(nb, p.Along), (eb.Bone, 1 - p.Along)]);
+            }
+            if (pv.Count == 0) continue;
+            while (pv.Count % 3 != 0) { pv.Add(pv[^1]); pn.Add(pn[^1]); pw.Add(pw[^1]); }
+            emitterMeshOf[c.Index] = rig.Meshes.Count;
+            rig.Meshes.Add(new CreatureRig.Mesh($"{nif.Get<NiObjectNET>(c.Emitter)?.Name} #{c.Index} [emit]", pv.ToArray(), pn.ToArray(), new Vector2[pv.Count], pw.ToArray(),
+                Enumerable.Range(0, pv.Count / 3).Select(t => new[] { 3 * t, 3 * t + 1, 3 * t + 2 }).ToArray(), [], Hidden: true));
+        }
+
         // Its particle systems (flames, steam, sparks), written into the body under the bones their nodes became, a particle
-        // array emitting from its own mesh (user, 2026-10-21: "we need a particle tool then as well"): MwVfx's systems.
+        // array emitting from its own points (user, 2026-10-21: "we need a particle tool then as well"): MwVfx's systems.
         if (nif.Blocks.OfType<NiParticleSystemController>().Any())
         {
             var vfx = new MwVfx(data, textures);
@@ -581,7 +647,9 @@ public static class MwCreatureSource
             {
                 var nodes = boneOf.Where(kv => kv.Value < boneIds.Length).ToDictionary(kv => kv.Key, kv => boneIds[kv.Value]);
                 foreach (var (node, vb) in particleParent) if (vb < boneIds.Length) nodes[node] = boneIds[vb];
-                int made = vfx.AddCreatureParticles(body, nif, nodes, mwShape => meshOf.TryGetValue(mwShape, out int mi) && mi < meshIds.Length ? meshIds[mi] : null);
+                int made = vfx.AddCreatureParticles(body, nif, nodes,
+                    mwShape => meshOf.TryGetValue(mwShape, out int mi) && mi < meshIds.Length ? meshIds[mi] : null,
+                    controller => emitterMeshOf.TryGetValue(controller, out int ei) && ei < meshIds.Length ? meshIds[ei] : null);
                 rig.ParticleSystems = made;
                 // The particles' textures beside the rest of the data.
                 foreach (var rel in vfx.UsedTextures)
@@ -634,14 +702,14 @@ public static class MwCreatureSource
                         float s = rest.Scale;
                         if (tracks.TryGetValue(b, out var kd))
                         {
-                            if (kd.Translations.Count > 0) tr = Sample(kd.Translations, t, Vector3.Lerp);
+                            if (kd.Translations.Count > 0) tr = MwKeys.Vector(kd.Translations, kd.TranslationType, kd.TranslationExtra, t);
                             if (b == movementRoot && kd.Translations.Count > 0)
                             {
-                                var at = Sample(kd.Translations, start, Vector3.Lerp);
+                                var at = MwKeys.Vector(kd.Translations, kd.TranslationType, kd.TranslationExtra, start);
                                 tr = new Vector3(at.X, at.Y, tr.Z);
                             }
-                            if (kd.Rotations.Count > 0) q = Sample(kd.Rotations, t, Quaternion.Slerp);
-                            if (kd.Scales.Count > 0) s = Sample(kd.Scales, t, Vector3.Lerp).X;
+                            if (kd.Rotations.Count > 0) q = MwKeys.Rotation(kd.Rotations, kd.RotationType, kd.RotationExtra, t);
+                            if (kd.Scales.Count > 0) s = MwKeys.Vector(kd.Scales, kd.ScaleType, kd.ScaleExtra, t).X;
                             // Keys are relative to the node's parent; under the model root they carry its transform too.
                             if (rig.Bones[b].Parent == 0 && !rig.HiddenBones.Contains(b))
                             {
@@ -651,19 +719,36 @@ public static class MwCreatureSource
                         }
                         if (rig.HiddenBones.Contains(b)) s = 0;
                         else if (visKeyedOf.TryGetValue(b, out var keyed)) s = keyed.All(k => Shown(nif, visKeys, k, source == ownSource, t)) ? 1 : 0;
+                        // A morph bone: Morrowind's weighted targets at this moment (its keys run on the model's own .kf's time).
+                        if (morphOf.TryGetValue(b, out var morph))
+                        {
+                            var sum = Vector3.Zero;
+                            if (source == ownSource)
+                                for (int k = 1; k < morph.Data.Morphs.Count; k++)
+                                    if (k < morph.Data.Weights.Count && morph.Data.Weights[k].Count > 0)
+                                        sum += MwKeys.Float(morph.Data.Weights[k], morph.Data.WeightTypes[k], morph.Data.WeightExtra[k], t) * morph.Offsets[k - 1];
+                            tr = sum;
+                        }
                         pose[b] = (tr, q);
                         scales[b] = s;
                     }
                     // A hidden visibility bone gathers what it carries into one point: its origin moved to the root's, so a part
-                    // on several of them (a body skinned to many bones) folds into that one point, not onto its skeleton.
+                    // on several of them (a body skinned to many bones) folds into that one point, not onto its skeleton. An emit
+                    // bone sits at its node's parent's origin, in its node's frame, as they are posed now.
                     var hiddenVis = visKeyedOf.Keys.Where(vb => scales[vb] == 0).ToList();
-                    if (hiddenVis.Count > 0)
+                    if (hiddenVis.Count > 0 || emitBoneOf.Count > 0)
                     {
                         var poseWorld = new Matrix4x4[rig.Bones.Count];
                         for (int b = 0; b < rig.Bones.Count; b++)
                         {
                             var local = Matrix4x4.CreateScale(scales[b]) * Matrix4x4.CreateFromQuaternion(pose[b].Item2) * Matrix4x4.CreateTranslation(pose[b].Item1);
                             poseWorld[b] = rig.Bones[b].Parent < 0 ? local : local * poseWorld[rig.Bones[b].Parent];
+                        }
+                        foreach (var (node, (eb, parentNode)) in emitBoneOf)
+                        {
+                            var parentOrigin = boneOf.TryGetValue(parentNode, out int pb) ? poseWorld[pb].Translation : root.Transform.Translation;
+                            if (Matrix4x4.Invert(poseWorld[rig.Bones[eb].Parent], out var toNode))
+                                pose[eb] = (Vector3.Transform(parentOrigin, toNode), Quaternion.Identity);
                         }
                         foreach (int vb in hiddenVis)
                             if (Matrix4x4.Invert(poseWorld[rig.Bones[vb].Parent], out var inv))
@@ -674,6 +759,39 @@ public static class MwCreatureSource
                 }
                 rig.Clips[clip] = new CreatureRig.Clip(Fps, clipFrames, clipScales);
             }
+            // Shader values Morrowind animates on its animation groups' time (`mw-shape-controllers`: the ancestor ghost's and the
+            // specter's alpha, the Heart of Akulakhan's scrolling and fading), each clip's frames as its bones' are; every clip
+            // of a creature with any carries every one (outside its own .kf's clips, each value as it rests).
+            var animated = ShaderTracks(nif, scene, bodyShapes.Where(s => meshOf.ContainsKey(s.Index) && !rig.Meshes[meshOf[s.Index]].Hidden).ToList());
+            if (animated.Count > 0)
+                foreach (var (clip, source, _, start, stop, _, _, _) in plan)
+                {
+                    if (rig.Looks.ContainsKey(clip) || !rig.Clips.TryGetValue(clip, out var made)) continue;
+                    var tracks = new List<CreatureRig.LookTrack>();
+                    foreach (var a in animated)
+                    {
+                        // Every frame, and between frames wherever a straight line would leave Morrowind's curve (its quadratic
+                        // keys: 2026-10-21, the ghost's fading in death was 0.0152 off between frames with frames alone).
+                        float Value(float local) => source == ownSource ? a.At(Math.Min(start + local, stop)) : a.Rest;
+                        var keys = new List<(float Time, float Value)>();
+                        void Between(float t0, float v0, float t1, float v1, int depth)
+                        {
+                            float tm = (t0 + t1) / 2, vm = Value(tm);
+                            if (depth >= 6 || MathF.Abs(vm - (v0 + v1) / 2) <= 2e-4f) return;
+                            Between(t0, v0, tm, vm, depth + 1);
+                            keys.Add((tm, vm));
+                            Between(tm, vm, t1, v1, depth + 1);
+                        }
+                        for (int f = 0; f < made.Frames.Length; f++)
+                        {
+                            float t = f / Fps, v = Value(t);
+                            if (f > 0) Between(keys[^1].Time, keys[^1].Value, t, v, 0);
+                            keys.Add((t, v));
+                        }
+                        tracks.Add(new CreatureRig.LookTrack(meshOf[a.Shape], a.Variable, Thin(keys)));
+                    }
+                    rig.Looks[clip] = new CreatureRig.ClipLook(Looping.Contains(clip), tracks);
+                }
             if (rig.Clips.Count == 0) problems.Add($"{model}: no animation groups found ({string.Join(", ", sources.SelectMany(s => s.Groups.Keys).Take(12))})");
         }
         return rig;
@@ -708,6 +826,168 @@ public static class MwCreatureSource
         return parents;
     }
 
+    /// <summary>
+    /// How Morrowind draws a shape (`mw-creature-looks`: of the creatures' 1,376 body shapes 127 are alpha-blended or
+    /// alpha-tested, 26 see-through by their material, 23 tinted by vertex colours, 14 lit by their own emissive colour,
+    /// 4 with glow maps, 2 with dark maps, 13 untextured), with its properties inherited as Morrowind does: its textures
+    /// (base; dark map multiplied in; glow map; untextured: its material colour, as MwMeshConverter draws Morrowind's), the
+    /// UV set its texture uses, and its look - alpha property, material alpha, tint (its vertex colours where their mode
+    /// uses them for colour, which is Morrowind's default; else its material's diffuse colour when it isn't white), emissive
+    /// colour, depth test and write, texture wrapping.
+    /// </summary>
+    public static (Dictionary<string, string> Textures, CreatureRig.MeshLook Look, int UvSet) Look(Nif4 nif, Dictionary<int, int> scene, NiTriShape shape, NiTriShapeData d,
+        MwTextures textures, string modOutDir, string model, List<string> problems)
+    {
+        var tx = Property<NiTexturingProperty>(nif, scene, shape.Index);
+        var mat = Property<NiMaterialProperty>(nif, scene, shape.Index);
+        var alpha = Property<NiAlphaProperty>(nif, scene, shape.Index);
+        var vc = Property<NiVertexColorProperty>(nif, scene, shape.Index);
+        var zbuffer = Chain(scene, shape.Index).Select(nif.Get<NiNode>).OfType<NiNode>()
+            .SelectMany(n => n.Properties.Reverse().Select(nif.Get<NiFlagProperty>)).FirstOrDefault(p => p?.Type == "NiZBufferProperty");
+        string name = shape.Name.Trim();
+        string? File(TexDesc? slot) => slot is { } s ? nif.Get<NiSourceTexture>(s.Source)?.FileName : null;
+        var tex = new Dictionary<string, string>();
+        int uvSet = (int)(tx?.Base?.UVSet ?? 0);
+
+        // Vertex colours tint it where their mode takes them for its colour (Morrowind's default, mode 2); mode 0 ignores them.
+        uint vertexMode = vc?.VertexMode ?? 2;
+        bool colorsUsed = vertexMode == 2 && d.Colors.Length == d.Vertices.Length && d.Colors.Any(c => c != Vector4.One);
+        if (vertexMode == 1 && d.Colors.Length > 0) problems.Add($"{model}: {name}: vertex colours as its emissive colour (not carried)");
+
+        if (File(tx?.Base) is { } baseFile && textures.Ensure(baseFile).Path is { } baseRel)
+        {
+            string diffuseRel = baseRel;
+            // A dark map multiplies the base (Skyrim has no such slot): the two are baked into one.
+            if (tx!.Textures.Length > 1 && tx.Textures[1] is { } dark && File(dark) is { } darkFile && textures.Ensure(darkFile).Path is { } darkRel)
+            {
+                if (dark.UVSet != tx.Base!.Value.UVSet) problems.Add($"{model}: {name}: dark map on UV set {dark.UVSet}, base on {tx.Base.Value.UVSet} (dark map not carried)");
+                else diffuseRel = BakeDark(baseRel, darkRel, modOutDir) ?? baseRel;
+            }
+            tex["diffuse"] = Path.Combine(modOutDir, diffuseRel);
+        }
+        else tex["diffuse"] = Path.Combine(modOutDir, textures.Solid(colorsUsed ? Vector3.One : mat?.Diffuse ?? Vector3.One));
+        if (tx?.Glow is { } glow && File(glow) is { } glowFile && textures.Ensure(glowFile).Path is { } glowRel)
+        {
+            if (glow.UVSet != uvSet) problems.Add($"{model}: {name}: glow map on UV set {glow.UVSet}, base on {uvSet} (drawn on the base's)");
+            tex["glow"] = Path.Combine(modOutDir, glowRel);
+            if (mat is { } gm && gm.Emissive.X + gm.Emissive.Y + gm.Emissive.Z > 0.05f) problems.Add($"{model}: {name}: a glow map and an emissive colour (the glow map is drawn)");
+        }
+        foreach (int slot in new[] { 2, 3, 5, 6 })
+            if (tx is not null && tx.Textures.Length > slot && tx.Textures[slot] is not null)
+                problems.Add($"{model}: {name}: a {new[] { "", "dark", "detail", "gloss", "glow", "bump", "decal" }[slot]} map (not carried)");
+
+        Vector4[]? colors = null;
+        if (colorsUsed) colors = d.Colors.ToArray();
+        else if (tx?.Base is not null && mat is { } m && Vector3.Distance(m.Diffuse, Vector3.One) > 0.004f)
+            colors = Enumerable.Repeat(new Vector4(m.Diffuse, 1), d.Vertices.Length).ToArray();
+        var look = new CreatureRig.MeshLook(alpha?.Flags, alpha?.Threshold ?? 0, mat?.Alpha ?? 1, colors, mat?.Emissive ?? Vector3.Zero,
+            ZTest: zbuffer is null || (zbuffer.Flags & 1) != 0, ZWrite: zbuffer is null || (zbuffer.Flags & 2) != 0, Clamp: tx?.Base?.Clamp ?? 3);
+        return (tex, look, uvSet);
+    }
+
+    /// <summary>A shader value Morrowind animates on a shape: the Skyrim lighting shader's variable (12 alpha, 20 U offset,
+    /// 21 U scale, 22 V offset, 23 V scale), its value at a moment of the model's own animation time, and as it rests.</summary>
+    public sealed record ShaderTrack(int Shape, int Variable, Func<float, float> At, float Rest);
+
+    /// <summary>
+    /// The shader values Morrowind's controllers animate on these shapes: the alpha of the material each draws with
+    /// (NiAlphaController), and the texture offset and tiling of each (NiUVController: U and V offset, U and V tiling), every
+    /// active controller with keys. An inactive one leaves its value as it rests.
+    /// </summary>
+    public static List<ShaderTrack> ShaderTracks(Nif4 nif, Dictionary<int, int> scene, List<NiTriShape> shapes)
+    {
+        var result = new List<ShaderTrack>();
+        var controllers = nif.Blocks.OfType<NiController>().Where(c => (c.Flags & 8) != 0).ToList();
+        foreach (var shape in shapes)
+        {
+            if (Property<NiMaterialProperty>(nif, scene, shape.Index) is { } mat)
+                foreach (var c in controllers.Where(c => c.Type == "NiAlphaController" && c.Target == mat.Index))
+                    if (nif.Get<NiKeyData>(c.Data) is { Keys.Count: > 0 } k)
+                        result.Add(new ShaderTrack(shape.Index, 12, t => MwKeys.Vector(k.Keys, k.Interpolation, k.Extra, ControllerTime(c, t)).X, mat.Alpha));
+            foreach (var c in controllers.Where(c => c.Type == "NiUVController" && c.Target == shape.Index))
+                if (nif.Get<NiUVData>(c.Data) is { } uv)
+                    for (int g = 0; g < 4; g++)
+                        if (uv.Groups[g] is { Keys.Count: > 0 } k)
+                            result.Add(new ShaderTrack(shape.Index, new[] { 20, 22, 21, 23 }[g], t => MwKeys.Vector(k.Keys, k.Interpolation, k.Extra, ControllerTime(c, t)).X, g < 2 ? 0 : 1));
+        }
+        return result;
+    }
+
+    /// <summary>A controller's own time at a moment of the animation: scaled by its frequency, moved by its phase, then
+    /// within its span as its cycle says (flags bits 1-2: 0 repeat, 1 back and forth, 2 held at its ends).</summary>
+    public static float ControllerTime(NiController c, float t)
+    {
+        float ct = t * c.Frequency + c.Phase, span = c.Stop - c.Start;
+        if (span <= 1e-6f) return c.Start;
+        switch ((c.Flags >> 1) & 3)
+        {
+            case 0: return c.Start + ((ct - c.Start) % span + span) % span;
+            case 1:
+            {
+                float p = ((ct - c.Start) % (2 * span) + 2 * span) % (2 * span);
+                return c.Start + (p <= span ? p : 2 * span - p);
+            }
+            default: return Math.Clamp(ct, c.Start, c.Stop);
+        }
+    }
+
+    /// <summary>Keys without those a straight line through their neighbours already gives (exact at every frame).</summary>
+    static (float Time, float Value)[] Thin(List<(float Time, float Value)> keys)
+    {
+        if (keys.Count <= 2) return keys.ToArray();
+        var kept = new List<(float Time, float Value)> { keys[0] };
+        for (int i = 1; i < keys.Count - 1; i++)
+        {
+            var a = kept[^1]; var b = keys[i + 1];
+            // Kept when leaving it out would move any frame between the last kept key and the next one.
+            bool needed = false;
+            for (int j = keys.IndexOf(a) + 1; j <= i && !needed; j++)
+            {
+                float uj = (keys[j].Time - a.Time) / (b.Time - a.Time);
+                needed = MathF.Abs(a.Value + (b.Value - a.Value) * uj - keys[j].Value) > 1e-5f;
+            }
+            if (needed) kept.Add(keys[i]);
+        }
+        kept.Add(keys[^1]);
+        return kept.ToArray();
+    }
+
+    /// <summary>A base texture with its dark map multiplied in (the dark map stretched to the base's size), beside the
+    /// converted textures; null when either can't be read.</summary>
+    static string? BakeDark(string baseRel, string darkRel, string modOutDir)
+    {
+        string rel = $@"{MwTextures.OutFolder}\baked\{MwTextures.FlatName(Path.ChangeExtension(baseRel, null)[(MwTextures.OutFolder.Length + 1)..])}__dark__{MwTextures.FlatName(Path.ChangeExtension(darkRel, null)[(MwTextures.OutFolder.Length + 1)..])}.dds";
+        string full = Path.Combine(modOutDir, rel);
+        if (System.IO.File.Exists(full)) return rel;
+        if (Util.DdsImage.Decode(System.IO.File.ReadAllBytes(Path.Combine(modOutDir, baseRel))) is not { } b || Util.DdsImage.Decode(System.IO.File.ReadAllBytes(Path.Combine(modOutDir, darkRel))) is not { } k) return null;
+        var px = new uint[b.Px.Length];
+        bool alpha = false;
+        for (int y = 0; y < b.H; y++)
+            for (int x = 0; x < b.W; x++)
+            {
+                // The dark map's texel under this one (bilinear, wrapping, as it tiles with the base).
+                float u = (x + 0.5f) / b.W * k.W - 0.5f, v = (y + 0.5f) / b.H * k.H - 0.5f;
+                int x0 = (int)MathF.Floor(u), y0 = (int)MathF.Floor(v);
+                float fx = u - x0, fy = v - y0;
+                Vector3 At(int xx, int yy) { uint c = k.Px[((yy % k.H + k.H) % k.H) * k.W + (xx % k.W + k.W) % k.W]; return new Vector3(c >> 16 & 255, c >> 8 & 255, c & 255) / 255f; }
+                var dk = Vector3.Lerp(Vector3.Lerp(At(x0, y0), At(x0 + 1, y0), fx), Vector3.Lerp(At(x0, y0 + 1), At(x0 + 1, y0 + 1), fx), fy);
+                uint c = b.Px[y * b.W + x];
+                var col = new Vector3(c >> 16 & 255, c >> 8 & 255, c & 255) / 255f * dk;
+                uint a = c >> 24;
+                if (a != 255) alpha = true;
+                px[y * b.W + x] = a << 24 | (uint)MathF.Round(col.X * 255) << 16 | (uint)MathF.Round(col.Y * 255) << 8 | (uint)MathF.Round(col.Z * 255);
+            }
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        MwTextures.WriteBcDds(full, px, b.W, b.H, alpha);
+        return rel;
+    }
+
+    /// <summary>The properties a block is drawn with, as Morrowind inherits them down the scene: its ancestors' from the root
+    /// down, then its own; of each kind the last (nearest) one is the one in effect.</summary>
+    public static T? Property<T>(Nif4 nif, Dictionary<int, int> parents, int block) where T : NiFlagProperty =>
+        Chain(parents, block).Select(nif.Get<NiNode>).OfType<NiNode>()
+            .SelectMany(n => n.Properties.Reverse().Select(nif.Get<NiFlagProperty>).OfType<T>()).FirstOrDefault();
+
     /// <summary>A block and its scene ancestors, itself first.</summary>
     public static IEnumerable<int> Chain(Dictionary<int, int> parents, int block)
     {
@@ -740,23 +1020,66 @@ public static class MwCreatureSource
         Chain(parents, block).Any(b => nif.Get<NiNode>(b) is { Hidden: true } && !keys.ContainsKey(b));
 
     /// <summary>The shapes a Morrowind model's Skyrim body holds, in order: those it can show (none of it and its ancestors
-    /// hidden for good; some shown only while their visibility keys say, as the dremora's armour pieces), then the hidden
-    /// ones a particle array emits from (the fire atronach's "Tri Weapon": its sword's flames), kept but not drawn.</summary>
+    /// hidden for good; some shown only while their visibility keys say, as the dremora's armour pieces), then a hidden one
+    /// a particle array emits from at its vertices (<see cref="EmitsAtVertex"/>: the first geometry under its emitter),
+    /// kept but not drawn.</summary>
     public static List<NiTriShape> BodyShapes(Nif4 nif)
     {
         var parents = SceneParents(nif);
         var keys = VisibilityKeys(nif);
-        var emitterShapes = new HashSet<int>();
-        void EmitterShapes(int i)
-        {
-            if (nif.Get<NiTriShape>(i) is { } s && s is not NiParticles) emitterShapes.Add(s.Index);
-            else if (nif.Get<NiNode>(i) is { } n) foreach (int ch in n.Children) EmitterShapes(ch);
-        }
-        foreach (var c in nif.Blocks.OfType<NiParticleSystemController>().Where(c => c.Type == "NiBSPArrayController")) EmitterShapes(c.Emitter);
+        var emitterShapes = nif.Blocks.OfType<NiParticleSystemController>().Where(EmitsAtVertex).Select(c => FirstGeometry(nif, c.Emitter)).OfType<NiTriShape>().Select(s => s.Index).ToHashSet();
         bool HasData(NiTriShape s) => nif.Get<NiTriShapeData>(s.Data) is { Vertices.Length: > 0 };
         var shapes = nif.Blocks.OfType<NiTriShape>().Where(s => s is not NiParticles && parents.ContainsKey(s.Index) && HasData(s)).ToList();
         var drawn = shapes.Where(s => !NeverShown(nif, parents, keys, s.Index)).ToList();
         return drawn.Concat(shapes.Where(s => !drawn.Contains(s) && emitterShapes.Contains(s.Index))).ToList();
+    }
+
+    /// <summary>Whether a particle array emits from its emitter's geometry (controller flag 0x10; OpenMW's reading of
+    /// Morrowind's, components/nifosg/particle.cpp), not from its emitter's nodes.</summary>
+    public static bool EmitsAtVertex(NiParticleSystemController c) => c.Type == "NiBSPArrayController" && (c.Flags & 0x10) != 0;
+
+    /// <summary>The first geometry under a node, depth first (what a particle array emitting at vertices emits from).</summary>
+    public static NiTriShape? FirstGeometry(Nif4 nif, int block)
+    {
+        if (nif.Get<NiTriShape>(block) is { } s && s is not NiParticles) return s;
+        if (nif.Get<NiNode>(block) is { } n) foreach (int ch in n.Children) if (FirstGeometry(nif, ch) is { } f) return f;
+        return null;
+    }
+
+    /// <summary>A point a particle array emits from: between a node of its emitter's subtree and that node's parent (at
+    /// <paramref name="Along"/>: 0 the parent, 1 the node), moved by <paramref name="Offset"/> in the node's own frame.</summary>
+    public readonly record struct EmitterPoint(int Node, int Parent, float Along, Vector3 Offset);
+
+    /// <summary>Points along each emitter bone: enough that particles spread along it as Morrowind's do.</summary>
+    public const int PointsPerBone = 5;
+
+    /// <summary>
+    /// Where a particle array that doesn't emit at vertices emits from, as Morrowind places its particles (OpenMW's reading,
+    /// components/nifosg/particle.cpp; `mw-particle-arrays`: all 21 of the creatures' arrays have flag 0x08): each emission
+    /// a node of its emitter's subtree (the emitter and every node under it, all alike), with flag 0x08 at a random point
+    /// between that node and its parent (here <see cref="PointsPerBone"/> points evenly along it), else at the node; within
+    /// a box of its emitter dimensions in the node's frame (here its corners and centre). In order: node by node (the
+    /// subtree depth first), point by point, offset by offset. Empty for an array emitting at vertices.
+    /// </summary>
+    public static List<EmitterPoint> EmitterPoints(Nif4 nif, Dictionary<int, int> scene, NiParticleSystemController c)
+    {
+        var points = new List<EmitterPoint>();
+        if (EmitsAtVertex(c)) return points;
+        var nodes = new List<int>();
+        void All(int i) { if (nif.Get<NiNode>(i) is { } n && n is not NiTriShape) { nodes.Add(i); foreach (int ch in n.Children) All(ch); } }
+        All(c.Emitter);
+        bool alongBone = (c.Flags & 0x08) != 0;
+        var half = c.EmitterDimensions / 2;
+        var offsets = half.LengthSquared() < 1e-8f ? [Vector3.Zero]
+            : new[] { Vector3.Zero }.Concat(from x in new[] { -1, 1 } from y in new[] { -1, 1 } from z in new[] { -1, 1 } select new Vector3(x * half.X, y * half.Y, z * half.Z)).ToList();
+        foreach (int n in nodes)
+        {
+            int parent = scene.GetValueOrDefault(n, -1);
+            var along = alongBone ? Enumerable.Range(0, PointsPerBone).Select(k => (k + 0.5f) / PointsPerBone) : [1f];
+            foreach (float s in along)
+                foreach (var o in offsets) points.Add(new EmitterPoint(n, parent, s, o));
+        }
+        return points;
     }
 
     /// <summary>Whether the body draws a shape (else it is only there for a particle array to emit from).</summary>

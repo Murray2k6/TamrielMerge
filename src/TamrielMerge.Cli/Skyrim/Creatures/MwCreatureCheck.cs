@@ -86,7 +86,11 @@ public static class MwCreatureCheck
             : "(not skinned)";
 
         Dictionary<int, Matrix4x4> lastWorld = [];
-        Vector3[][] Morrowind(float time, float groupStart)
+        // Vertex morphs by the shape they bend (relative: the base plus each target at its weight).
+        var morphs = nif.Blocks.OfType<NiController>().Where(c => c.Type == "NiGeomMorpherController" && nif.Get<NiMorphData>(c.Data) is { Relative: true })
+            .GroupBy(c => c.Target).ToDictionary(g => g.Key, g => nif.Get<NiMorphData>(g.First().Data)!);
+
+        Vector3[][] Morrowind(float time, float groupStart, bool own = true)
         {
             var world = lastWorld = new Dictionary<int, Matrix4x4> { [root.Index] = Local(root.Transform) };
             foreach (var n in order)
@@ -95,12 +99,12 @@ public static class MwCreatureCheck
                 var rot = Mat3(t.Rotation); var tr = t.Translation; float scale = t.Scale;
                 if (trackOf.TryGetValue(n.Index, out var kd))
                 {
-                    if (kd.Rotations.Count > 0) rot = FromQuaternion(Key(kd.Rotations, time, Nlerp));
-                    if (kd.Translations.Count > 0) tr = Key(kd.Translations, time, Vector3.Lerp);
-                    if (kd.Scales.Count > 0) scale = Key(kd.Scales, time, Vector3.Lerp).X;
+                    if (kd.Rotations.Count > 0) rot = FromQuaternion(MwKeys.Rotation(kd.Rotations, kd.RotationType, kd.RotationExtra, time));
+                    if (kd.Translations.Count > 0) tr = MwKeys.Vector(kd.Translations, kd.TranslationType, kd.TranslationExtra, time);
+                    if (kd.Scales.Count > 0) scale = MwKeys.Vector(kd.Scales, kd.ScaleType, kd.ScaleExtra, time).X;
                     if (n.Index == movementRoot && kd.Translations.Count > 0)
                     {
-                        var at = Key(kd.Translations, groupStart, Vector3.Lerp);
+                        var at = MwKeys.Vector(kd.Translations, kd.TranslationType, kd.TranslationExtra, groupStart);
                         tr = new Vector3(at.X, at.Y, tr.Z);
                     }
                 }
@@ -126,7 +130,15 @@ public static class MwCreatureCheck
                 else
                 {
                     var m = Local(s.Transform) * world[shapeParent[s.Index]];
-                    for (int i = 0; i < v.Length; i++) v[i] = Vector3.Transform(d.Vertices[i], m);
+                    var morphed = d.Vertices.ToArray();
+                    if (own && morphs.TryGetValue(s.Index, out var md))
+                        for (int k = 1; k < md.Morphs.Count; k++)
+                        {
+                            if (k >= md.Weights.Count || md.Weights[k].Count == 0) continue;
+                            float wk = MwKeys.Float(md.Weights[k], md.WeightTypes[k], md.WeightExtra[k], time);
+                            for (int i = 0; i < morphed.Length && i < md.Morphs[k].Length; i++) morphed[i] += wk * md.Morphs[k][i];
+                        }
+                    for (int i = 0; i < v.Length; i++) v[i] = Vector3.Transform(morphed[i], m);
                 }
                 result[si] = v;
             }
@@ -136,14 +148,28 @@ public static class MwCreatureCheck
         var results = new List<Result>();
         string folder = Path.Combine(skyrimDataDir, CreatureRig.MeshFolder(id));
         using var body = new SkyrimBody(folder, id);
-        if (body.ShapeVertexCounts.Count != shapes.Count)
-            say($"  shapes: Morrowind {shapes.Count}, Skyrim {body.ShapeVertexCounts.Count}");
+        int bodyShapes = body.ShapeNames.Count(n => !n.EndsWith("[emit]"));
+        if (bodyShapes != shapes.Count)
+            say($"  shapes: Morrowind {shapes.Count}, Skyrim {bodyShapes} (and {body.ShapeNames.Count - bodyShapes} particle emitter meshes)");
         for (int i = 0; i < Math.Min(shapes.Count, body.ShapeVertexCounts.Count); i++)
         {
             int mw = nif.Get<NiTriShapeData>(shapes[i].Data)!.Vertices.Length, sk = body.ShapeVertexCounts[i];
             int mwTris = nif.Get<NiTriShapeData>(shapes[i].Data)!.Triangles.Length / 3;
             if (mw != sk || mwTris != body.ShapeTriangleCounts[i]) say($"  {shapes[i].Name}: Morrowind {mw} vertices {mwTris} triangles, Skyrim {sk} vertices {body.ShapeTriangleCounts[i]} triangles");
         }
+        // The particle arrays' emitter meshes: each point where Morrowind emits from (between a node of the emitter's subtree
+        // and its parent, MwCreatureSource.EmitterPoints), every frame, against Morrowind's posed nodes.
+        var emitterChecks = new List<(int Shape, List<MwCreatureSource.EmitterPoint> Points)>();
+        foreach (var c in nif.Blocks.OfType<NiParticleSystemController>().Where(c => c.Type == "NiBSPArrayController"))
+        {
+            var pts = MwCreatureSource.EmitterPoints(nif, scene, c);
+            if (pts.Count == 0) continue;
+            string want = CreatureRig.FileSafe($"{id}_{nif.Get<NiObjectNET>(c.Emitter)?.Name} #{c.Index} [emit]");
+            int si = body.ShapeNames.IndexOf(want);
+            if (si < 0) say($"  particle array {c.Index}: no emitter mesh {want}");
+            else emitterChecks.Add((si, pts));
+        }
+        float emitWorst = 0; int emitCount = 0; string emitWhere = "";
         foreach (var (clip, source, group, start, stop, _, _, _) in plan)
         {
             trackOf = trackOfSource[source];
@@ -151,10 +177,12 @@ public static class MwCreatureCheck
             if (!File.Exists(file)) { say($"  {clip}: no {file}"); continue; }
             var anim = body.Animation(file);
             float worst = 0, sum = 0; int count = 0, worstFrame = 0; string worstWhere = "";
+            var framesOff = new List<int>();   // frames with a vertex more than 0.05 off
             for (int f = 0; f < anim.Frames; f++)
             {
+                float frameWorst = 0;
                 float t = Math.Min(start + f / anim.Fps, stop);
-                var reference = Morrowind(t, start);
+                var reference = Morrowind(t, start, source == ownSource);
                 var ours = body.Pose(anim, f);
                 if (probe is { } pr && pr.Clip == clip && pr.Frame == f)
                 {
@@ -187,6 +215,13 @@ public static class MwCreatureCheck
                         say($"    {n.Name} keys within 0.05 s of t={t:R}: {string.Join(" | ", kd.Rotations.Where(k => MathF.Abs(k.Time - t) < 0.05f).Select(k => $"{k.Time:R} {k.Value}"))}");
                         say($"    {n.Name} at t={t:F5}: Morrowind key {refQ}, ours {new Quaternion(qs.M21, qs.M22, qs.M23, qs.M24)}; keys around: {(k1 > 0 ? $"{kd.Rotations[k1 - 1].Time:F5} {kd.Rotations[k1 - 1].Value}" : "-")} | {(k1 >= 0 ? $"{kd.Rotations[k1].Time:F5} {kd.Rotations[k1].Value}" : "-")}");
                     }
+                    // The shapes off at this frame: what each rides in Morrowind (its parent node, or its skin's bones) and in ours.
+                    for (int s = 0; s < Math.Min(reference.Length, ours.Length); s++)
+                    {
+                        float off = Enumerable.Range(0, Math.Min(reference[s].Length, ours[s].Length)).Select(i => Vector3.Distance(reference[s][i], ours[s][i])).DefaultIfEmpty(0).Max();
+                        if (off > 0.05f)
+                            say($"    {shapes[s].Name}: up to {off:F3} off; Morrowind's parent {nif.Get<NiObjectNET>(shapeParent.GetValueOrDefault(shapes[s].Index, -1))?.Name} (node {shapeParent.GetValueOrDefault(shapes[s].Index, -1)}); ours on {body.ShapeBones(s, anim, f)}");
+                    }
                     say($"  {clip} frame {f}: the bones furthest apart");
                     foreach (var r in rows.OrderByDescending(r => r.D).Take(16)) say(r.Line);
                     say($"  {clip} frame {f}: the first bones, in the tree's order");
@@ -208,10 +243,24 @@ public static class MwCreatureCheck
                     {
                         float dist = Vector3.Distance(reference[s][i], ours[s][i]);
                         sum += dist; count++;
+                        frameWorst = MathF.Max(frameWorst, dist);
                         if (dist > worst) { worst = dist; worstFrame = f; worstWhere = $"{shapes[s].Name} vertex {i} on {BonesOf(s, i)}: Morrowind {reference[s][i]}, ours {ours[s][i]}"; }
                     }
                 }
+                if (frameWorst > 0.05f) framesOff.Add(f);
+                foreach (var (si, pts) in emitterChecks)
+                    for (int k = 0; k < pts.Count && k < ours[si].Length; k++)
+                    {
+                        var p = pts[k];
+                        if (!lastWorld.TryGetValue(p.Node, out var nodeW)) continue;
+                        var parentPos = p.Parent >= 0 && lastWorld.TryGetValue(p.Parent, out var pw) ? pw.Translation : lastWorld[root.Index].Translation;
+                        var wantAt = Vector3.Lerp(parentPos, nodeW.Translation, p.Along) + Vector3.TransformNormal(p.Offset, nodeW);
+                        float e = Vector3.Distance(wantAt, ours[si][k]);
+                        emitCount++;
+                        if (e > emitWorst) { emitWorst = e; emitWhere = $"{clip} frame {f}, {nif.Get<NiObjectNET>(p.Node)?.Name} at {p.Along:F2}: Morrowind {wantAt}, ours {ours[si][k]}"; }
+                    }
             }
+            if (framesOff.Count > 0) worstWhere += $"; {framesOff.Count} of {anim.Frames} frames more than 0.05 off ({string.Join(", ", framesOff.Take(12))}{(framesOff.Count > 12 ? ", ..." : "")})";
             results.Add(new Result(clip, group, anim.Frames, worst, count > 0 ? sum / count : 0, worstFrame, worstWhere));
         }
         // Particle systems Morrowind shows and hides (themselves or their emitter): ours on at full scale exactly when
@@ -238,6 +287,7 @@ public static class MwCreatureCheck
             }
         }
         if (particleRight + particleWrong > 0) say($"  particle systems Morrowind shows and hides: right in {particleRight} system-frames, wrong in {particleWrong}{(particleWrong > 0 ? " (first: " + particleFirstWrong + ")" : "")}");
+        if (emitCount > 0) say($"  particle arrays' emitting points (along their bones): {emitWorst:F3} units from Morrowind's at worst over {emitCount} point-frames{(emitWorst > 0.05f ? " (" + emitWhere + ")" : "")}");
         if (hiddenFramesRight + hiddenFramesWrong > 0) say($"  parts Morrowind hides: out of sight in {hiddenFramesRight} part-frames, shown in {hiddenFramesWrong}");
         return results;
     }
@@ -315,6 +365,8 @@ public static class MwCreatureCheck
         public List<int> ShapeTriangleCounts { get; } = [];
         /// <summary>Each shape's diffuse texture as written.</summary>
         public List<string> ShapeTextures { get; } = [];
+        /// <summary>Each shape's name as written.</summary>
+        public List<string> ShapeNames { get; } = [];
 
         public sealed record Anim(int Tracks, int Frames, float Fps, IList<Matrix4x4> Transforms);
 
@@ -356,6 +408,7 @@ public static class MwCreatureCheck
                 shape.GetTriangles(tris);
                 ShapeTriangleCounts.Add(tris.Count);
                 ShapeTextures.Add(nif.GetTexturePathByIndex(shape, 0) ?? "");
+                ShapeNames.Add(shape.name.get());
             }
         }
 
@@ -376,7 +429,11 @@ public static class MwCreatureCheck
         public float Scale(Anim anim, int frame, string bone) => BoneNames.IndexOf(bone) is >= 0 and var b ? anim.Transforms[frame * anim.Tracks + b].M31 : float.NaN;
 
         /// <summary>A shape's bones with their scales at a frame (what shows or hides it).</summary>
-        public string ShapeBones(int shape, Anim anim, int frame) => string.Join(", ", shapes[shape].Bones.Distinct().Select(b => $"{skeleton.m_bones[b].m_name} x{anim.Transforms[frame * anim.Tracks + b].M31:F2}"));
+        public string ShapeBones(int shape, Anim anim, int frame) => string.Join(", ", shapes[shape].Bones.Distinct().Select(b =>
+        {
+            var qs = anim.Transforms[frame * anim.Tracks + b];
+            return $"{skeleton.m_bones[b].m_name} x{qs.M31:F2} at ({qs.M11:F2}, {qs.M12:F2}, {qs.M13:F2}) turned ({qs.M21:F3}, {qs.M22:F3}, {qs.M23:F3}, {qs.M24:F3})";
+        }));
 
         public Matrix4x4[] BoneWorlds(Anim anim, int frame)
         {

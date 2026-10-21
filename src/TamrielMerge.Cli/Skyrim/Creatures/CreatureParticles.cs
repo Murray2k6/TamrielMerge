@@ -64,11 +64,34 @@ public static class CreatureParticles
             {
                 Same("box width", c.EmitterDimensions.X * 2, box.width); Same("box height", c.EmitterDimensions.Y * 2, box.height); Same("box depth", c.EmitterDimensions.Z * 2, box.depth);
             }
+            string emitsFrom = isMesh ? "from its mesh" : "box";
             if (emitter is nifly.NiPSysMeshEmitter mesh)
             {
                 using var meshes = new nifly.vectoruint32();
                 mesh.meshRefs.GetIndices(meshes);
                 if (meshes.Count == 0) { Issue($"{name}: mesh emitter with no mesh"); ok = false; }
+                else if (MwCreatureSource.EmitsAtVertex(c))
+                {
+                    // At the vertices of the first geometry under its emitter.
+                    var first = MwCreatureSource.FirstGeometry(mw, c.Emitter);
+                    string wantShape = first is null ? "" : CreatureRig.FileSafe($"{id}_{(first.Name.Length > 0 ? first.Name : $"shape{first.Index}")}");
+                    string got = (hdr.GetBlockById(meshes[0]) as nifly.NiAVObject)?.name.get() ?? "";
+                    if (meshes.Count != 1 || got != wantShape) { Issue($"{name}: emits from {got} ({meshes.Count} meshes), Morrowind from {wantShape}'s vertices"); ok = false; }
+                    else emitsFrom = $"at {first!.Name.Trim()}'s vertices";
+                }
+                else
+                {
+                    // Along its emitter's bones: its own emitter mesh, a vertex per point, heading off each vertex's normal.
+                    var points = MwCreatureSource.EmitterPoints(mw, MwCreatureSource.SceneParents(mw), c);
+                    string wantMeshName = CreatureRig.FileSafe($"{id}_{mw.Get<NiObjectNET>(c.Emitter)?.Name} #{c.Index} [emit]");
+                    var shape = meshes.Count == 1 ? hdr.GetBlockById(meshes[0]) as nifly.NiShape : null;
+                    string got = shape?.name.get() ?? "";
+                    int verts = shape is null ? 0 : nif.GetVertsForShape(shape)?.Count ?? 0;
+                    if (got != wantMeshName) { Issue($"{name}: emits from {got}, expected its emitter mesh {wantMeshName}"); ok = false; }
+                    else if (verts < points.Count || verts > points.Count + 2) { Issue($"{name}: emitter mesh has {verts} vertices for {points.Count} points"); ok = false; }
+                    else if (mesh.velocityType != nifly.VelocityType.VELOCITY_USE_NORMALS) { Issue($"{name}: emits along {mesh.velocityType}, not each point's node's +Z (its normal)"); ok = false; }
+                    else emitsFrom = $"along {points.Select(p => p.Node).Distinct().Count()} bones of {mw.Get<NiObjectNET>(c.Emitter)?.Name}, {points.Count} points";
+                }
             }
             // Each Morrowind modifier as its Skyrim one.
             var want = new List<string>();
@@ -105,7 +128,7 @@ public static class CreatureParticles
                 if (mw.Get<NiTexturingProperty>(pi)?.Base is { } bt && mw.Get<NiSourceTexture>(bt.Source)?.FileName is { } file) texture = file;
             string skTex = hdr.GetBlockById(ps.shaderPropertyRef.index) is nifly.BSEffectShaderProperty sh ? sh.sourceTexture.get() : "";
             if (texture is not null && !File.Exists(Path.Combine(dataDir, skTex))) { Issue($"{name}: texture {skTex} (Morrowind's {texture}) not in the data"); ok = false; }
-            if (ok) parts.Add($"{name}: as Morrowind's ({(isMesh ? "from its mesh" : "box")}, under {skParent}, {have.Count} modifiers, {rate:F1} a second, texture {Path.GetFileName(skTex)})");
+            if (ok) parts.Add($"{name}: as Morrowind's ({emitsFrom}, under {skParent}, {have.Count} modifiers, {rate:F1} a second, texture {Path.GetFileName(skTex)})");
             lines.AddRange(parts.Select(p => "  " + p));
         }
         foreach (var extra in systems.Keys.Where(k => controllers.All(c => mw.Get<NiParticles>(c.Target) is not { } p || MwVfx.ParticleName(p, creature: true) != k)))

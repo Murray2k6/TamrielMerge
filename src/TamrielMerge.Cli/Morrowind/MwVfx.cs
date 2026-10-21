@@ -55,6 +55,8 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
         public bool Creature;
         /// <summary>A creature's body shapes by the Morrowind shape they came from (its index), for mesh emitters.</summary>
         public Func<int, uint?>? ShapeOf;
+        /// <summary>A creature's particle array's own emitter mesh (its points along its emitter's bones), by its controller.</summary>
+        public Func<int, uint?>? EmitterMeshOf;
     }
 
     /// <summary>
@@ -62,12 +64,13 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
     /// <paramref name="nif"/>: each Morrowind particle controller with its particles as a Skyrim particle system under the
     /// node its particles hang from (<paramref name="nodes"/>: Morrowind node index to the body's bone node, which the
     /// engine moves with the skeleton), as <see cref="AddParticles"/> builds them, cycling as Morrowind cycles them, a
-    /// particle array (NiBSPArrayController) emitting from the creature's own mesh (<paramref name="shapeOf"/>). Returns
-    /// the systems made.
+    /// particle array (NiBSPArrayController) emitting where Morrowind's does: along its emitter's bones from its own
+    /// emitter mesh (<paramref name="emitterMeshOf"/>, by controller), or at its first geometry's vertices
+    /// (<paramref name="shapeOf"/>, by Morrowind shape) when it emits at vertices. Returns the systems made.
     /// </summary>
-    public int AddCreatureParticles(NifFile nif, Nif4 mw, IReadOnlyDictionary<int, uint> nodes, Func<int, uint?> shapeOf)
+    public int AddCreatureParticles(NifFile nif, Nif4 mw, IReadOnlyDictionary<int, uint> nodes, Func<int, uint?> shapeOf, Func<int, uint?> emitterMeshOf)
     {
-        var b = new Build(nif) { Creature = true, ShapeOf = shapeOf };
+        var b = new Build(nif) { Creature = true, ShapeOf = shapeOf, EmitterMeshOf = emitterMeshOf };
         foreach (var (k, v) in nodes) b.Nodes[k] = v;
         int made = 0;
         foreach (var c in mw.Blocks.OfType<NiParticleSystemController>())
@@ -231,20 +234,20 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
         int parentIndex = mw.Blocks.OfType<NiNode>().FirstOrDefault(n => n.Children.Contains(particles.Index))?.Index ?? -1;
         if (!b.Nodes.TryGetValue(parentIndex, out var parentId)) parentId = b.Hdr.GetBlockID(b.Nif.GetRootNode());
         uint emitterNode = b.Nodes.TryGetValue(c.Emitter, out var en) ? en : parentId;
-        // A creature's particle array emits from its own mesh (Morrowind's NiBSPArrayController emits from its emitter
-        // object's vertices): the body shapes made from that object, or from the shapes under it.
+        // A creature's particle array emits where Morrowind's does (OpenMW's reading, components/nifosg/particle.cpp): along
+        // its emitter's bones (its own emitter mesh, a vertex per point, each facing its node's +Z), or with flag 0x10 at the
+        // vertices of the first geometry under its emitter (that body shape).
         var meshEmitters = new List<uint>();
-        if (b.Creature && c.Type == "NiBSPArrayController" && b.ShapeOf is { } shapeOf)
+        bool alongBones = false;
+        if (b.Creature && c.Type == "NiBSPArrayController")
         {
-            var under = new List<int>();
-            void Collect(int i)
+            if (Skyrim.Creatures.MwCreatureSource.EmitsAtVertex(c))
             {
-                if (mw.Get<NiTriShape>(i) is { } s && s is not NiParticles) under.Add(s.Index);
-                else if (mw.Get<NiNode>(i) is { } n) foreach (int ch in n.Children) Collect(ch);
+                if (Skyrim.Creatures.MwCreatureSource.FirstGeometry(mw, c.Emitter) is { } first && b.ShapeOf?.Invoke(first.Index) is { } id) meshEmitters.Add(id);
+                else Problems.Add($"particle array {c.Index}: its emitter {c.Emitter} has no geometry to emit from (a box at its node instead)");
             }
-            Collect(c.Emitter);
-            foreach (int i in under) if (shapeOf(i) is { } id) meshEmitters.Add(id);
-            if (meshEmitters.Count == 0) Problems.Add($"particle array {c.Index}: its emitter {c.Emitter} has no body shape to emit from (a box at its node instead)");
+            else if (b.EmitterMeshOf?.Invoke(c.Index) is { } points) { meshEmitters.Add(points); alongBones = true; }
+            else Problems.Add($"particle array {c.Index}: no emitter mesh for its emitter's bones (a box at its node instead)");
         }
         var (texture, alphaProp, material) = Look(mw, particles);
         int max = Math.Max(1, Math.Max(c.NumParticles, mw.Get<NiGeometryData>(particles.Data)?.Vertices.Length ?? 0));
@@ -271,7 +274,8 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
         NiPSysEmitter emitter;
         if (meshEmitters.Count > 0)
         {
-            // From the creature's own mesh, as Morrowind's particle array emits from its emitter object's vertices.
+            // From its emitter mesh's vertices: along its bones each heading off its own node's +Z (the vertex's normal), at
+            // a geometry's vertices heading off the emitter's +Z, by the declination and planar angle, as Morrowind's shoot.
             var mesh = new NiPSysMeshEmitter
             {
                 name = new NiStringRef("NiPSysMeshEmitter"), order = 1000, isActive = true,
@@ -281,10 +285,8 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
                 color = new Color4(c.InitialColor.X, c.InitialColor.Y, c.InitialColor.Z, c.InitialColor.W),
                 radius = c.InitialSize, radiusVariation = 0,
                 lifeSpan = c.Lifetime, lifeSpanVariation = c.LifetimeVariation,
-                // From the vertices, heading off the emitter's +Z by the declination and planar angle, as Morrowind's
-                // emitters (and Skyrim's box) do.
                 emissionType = EmitFrom.EMIT_FROM_VERTICES,
-                velocityType = VelocityType.VELOCITY_USE_DIRECTION,
+                velocityType = alongBones ? VelocityType.VELOCITY_USE_NORMALS : VelocityType.VELOCITY_USE_DIRECTION,
                 emissionAxis = new nifly.Vector3(0, 0, 1),
             };
             foreach (var m in meshEmitters) mesh.meshRefs.AddBlockRef(m);

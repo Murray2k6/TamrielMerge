@@ -295,7 +295,7 @@ public sealed class Nif4
                         if (d.RotationType == 4) continue;
                         var q = r.V4();
                         d.Rotations.Add((t, new Quaternion(q.Y, q.Z, q.W, q.X)));   // stored w, x, y, z
-                        if (d.RotationType == 3) r.Skip(12);
+                        if (d.RotationType == 3) d.RotationExtra.Add([r.F32(), r.F32(), r.F32()]);   // tension, continuity, bias
                     }
                     if (d.RotationType == 4)
                     {
@@ -303,8 +303,8 @@ public sealed class Nif4
                         for (int axis = 0; axis < 3; axis++) ReadKeys(r, 1, null);
                     }
                 }
-                ReadKeys(r, 3, d.Translations);
-                ReadKeys(r, 1, d.Scales);
+                d.TranslationType = ReadKeys(r, 3, d.Translations, d.TranslationExtra);
+                d.ScaleType = ReadKeys(r, 1, d.Scales, d.ScaleExtra);
                 return d;
             }
             case "NiColorData":
@@ -326,8 +326,9 @@ public sealed class Nif4
             }
             case "NiPosData": case "NiFloatData":
             {
-                ReadKeys(r, type == "NiPosData" ? 3 : 1, null);
-                return new NiRaw();
+                var d = new NiKeyData();
+                d.Interpolation = ReadKeys(r, type == "NiPosData" ? 3 : 1, d.Keys, d.Extra);
+                return d;
             }
             case "NiVisData":
             {
@@ -338,19 +339,30 @@ public sealed class Nif4
             }
             case "NiUVData":
             {
-                for (int i = 0; i < 4; i++) ReadKeys(r, 1, null);
-                return new NiRaw();
+                var d = new NiUVData();
+                for (int i = 0; i < 4; i++) { var k = new NiKeyData(); k.Interpolation = ReadKeys(r, 1, k.Keys, k.Extra); d.Groups[i] = k; }
+                return d;
             }
             case "NiMorphData":
             {
                 var d = new NiMorphData();
                 int morphs = r.I32(), verts = r.I32();
-                r.U8();                         // relative targets
+                d.Relative = r.U8() != 0;       // targets are offsets from the first (the base)
                 for (int m = 0; m < morphs; m++)
                 {
                     int keys = r.I32();
                     int interp = r.I32();
-                    for (int k = 0; k < keys; k++) r.Skip(4 + 4 + (interp == 2 ? 8 : interp == 3 ? 12 : 0));
+                    var weights = new List<(float Time, float Weight)>();
+                    var extras = new List<float[]>();
+                    for (int k = 0; k < keys; k++)
+                    {
+                        weights.Add((r.F32(), r.F32()));
+                        if (interp == 2) extras.Add([r.F32(), r.F32()]);              // quadratic tangents
+                        else if (interp == 3) extras.Add([r.F32(), r.F32(), r.F32()]); // tension, continuity, bias
+                    }
+                    d.WeightExtra.Add(extras);
+                    d.Weights.Add(weights);
+                    d.WeightTypes.Add(interp);
                     var v = new Vector3[verts];
                     for (int i = 0; i < verts; i++) v[i] = r.V3();
                     d.Morphs.Add(v);
@@ -387,20 +399,24 @@ public sealed class Nif4
 
     /// <summary>A key group: count, interpolation (when keys exist), then keys of time + value (+ tangents for
     /// quadratic, + tension/bias/continuity for TBC). <paramref name="width"/> is the value's float count.</summary>
-    static void ReadKeys(NifReader r, int width, List<(float Time, Vector3 Value)>? into)
+    /// <summary>Reads a key list; returns its interpolation (1 linear, 2 quadratic, 3 TBC; 0 none).</summary>
+    /// <param name="extra">Each key's interpolation data as stored: a quadratic key's two tangents (width each, in file
+    /// order), a TBC key's tension, continuity and bias.</param>
+    static int ReadKeys(NifReader r, int width, List<(float Time, Vector3 Value)>? into, List<float[]>? extra = null)
     {
         int n = r.I32();
-        if (n == 0) return;
+        if (n == 0) return 0;
         int interp = r.I32();
         for (int i = 0; i < n; i++)
         {
             float t = r.F32();
             var v = new float[width];
             for (int k = 0; k < width; k++) v[k] = r.F32();
-            if (interp == 2) r.Skip(8 * width);
-            else if (interp == 3) r.Skip(12);
+            if (interp == 2) { var e = new float[2 * width]; for (int k = 0; k < e.Length; k++) e[k] = r.F32(); extra?.Add(e); }
+            else if (interp == 3) extra?.Add([r.F32(), r.F32(), r.F32()]);
             into?.Add((t, width >= 3 ? new Vector3(v[0], v[1], v[2]) : new Vector3(v[0], 0, 0)));
         }
+        return interp;
     }
 }
 
@@ -690,16 +706,38 @@ public class NiParticleModifier : NifBlock
 
 public sealed class NiKeyframeData : NifBlock
 {
-    public int RotationType;
+    public int RotationType, TranslationType, ScaleType;
+    /// <summary>Per key, as stored: TBC rotations' tension, continuity, bias; quadratic keys' two tangents; TBC keys' t/c/b.</summary>
+    public List<float[]> RotationExtra = [], TranslationExtra = [], ScaleExtra = [];
     public List<(float Time, Quaternion Value)> Rotations = [];
     public List<(float Time, Vector3 Value)> Translations = [];
     /// <summary>Scale keys (value in X).</summary>
     public List<(float Time, Vector3 Value)> Scales = [];
 }
 
-public sealed class NiMorphData : NifBlock { public List<Vector3[]> Morphs = []; }
+/// <summary>Vertex morph targets and each one's weight keys over time; with <see cref="Relative"/> the first is the
+/// base shape and the rest are offsets added at their weights.</summary>
+public sealed class NiMorphData : NifBlock
+{
+    public List<Vector3[]> Morphs = [];
+    public List<List<(float Time, float Weight)>> Weights = [];
+    /// <summary>Each target's key interpolation (1 linear, 2 quadratic, 3 TBC).</summary>
+    public List<int> WeightTypes = [];
+    public List<List<float[]>> WeightExtra = [];
+    public bool Relative;
+}
+
+/// <summary>Float (value in X) or position keys with their interpolation (1 linear, 2 quadratic, 3 TBC) and each key's
+/// tangents or tension/continuity/bias, as stored.</summary>
+public sealed class NiKeyData : NifBlock
+{
+    public int Interpolation;
+    public List<(float Time, Vector3 Value)> Keys = [];
+    public List<float[]> Extra = [];
+}
+
+/// <summary>Texture-coordinate keys: U offset, V offset, U tiling, V tiling.</summary>
+public sealed class NiUVData : NifBlock { public NiKeyData[] Groups = new NiKeyData[4]; }
 
 /// <summary>Visibility keys (time, shown), a step from each key to the next.</summary>
 public sealed class NiVisData : NifBlock { public List<(float Time, bool Visible)> Keys = []; }
-
-/// <summary>Visibility keys (time, shown), a step from each key to the next.</summary> sealed class NiVisData : NifBlock { public List<(float Time, bool Visible)> Keys = []; }

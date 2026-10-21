@@ -1,4 +1,4 @@
-using nifly;
+﻿using nifly;
 
 namespace TamrielMerge.Util;
 
@@ -18,6 +18,15 @@ public static class NifDump
             string detail = type switch
             {
                 "BSXFlags" => $"integer={cache.EditableBlockById<BSXFlags>(i).integerData}",
+                "BSBehaviorGraphExtraData" => $"name={cache.EditableBlockById<BSBehaviorGraphExtraData>(i).name.get()} file={cache.EditableBlockById<BSBehaviorGraphExtraData>(i).behaviorGraphFile.get()} controlsBaseSkel={cache.EditableBlockById<BSBehaviorGraphExtraData>(i).controlsBaseSkel}",
+                "NiControllerSequence" => $"name={cache.EditableBlockById<NiControllerSequence>(i).name.get()} cycle={cache.EditableBlockById<NiControllerSequence>(i).cycleType} start={cache.EditableBlockById<NiControllerSequence>(i).startTime} stop={cache.EditableBlockById<NiControllerSequence>(i).stopTime} freq={cache.EditableBlockById<NiControllerSequence>(i).frequency}",
+                "BSLightingShaderPropertyFloatController" => Ctlr(cache.EditableBlockById<NiTimeController>(i)) + $" var={cache.EditableBlockById<BSLightingShaderPropertyFloatController>(i).typeOfControlledVariable} interp={cache.EditableBlockById<NiSingleInterpController>(i).interpolatorRef.index}",
+                "BSLightingShaderPropertyColorController" => Ctlr(cache.EditableBlockById<NiTimeController>(i)) + $" color={cache.EditableBlockById<BSLightingShaderPropertyColorController>(i).typeOfControlledColor} interp={cache.EditableBlockById<NiSingleInterpController>(i).interpolatorRef.index}",
+                "NiFloatInterpolator" => $"value={cache.EditableBlockById<NiFloatInterpolator>(i).floatValue} data={cache.EditableBlockById<NiFloatInterpolator>(i).dataRef.index}",
+                "NiBlendFloatInterpolator" => $"value={cache.EditableBlockById<NiBlendFloatInterpolator>(i).value} flags={cache.EditableBlockById<NiBlendFloatInterpolator>(i).flags} arraySize={cache.EditableBlockById<NiBlendFloatInterpolator>(i).arraySize} weightThreshold={cache.EditableBlockById<NiBlendFloatInterpolator>(i).weightThreshold}",
+                "NiFloatData" => FloatData(cache.EditableBlockById<NiFloatData>(i)),
+                "NiTextKeyExtraData" => "keys " + string.Join(" ", TamrielMerge.Skyrim.Meshes.NiflyRaw.TextKeys(cache.EditableBlockById<NiTextKeyExtraData>(i)).Select(k => $"{k.time:0.###}={k.value.get()}")),
+                "NiControllerManager" =>$"flags={cache.EditableBlockById<NiControllerManager>(i).flags} cumulative={cache.EditableBlockById<NiControllerManager>(i).cumulative}",
                 "BSBound" => $"name={cache.EditableBlockById<BSBound>(i).name.get()} center=({cache.EditableBlockById<BSBound>(i).center.x},{cache.EditableBlockById<BSBound>(i).center.y},{cache.EditableBlockById<BSBound>(i).center.z}) halfExtents=({cache.EditableBlockById<BSBound>(i).halfExtents.x},{cache.EditableBlockById<BSBound>(i).halfExtents.y},{cache.EditableBlockById<BSBound>(i).halfExtents.z})",
                 "bhkCollisionObject" => $"flags={cache.EditableBlockById<bhkCollisionObject>(i).flags} target={cache.EditableBlockById<bhkCollisionObject>(i).targetRef.index} body={cache.EditableBlockById<bhkCollisionObject>(i).bodyRef.index}",
                 "bhkRigidBody" or "bhkRigidBodyT" => RigidBody(cache.EditableBlockById<bhkRigidBody>(i)),
@@ -34,7 +43,18 @@ public static class NifDump
                 _ => "",
             };
             Console.WriteLine($"  [{i}] {type} {detail}");
+            if (type == "NiControllerSequence")
+                foreach (var l in TamrielMerge.Skyrim.Meshes.NiflyRaw.Links(cache.EditableBlockById<NiControllerSequence>(i)))
+                    Console.WriteLine($"      link node={l.nodeName.get()} prop={l.propType.get()} ctrlType={l.ctrlType.get()} ctrlID={l.ctrlID.get()} interpID={l.interpID.get()} controller={l.controllerRef.index} interpolator={l.interpolatorRef.index} priority={l.priority}");
         }
+    }
+
+    static string Ctlr(NiTimeController c) => $"flags={c.flags} freq={c.frequency} phase={c.phase} start={c.startTime} stop={c.stopTime} target={c.targetRef.index} next={c.nextControllerRef.index}";
+
+    static string FloatData(NiFloatData d)
+    {
+        var keys = Enumerable.Range(0, (int)d.data.GetNumKeys()).Select(k => TamrielMerge.Skyrim.Meshes.NifKeys.Read(d.data, k)).Select(k => $"{k.Time:0.###}={k.Value:0.###}");
+        return $"type={d.data.GetInterpolationType()} keys {string.Join(" ", keys.Take(12))}";
     }
 
     static string Prop(string name, hkWorldObjCInfoProperty p) => $"{name}=({p.data},{p.size},0x{p.capacityAndFlags:X})";

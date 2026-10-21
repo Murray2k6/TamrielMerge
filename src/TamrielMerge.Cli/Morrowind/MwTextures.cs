@@ -153,16 +153,21 @@ public sealed class MwTextures(Tes3Data data, string modOutDir)
         WriteBcDds(full, outPx, w, h, true);
     }
 
-    /// <summary>A small solid-colour texture (for Morrowind's untextured shapes, drawn in their material colour).</summary>
+    readonly HashSet<string> solids = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A small solid-colour texture (for Morrowind's untextured shapes, drawn in their material colour), uncompressed
+    /// so the colour is Morrowind's to the 8-bit step (2026-10-21, `creature-looks`: block compression's 5-bit red and blue left
+    /// the frost atronach's box tip 0.694 red as 0.706).</summary>
     public string Solid(System.Numerics.Vector3 rgb)
     {
-        uint r = (uint)Math.Clamp(rgb.X * 255, 0, 255), g = (uint)Math.Clamp(rgb.Y * 255, 0, 255), b = (uint)Math.Clamp(rgb.Z * 255, 0, 255);
+        uint r = (uint)Math.Clamp(MathF.Round(rgb.X * 255), 0, 255), g = (uint)Math.Clamp(MathF.Round(rgb.Y * 255), 0, 255), b = (uint)Math.Clamp(MathF.Round(rgb.Z * 255), 0, 255);
         string rel = $@"{OutFolder}\solid\{r:X2}{g:X2}{b:X2}.dds";
         string full = Path.Combine(modOutDir, rel);
-        if (!File.Exists(full))
+        // Written once a run (over an older build's block-compressed one).
+        if (solids.Add(rel))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-            WriteBcDds(full, Enumerable.Repeat(0xFF000000u | r << 16 | g << 8 | b, 16).ToArray(), 4, 4, false);
+            Skyrim.Meshes.DfTextureExport.WriteDds(full, Enumerable.Repeat(0xFF000000u | r << 16 | g << 8 | b, 16).ToArray(), 4, 4);
         }
         EnsureFlatNormal();
         return rel;

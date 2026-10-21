@@ -1,4 +1,4 @@
-﻿namespace TamrielMerge.Daggerfall;
+namespace TamrielMerge.Daggerfall;
 
 /// <summary>How a Daggerfall creature moves (Daggerfall Unity MobileBehaviour).</summary>
 public enum DfMoves { General, Flying, Aquatic, Spectral, Spellcaster, Guard, CustomBodyParts }
@@ -78,8 +78,9 @@ public static class DfMonsters
     };
 
     /// <summary>
-    /// A creature's Speed attribute from ARENA2\MONSTER.BSA (record ENEMY&lt;id&gt;.CFG, a class file: the eight attributes
-    /// as 16-bit values from byte 42, Speed the seventh: Daggerfall Unity ClassFile / DFCareer), or null without it.
+    /// A creature's Speed attribute from ARENA2\MONSTER.BSA (record ENEMY&lt;id&gt;.CFG, 74 bytes: a class file with its
+    /// 16-byte name at 28, so the eight attributes are 16-bit values from byte 58, Speed the seventh at 70; read from the
+    /// user's file 2026-10-21: the imp's 40 65 70 80 55 50 70 50, its name "Imp" at 28), or null without it.
     /// </summary>
     public static int? Speed(string arena2, int id)
     {
@@ -89,7 +90,7 @@ public static class DfMonsters
         string name = $"ENEMY{id:000}.CFG";
         if (!bsa.Contains(name)) return null;
         var data = bsa.Record(name);
-        return data.Length >= 56 ? BitConverter.ToUInt16(data, 54) : null;
+        return data.Length >= 72 ? BitConverter.ToUInt16(data, 70) : null;
     }
 
     /// <summary>How fast it moves, in Skyrim units a second: Daggerfall Unity's enemies move (Speed + 150) classic units

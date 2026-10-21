@@ -10,7 +10,7 @@ namespace TamrielMerge.Skyrim.Creatures;
 /// name; name, actors (every creature drawn with it, as the conversion names them) and bones from the game.
 /// </summary>
 public sealed record CreatureSpec(string Id, string Game, string? Model, string Name, string? Head, string? Torso, List<string> Actors,
-    string? Template, string? TemplateRace, int? Remaster, JsonElement? Stats, int? DfMonster = null)
+    string? Template, string? TemplateRace, int? Remaster, JsonElement? Stats, int? DfMonster = null, string? SameAs = null)
 {
     public static string ConfigDir => Path.Combine(Setup.Dependencies.Root, "creatures");
 
@@ -25,7 +25,19 @@ public sealed record CreatureSpec(string Id, string Game, string? Model, string 
             r.TryGetProperty("actors", out var a) ? a.EnumerateArray().Select(x => x.GetString()!).ToList() : [],
             S("template"), S("templateRace"), r.TryGetProperty("remaster", out var rm) ? rm.GetInt32() : null,
             r.TryGetProperty("stats", out var st) ? st.Clone() : null,
-            r.TryGetProperty("dfMonster", out var dm) ? dm.GetInt32() : null);
+            r.TryGetProperty("dfMonster", out var dm) ? dm.GetInt32() : null,
+            S("sameAs"));
+    }
+
+    /// <summary>A fingerprint of what a config's Blender export reads (its source, armature, meshes, height, facing, actions,
+    /// textures, materials, body): the export is made again only when that changes, not for a new name, actors, numbers or
+    /// behaviour.</summary>
+    public static string ExportKey(string configPath)
+    {
+        using var doc = JsonDocument.Parse(File.ReadAllText(configPath));
+        var read = new[] { "source", "armature", "meshes", "height", "facing", "forward", "actions", "textures", "materials", "body", "scale", "rotate" };
+        var parts = doc.RootElement.EnumerateObject().Where(p => read.Contains(p.Name)).OrderBy(p => p.Name, StringComparer.Ordinal).Select(p => p.Name + "=" + p.Value.GetRawText());
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(string.Join("\n", parts))));
     }
 
     /// <summary>Every configured creature.</summary>

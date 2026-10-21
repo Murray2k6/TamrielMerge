@@ -6,6 +6,7 @@ using TamrielMerge.Skyrim.Meshes;
 using Quaternion = System.Numerics.Quaternion;
 using Vector2 = System.Numerics.Vector2;
 using Vector3 = System.Numerics.Vector3;
+using Vector4 = System.Numerics.Vector4;
 
 namespace TamrielMerge.Skyrim.Creatures;
 
@@ -26,7 +27,39 @@ public sealed class CreatureRig
     /// (row vectors: p_bone = p * M) when it was bound in another pose than the skeleton's rest (Morrowind's creatures are: a
     /// vertex between two far bones, as a robe's between the calves, comes out right only so); else each bone's rest inverted.</summary>
     public sealed record Mesh(string Name, Vector3[] V, Vector3[] N, Vector2[] Uv, (int Bone, float W)[][] Weights, int[][] Tris, Dictionary<string, string> Textures,
-        Dictionary<int, Matrix4x4>? SkinToBone = null, bool Hidden = false);
+        Dictionary<int, Matrix4x4>? SkinToBone = null, bool Hidden = false, MeshLook? Look = null);
+
+    /// <summary>
+    /// How a mesh is drawn beyond its textures (a Morrowind shape's material, alpha and vertex colours; null: opaque, matte,
+    /// white): its alpha property (blend and test flags, test threshold) as the source has it, the material's alpha, the
+    /// colour each vertex is tinted (the source's vertex colours, or its material colour), the colour it gives off (the glow
+    /// shader, its texture or "glow" texture the glow map), whether it tests and writes the depth buffer, and the texture's
+    /// wrapping (0 clamp both .. 3 wrap both).
+    /// </summary>
+    public sealed record MeshLook(ushort? AlphaFlags, byte AlphaThreshold, float Alpha, Vector4[]? Colors, Vector3 Emissive, bool ZTest, bool ZWrite, uint Clamp);
+
+    /// <summary>A shader value a clip animates on a mesh: the lighting shader's variable (12 alpha, 20 U offset, 22 V offset,
+    /// as vanilla's BSLightingShaderPropertyFloatController numbers them) and its keys (seconds from the clip's start).</summary>
+    public sealed record LookTrack(int Mesh, int Variable, (float Time, float Value)[] Keys);
+
+    /// <summary>A clip's look: every animated shader value as it is through the clip, and whether it repeats.</summary>
+    public sealed record ClipLook(bool Loops, List<LookTrack> Tracks);
+
+    /// <summary>
+    /// The shader values each clip animates (Morrowind's alpha and texture-scroll controllers, which run on its animation
+    /// groups' time: the ancestor ghost's flicker when hit, a specter's fade in death, the Heart of Akulakhan's scrolling
+    /// fire): written as vanilla animates a body's materials (the chaurus flyer's, the spriggan matron's) - the body's
+    /// controller manager holds one sequence per clip (<see cref="LookEvent"/>), its own behaviour graph
+    /// (BSBehaviorGraphExtraData) plays the one its clip's event names, and each clip sends that event as it starts.
+    /// Every clip's sequence sets every animated value, so each clip shows its own.
+    /// </summary>
+    public Dictionary<string, ClipLook> Looks { get; } = [];
+
+    /// <summary>The event (and body sequence) for a clip's look.</summary>
+    public static string LookEvent(string clip) => "TMLook_" + clip;
+
+    /// <summary>The behaviour project that plays a body's looks, relative to meshes\ (what the body's BGED names).</summary>
+    public static string LookProject(string id) => $@"actors\tamrielmerge\{id}\looks\{CreatureBehavior.ProjectName(id)[..^"Project".Length]}Looks.hkx";
     /// <summary>A clip: frames of each bone's local translation and rotation, and its scale per frame and bone when the source
     /// animates scale (null: all 1).</summary>
     public sealed record Clip(float Fps, (Vector3 T, Quaternion Q)[][] Frames, float[][]? Scales = null);
@@ -166,7 +199,7 @@ public sealed class CreatureRig
 
     /// <summary>A Havok QS transform; the rotation made unit length (an interpolated quaternion that isn't turns a bone by
     /// the wrong angle: 2026-10-21, the clannfear's spine 0.046 degrees off from System.Numerics Slerp's unnormalised blend).</summary>
-    static Matrix4x4 QsTransform(Vector3 t, Quaternion q, float s = 1)
+    internal static Matrix4x4 QsTransform(Vector3 t, Quaternion q, float s = 1)
     {
         q = Quaternion.Normalize(q);
         return new(
@@ -288,7 +321,7 @@ public sealed class CreatureRig
         return lowest == float.MaxValue ? 0 : lowest;
     }
 
-    static void WriteHavok(string path, hkaAnimationContainer container)
+    internal static void WriteHavok(string path, hkaAnimationContainer container)
     {
         var root = new hkRootLevelContainer
         {
@@ -428,17 +461,42 @@ public sealed class CreatureRig
             meshIds[mi] = hdr.GetBlockID(shape);
             string? diffuse = Texture(m.Textures.GetValueOrDefault("diffuse"), texDir, FileSafe($"{id}_{m.Name}"), "", alpha: false);
             string? normal = Texture(m.Textures.GetValueOrDefault("normal"), texDir, FileSafe($"{id}_{m.Name}"), "_n", alpha: false);
+            string? glowMap = Texture(m.Textures.GetValueOrDefault("glow"), texDir, FileSafe($"{id}_{m.Name}"), "_g", alpha: false);
             if (diffuse is not null) nif.SetTextureSlot(shape, Path.GetRelativePath(dataDir, diffuse), 0);
             nif.SetTextureSlot(shape, normal is not null ? Path.GetRelativePath(dataDir, normal) : DfTextureExport.FlatNormal, 1);
+            var look = m.Look;
+            // The colour it gives off: its own glow map, else (Morrowind multiplies a material's emissive colour into the
+            // texture) its own texture as the glow map, tinted by that colour, as MwMeshConverter draws Morrowind's.
+            var emissive = look?.Emissive ?? Vector3.Zero;
+            bool glows = glowMap is not null || (diffuse is not null && emissive.X + emissive.Y + emissive.Z > 0.05f);
+            if (glows) nif.SetTextureSlot(shape, Path.GetRelativePath(dataDir, glowMap ?? diffuse!), 2);
             // Tangents for drawn shapes (a hidden emitter shape has no texture coordinates; nifly crashes on them).
             if (!m.Hidden) nif.CalcTangentsForShape(shape);
+            bool colors = look?.Colors is { } cs && cs.Length == m.V.Length;
+            if (colors)
+            {
+                using var cols = new vectorColor4();
+                foreach (var c in look!.Colors!) cols.Add(new Color4(c.X, c.Y, c.Z, c.W));
+                nif.SetColorsForShape(shape, cols);
+            }
+            if (look?.AlphaFlags is { } af) nif.AssignAlphaProperty(shape, BlockMeshBuilder.Owned(new NiAlphaProperty { flags = af, threshold = look.AlphaThreshold }));
+            bool blended = look?.AlphaFlags is { } bf && (bf & 1) != 0 && (bf & 0x200) == 0;
+            bool vertexAlpha = colors && look!.AlphaFlags is not null && look.Colors!.Any(c => c.W < 1);
             BlockMeshBuilder.EditBlock<BSLightingShaderProperty>(nif, hdr.GetBlockID(nif.GetShader(shape)), sh =>
             {
-                // Matte (the models are never shiny; Morrowind's creatures have no specular): skinned, cast + receive shadows.
-                sh.shaderFlags1 = 0x80400302u;
-                sh.shaderFlags2 = 0x8001u;       // ZBuffer write, vertex animation off
+                // Matte (the models are never shiny; Morrowind's creatures have no specular): skinned, own emit, cast + receive
+                // shadows, depth test as the source has it; vertex alpha when its colours carry some.
+                sh.shaderFlags1 = (look is null || look.ZTest ? 0x80000000u : 0) | 0x400302u | (vertexAlpha ? 0x8u : 0);
+                // Depth write (off for blended surfaces, as MwMeshConverter draws Morrowind's, or where the source turns it
+                // off), vertex colours when tinted, glow map when it glows.
+                sh.shaderFlags2 = (blended || look is { ZWrite: false } ? 0u : 0x1u) | (colors ? 0x20u : 0) | (glows ? 0x40u : 0) | 0x8000u;
+                if (glows) sh.SetShaderType(2u);
                 sh.glossiness = 1;
                 sh.specularStrength = 0;
+                sh.alpha = look?.Alpha ?? 1;
+                sh.emissiveColor = glows ? (glowMap is not null ? new nifly.Vector3(1, 1, 1) : new nifly.Vector3(emissive.X, emissive.Y, emissive.Z)) : new nifly.Vector3(0, 0, 0);
+                sh.emissiveMultiple = glows ? 1 : 0;
+                sh.textureClampMode = (TexClampMode)(look?.Clamp ?? 3);
             });
 
             // Skinning: only the bones this shape uses, each with its bind (bone-to-root inverted).
@@ -495,8 +553,107 @@ public sealed class CreatureRig
         }
         var boneIds = nodes.Select(n => hdr.GetBlockID(n)).ToArray();
         foreach (var extra in BodyExtras) extra(nif, dataDir, boneIds, meshIds);
-        if (BodyExtras.Count > 0) BlockMeshBuilder.AddBsxFlags(nif, nif.GetRootNode(), 1);   // animated: its effects run
+        if (Looks.Count > 0) AddLooks(nif, id, meshIds);
+        if (BodyExtras.Count > 0 || Looks.Count > 0) BlockMeshBuilder.AddBsxFlags(nif, nif.GetRootNode(), 1);   // animated: its effects run
         nif.Save(path);
+    }
+
+    /// <summary>
+    /// The clips' looks (<see cref="Looks"/>) in the body, laid out as vanilla's (charurusflyer.nif): on each animated mesh's
+    /// shader one float controller per variable (manager controlled, a blend interpolator the manager sets); under the root
+    /// a controller manager with one sequence per clip (its keys for every animated value, "start" and "end" text keys,
+    /// looping for a repeating clip), an object palette naming the meshes, and the behaviour graph that plays the sequences
+    /// (<see cref="LookProject"/>, not driving the skeleton).
+    /// </summary>
+    void AddLooks(NifFile nif, string id, uint[] meshIds)
+    {
+        var hdr = nif.GetHeader();
+        var root = nif.GetRootNode();
+        uint rootId = hdr.GetBlockID(root);
+        uint Add(NiObject block) => hdr.AddBlock(BlockMeshBuilder.Owned(block));
+        const uint NoBlock = uint.MaxValue;
+
+        // The controllers: one per animated (mesh, variable), chained on the mesh's shader.
+        var controllerOf = new Dictionary<(int Mesh, int Variable), uint>();
+        float longest = Looks.Values.Max(l => l.Tracks.Count == 0 ? 0 : l.Tracks.Max(t => t.Keys.Length == 0 ? 0 : t.Keys[^1].Time));
+        foreach (var group in Looks.Values.SelectMany(l => l.Tracks).Select(t => (t.Mesh, t.Variable)).Distinct().GroupBy(t => t.Mesh))
+        {
+            var shape = (NiShape)hdr.GetBlockById(meshIds[group.Key]);
+            uint shaderId = hdr.GetBlockID(nif.GetShader(shape));
+            uint next = NoBlock;
+            foreach (var (mesh, variable) in group.Reverse())
+            {
+                var blend = new NiBlendFloatInterpolator { value = float.MinValue };
+                blend.flags = InterpBlendFlags.INTERP_BLEND_MANAGER_CONTROLLED; blend.arraySize = 2; blend.weightThreshold = 0; blend.singleIndex = 255;
+                blend.highPriority = (char)0xFFFD; blend.nextHighPriority = (char)0xFFFD; blend.singleTime = float.MinValue;
+                uint blendId = Add(blend);
+                var c = new BSLightingShaderPropertyFloatController { flags = 0x6C, frequency = 1, phase = 0, startTime = 0, stopTime = longest, typeOfControlledVariable = (uint)variable };
+                c.targetRef.index = shaderId;
+                c.interpolatorRef.index = blendId;
+                c.nextControllerRef.index = next;
+                next = controllerOf[(mesh, variable)] = Add(c);
+            }
+            BlockMeshBuilder.EditBlock<BSLightingShaderProperty>(nif, shaderId, sh => sh.controllerRef.index = next);
+        }
+
+        var manager = new NiControllerManager { flags = 0x4C, frequency = 1, phase = 0, startTime = float.MaxValue, stopTime = float.MinValue, cumulative = false };
+        manager.targetRef.index = rootId;
+        uint managerId = Add(manager);
+        var seqIds = new List<uint>();
+        foreach (var (clip, look) in Looks)
+        {
+            float length = Duration(clip);
+            var seq = NiflyRaw.NewSequence(look.Tracks.Count);
+            var slots = NiflyRaw.Links(seq);
+            for (int k = 0; k < look.Tracks.Count; k++)
+            {
+                var t = look.Tracks[k];
+                var data = new NiFloatData();
+                data.data.SetInterpolationType(NiKeyType.LINEAR_KEY);
+                foreach (var (time, value) in t.Keys) NifKeys.Add(data.data, time, value);
+                var interp = new NiFloatInterpolator { floatValue = float.MinValue };
+                interp.dataRef.index = Add(data);
+                slots[k].interpolatorRef.index = Add(interp);
+                slots[k].controllerRef.index = controllerOf[(t.Mesh, t.Variable)];
+                slots[k].priority = 0;
+                slots[k].nodeName = new NiStringRef(((NiShape)hdr.GetBlockById(meshIds[t.Mesh])).name.get());
+                slots[k].propType = new NiStringRef("BSLightingShaderProperty");
+                slots[k].ctrlType = new NiStringRef("BSLightingShaderPropertyFloatController");
+                slots[k].ctrlID = new NiStringRef(t.Variable.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                slots[k].interpID = new NiStringRef("");
+                NiflyRaw.Ref(slots[k].stringPaletteRef).index = NoBlock;
+            }
+            seq.name = new NiStringRef(LookEvent(clip));
+            seq.cycleType = look.Loops ? CycleType.CYCLE_LOOP : CycleType.CYCLE_CLAMP;
+            seq.frequency = 1;
+            seq.startTime = 0;
+            seq.stopTime = length;
+            seq.weight = 1;
+            seq.managerRef.index = managerId;
+            seq.accumRootName = new NiStringRef(root.name.get());
+            seq.textKeyRef.index = Add(NiflyRaw.NewTextKeys([(0f, "start"), (length, "end")]));
+            NiflyRaw.Ref(seq.stringPaletteRef).index = NoBlock;
+            seqIds.Add(Add(seq));
+        }
+
+        // The object palette: the root and the animated meshes by name, for the sequences to find them.
+        var named = Looks.Values.SelectMany(l => l.Tracks).Select(t => t.Mesh).Distinct().Select(mi => (Name: ((NiShape)hdr.GetBlockById(meshIds[mi])).name.get(), Id: meshIds[mi])).ToList();
+        var palette = NiflyRaw.NewPalette(named.Count + 1);
+        var entries = NiflyRaw.PaletteObjects(palette);
+        entries[0].name = new NiString(root.name.get()); entries[0].objectRef.index = rootId;
+        for (int k = 0; k < named.Count; k++) { entries[k + 1].name = new NiString(named[k].Name); entries[k + 1].objectRef.index = named[k].Id; }
+        palette.sceneRef.index = rootId;
+        uint paletteId = Add(palette);
+
+        var m = (NiControllerManager)hdr.GetBlockById(managerId);
+        foreach (var s in seqIds) m.controllerSequenceRefs.AddBlockRef(s);
+        m.objectPaletteRef.index = paletteId;
+        root.controllerRef.index = managerId;
+
+        var graph = BlockMeshBuilder.Owned(new BSBehaviorGraphExtraData { controlsBaseSkel = false });
+        graph.name = new NiStringRef("BGED");
+        graph.behaviorGraphFile = new NiStringRef(LookProject(id));
+        nif.AssignExtraData(root, graph);
     }
 
     /// <summary>The block ID of the shape's NiSkinData (through its skin instance), or null.</summary>
@@ -512,7 +669,7 @@ public sealed class CreatureRig
     }
 
     /// <summary>A name made fit for a file: what a file name can't hold (a Morrowind shape's trailing tab) as "_", trimmed.</summary>
-    static string FileSafe(string name) => new string(name.Select(c => char.IsControl(c) || Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray()).Trim('_', ' ');
+    internal static string FileSafe(string name) => new string(name.Select(c => char.IsControl(c) || Path.GetInvalidFileNameChars().Contains(c) ? '_' : c).ToArray()).Trim('_', ' ');
 
     /// <summary>A source picture as a DDS beside the creature's others; null without one.</summary>
     static string? Texture(string? source, string dir, string stem, string suffix, bool alpha)

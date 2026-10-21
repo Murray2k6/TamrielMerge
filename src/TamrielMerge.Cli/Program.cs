@@ -4247,12 +4247,12 @@ static class Program
                         }
                         else if (Tex(n) is { Length: > 0 } t) extra = $" tex [{t}]";
                         var lr = n.Transform.Rotation; float det = lr.M11 * (lr.M22 * lr.M33 - lr.M23 * lr.M32) - lr.M12 * (lr.M21 * lr.M33 - lr.M23 * lr.M31) + lr.M13 * (lr.M21 * lr.M32 - lr.M22 * lr.M31);
-                        Console.WriteLine($"{new string(' ', depth * 2)}{n.Type} \"{n.Name}\"{(n.Hidden ? " hidden" : "")} at {w.Translation:F1} s {w.Scale:F2} local {n.Transform.Translation:F1} rot [{lr.M11:F2} {lr.M12:F2} {lr.M13:F2} | {lr.M21:F2} {lr.M22:F2} {lr.M23:F2} | {lr.M31:F2} {lr.M32:F2} {lr.M33:F2}] det {det:F2}{extra}");
+                        Console.WriteLine($"{new string(' ', depth * 2)}{(opts.ContainsKey("index") ? $"#{n.Index} " : "")}{n.Type} \"{n.Name}\"{(n.Hidden ? " hidden" : "")} at {w.Translation:F1} s {w.Scale:F2} local {n.Transform.Translation:F1} rot [{lr.M11:F2} {lr.M12:F2} {lr.M13:F2} | {lr.M21:F2} {lr.M22:F2} {lr.M23:F2} | {lr.M31:F2} {lr.M32:F2} {lr.M33:F2}] det {det:F2}{extra}");
                         foreach (var c in n.Children) Walk(c, w, depth + 1);
                     }
                     foreach (var r in nif.Roots) Walk(r, Morrowind.NifTransform.Identity, 0);
                     foreach (var c in nif.Blocks.OfType<Morrowind.NiParticleSystemController>())
-                        Console.WriteLine($"  particles: target {nif.Get<Morrowind.NiNode>(c.Target)?.Name} size {c.InitialSize} speed {c.Speed} life {c.Lifetime} rate {c.BirthRate} n {c.NumParticles} dims {c.EmitterDimensions}");
+                        Console.WriteLine($"  particles: {c.Type} target {nif.Get<Morrowind.NiNode>(c.Target)?.Name} emitter #{c.Emitter} {nif.Get<Morrowind.NiObjectNET>(c.Emitter)?.Type} \"{nif.Get<Morrowind.NiObjectNET>(c.Emitter)?.Name}\" flags {c.EmitFlags:X} size {c.InitialSize} speed {c.Speed} life {c.Lifetime} rate {c.BirthRate} n {c.NumParticles} dims {c.EmitterDimensions}");
                 }
                 return 0;
             }
@@ -10814,11 +10814,24 @@ static class Program
                         }
                         else
                         {
-                            if (!File.Exists(exported) || File.GetLastWriteTimeUtc(exported) < File.GetLastWriteTimeUtc(config) || opts.ContainsKey("export"))
+                            // A config reusing another's model ("sameAs": the ancient lich the lich's) takes that one's export.
+                            if (spec.SameAs is { } same)
+                            {
+                                string sameDir = Path.Combine(Skyrim.Creatures.CreatureSpec.ConfigDir, same);
+                                (config, work, exported) = (Path.Combine(sameDir, "creature.json"), Path.Combine(sameDir, "work"), Path.Combine(sameDir, "work", "creature.json"));
+                            }
+                            // Exported again only when what the export reads changed (its model, armature, meshes, height, actions,
+                            // textures, body): not for its name, actors, numbers or behaviour.
+                            string exportKey = Skyrim.Creatures.CreatureSpec.ExportKey(config), keyFile = Path.Combine(work, "export.key");
+                            // (An export from before keys were kept is taken as current: its key is written now.)
+                            if (File.Exists(exported) && !File.Exists(keyFile)) File.WriteAllText(keyFile, exportKey);
+                            bool stale = !File.Exists(exported) || File.ReadAllText(keyFile) != exportKey;
+                            if (stale || opts.ContainsKey("export"))
                             {
                                 string blender = Setup.Dependencies.Blender ?? throw new InvalidOperationException("Blender is needed: run setup");
                                 int code = Setup.ToolScripts.Run(blender, ["-b", "--disable-autoexec", "--python", Path.Combine(Setup.Dependencies.Root, "creatures", "export_creature.py"), "--", config, work]);
                                 if (code != 0 || !File.Exists(exported)) { Console.WriteLine($"{id}: export failed ({code})"); failedCreatures.Add(id); continue; }
+                                File.WriteAllText(keyFile, exportKey);
                             }
                             rig = Skyrim.Creatures.CreatureRig.Load(exported);
                             // A Daggerfall creature (config "dfMonster"): its own sounds, blow timing and pace from the game.
@@ -10995,6 +11008,288 @@ static class Program
                             Console.WriteLine($"  {time:F2} {line}");
                 return 0;
             }
+            case "mw-keys-selftest":
+            {
+                // Morrowind key interpolation (Morrowind/MwKeys) against what it must be: through its keys, slopes its tangents,
+                // TBC 0/0/0 Catmull-Rom, rotations unit and smooth.
+                var fails = Morrowind.MwKeys.SelfTest();
+                foreach (var f in fails) Console.WriteLine("  FAIL " + f);
+                Console.WriteLine(fails.Count == 0 ? "all key interpolation checks pass" : $"{fails.Count} failures");
+                return fails.Count == 0 ? 0 : 2;
+            }
+            case "mw-key-types":
+            {
+                // Dev aid: how Morrowind's creature animations interpolate (1 linear, 2 quadratic, 3 TBC, 4 per-axis rotation):
+                // every keyframe track of every creature .kf (and the humanoid one) and model, and every morph's weights, counted.
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var world = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                var counts = new SortedDictionary<string, int>();
+                void Count(string k) => counts[k] = counts.GetValueOrDefault(k) + 1;
+                var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { @"meshes\xbase_anim.kf" };
+                foreach (var m in world.Objects.Values.Where(o => o.Type == "CREA" && o.Str("MODL") is { Length: > 0 }).Select(o => @"meshes\" + o.Str("MODL")!.ToLowerInvariant()).Distinct())
+                {
+                    files.Add(m);
+                    files.Add(Path.Combine(Path.GetDirectoryName(m)!, "x" + Path.GetFileNameWithoutExtension(m) + ".kf"));
+                }
+                var examples = new Dictionary<string, string>();
+                foreach (var file in files)
+                {
+                    if (mwData.Read(file) is not { } bytes) continue;
+                    var nif = Morrowind.Nif4.Read(bytes, file);
+                    foreach (var kd in nif.Blocks.OfType<Morrowind.NiKeyframeData>())
+                    {
+                        if (kd.Rotations.Count > 0 || kd.RotationType == 4) { Count($"rotation {kd.RotationType}"); examples.TryAdd($"rotation {kd.RotationType}", file); }
+                        if (kd.Translations.Count > 0) { Count($"translation {kd.TranslationType}"); examples.TryAdd($"translation {kd.TranslationType}", file); }
+                        if (kd.Scales.Count > 0) { Count($"scale {kd.ScaleType}"); examples.TryAdd($"scale {kd.ScaleType}", file); }
+                    }
+                    foreach (var md in nif.Blocks.OfType<Morrowind.NiMorphData>())
+                        foreach (var wt in md.WeightTypes) { Count($"morph weights {wt}"); examples.TryAdd($"morph weights {wt}", file); }
+                }
+                foreach (var (k, n) in counts) Console.WriteLine($"{k,-20} {n,6}  (e.g. {examples.GetValueOrDefault(k)})");
+                // Which of a quadratic key's two stored tangents leads out of it and which into it: each against the step to
+                // the next key and from the one before, over every interior key of every quadratic translation track.
+                double aNext = 0, aPrev = 0, bNext = 0, bPrev = 0; int n2 = 0;
+                foreach (var file in files)
+                {
+                    if (mwData.Read(file) is not { } bytes) continue;
+                    foreach (var kd in Morrowind.Nif4.Read(bytes, file).Blocks.OfType<Morrowind.NiKeyframeData>().Where(k => k.TranslationType == 2 && k.TranslationExtra.Count == k.Translations.Count))
+                        for (int i = 1; i + 1 < kd.Translations.Count; i++)
+                        {
+                            var e = kd.TranslationExtra[i];
+                            var a = new System.Numerics.Vector3(e[0], e[1], e[2]); var b = new System.Numerics.Vector3(e[3], e[4], e[5]);
+                            var next = kd.Translations[i + 1].Value - kd.Translations[i].Value; var prev = kd.Translations[i].Value - kd.Translations[i - 1].Value;
+                            aNext += (a - next).Length(); aPrev += (a - prev).Length(); bNext += (b - next).Length(); bPrev += (b - prev).Length(); n2++;
+                        }
+                }
+                Console.WriteLine($"quadratic tangents over {n2} keys, mean distance: first-stored vs step to next {aNext / n2:F4}, vs step from previous {aPrev / n2:F4}; second-stored vs next {bNext / n2:F4}, vs previous {bPrev / n2:F4}");
+                return 0;
+            }
+            case "df-monster-raw":
+            {
+                // Dev aid: a Daggerfall monster's MONSTER.BSA record (--id): its bytes, and the 16-bit values from each offset.
+                var bsa = new Daggerfall.DfBsa(Path.Combine(arena2, "MONSTER.BSA"));
+                string name = $"ENEMY{int.Parse(opts["id"]):000}.CFG";
+                var bytes = bsa.Record(name);
+                Console.WriteLine($"{arena2}\\MONSTER.BSA {name}: {bytes.Length} bytes");
+                Console.WriteLine(Convert.ToHexString(bytes));
+                for (int o = 0; o + 1 < bytes.Length; o += 2) Console.Write($"{o}:{BitConverter.ToUInt16(bytes, o)} ");
+                Console.WriteLine();
+                Console.WriteLine("records: " + string.Join(", ", bsa.Entries.Take(8).Select(e => $"{e.Name}({e.Size})")));
+                return 0;
+            }
+            case "mw-morphs":
+            {
+                // Dev aid: every vertex morph on Morrowind's creature models (NiGeomMorpherController): the shape it bends (skinned
+                // or not), its targets, how many vertices each moves and how far, and its weight keys (how many, over what time,
+                // between what weights).
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var world = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                foreach (var g in world.Objects.Values.Where(o => o.Type == "CREA" && o.Str("MODL") is { Length: > 0 }).GroupBy(o => o.Str("MODL")!.ToLowerInvariant()).OrderBy(g => g.Key))
+                {
+                    string model = @"meshes\" + g.Key;
+                    if (mwData.Read(model) is not { } bytes) continue;
+                    var nif = Morrowind.Nif4.Read(bytes, model);
+                    foreach (var c in nif.Blocks.OfType<Morrowind.NiController>().Where(c => c.Type == "NiGeomMorpherController"))
+                    {
+                        var shape = nif.Get<Morrowind.NiTriShape>(c.Target);
+                        var md = nif.Get<Morrowind.NiMorphData>(c.Data);
+                        if (shape is null || md is null) { Console.WriteLine($"{g.Key}: morph {c.Index} on {c.Target}: no shape or data"); continue; }
+                        bool skinned = nif.Get<Morrowind.NiSkinInstance>(shape.Skin) is not null;
+                        var parts = new List<string>();
+                        for (int m = 1; m < md.Morphs.Count; m++)
+                        {
+                            var delta = md.Morphs[m].Select((v, i) => md.Relative ? v : v - md.Morphs[0][i]).ToArray();
+                            int moving = delta.Count(d => d.Length() > 0.01f);
+                            var w = md.Weights[m];
+                            parts.Add($"target {m}: {moving} vertices up to {(delta.Length == 0 ? 0 : delta.Max(d => d.Length())):F1}, {w.Count} keys {(w.Count > 0 ? $"{w.Min(k => k.Time):F2}..{w.Max(k => k.Time):F2} weight {w.Min(k => k.Weight):F2}..{w.Max(k => k.Weight):F2}" : "")}");
+                        }
+                        // How many distinct vertex motions (one bone each) the morph needs: vertices whose offsets in every target
+                        // agree within a tolerance share one.
+                        int verts = md.Morphs.FirstOrDefault()?.Length ?? 0;
+                        var sig = Enumerable.Range(0, verts).Select(i => Enumerable.Range(1, md.Morphs.Count - 1).Select(m => md.Relative ? md.Morphs[m][i] : md.Morphs[m][i] - md.Morphs[0][i]).ToArray()).ToList();
+                        string Groups(float tol)
+                        {
+                            var reps = new List<System.Numerics.Vector3[]>();
+                            int moving = 0;
+                            foreach (var s in sig)
+                            {
+                                if (s.All(d => d.Length() <= 1e-4f)) continue;
+                                moving++;
+                                if (!reps.Any(r => r.Zip(s).All(p => System.Numerics.Vector3.Distance(p.First, p.Second) <= tol))) reps.Add(s);
+                            }
+                            return $"{reps.Count}";
+                        }
+                        Console.WriteLine($"{g.Key}: {shape.Name.Trim()} ({(skinned ? "skinned" : "rigid")}, {verts} vertices, {(shape.Hidden ? "hidden, " : "")}{(md.Relative ? "relative" : "absolute")}, flags {c.Flags:X}, {c.Start:F2}..{c.Stop:F2}) bones exact {Groups(1e-4f)}, within 0.05 {Groups(0.05f)}, within 0.25 {Groups(0.25f)}: {string.Join("; ", parts)}");
+                    }
+                }
+                return 0;
+            }
+            case "sk-actor-controllers":
+            {
+                // Dev aid: the controllers in Skyrim's own actor models (meshes\actors, both mesh archives; --match narrows by
+                // path): each model's controller, interpolator and sequence blocks by type, its sequences' names, and the
+                // shader controllers' target values - how vanilla animates actors' materials.
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match") ?? @"^meshes\\actors\\.*\.nif$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                string tmp = Path.Combine(Path.GetTempPath(), "tm-actorctl.nif");
+                foreach (var bsa in new[] { "Skyrim - Meshes0.bsa", "Skyrim - Meshes1.bsa" })
+                {
+                    var reader = Mutagen.Bethesda.Archives.Archive.CreateReader(Mutagen.Bethesda.GameRelease.SkyrimSE, Path.Combine(skyrimData, bsa));
+                    foreach (var f in reader.Files.Where(f => rx.IsMatch(f.Path)).OrderBy(f => f.Path))
+                    {
+                        File.WriteAllBytes(tmp, f.GetBytes());
+                        using var nif = new nifly.NifFile();
+                        if (nif.Load(tmp) != 0) continue;
+                        var hdr = nif.GetHeader();
+                        using var cache = new nifly.niflycpp.BlockCache(hdr);
+                        var types = new Dictionary<string, int>();
+                        var notes = new List<string>();
+                        for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                        {
+                            string type = hdr.GetBlockById(i).GetBlockName();
+                            if (!(type.Contains("Controller") || type.Contains("Sequence") || type.Contains("Interpolator"))) continue;
+                            types[type] = types.GetValueOrDefault(type) + 1;
+                            if (type == "NiControllerSequence") notes.Add("seq " + cache.EditableBlockById<nifly.NiControllerSequence>(i).name.get());
+                            else if (type == "BSLightingShaderPropertyFloatController") notes.Add($"lightfloat {cache.EditableBlockById<nifly.BSLightingShaderPropertyFloatController>(i).typeOfControlledVariable}");
+                            else if (type == "BSEffectShaderPropertyFloatController") notes.Add($"effectfloat {cache.EditableBlockById<nifly.BSEffectShaderPropertyFloatController>(i).typeOfControlledVariable}");
+                            else if (type == "BSLightingShaderPropertyColorController") notes.Add($"lightcolor {cache.EditableBlockById<nifly.BSLightingShaderPropertyColorController>(i).typeOfControlledColor}");
+                            else if (type == "BSEffectShaderPropertyColorController") notes.Add($"effectcolor {cache.EditableBlockById<nifly.BSEffectShaderPropertyColorController>(i).typeOfControlledColor}");
+                        }
+                        if (types.Count == 0 || types.Keys.All(t => t is "NiTransformController" or "NiTransformInterpolator" or "NiMultiTargetTransformController")) continue;
+                        Console.WriteLine($"{f.Path}: {string.Join(", ", types.Select(p => $"{p.Key} {p.Value}"))}; {string.Join(", ", notes.Distinct().Take(30))}");
+                    }
+                }
+                return 0;
+            }
+            case "mw-creature-looks":
+            {
+                // Dev aid: how each shape of Morrowind's creature bodies is drawn, with its properties inherited as Morrowind
+                // does: texture (own or from an ancestor, or none), UV set, alpha (flags, threshold), material colours and alpha,
+                // vertex colours (how many not white, with alpha) and their mode, glow and other texture slots, specular, z-buffer,
+                // wireframe; then totals of what differs from a plain opaque, white, textured, unlit shape.
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var world = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                var totals = new SortedDictionary<string, int>();
+                void Count(string k) => totals[k] = totals.GetValueOrDefault(k) + 1;
+                foreach (var g in world.Objects.Values.Where(o => o.Type == "CREA" && o.Str("MODL") is { Length: > 0 }).GroupBy(o => o.Str("MODL")!.ToLowerInvariant()).OrderBy(g => g.Key))
+                {
+                    string model = @"meshes\" + g.Key;
+                    if (mwData.Read(model) is not { } bytes) continue;
+                    var nif = Morrowind.Nif4.Read(bytes, model);
+                    var parents = Skyrim.Creatures.MwCreatureSource.SceneParents(nif);
+                    foreach (var shape in Skyrim.Creatures.MwCreatureSource.BodyShapes(nif))
+                    {
+                        if (nif.Get<Morrowind.NiTriShapeData>(shape.Data) is not { } d) continue;
+                        Count("shapes");
+                        T? P<T>() where T : Morrowind.NiFlagProperty => Skyrim.Creatures.MwCreatureSource.Property<T>(nif, parents, shape.Index);
+                        var notes = new List<string>();
+                        var tx = P<Morrowind.NiTexturingProperty>();
+                        string? file = tx?.Base is { } b ? nif.Get<Morrowind.NiSourceTexture>(b.Source)?.FileName : null;
+                        bool own = tx is not null && shape.Properties.Contains(tx.Index);
+                        if (file is null) { notes.Add("untextured"); Count("untextured"); }
+                        else if (!own) { notes.Add("texture inherited"); Count("texture inherited"); }
+                        if (tx?.Base is { UVSet: > 0 } bu) { notes.Add($"uv set {bu.UVSet} of {d.UVSets.Length}"); Count("uv set > 0"); }
+                        if (tx?.Base is { Clamp: not 3 } bc) { notes.Add($"clamp {bc.Clamp}"); Count("clamped"); }
+                        if (tx is { ApplyMode: not 2 }) { notes.Add($"apply {tx.ApplyMode}"); Count($"apply mode {tx.ApplyMode}"); }
+                        for (int slot = 1; slot < (tx?.Textures.Length ?? 0); slot++)
+                            if (tx!.Textures[slot] is { } ts) { string sn = new[] { "", "dark", "detail", "gloss", "glow", "bump", "decal" }.ElementAtOrDefault(slot) ?? $"slot{slot}"; notes.Add($"{sn} {nif.Get<Morrowind.NiSourceTexture>(ts.Source)?.FileName}"); Count($"{sn} map"); }
+                        if (P<Morrowind.NiAlphaProperty>() is { } a) { notes.Add($"alpha {a.Flags:X} >{a.Threshold}"); Count(((a.Flags & 1) != 0 ? "blended" : "") + ((a.Flags & 0x200) != 0 ? "tested" : "") + " alpha"); }
+                        if (P<Morrowind.NiMaterialProperty>() is { } m)
+                        {
+                            if (m.Alpha < 0.999f) { notes.Add($"material alpha {m.Alpha:F2}"); Count("material alpha < 1"); }
+                            if (Vector3Differs(m.Diffuse, System.Numerics.Vector3.One)) { notes.Add($"diffuse ({m.Diffuse.X:F2},{m.Diffuse.Y:F2},{m.Diffuse.Z:F2})"); Count("diffuse not white"); }
+                            if (Vector3Differs(m.Ambient, m.Diffuse)) { notes.Add($"ambient ({m.Ambient.X:F2},{m.Ambient.Y:F2},{m.Ambient.Z:F2})"); Count("ambient not diffuse"); }
+                            if (m.Emissive.X + m.Emissive.Y + m.Emissive.Z > 0.01f) { notes.Add($"emissive ({m.Emissive.X:F2},{m.Emissive.Y:F2},{m.Emissive.Z:F2})"); Count("emissive"); }
+                        }
+                        else { notes.Add("no material"); Count("no material"); }
+                        int coloured = d.Colors.Count(c => Vector3Differs(new System.Numerics.Vector3(c.X, c.Y, c.Z), System.Numerics.Vector3.One)), seeThrough = d.Colors.Count(c => c.W < 0.999f);
+                        var vc = P<Morrowind.NiVertexColorProperty>();
+                        if (d.Colors.Length > 0) { notes.Add($"vertex colours {coloured}/{d.Colors.Length} not white, {seeThrough} see-through, mode {(vc is null ? "default" : $"{vc.VertexMode}/{vc.LightingMode}")}"); Count(coloured > 0 || seeThrough > 0 ? "vertex colours used" : "vertex colours all white"); }
+                        else if (vc is not null) { notes.Add($"vertex colour property {vc.VertexMode}/{vc.LightingMode}, no colours"); }
+                        foreach (var fp in new[] { "NiSpecularProperty", "NiZBufferProperty", "NiWireframeProperty", "NiShadeProperty", "NiDitherProperty" })
+                            if (Skyrim.Creatures.MwCreatureSource.Chain(parents, shape.Index).Select(nif.Get<Morrowind.NiNode>).OfType<Morrowind.NiNode>().SelectMany(n => n.Properties.Select(nif.Get<Morrowind.NiFlagProperty>)).FirstOrDefault(p => p?.Type == fp) is { } q)
+                            { notes.Add($"{fp[2..^8]} {q.Flags:X}"); Count($"{fp} {q.Flags:X}"); }
+                        if (notes.Count > 0) Console.WriteLine($"{g.Key} {shape.Name.Trim()}{(Skyrim.Creatures.MwCreatureSource.Drawn(nif, shape) ? "" : " (emitter only)")}: {string.Join("; ", notes)}");
+                    }
+                }
+                foreach (var (k, n) in totals) Console.WriteLine($"  {k}: {n}");
+                return 0;
+                static bool Vector3Differs(System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Distance(a, b) > 0.004f;
+            }
+            case "mw-particle-arrays":
+            {
+                // Dev aid: every particle array (NiBSPArrayController) on Morrowind's creature models, with how Morrowind places
+                // its particles (OpenMW's reading, components/nifosg/particle.cpp: controller flag 0x10 a random vertex of the
+                // first geometry under its emitter; else a random node of the emitter's subtree each emission, 0x08 at a random
+                // point between that node and its parent; within a box of its emitter dimensions), its emitter, the subtree's
+                // nodes, the first geometry under it, and its shooting.
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var world = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                var tally = new SortedDictionary<string, int>();
+                foreach (var g in world.Objects.Values.Where(o => o.Type == "CREA" && o.Str("MODL") is { Length: > 0 }).GroupBy(o => o.Str("MODL")!.ToLowerInvariant()).OrderBy(g => g.Key))
+                {
+                    string model = @"meshes\" + g.Key;
+                    if (mwData.Read(model) is not { } bytes) continue;
+                    var nif = Morrowind.Nif4.Read(bytes, model);
+                    foreach (var c in nif.Blocks.OfType<Morrowind.NiParticleSystemController>().Where(c => c.Type == "NiBSPArrayController"))
+                    {
+                        var nodes = new List<int>();
+                        void All(int i) { if (nif.Get<Morrowind.NiNode>(i) is { } n && n is not Morrowind.NiTriShape) { nodes.Add(i); foreach (int ch in n.Children) All(ch); } }
+                        All(c.Emitter);
+                        Morrowind.NiTriShape? First(int i)
+                        {
+                            if (nif.Get<Morrowind.NiTriShape>(i) is { } s && s is not Morrowind.NiParticles) return s;
+                            if (nif.Get<Morrowind.NiNode>(i) is { } n) foreach (int ch in n.Children) if (First(ch) is { } f) return f;
+                            return null;
+                        }
+                        var geo = First(c.Emitter);
+                        string how = (c.Flags & 0x10) != 0 ? "at a vertex" : (c.Flags & 0x08) != 0 ? "along a node's bone" : "at a node";
+                        tally[how] = tally.GetValueOrDefault(how) + 1;
+                        Console.WriteLine($"{g.Key} #{c.Index}: flags {c.Flags:X} ({how}), emitter #{c.Emitter} \"{nif.Get<Morrowind.NiObjectNET>(c.Emitter)?.Name}\" ({nodes.Count} nodes: {string.Join(", ", nodes.Take(6).Select(n => nif.Get<Morrowind.NiObjectNET>(n)?.Name))}{(nodes.Count > 6 ? ", ..." : "")}), first geometry {(geo is null ? "none" : $"\"{geo.Name}\" {nif.Get<Morrowind.NiGeometryData>(geo.Data)?.Vertices.Length} vertices{(geo.Hidden ? " hidden" : "")}")}, box {c.EmitterDimensions}, declination {c.Declination:F2}±{c.DeclinationVariation:F2}, planar {c.PlanarAngle:F2}±{c.PlanarAngleVariation:F2}, speed {c.Speed}");
+                    }
+                }
+                foreach (var (k, n) in tally) Console.WriteLine($"  {k}: {n}");
+                return 0;
+            }
+            case "mw-shape-controllers":
+            {
+                // Dev aid: every alpha, material-colour and texture-coordinate controller on Morrowind's creature models: what it
+                // drives (the material's shapes, or the shape), its flags (cycle: bits 1-2, 0 loop, 1 reverse, 2 clamp; bit 3
+                // active), frequency, phase and time span, its keys (interpolation, how many, times, values), and the model's
+                // animation groups those key times fall in.
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var world = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                string[] kinds = ["NiAlphaController", "NiMaterialColorController", "NiUVController"];
+                foreach (var g in world.Objects.Values.Where(o => o.Type == "CREA" && o.Str("MODL") is { Length: > 0 }).GroupBy(o => o.Str("MODL")!.ToLowerInvariant()).OrderBy(g => g.Key))
+                {
+                    string model = @"meshes\" + g.Key;
+                    if (mwData.Read(model) is not { } bytes) continue;
+                    var nif = Morrowind.Nif4.Read(bytes, model);
+                    var ctlrs = nif.Blocks.OfType<Morrowind.NiController>().Where(c => kinds.Contains(c.Type)).ToList();
+                    if (ctlrs.Count == 0) continue;
+                    string kfPath = Path.Combine(Path.GetDirectoryName(model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf");
+                    var groups = mwData.Read(kfPath) is { } kfBytes ? Skyrim.Creatures.MwCreatureSource.Groups(Skyrim.Creatures.MwCreatureSource.ReadKf(Morrowind.Nif4.Read(kfBytes, kfPath)).Keys) : [];
+                    string In(float t) => string.Join("/", groups.Where(p => p.Value.Whole && t >= p.Value.Start - 1e-4f && t <= p.Value.Stop + 1e-4f).Select(p => p.Key)) is { Length: > 0 } s ? s : "-";
+                    Console.WriteLine($"{g.Key}: groups {string.Join(", ", groups.OrderBy(p => p.Value.Start).Select(p => $"{p.Key} {p.Value.Start:F2}..{p.Value.Stop:F2}"))}");
+                    var shapes = nif.Blocks.OfType<Morrowind.NiTriShape>().ToList();
+                    foreach (var c in ctlrs)
+                    {
+                        string target = c.Type == "NiUVController"
+                            ? nif.Get<Morrowind.NiTriShape>(c.Target)?.Name.Trim() ?? $"#{c.Target}"
+                            : $"{nif.Get<Morrowind.NiObjectNET>(c.Target)?.Name.Trim()} on " + string.Join(";", shapes.Where(s => s.Properties.Contains(c.Target)).Select(s => s.Name.Trim() + (s.Hidden ? " (hidden)" : "")));
+                        var datas = c.Type == "NiUVController"
+                            ? (nif.Get<Morrowind.NiUVData>(c.Data)?.Groups ?? []).Select((k, i) => (Name: new[] { "U offset", "V offset", "U tiling", "V tiling" }[i], Keys: k)).ToList()
+                            : [(Name: c.Type == "NiAlphaController" ? "alpha" : $"colour {(c.Flags >> 4) & 7}", Keys: nif.Get<Morrowind.NiKeyData>(c.Data))];
+                        Console.WriteLine($"  {c.Type} -> {target}: flags {c.Flags:X} (cycle {(c.Flags >> 1) & 3}, {((c.Flags & 8) != 0 ? "active" : "inactive")}), frequency {c.Frequency:F2}, phase {c.Phase:F2}, {c.Start:F2}..{c.Stop:F2}");
+                        foreach (var (name, keys) in datas)
+                        {
+                            if (keys is null || keys.Keys.Count == 0) { Console.WriteLine($"    {name}: no keys"); continue; }
+                            Console.WriteLine($"    {name}: type {keys.Interpolation}, {keys.Keys.Count} keys {keys.Keys[0].Time:F2}..{keys.Keys[^1].Time:F2}: " +
+                                string.Join(" ", keys.Keys.Take(40).Select(k => $"{k.Time:F2}={(c.Type == "NiMaterialColorController" ? $"({k.Value.X:F2},{k.Value.Y:F2},{k.Value.Z:F2})" : k.Value.X.ToString("F2"))}[{In(k.Time)}]")) + (keys.Keys.Count > 40 ? " ..." : ""));
+                        }
+                    }
+                }
+                return 0;
+            }
             case "mw-creature-census":
             {
                 // Dev aid: every model Morrowind's creatures (CREA) are drawn with: how many creatures use it, their flags
@@ -11073,6 +11368,30 @@ static class Program
                 Console.WriteLine($"particle systems: Morrowind {systemsMw}, in the bodies {systemsSk}; {total} issues");
                 return total == 0 ? 0 : 2;
             }
+            case "creature-looks":
+            {
+                // Whether built Morrowind creatures look as Morrowind draws them (Skyrim/Creatures/CreatureLooks): each shape's
+                // alpha, tint, glow, depth and texture, their animated shader values clip by clip, and the graphs that play
+                // them. --creature <id> or --all (every Morrowind creature built under --data, default out\creatures).
+                string data = Path.GetFullPath(opts.GetValueOrDefault("data", "out/creatures"));
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var lw = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                var ids = opts.ContainsKey("all")
+                    ? Directory.GetDirectories(Path.Combine(data, "meshes", "actors", "tamrielmerge")).Select(Path.GetFileName).OfType<string>().Order().ToList()
+                    : [opts["creature"]];
+                int total = 0, shapes = 0, animated = 0;
+                foreach (var cid in ids)
+                {
+                    var spec = Skyrim.Creatures.CreatureSpec.Find(cid, () => lw);
+                    if (spec is not { Game: "morrowind", Model: { } model }) continue;
+                    var rep = Skyrim.Creatures.CreatureLooks.Check(mwData, model, data, cid, lw);
+                    Console.WriteLine($"{cid}: {rep.Shapes} shapes, {rep.Animated} animated shader values, {rep.Issues} issues");
+                    foreach (var l in rep.Lines) Console.WriteLine(l);
+                    total += rep.Issues; shapes += rep.Shapes; animated += rep.Animated;
+                }
+                Console.WriteLine($"looks: {shapes} shapes, {animated} animated values; {total} issues");
+                return total == 0 ? 0 : 2;
+            }
             case "creature-bones":
             {
                 // Whether built creatures' bones hold together (Skyrim/Creatures/CreatureBones): --creature <id> or --all (every
@@ -11114,7 +11433,7 @@ static class Program
                 (string, int)? probe = opts.TryGetValue("probe", out var pv) && pv.Split(':') is [var pc, var pf] ? (pc, int.Parse(pf)) : null;
                 var results = Skyrim.Creatures.MwCreatureCheck.Run(mwData, model, data, id, Console.WriteLine, Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!), probe);
                 foreach (var r in results)
-                    Console.WriteLine($"  {r.Clip} (Morrowind {r.Group}, {r.Frames} frames): vertices off by {r.Mean:F3} on average, {r.Worst:F3} at worst (frame {r.WorstFrame}{(r.Worst > 0.1f ? ": " + r.WorstWhere : "")})");
+                    Console.WriteLine($"  {r.Clip} (Morrowind {r.Group}, {r.Frames} frames): vertices off by {r.Mean:F3} on average, {r.Worst:F3} at worst (frame {r.WorstFrame}{(r.Worst > 0.1f || opts.ContainsKey("where") ? ": " + r.WorstWhere : "")})");
                 // --keys: the .kf's text keys inside each group used (sounds, hits), at their time from the group's start.
                 if (opts.ContainsKey("keys"))
                 {
