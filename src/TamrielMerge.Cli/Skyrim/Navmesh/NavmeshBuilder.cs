@@ -634,8 +634,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// counter-clockwise around their normals) and links load doors to the nearest triangle in front of them.
     /// </summary>
     public Result BuildInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround = null, IEnumerable<P3Float>? keepAlso = null,
-        Func<P3Float, bool>? underwater = null, Hazards? hazards = null) =>
-        BeginInterior(cell, polygons, loadDoors, keepAround, keepAlso, underwater, background: false, hazards: hazards).Finish();
+        Func<P3Float, bool>? underwater = null, Hazards? hazards = null, bool snapActors = false) =>
+        BeginInterior(cell, polygons, loadDoors, keepAround, keepAlso, underwater, background: false, snapActors: snapActors, hazards: hazards).Finish();
 
     /// <summary>
     /// An interior's navmesh from its faces as wound (a ceiling or an underside is an obstacle), or, when that leaves an
@@ -727,8 +727,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         int moved = 0;
         foreach (var npc in cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>())
         {
-            if (npc.Placement is not { } pl || staysPut?.Invoke(pl.Position) == true) continue;
+            if (npc.Placement is not { } pl) continue;
             var p = V(pl.Position);
+            // In water with its navmesh under it, it swims there: left as it is. In water with none under it (Paradise's
+            // prisoners, in their cages under the grotto's water), moved as any other.
+            if (staysPut?.Invoke(pl.Position) == true && tris.Any(t => HeightOver(V(verts[t.Vertices.X]), V(verts[t.Vertices.Y]), V(verts[t.Vertices.Z]), p.X, p.Y) is { } under && under < p.Z)) continue;
             bool on = false;
             float best = 512f * 512f;
             Vector3? at = null;
@@ -765,7 +768,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             // Nothing on its level or under it (in a passage too steep for the mesh): the nearest mesh, any level.
             if (at is null)
             {
-                float any = 1024f * 1024f;
+                // Any distance: with nothing on its level or under it, it would fall for ever (Xeddefen's three, 1,316 under
+                // everything in the cell, 2026-10-21).
+                float any = float.MaxValue;
                 foreach (var t in tris)
                 {
                     Vector3 a = V(verts[t.Vertices.X]), b = V(verts[t.Vertices.Y]), c = V(verts[t.Vertices.Z]);

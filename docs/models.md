@@ -121,6 +121,23 @@ on the built plugins it finds a triangle for all six; the last two are in Oblivi
 actors still off: swimmers in water (left where they swim), holding pens, prisoners in Paradise's cages, Xeddefen's
 three NPCs 1,316 under everything and Veyond's goblins 120-190 over their floor.
 
+**Morrowind's root nodes** (2026-10-21). Morrowind places a model without its root node's own turn and move (a root
+that is itself a shape keeps its transform; MwMeshConverter.RootLeftOut, as MwVfx already did for effects). 122 of the
+3,658 placed models have such a root: the forts' spiral stairs (In_impsmall_spiral_01, turned 90) stood 256 off their
+pathgrid and broke into one navmesh piece a turn; Prelude Shipwreck's deck (moved 92.4 up) stood over its skeleton, its
+rat and all 11 pathgrid points. With the rule, Morrowind's interior pathgrid points with no ground under them fell from
+988 to 248 of 43,674 (`mw-pathgrid-ground`), and of its 39,876 interior items 95.5% rest on what is drawn under them
+(95.1% with every root applied; `mw-rest-check --drawn`; crates, whose root is their box, keep it: 301 items on them).
+No placed model's root is scaled, so nothing is scaled twice. The 1.0% of items sunk in are Morrowind's own placings
+(spears in their racks, notes slid under things). `mw-path-connect` checks, for a built plugin, that each of Morrowind's
+pathgrid connections joins two points on one navmesh piece (where its AI walked, NPCs can).
+
+**Oblivion's schedules** (2026-10-21). Each Oblivion NPC keeps its own AI packages, in Oblivion's order, with Oblivion's
+schedule (month, weekday, date, hour, how long) and its conditions translated as dialogue's are (ObScriptRecords.
+ObScheduledPackage): Talasma sleeps from 2:00 for 4 hours and serves the tavern otherwise; quest packages wait on their
+quest's stage. The sandbox every NPC had before stays last, for when none of its own holds. 1,070 NPCs, 4,207 packages
+(`npc-packages` lists an NPC's).
+
 **Floors for empty cells** (user, 2026-10-21: "the interiors have navmeshes for the test cells"). Six of Oblivion.esm's
 interiors hold their contents over nothing: TestParticles, TestGrantWarehouseUpper (167 statics, all candles, books and
 plates), TestCastleInterior (a ladder and a trapdoor), ToddDung, WeatherleahInterior02 and FortUrasek02DUPLICATE000 (its

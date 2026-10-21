@@ -773,50 +773,17 @@ public sealed partial class ObPluginBuilder
     /// <summary>Interiors given an invisible floor (<see cref="InvisibleFloor"/>), with how.</summary>
     public List<string> FlooredInteriors { get; } = [];
 
-    /// <summary>
-    /// A floor for an interior Oblivion left without one (user, 2026-10-21: "the interiors have navmeshes for the test
-    /// cells"; Oblivion.esm's test cells and leftovers hold their contents over nothing: TestGrantWarehouseUpper 167
-    /// statics, all candles, books and plates; FortUrasek02DUPLICATE000 its pathgrid and 3 actors): along the cell's own
-    /// pathgrid where it has one (a 96-unit pad at each point, a 96-unit walk along each connection, where Oblivion's AI
-    /// walked), else under what stands in it (its actors, doors, furniture and containers, and anything 40 or more tall):
-    /// by height, those within 96 of each other one level, its floor at the lowest of them, under all of that level's
-    /// contents and 128 round them (512 each way at least). Faces up; walked on as a floor (the navmesh) and collided with (an invisible model).
-    /// </summary>
+    /// <summary>The floor for an interior Oblivion left with nothing to walk on (<see cref="Skyrim.Navmesh.InvisibleFloors"/>): from
+    /// its pathgrid, else from what stands in it (TestGrantWarehouseUpper's 167 statics are all candles, books and plates).</summary>
     List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)> InvisibleFloor(Cell cell, Ob.ICellGetter? source, out string how)
     {
-        var up = System.Numerics.Vector3.UnitZ;
-        var floor = new List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)>();
-        void Quad(System.Numerics.Vector3 a, System.Numerics.Vector3 b, System.Numerics.Vector3 c, System.Numerics.Vector3 d)
-        {
-            // Wound to face up whichever way the corners come.
-            var n = System.Numerics.Vector3.Cross(b - a, c - a);
-            if (n.Z < 0) (b, d) = (d, b);
-            var nn = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(b - a, c - a));
-            floor.Add(([a, b, c], nn));
-            floor.Add(([a, c, d], nn));
-        }
-        void Pad(System.Numerics.Vector3 c, float half) =>
-            Quad(c + new System.Numerics.Vector3(-half, -half, 0), c + new System.Numerics.Vector3(half, -half, 0), c + new System.Numerics.Vector3(half, half, 0), c + new System.Numerics.Vector3(-half, half, 0));
+        // The cell's pathgrid, if it has one.
         var grid = source?.PathGrid?.PointToPointConnections.ToList() ?? [];
-        if (grid.Count > 0)
-        {
-            var pts = grid.Select(g => new System.Numerics.Vector3(g.Point.X, g.Point.Y, g.Point.Z)).ToList();
-            foreach (var p in pts) Pad(p, 48);
-            int walks = 0;
-            for (int i = 0; i < grid.Count; i++)
-                foreach (var j in grid[i].Connections.Select(c => (int)c).Where(j => j > i && j < pts.Count))
-                {
-                    var a = pts[i]; var b = pts[j];
-                    var along = new System.Numerics.Vector3(b.X - a.X, b.Y - a.Y, 0);
-                    if (along.LengthSquared() < 1) continue;
-                    var side = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(along, up)) * 48;
-                    Quad(a - side, b - side, b + side, a + side);
-                    walks++;
-                }
-            how = $"along its pathgrid ({pts.Count} points, {walks} walks)";
-            return floor;
-        }
-        // What stands (supports) and everything else, by its bottom: actors at their feet, objects at their model's bottom.
+        var points = grid.Select(g => new System.Numerics.Vector3(g.Point.X, g.Point.Y, g.Point.Z)).ToList();
+        var links = new List<(int, int)>();
+        for (int i = 0; i < grid.Count; i++)
+            foreach (var j in grid[i].Connections.Select(c => (int)c).Where(j => j > i)) links.Add((i, j));
+        // What stands in it and everything else, by its bottom: actors at their feet, objects at their model's bottom.
         var stands = new List<System.Numerics.Vector3>();
         var rests = new List<System.Numerics.Vector3>();
         foreach (var n in cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>())
@@ -830,59 +797,11 @@ public sealed partial class ObPluginBuilder
             bool stand = rec is IDoorGetter or IFurnitureGetter or IContainerGetter || (mesh.Max.Z - mesh.Min.Z) * s >= 40;
             (stand ? stands : rests).Add(bottom);
         }
-        if (stands.Count == 0) stands.AddRange(rests);
-        if (stands.Count == 0) { how = "nothing to stand under"; return floor; }
-        var levels = new List<List<System.Numerics.Vector3>>();
-        foreach (var p in stands.OrderBy(p => p.Z))
-            if (levels.Count > 0 && p.Z - levels[^1][^1].Z <= 96) levels[^1].Add(p); else levels.Add([p]);
-        var heights = new List<string>();
-        foreach (var level in levels)
-        {
-            float z = level[0].Z;
-            float top = level[^1].Z + 300;
-            var all = level.Concat(rests.Where(r => r.Z >= z - 32 && r.Z <= top)).ToList();
-            float x0 = all.Min(p => p.X) - 128, x1 = all.Max(p => p.X) + 128, y0 = all.Min(p => p.Y) - 128, y1 = all.Max(p => p.Y) + 128;
-            // At least 512 each way: smaller, the navmesh made on it was too small to keep (TestParticles' 256, one static).
-            if (x1 - x0 < 512) { float m = (x0 + x1) / 2; x0 = m - 256; x1 = m + 256; }
-            if (y1 - y0 < 512) { float m = (y0 + y1) / 2; y0 = m - 256; y1 = m + 256; }
-            Quad(new(x0, y0, z), new(x1, y0, z), new(x1, y1, z), new(x0, y1, z));
-            heights.Add($"{z:F0} ({x1 - x0:F0} x {y1 - y0:F0})");
-        }
-        how = $"under its contents, {levels.Count} level{(levels.Count == 1 ? "" : "s")}: {string.Join(", ", heights)}";
-        return floor;
+        return Skyrim.Navmesh.InvisibleFloors.Plan(points, links, stands, rests, out how);
     }
 
-    /// <summary>The floor <see cref="InvisibleFloor"/> made, as an invisible model of collision only, placed in the cell.</summary>
-    void PlaceInvisibleFloor(Cell cell, List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)> floor)
-    {
-        string rel = $@"meshes\tamrielmerge\ob\floors\{cell.EditorID}.nif";
-        using (var nif = new nifly.NifFile())
-        {
-            nif.Create(nifly.NiVersion.getSSE());
-            var hdr = nif.GetHeader();
-            var fade = Skyrim.Meshes.BlockMeshBuilder.Owned(new nifly.BSFadeNode());
-            fade.name = new nifly.NiStringRef(Path.GetFileNameWithoutExtension(rel));
-            hdr.ReplaceBlock(hdr.GetBlockID(nif.GetRootNode()), fade);
-            var root = nif.GetRootNode();
-            Skyrim.Meshes.BlockMeshBuilder.AddCollision(nif, root, floor.Select(f => (f.Points, f.Normal, new Skyrim.Meshes.BlockMeshBuilder.Tex("", "", false))).ToList(), false);
-            Skyrim.Meshes.BlockMeshBuilder.AddBsxFlags(nif, root);
-            string path = Path.Combine(modOutDir, rel);
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            if (nif.Save(path) != 0) throw new IOException($"nifly failed to save {path}");
-        }
-        var pts = floor.SelectMany(f => f.Points).ToList();
-        var lo = pts.Aggregate(new System.Numerics.Vector3(float.MaxValue), System.Numerics.Vector3.Min);
-        var hi = pts.Aggregate(new System.Numerics.Vector3(float.MinValue), System.Numerics.Vector3.Max);
-        static short C(float v) => (short)Math.Clamp(MathF.Round(v), short.MinValue, short.MaxValue);
-        var stat = new Static(mod)
-        {
-            EditorID = "OBTMFloor" + cell.EditorID,
-            ObjectBounds = new ObjectBounds { First = new P3Int16(C(lo.X), C(lo.Y), C(lo.Z - 12)), Second = new P3Int16(C(hi.X), C(hi.Y), C(hi.Z)) },
-            Model = new Model { File = rel[7..] },
-        };
-        mod.Statics.Add(stat);
-        cell.Temporary.Add(new PlacedObject(mod) { Base = stat.ToNullableLink<IPlaceableObjectGetter>(), Placement = new Placement { Position = new P3Float(0, 0, 0), Rotation = new P3Float(0, 0, 0) } });
-    }
+    void PlaceInvisibleFloor(Cell cell, List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)> floor) =>
+        Skyrim.Navmesh.InvisibleFloors.Place(mod, modOutDir, "ob", "OB", cell, floor);
 
     void BuildNavmesh(Cell cell, Ob.ICellGetter? source = null)
     {

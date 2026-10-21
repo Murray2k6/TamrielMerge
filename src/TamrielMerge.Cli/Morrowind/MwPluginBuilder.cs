@@ -302,6 +302,56 @@ public sealed partial class MwPluginBuilder
         }
     }
 
+    /// <summary>Interiors given an invisible floor (<see cref="GiveFloor"/>), with how.</summary>
+    public List<string> FlooredInteriors { get; } = [];
+
+    /// <summary>
+    /// A floor for an interior Morrowind left with nothing to walk on (<see cref="Skyrim.Navmesh.InvisibleFloors"/>): from
+    /// its pathgrid (PGRD, the last plugin's), else from what stands in it; placed in the cell and its triangles added to
+    /// <paramref name="into"/>. False when there is nothing to put one under.
+    /// </summary>
+    bool GiveFloor(Cell cell, Tes3Cell source, List<Vector3[]> into)
+    {
+        var points = new List<Vector3>();
+        var links = new List<(int, int)>();
+        foreach (var plugin in world.Plugins)
+            foreach (var rec in plugin.Records.Where(r => r.Type == "PGRD" && string.Equals(r.Str("NAME"), source.Name, StringComparison.OrdinalIgnoreCase)))
+            {
+                if (rec.Get("PGRP") is not { } pgrp) continue;
+                points.Clear(); links.Clear();
+                var counts = new List<int>();
+                for (int k = 0; k + 16 <= pgrp.Data.Length; k += 16)
+                {
+                    points.Add(new(BitConverter.ToInt32(pgrp.Data, k), BitConverter.ToInt32(pgrp.Data, k + 4), BitConverter.ToInt32(pgrp.Data, k + 8)));
+                    counts.Add(pgrp.Data[k + 13]);
+                }
+                if (rec.Get("PGRC") is { } pgrc)
+                {
+                    int at = 0;
+                    for (int i = 0; i < points.Count; i++)
+                        for (int c = 0; c < counts[i] && at + 4 <= pgrc.Data.Length; c++, at += 4)
+                            if (BitConverter.ToInt32(pgrc.Data, at) is var j && j > i && j < points.Count) links.Add((i, j));
+                }
+            }
+        var stands = new List<Vector3>();
+        var rests = new List<Vector3>();
+        foreach (var r in source.Refs)
+        {
+            string type = world.Objects.TryGetValue(r.BaseId, out var b) ? b.Type : "";
+            if (type is "NPC_" or "CREA" or "LEVC") { stands.Add(r.Position); continue; }
+            if (world.Model(r.BaseId) is not { Length: > 0 } model || converted.GetValueOrDefault(model) is not { } mesh) continue;
+            var bottom = r.Position with { Z = r.Position.Z + mesh.Min.Z * r.Scale };
+            bool stand = type is "DOOR" or "CONT" || (mesh.Max.Z - mesh.Min.Z) * r.Scale >= 40;
+            (stand ? stands : rests).Add(bottom);
+        }
+        var floor = Skyrim.Navmesh.InvisibleFloors.Plan(points, links, stands, rests, out string how);
+        if (floor.Count == 0) return false;
+        Skyrim.Navmesh.InvisibleFloors.Place(mod, modOutDir, "mw", "MW", cell, floor);
+        into.AddRange(floor.Select(f => f.Points));
+        FlooredInteriors.Add($"{cell.EditorID} ({how})");
+        return true;
+    }
+
     /// <summary>Interiors turned as one piece by <see cref="TipBack"/>: the point they turned about and the turn (row vectors).</summary>
     readonly Dictionary<string, (Vector3 Pivot, Matrix4x4 Turn)> tipped = new(StringComparer.OrdinalIgnoreCase);
 
@@ -425,7 +475,7 @@ public sealed partial class MwPluginBuilder
         }
         AddAnchor(source.Name, cell);
         CellSolids[source.Name] = solid;
-        BuildNavmesh(cell, solid, hazard);
+        BuildNavmesh(cell, solid, hazard, source);
         if (Start is { } start && string.Equals(start.Cell, source.Name, StringComparison.OrdinalIgnoreCase))
         {
             var spot = ClearSpot(start.Position, solid);
@@ -517,9 +567,10 @@ public sealed partial class MwPluginBuilder
     /// can walk; load doors are linked, and the areas around actors are kept even when nothing else connects to them.
     /// Items, swinging doors and actors aren't part of the collision, so it runs through doorways.
     /// </summary>
-    void BuildNavmesh(Cell cell, List<Vector3[]> solid, List<Vector3[]> hazard)
+    void BuildNavmesh(Cell cell, List<Vector3[]> solid, List<Vector3[]> hazard, Tes3Cell? source = null)
     {
-        if (solid.Count == 0) return;
+        // No collision at all in it: a floor of its own (InvisibleFloors).
+        if (solid.Count == 0 && (source is null || !GiveFloor(cell, source, solid))) return;
         if (Environment.GetEnvironmentVariable("TM_MW_WINDING") == "1") Console.WriteLine($"  winding {cell.EditorID}: {Skyrim.Navmesh.NavmeshBuilder.Winding(solid)}");
         // TM_MW_PROBE=<EditorID>,x,y: every collision triangle over that point, its height there and which way it faces.
         if (Environment.GetEnvironmentVariable("TM_MW_PROBE")?.Split(',') is [var pc, var px, var py] && pc == cell.EditorID && float.TryParse(px, out var qx) && float.TryParse(py, out var qy))
@@ -546,7 +597,17 @@ public sealed partial class MwPluginBuilder
             // What hurts to stand on (Hurting: the lava pools) is no floor.
             var hazards = hazard.Count > 0 ? new Skyrim.Navmesh.NavmeshBuilder.Hazards(new Skyrim.Navmesh.WoundInput(hazard), null) : null;
             if (hazards is not null) HazardCells++;
-            var r = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp && cell.Persistent.Contains(StartMarker) ? sp.Position : null, actorsHere, hazards);
+            Skyrim.Navmesh.NavmeshBuilder.Result r;
+            try { r = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp && cell.Persistent.Contains(StartMarker) ? sp.Position : null, actorsHere, hazards); }
+            catch (InvalidOperationException e) when (e.Message.StartsWith("no floor to walk on") && source is not null)
+            {
+                // Nothing to walk on in it (Bloodmoon's "Solstheim" cell: Molag Bal's statue and one actor): a floor of its
+                // own, then the navmesh on it.
+                var added = new List<Vector3[]>();
+                if (!GiveFloor(cell, source, added)) throw;
+                foreach (var t in added) { var nn = Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])); polygons.Add((t, nn)); turnedUp.Add((t, nn)); }
+                r = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp2 && cell.Persistent.Contains(StartMarker) ? sp2.Position : null, actorsHere, hazards);
+            }
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
             // Who stands on it: the cell's actors within 64 units of a navmesh triangle.

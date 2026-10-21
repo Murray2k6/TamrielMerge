@@ -3537,6 +3537,7 @@ static class Program
                 Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} lead outside or to unbuilt cells; {builder.DoorTrianglesAdded} given their door triangle afterwards");
                 Console.WriteLine($"  effects: {builder.EffectCount} vanilla effects standing in for particle systems");
                 Console.WriteLine($"  locks: {builder.LockCount} locked, {builder.TrapCount} trapped (Morrowind security)");
+                Console.WriteLine($"  floors: {builder.FlooredInteriors.Count} interiors Morrowind left with nothing to walk on given an invisible floor{(builder.FlooredInteriors.Count > 0 ? ": " + string.Join("; ", builder.FlooredInteriors) : "")}");
                 Console.WriteLine($"  tipped back (too steep to walk): {builder.TippedInteriors.Count} interiors{(builder.TippedInteriors.Count > 0 ? ": " + string.Join(", ", builder.TippedInteriors) : "")}");
                 if (!opts.ContainsKey("no-dialogue"))
                 {
@@ -6068,7 +6069,12 @@ static class Program
                             if (st == "bhkMoppBvTreeShape") shape = cache.EditableBlockById<nifly.bhkMoppBvTreeShape>(shape).shapeRef.index;
                             else break;
                         }
-                        lines.Add($"  {type} layer {body.collisionFilter.layer} motion {body.motionSystem} quality {body.qualityType}: {string.Join(" > ", chain)}");
+                        lines.Add($"  {type} layer {body.collisionFilter.layer} motion {body.motionSystem} quality {body.qualityType}: {string.Join(" > ", chain)}; body at {body.translation.x * 7:F1},{body.translation.y * 7:F1},{body.translation.z * 7:F1}");
+                        // The node the collision is on, and its chain up to the root (each node's own translation and scale).
+                        for (uint ci = 0; ci < hdr.GetNumBlocks(); ci++)
+                            if (hdr.GetBlockById(ci) is nifly.bhkNiCollisionObject co && co.bodyRef.index == i)
+                                for (var node = hdr.GetBlockById(co.targetRef.index) as nifly.NiNode; node is not null; node = nif.GetParentNode(node))
+                                    lines.Add($"    on {node.GetBlockName()} \"{node.name.get()}\" at {node.transform.translation.x:F1},{node.transform.translation.y:F1},{node.transform.translation.z:F1} scale {node.transform.scale:F2}");
                     }
                     Console.WriteLine($"{model}:");
                     foreach (var l in lines) Console.WriteLine(l);
@@ -6236,14 +6242,12 @@ static class Program
             }
             case "mw-path-connect":
             {
-                // Whether NPCs can go where Morrowind's own AI went (user, 2026-10-21: "did we fix npc pathing so they move
-                // normally"): a built plugin's interiors (--plugin) against Morrowind's pathgrids. Each pathgrid point on the
-                // navmesh piece under it (its nearest triangle within 64; pieces by the triangles' own edge links), and each
-                // pathgrid connection: whole (both ends on one piece), broken (two pieces: NPCs can't follow it), or with an
-                // end off the navmesh. Worst interiors listed (--worst N).
+                // Whether NPCs can go where Morrowind's own AI went: a built plugin's interiors (--plugin) against Morrowind's
+                // pathgrids (Skyrim.Navmesh.PathConnect). Worst interiors listed (--worst N).
                 string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
                 var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
-                var grids = new Dictionary<string, (List<System.Numerics.Vector3> Points, List<(int A, int B)> Links)>(StringComparer.OrdinalIgnoreCase);
+                static string Sanitized(string s) => new(s.Where(char.IsLetterOrDigit).ToArray());
+                var grids = new Dictionary<string, Skyrim.Navmesh.PathConnect.Grid>(StringComparer.OrdinalIgnoreCase);
                 foreach (var plugin in world.Plugins)
                     foreach (var rec in plugin.Records.Where(r => r.Type == "PGRD"))
                     {
@@ -6266,69 +6270,36 @@ static class Program
                                     if (j > i && j < pts.Count) links.Add((i, j));
                                 }
                         }
-                        grids[name] = (pts, links);
+                        grids["MW" + Sanitized(name)] = new(pts, links);   // a later plugin's grid replaces an earlier one's
                     }
-                static string Sanitized(string s) => new(s.Where(char.IsLetterOrDigit).ToArray());
-                var byEditorId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var k in grids.Keys) byEditorId.TryAdd("MW" + Sanitized(k), k);
                 using var m = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
-                long whole = 0, broken = 0, off = 0, points = 0, pointsOff = 0;
-                var perCell = new List<(string Cell, int Links, int Broken, int Off)>();
-                foreach (var cell in m.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
-                {
-                    if (cell.EditorID is null || !byEditorId.TryGetValue(cell.EditorID, out var name)) continue;
-                    var (pts, links) = grids[name];
-                    // Every triangle of the cell's navmeshes, with its piece (union over the edge links inside one navmesh).
-                    var tris = new List<(System.Numerics.Vector3 A, System.Numerics.Vector3 B, System.Numerics.Vector3 C, int Piece)>();
-                    int pieceBase = 0;
-                    foreach (var nav in cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>())
-                    {
-                        int n = nav.Triangles.Count;
-                        var parent = Enumerable.Range(0, n).ToArray();
-                        int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
-                        for (int i = 0; i < n; i++)
-                        {
-                            var t = nav.Triangles[i];
-                            foreach (int e in new[] { (int)t.EdgeLink_0_1, t.EdgeLink_1_2, t.EdgeLink_2_0 })
-                                if (e >= 0 && e < n) parent[Find(i)] = Find(e);
-                        }
-                        for (int i = 0; i < n; i++)
-                        {
-                            var t = nav.Triangles[i];
-                            System.Numerics.Vector3 V(int k) => new(nav.Vertices[k].X, nav.Vertices[k].Y, nav.Vertices[k].Z);
-                            tris.Add((V(t.Vertices.X), V(t.Vertices.Y), V(t.Vertices.Z), pieceBase + Find(i)));
-                        }
-                        pieceBase += n;
-                    }
-                    int PieceOf(System.Numerics.Vector3 p)
-                    {
-                        float best = 64f * 64f; int piece = -1;
-                        foreach (var t in tris)
-                        {
-                            var q = Skyrim.Navmesh.NavmeshBuilder.ClosestOnTriangle(p, t.A, t.B, t.C);
-                            float d = System.Numerics.Vector3.DistanceSquared(p, q);
-                            if (d < best) { best = d; piece = t.Piece; }
-                        }
-                        return piece;
-                    }
-                    var pieceOfPoint = pts.Select(PieceOf).ToArray();
-                    points += pts.Count; pointsOff += pieceOfPoint.Count(p => p < 0);
-                    int cb = 0, co = 0;
-                    foreach (var (a, b) in links)
-                    {
-                        if (pieceOfPoint[a] < 0 || pieceOfPoint[b] < 0) { off++; co++; }
-                        else if (pieceOfPoint[a] != pieceOfPoint[b]) { broken++; cb++; }
-                        else whole++;
-                    }
-                    if (cb + co > 0) perCell.Add((cell.EditorID, links.Count, cb, co));
-                }
-                long all = whole + broken + off;
-                Console.WriteLine($"mw-path-connect: {points:N0} pathgrid points ({pointsOff:N0} more than 64 off the navmesh); {all:N0} connections: whole {whole:N0} ({whole * 100.0 / Math.Max(1, all):F1}%), broken across two pieces {broken:N0} ({broken * 100.0 / Math.Max(1, all):F1}%), an end off the navmesh {off:N0}");
-                foreach (var c in perCell.OrderByDescending(c => c.Broken + c.Off).Take(int.Parse(opts.GetValueOrDefault("worst", "20"))))
-                    Console.WriteLine($"  {c.Cell}: {c.Links} connections, {c.Broken} broken, {c.Off} with an end off");
+                Skyrim.Navmesh.PathConnect.Report("mw-path-connect", m, grids, int.Parse(opts.GetValueOrDefault("worst", "20")));
                 return 0;
             }
-            case "mw-rest-check":
+            case "ob-path-connect":
+            {
+                // Whether NPCs can go where Oblivion's own AI went: a built plugin's interiors (--plugin) against the interior
+                // pathgrids of Oblivion's active plugins (Skyrim.Navmesh.PathConnect). Worst interiors listed (--worst N).
+                string dir = GameInstalls.DataDir(Game.Oblivion)!;
+                static string Sanitized(string s) => new(s.Where(char.IsLetterOrDigit).ToArray());
+                var grids = new Dictionary<string, Skyrim.Navmesh.PathConnect.Grid>(StringComparer.OrdinalIgnoreCase);
+                foreach (var file in Oblivion.ObData.LoadOrder(dir))
+                {
+                    using var plugin = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dir, file), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                    foreach (var cell in plugin.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                    {
+                        if (cell.PathGrid is not { } pg || pg.PointToPointConnections.Count == 0) continue;
+                        var pts = pg.PointToPointConnections.Select(q => new System.Numerics.Vector3(q.Point.X, q.Point.Y, q.Point.Z)).ToList();
+                        var links = new List<(int, int)>();
+                        for (int i = 0; i < pg.PointToPointConnections.Count; i++)
+                            foreach (var j in pg.PointToPointConnections[i].Connections.Select(x => (int)x).Where(j => j > i && j < pts.Count)) links.Add((i, j));
+                        grids["OB" + Sanitized(cell.EditorID ?? cell.FormKey.ID.ToString("X6"))] = new(pts, links);
+                    }
+                }
+                using var m = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                Skyrim.Navmesh.PathConnect.Report("ob-path-connect", m, grids, int.Parse(opts.GetValueOrDefault("worst", "20")));
+                return 0;
+            }            case "mw-rest-check":
             {
                 // Whether Morrowind's items sit where its makers set them, nothing sunk in and nothing floating (user,
                 // 2026-10-21: "make sure not to overscale", "make sure nothing clips"): every item in every interior
@@ -8904,6 +8875,11 @@ static class Program
                 }
                 return 0;
             }
+            case "creature-check":
+                // Whether a built plugin's creatures can move as they should (Skyrim/CreatureCheck.cs): size against the room over
+                // and across where they stand, their navmesh, its piece and doors, their packages.
+                Skyrim.CreatureCheck.Run(opts["plugin"], skyrimData, int.Parse(opts.GetValueOrDefault("worst", "8")));
+                return 0;
             case "npc-packages":
             {
                 // A built plugin's NPCs (--plugin; --npc EditorID part, default all, at most --max 12) and their packages in
@@ -9207,7 +9183,8 @@ static class Program
                 int[] bands = [16, 32, 64, 128, 256];
                 var doorHist = new int[bands.Length + 2];   // within each band, further, no navmesh in the cell
                 var actorHist = new int[bands.Length + 2];
-                int doors = 0, doorsLinked = 0, actors = 0;
+                int doors = 0, doorsLinked = 0, actors = 0, swimming = 0, apartFromDoors = 0;
+                var apartExamples = new List<string>();
                 var worst = new List<(float D, float Across, float Up, string What)>();
                 var doorOff = new List<(float D, float Across, float Up)>();
                 var untriangled = new List<string>();
@@ -9215,6 +9192,40 @@ static class Program
                 {
                     var meshes = cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>().ToList();
                     var tris = meshes.SelectMany(d => d.Triangles.Select(t => (d.Vertices[t.Vertices.X], d.Vertices[t.Vertices.Y], d.Vertices[t.Vertices.Z]))).ToList();
+                    // Each triangle's piece (joined by the triangles' own edge links) and the pieces a load door's triangle is on.
+                    var piece = new int[tris.Count];
+                    var doorPieces = new HashSet<int>();
+                    {
+                        int at0 = 0;
+                        foreach (var d in meshes)
+                        {
+                            int n0 = d.Triangles.Count;
+                            var parent = Enumerable.Range(0, n0).ToArray();
+                            int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+                            for (int i = 0; i < n0; i++)
+                            {
+                                var t = d.Triangles[i];
+                                if (t.EdgeLink_0_1 >= 0 && t.EdgeLink_0_1 < n0 && !t.Flags.HasFlag(NavmeshTriangle.Flag.EdgeLink_0_1)) parent[Find(i)] = Find(t.EdgeLink_0_1);
+                                if (t.EdgeLink_1_2 >= 0 && t.EdgeLink_1_2 < n0 && !t.Flags.HasFlag(NavmeshTriangle.Flag.EdgeLink_1_2)) parent[Find(i)] = Find(t.EdgeLink_1_2);
+                                if (t.EdgeLink_2_0 >= 0 && t.EdgeLink_2_0 < n0 && !t.Flags.HasFlag(NavmeshTriangle.Flag.EdgeLink_2_0)) parent[Find(i)] = Find(t.EdgeLink_2_0);
+                            }
+                            for (int i = 0; i < n0; i++) piece[at0 + i] = at0 + Find(i);
+                            foreach (var dt in d.DoorTriangles) if (dt.TriangleBeforeDoor >= 0 && dt.TriangleBeforeDoor < n0) doorPieces.Add(at0 + Find(dt.TriangleBeforeDoor));
+                            at0 += n0;
+                        }
+                    }
+                    int NearestPiece(Noggog.P3Float at)
+                    {
+                        var p = new System.Numerics.Vector3(at.X, at.Y, at.Z);
+                        float best = float.MaxValue; int bi = -1;
+                        for (int i = 0; i < tris.Count; i++)
+                        {
+                            var (a, b, c) = tris[i];
+                            float d = System.Numerics.Vector3.DistanceSquared(p, Skyrim.Navmesh.NavmeshBuilder.ClosestOnTriangle(p, new(a.X, a.Y, a.Z), new(b.X, b.Y, b.Z), new(c.X, c.Y, c.Z)));
+                            if (d < best) { best = d; bi = i; }
+                        }
+                        return bi < 0 ? -1 : piece[bi];
+                    }
                     var doorTris = meshes.SelectMany(d => d.DoorTriangles.Select(t => t.Door.FormKey)).ToHashSet();
                     (float D, float Across, float Up) Near(Noggog.P3Float at)
                     {
@@ -9227,6 +9238,13 @@ static class Program
                             if (d < best.D) best = (d, MathF.Sqrt((p.X - q.X) * (p.X - q.X) + (p.Y - q.Y) * (p.Y - q.Y)), p.Z - q.Z);
                         }
                         return best;
+                    }
+                    static float? ZUnder((Noggog.P3Float A, Noggog.P3Float B, Noggog.P3Float C) t, Noggog.P3Float p)
+                    {
+                        float d = (t.B.Y - t.C.Y) * (t.A.X - t.C.X) + (t.C.X - t.B.X) * (t.A.Y - t.C.Y);
+                        if (MathF.Abs(d) < 1e-6f) return null;
+                        float a = ((t.B.Y - t.C.Y) * (p.X - t.C.X) + (t.C.X - t.B.X) * (p.Y - t.C.Y)) / d, b = ((t.C.Y - t.A.Y) * (p.X - t.C.X) + (t.A.X - t.C.X) * (p.Y - t.C.Y)) / d;
+                        return a < 0 || b < 0 || a + b > 1 ? null : a * t.A.Z + b * t.B.Z + (1 - a - b) * t.C.Z;
                     }
                     void Count(int[] hist, float d)
                     {
@@ -9254,7 +9272,14 @@ static class Program
                         {
                             actors++;
                             var n = tris.Count > 0 ? Near(ap.Position) : (float.MaxValue, 0, 0);
+                            // In the cell's water with its navmesh under it (the ground under water, flagged Water): swimming
+                            // over its navmesh, as Skyrim's swimmers do; counted apart, not by distance.
+                            if (n.Item1 > 64 && cell.Flags.HasFlag(Cell.Flag.HasWater) && cell.WaterHeight is { } wh && ap.Position.Z < wh
+                                && tris.Any(t => ZUnder(t, ap.Position) is { } z && z < ap.Position.Z))
+                            { swimming++; continue; }
                             Count(actorHist, n.Item1);
+                            // On a piece of navmesh no load door's triangle is on: it can't walk to a way out (vanilla: 17 of 2,245 creatures).
+                            if (tris.Count > 0 && doorPieces.Count > 0 && !doorPieces.Contains(NearestPiece(ap.Position))) { apartFromDoors++; if (apartExamples.Count < int.Parse(opts.GetValueOrDefault("worst", "10"))) apartExamples.Add($"{bases.GetValueOrDefault(pn.Base.FormKey, pn.Base.FormKey.ToString())} in {cell.EditorID} at {ap.Position}"); }
                             if (tris.Count > 0 && n.Item1 > 64) worst.Add((n.Item1, n.Item2, n.Item3, $"actor {bases.GetValueOrDefault(pn.Base.FormKey, pn.Base.FormKey.ToString())} in {cell.EditorID} at {ap.Position}"));
                         }
                     }
@@ -9271,7 +9296,8 @@ static class Program
                     Console.WriteLine($"    of the {mid.Count:N0} doors 64-256 off: median {Median(mid.Select(d => d.Across)):F0} across, {Median(mid.Select(d => d.Up)):+0;-0} up; "
                         + $"{mid.Count(d => d.Across <= 32):N0} within 32 across (only above or below the floor), {mid.Count(d => d.Across > 64):N0} more than 64 across");
                 }
-                Console.WriteLine($"  actors to the navmesh: {Hist(actorHist, actors)}");
+                Console.WriteLine($"  actors to the navmesh: {Hist(actorHist, actors - swimming)}; swimming in water over their navmesh: {swimming:N0}; on a piece no load door is on: {apartFromDoors:N0}");
+                foreach (var e in apartExamples) Console.WriteLine($"    apart from the doors: {e}");
                 Console.WriteLine($"  load doors without a door triangle ({untriangled.Count}):");
                 foreach (var u in untriangled) Console.WriteLine($"    {u}");
                 foreach (var w in worst.OrderByDescending(w => w.D).Take(int.Parse(opts.GetValueOrDefault("worst", "25"))))

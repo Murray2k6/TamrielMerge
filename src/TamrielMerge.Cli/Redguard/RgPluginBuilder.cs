@@ -782,13 +782,20 @@ public sealed partial class RgPluginBuilder
                 .OrderBy(o => Vector3.Distance(o.Value.Arrival, At(t.From, t.At))).Select(o => o.Value.Door).FirstOrDefault();
             if (back is null)
             {
+                // A one-way way in (Redguard's LoadWorld without a way back): Skyrim's load door still needs a partner. It
+                // stands 64 under the arrival, in the floor where no one reaches it (an auto load door, it would take the
+                // player back on arriving), over the navmesh it gets its door triangle from, as every load door has one, and
+                // locked for good (a key no one has), so neither the player nor anyone following can go back through it
+                // (2026-10-21: 4000 under the arrival, three doors had no door triangle).
                 back = new PlacedObject(mod)
                 {
                     Base = new FormLinkNullable<IPlaceableObjectGetter>(autoDoor.FormKey),
-                    Placement = new Placement { Position = new P3Float(d.Arrival.X, d.Arrival.Y, d.Arrival.Z - 4000), Rotation = new P3Float(0, 0, 0) },
+                    Placement = new Placement { Position = new P3Float(d.Arrival.X, d.Arrival.Y, d.Arrival.Z - 64), Rotation = new P3Float(0, 0, 0) },
                     SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400,
+                    Lock = new LockData { Level = LockLevel.RequiresKey },
                 };
                 PersistentCellFor(d.To).Persistent.Add(back);
+                d.To.LoadDoors.Add(back);   // given its door triangle with the others (BuildNavmeshes)
                 back.TeleportDestination = new TeleportDestination { Door = d.Door.ToLink<IPlacedObjectGetter>(), Position = d.Door.Placement!.Position, Rotation = new P3Float(0, 0, 0) };
                 DoorsOneWay++;
             }
@@ -844,7 +851,9 @@ public sealed partial class RgPluginBuilder
             try
             {
                 var r = navmeshes.BuildInterior(cell, solid, scene.LoadDoors.Cast<IPlacedObjectGetter>(),
-                    keepAround: scene.LoadDoors.FirstOrDefault()?.TeleportDestination is null ? null : scene.LoadDoors[0].Placement!.Position);
+                    keepAround: scene.LoadDoors.FirstOrDefault()?.TeleportDestination is null ? null : scene.LoadDoors[0].Placement!.Position,
+                    // Actors off it moved onto it (2026-10-21: 29 of Redguard's 162 interior actors stood more than 64 off).
+                    snapActors: true);
                 Navmeshes++;
                 NavmeshTriangles += r.Triangles;
             }

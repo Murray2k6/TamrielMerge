@@ -483,7 +483,22 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             {
                 var s = (bhkNiTriStripsShape)block;
                 var sc = new V3(s.scale.x == 0 ? 1 : s.scale.x, s.scale.y == 0 ? 1 : s.scale.y, s.scale.z == 0 ? 1 : s.scale.z);
-                for (uint k = 0; k < s.partRefs.GetSize(); k++) pending.Add((s.partRefs.GetBlockRef(k), xf, sc, target));   // read later (ReadStrips)
+                // Each part's strip data read as it is (its vertices and triangles; the read through a temporary shape,
+                // ReadStrips, failed for some models and they fell back to drawn geometry without its nodes' transforms:
+                // Bruma's houses, collision 155 under their floors, 2026-10-21); that only when the data can't be read so.
+                for (uint k = 0; k < s.partRefs.GetSize(); k++)
+                {
+                    uint part = s.partRefs.GetBlockRef(k);
+                    if (part < hdr.GetNumBlocks() && hdr.GetBlockById(part) is NiTriStripsData data && data.vertices.Count > 0)
+                    {
+                        var verts = data.vertices.Select(v => xf(new V3(v.x * sc.X, v.y * sc.Y, v.z * sc.Z))).ToList();
+                        using var stripTris = new vectorTriangle();
+                        data.GetTriangles(stripTris);
+                        foreach (var t in stripTris)
+                            if (t.p1 < verts.Count && t.p2 < verts.Count && t.p3 < verts.Count) output.Add((target, [verts[t.p1], verts[t.p2], verts[t.p3]]));
+                    }
+                    else pending.Add((part, xf, sc, target));   // read later (ReadStrips)
+                }
                 return true;
             }
             default:
