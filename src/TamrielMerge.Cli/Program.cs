@@ -10804,9 +10804,10 @@ static class Program
                             // --no-remaster: as the game has it (the remaster runs Blender and the texture model).
                             if (spec.Remaster is { } levels && !opts.ContainsKey("no-remaster"))
                                 Skyrim.Creatures.CreatureRemaster.Run(rig, work, levels, problems);
-                            foreach (var pr in problems) Console.WriteLine($"  {id} problem: " + pr);
                             rig.EnsureDeath();
                             var files = rig.Write(outDir, id);
+                            // (after writing: the body's particle systems report as it is written)
+                            foreach (var pr in problems) Console.WriteLine($"  {id} problem: " + pr);
                             if (!File.Exists(config) && Directory.Exists(mwTexDir)) Directory.Delete(mwTexDir, recursive: true);
                             files.AddRange(WriteBehaviour(spec, rig));
                             Report(spec, rig, files);
@@ -11048,6 +11049,30 @@ static class Program
                 Console.WriteLine($"{models} models, {withKf} with their own .kf");
                 return 0;
             }
+            case "creature-particles":
+            {
+                // Whether built Morrowind creatures' particle systems are Morrowind's (Skyrim/Creatures/CreatureParticles):
+                // --creature <id> or --all (every Morrowind creature built under --data, default out\creatures).
+                string data = Path.GetFullPath(opts.GetValueOrDefault("data", "out/creatures"));
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                Morrowind.MwWorld? pw = null;
+                var ids = opts.ContainsKey("all")
+                    ? Directory.GetDirectories(Path.Combine(data, "meshes", "actors", "tamrielmerge")).Select(Path.GetFileName).OfType<string>().Order().ToList()
+                    : [opts["creature"]];
+                int total = 0, systemsMw = 0, systemsSk = 0;
+                foreach (var cid in ids)
+                {
+                    var spec = Skyrim.Creatures.CreatureSpec.Find(cid, () => pw ??= Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!));
+                    if (spec is not { Game: "morrowind", Model: { } model }) continue;
+                    var rep = Skyrim.Creatures.CreatureParticles.Check(mwData, model, data, cid);
+                    if (rep.Morrowind == 0 && rep.Skyrim == 0) continue;
+                    Console.WriteLine($"{cid}: Morrowind {rep.Morrowind} particle systems, body {rep.Skyrim}, {rep.Issues} issues");
+                    foreach (var l in rep.Lines) Console.WriteLine(l);
+                    total += rep.Issues; systemsMw += rep.Morrowind; systemsSk += rep.Skyrim;
+                }
+                Console.WriteLine($"particle systems: Morrowind {systemsMw}, in the bodies {systemsSk}; {total} issues");
+                return total == 0 ? 0 : 2;
+            }
             case "creature-bones":
             {
                 // Whether built creatures' bones hold together (Skyrim/Creatures/CreatureBones): --creature <id> or --all (every
@@ -11286,6 +11311,20 @@ static class Program
                 Walk(root, "root");
                 Console.WriteLine(string.Join(", ", counts.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}")));
                 foreach (var g in notes.GroupBy(x => x).OrderBy(g => g.Key)) Console.WriteLine($"  {g.Key}{(g.Count() > 1 ? $" (x{g.Count()})" : "")}");
+                return 0;
+            }
+            case "type-members":
+            {
+                // Dev aid: the public members of nifly's (or HKX2's) types whose name matches --name (a regex).
+                var rx = new System.Text.RegularExpressions.Regex(opts["name"]);
+                foreach (var asm in new[] { typeof(nifly.NifFile).Assembly, typeof(HKX2.hkbClipGenerator).Assembly })
+                    foreach (var t in asm.GetTypes().Where(t => rx.IsMatch(t.Name)))
+                    {
+                        Console.WriteLine($"{t.FullName} : {t.BaseType?.Name}");
+                        if (t.IsEnum) Console.WriteLine("  values: " + string.Join(", ", Enum.GetNames(t).Select(n => $"{n}={Convert.ToInt64(Enum.Parse(t, n))}")));
+                        foreach (var p in t.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly)) Console.WriteLine($"  {p.PropertyType.Name} {p.Name}");
+                        foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly).Where(m => !m.IsSpecialName)) Console.WriteLine($"  {m.ReturnType.Name} {m.Name}({string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name))})");
+                    }
                 return 0;
             }
             case "weapon-frames":

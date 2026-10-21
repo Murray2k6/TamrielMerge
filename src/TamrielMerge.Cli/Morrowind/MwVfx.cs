@@ -20,6 +20,8 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
 {
     readonly Dictionary<string, string?> converted = new(StringComparer.OrdinalIgnoreCase);
     public List<string> Problems { get; } = [];
+    /// <summary>The data-relative textures the effects use.</summary>
+    public HashSet<string> UsedTextures { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     static T Owned<T>(T block) where T : class => BlockMeshBuilder.Owned(block);
 
@@ -48,6 +50,30 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
         public readonly Dictionary<int, uint> Nodes = new();
         public uint Next => Hdr.GetNumBlocks();
         public uint Add(NiObject block) => Hdr.AddBlock(Owned(block));
+        /// <summary>A creature's: its effects keep Morrowind's own cycle (its flames and steam go on), and a particle array
+        /// emits from the creature's own mesh.</summary>
+        public bool Creature;
+        /// <summary>A creature's body shapes by the Morrowind shape they came from (its index), for mesh emitters.</summary>
+        public Func<int, uint?>? ShapeOf;
+    }
+
+    /// <summary>
+    /// A creature's particle systems (user, 2026-10-21: "we need a particle tool then as well") into its Skyrim body
+    /// <paramref name="nif"/>: each Morrowind particle controller with its particles as a Skyrim particle system under the
+    /// node its particles hang from (<paramref name="nodes"/>: Morrowind node index to the body's bone node, which the
+    /// engine moves with the skeleton), as <see cref="AddParticles"/> builds them, cycling as Morrowind cycles them, a
+    /// particle array (NiBSPArrayController) emitting from the creature's own mesh (<paramref name="shapeOf"/>). Returns
+    /// the systems made.
+    /// </summary>
+    public int AddCreatureParticles(NifFile nif, Nif4 mw, IReadOnlyDictionary<int, uint> nodes, Func<int, uint?> shapeOf)
+    {
+        var b = new Build(nif) { Creature = true, ShapeOf = shapeOf };
+        foreach (var (k, v) in nodes) b.Nodes[k] = v;
+        int made = 0;
+        foreach (var c in mw.Blocks.OfType<NiParticleSystemController>())
+            if (mw.Get<NiParticles>(c.Target) is { } particles) { AddParticles(b, mw, c, particles); made++; }
+            else Problems.Add($"particle controller {c.Index}: its target {c.Target} is no particle system");
+        return made;
     }
 
     void Write(Nif4 mw, string outPath, string name)
@@ -97,6 +123,14 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
     /// Morrowind plays a spell's visual once, so it is played once here too (clamped): Skyrim keeps a magic effect's
     /// art for the whole effect, and a looping visual would repeat for as long as a summon or bound weapon lasts.
     static ushort Flags(NiController c) => 0x4C;
+
+    /// <summary>A particle system's name: Morrowind's; a creature's with its block number too (one model can have several
+    /// "SuperSpray" systems, each its own).</summary>
+    public static string ParticleName(NiParticles particles, bool creature) =>
+        (string.IsNullOrEmpty(particles.Name) ? $"Particles{particles.Index}" : particles.Name) + (creature ? $" #{particles.Index}" : "");
+
+    /// <summary>A creature's effect's flags: Morrowind's own cycle (bits 1-2: loop, reverse, clamp), active, and Skyrim's 0x40.</summary>
+    static ushort CreatureFlags(NiController c) => (ushort)((c.Flags & 0x06) | 0x08 | 0x40);
 
     void Animate(Build b, uint nodeId, NiController kc, NiKeyframeData kd)
     {
@@ -166,6 +200,7 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
             {
                 case NiTexturingProperty { Base: { } tex } when mw.Get<NiSourceTexture>(tex.Source) is { FileName: { } file }:
                     texture = textures.Ensure(file).Path;
+                    if (texture is not null) UsedTextures.Add(texture);
                     break;
                 case NiAlphaProperty a: alpha = a; break;
                 case NiMaterialProperty m: material = m; break;
@@ -196,6 +231,21 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
         int parentIndex = mw.Blocks.OfType<NiNode>().FirstOrDefault(n => n.Children.Contains(particles.Index))?.Index ?? -1;
         if (!b.Nodes.TryGetValue(parentIndex, out var parentId)) parentId = b.Hdr.GetBlockID(b.Nif.GetRootNode());
         uint emitterNode = b.Nodes.TryGetValue(c.Emitter, out var en) ? en : parentId;
+        // A creature's particle array emits from its own mesh (Morrowind's NiBSPArrayController emits from its emitter
+        // object's vertices): the body shapes made from that object, or from the shapes under it.
+        var meshEmitters = new List<uint>();
+        if (b.Creature && c.Type == "NiBSPArrayController" && b.ShapeOf is { } shapeOf)
+        {
+            var under = new List<int>();
+            void Collect(int i)
+            {
+                if (mw.Get<NiTriShape>(i) is { } s && s is not NiParticles) under.Add(s.Index);
+                else if (mw.Get<NiNode>(i) is { } n) foreach (int ch in n.Children) Collect(ch);
+            }
+            Collect(c.Emitter);
+            foreach (int i in under) if (shapeOf(i) is { } id) meshEmitters.Add(id);
+            if (meshEmitters.Count == 0) Problems.Add($"particle array {c.Index}: its emitter {c.Emitter} has no body shape to emit from (a box at its node instead)");
+        }
         var (texture, alphaProp, material) = Look(mw, particles);
         int max = Math.Max(1, Math.Max(c.NumParticles, mw.Get<NiGeometryData>(particles.Data)?.Vertices.Length ?? 0));
         float rate = c.UseBirthRate ? c.BirthRate : max / Math.Max(0.05f, c.Lifetime + c.LifetimeVariation / 2);
@@ -216,20 +266,46 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
 
         // Modifiers, in vanilla's order numbers.
         var mods = new List<NiPSysModifier>();
-        string psysName = string.IsNullOrEmpty(particles.Name) ? $"Particles{particles.Index}" : particles.Name;
+        string psysName = ParticleName(particles, b.Creature);
         mods.Add(new NiPSysAgeDeathModifier { name = new NiStringRef("NiPSysAgeDeath"), order = 0, isActive = true });
-        var emitter = new NiPSysBoxEmitter
+        NiPSysEmitter emitter;
+        if (meshEmitters.Count > 0)
         {
-            name = new NiStringRef("NiPSysBoxEmitter"), order = 1000, isActive = true,
-            speed = c.Speed, speedVariation = c.SpeedVariation,
-            declination = c.Declination, declinationVariation = c.DeclinationVariation,
-            planarAngle = c.PlanarAngle, planarAngleVariation = c.PlanarAngleVariation,
-            color = new Color4(c.InitialColor.X, c.InitialColor.Y, c.InitialColor.Z, c.InitialColor.W),
-            radius = c.InitialSize, radiusVariation = 0,
-            lifeSpan = c.Lifetime, lifeSpanVariation = c.LifetimeVariation,
-            width = c.EmitterDimensions.X * 2, height = c.EmitterDimensions.Y * 2, depth = c.EmitterDimensions.Z * 2,
-        };
-        emitter.emitterNodeRef.index = emitterNode;
+            // From the creature's own mesh, as Morrowind's particle array emits from its emitter object's vertices.
+            var mesh = new NiPSysMeshEmitter
+            {
+                name = new NiStringRef("NiPSysMeshEmitter"), order = 1000, isActive = true,
+                speed = c.Speed, speedVariation = c.SpeedVariation,
+                declination = c.Declination, declinationVariation = c.DeclinationVariation,
+                planarAngle = c.PlanarAngle, planarAngleVariation = c.PlanarAngleVariation,
+                color = new Color4(c.InitialColor.X, c.InitialColor.Y, c.InitialColor.Z, c.InitialColor.W),
+                radius = c.InitialSize, radiusVariation = 0,
+                lifeSpan = c.Lifetime, lifeSpanVariation = c.LifetimeVariation,
+                // From the vertices, heading off the emitter's +Z by the declination and planar angle, as Morrowind's
+                // emitters (and Skyrim's box) do.
+                emissionType = EmitFrom.EMIT_FROM_VERTICES,
+                velocityType = VelocityType.VELOCITY_USE_DIRECTION,
+                emissionAxis = new nifly.Vector3(0, 0, 1),
+            };
+            foreach (var m in meshEmitters) mesh.meshRefs.AddBlockRef(m);
+            emitter = mesh;
+        }
+        else
+        {
+            var box = new NiPSysBoxEmitter
+            {
+                name = new NiStringRef("NiPSysBoxEmitter"), order = 1000, isActive = true,
+                speed = c.Speed, speedVariation = c.SpeedVariation,
+                declination = c.Declination, declinationVariation = c.DeclinationVariation,
+                planarAngle = c.PlanarAngle, planarAngleVariation = c.PlanarAngleVariation,
+                color = new Color4(c.InitialColor.X, c.InitialColor.Y, c.InitialColor.Z, c.InitialColor.W),
+                radius = c.InitialSize, radiusVariation = 0,
+                lifeSpan = c.Lifetime, lifeSpanVariation = c.LifetimeVariation,
+                width = c.EmitterDimensions.X * 2, height = c.EmitterDimensions.Y * 2, depth = c.EmitterDimensions.Z * 2,
+            };
+            box.emitterNodeRef.index = emitterNode;
+            emitter = box;
+        }
         mods.Add(emitter);
         var spawn = new NiPSysSpawnModifier { name = new NiStringRef("NiPSysSpawnModifier"), order = 1000, isActive = true, percentSpawned = 1, minSpawned = 1, maxSpawned = 1, lifeSpan = c.Lifetime, lifeSpanVariation = c.LifetimeVariation };
         mods.Add(spawn);
@@ -306,7 +382,7 @@ public sealed class MwVfx(Tes3Data data, MwTextures textures)
             mod.targetRef.index = psysId;
             b.Add(mod);
         }
-        var emitCtlr = new NiPSysEmitterCtlr { flags = Flags(c), frequency = c.Frequency, phase = c.Phase, startTime = c.Start, stopTime = c.Stop, modifierName = emitter.name };
+        var emitCtlr = new NiPSysEmitterCtlr { flags = b.Creature ? CreatureFlags(c) : Flags(c), frequency = c.Frequency, phase = c.Phase, startTime = c.Start, stopTime = c.Stop, modifierName = emitter.name };
         emitCtlr.targetRef.index = psysId;
         emitCtlr.nextControllerRef.index = updateCtlrId;
         emitCtlr.interpolatorRef.index = rateId;

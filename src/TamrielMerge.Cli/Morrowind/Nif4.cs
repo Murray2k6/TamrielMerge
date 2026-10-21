@@ -331,9 +331,10 @@ public sealed class Nif4
             }
             case "NiVisData":
             {
+                var d = new NiVisData();
                 int n = r.I32();
-                r.Skip(n * 5);
-                return new NiRaw();
+                for (int i = 0; i < n; i++) d.Keys.Add((r.F32(), r.U8() != 0));
+                return d;
             }
             case "NiUVData":
             {
@@ -697,3 +698,8 @@ public sealed class NiKeyframeData : NifBlock
 }
 
 public sealed class NiMorphData : NifBlock { public List<Vector3[]> Morphs = []; }
+
+/// <summary>Visibility keys (time, shown), a step from each key to the next.</summary>
+public sealed class NiVisData : NifBlock { public List<(float Time, bool Visible)> Keys = []; }
+
+/// <summary>Visibility keys (time, shown), a step from each key to the next.</summary> sealed class NiVisData : NifBlock { public List<(float Time, bool Visible)> Keys = []; }

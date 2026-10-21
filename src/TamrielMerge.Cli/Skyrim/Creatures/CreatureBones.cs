@@ -76,7 +76,7 @@ public static class CreatureBones
             var src = Nif4.Read(mwData.Read(mp)!, mp);
             var holder = new HashSet<int>();
             foreach (var b in src.Blocks.OfType<NiNode>()) foreach (int c in b.Children) if (src.Get<NiTriShape>(c) is { } s) holder.Add(s.Index);
-            sourceBinds = src.Blocks.OfType<NiTriShape>().Where(s => s is not NiParticles && !s.Hidden && holder.Contains(s.Index) && src.Get<NiTriShapeData>(s.Data) is { Vertices.Length: > 0 })
+            sourceBinds = MwCreatureSource.BodyShapes(src)
                 .Select(s => src.Get<NiSkinInstance>(s.Skin) is { } inst && src.Get<NiSkinData>(inst.Data) is { } sd
                     ? inst.Bones.Select((node, bi) => (Name: MwCreatureSource.BoneName(src.Get<NiNode>(node)?.Name ?? ""), bi)).Where(x => x.bi < sd.Bones.Count).GroupBy(x => x.Name).ToDictionary(g => g.Key, g => MwCreatureSource.RowMatrix(sd.Bones[g.First().bi].Transform))
                     : []).ToList();
@@ -110,7 +110,7 @@ public static class CreatureBones
                     var stb = new Matrix4x4(cx.x, cx.y, cx.z, 0, cy.x, cy.y, cy.z, 0, cz.x, cz.y, cz.z, 0, t.translation.x, t.translation.y, t.translation.z, 1);
                     // Against the source's bind for this shape and bone, else the bone's rest inverted: points go where they should.
                     Matrix4x4 expected;
-                    if (sourceBinds is not null && shapes - 1 < sourceBinds.Count && sourceBinds[shapes - 1].TryGetValue(bl[b], out var own)) expected = own;
+                    if (sourceBinds is not null && shapes - 1 < sourceBinds.Count && sourceBinds[shapes - 1].TryGetValue(System.Text.RegularExpressions.Regex.Replace(bl[b], @" \[vis \d+\]$", ""), out var own)) expected = own;
                     else Matrix4x4.Invert(world[bi], out expected);
                     float err = new[] { Vector3.Zero, Vector3.UnitX * 50, Vector3.UnitY * 50, Vector3.UnitZ * 50 }.Max(p => Vector3.Distance(Vector3.Transform(p, Matrix4x4.CreateScale(t.scale) * stb), Vector3.Transform(p, expected)));
                     if (err > worstBind) { worstBind = err; worstBindBone = bl[b]; }

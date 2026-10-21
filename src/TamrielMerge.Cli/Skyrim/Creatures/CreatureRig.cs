@@ -26,7 +26,7 @@ public sealed class CreatureRig
     /// (row vectors: p_bone = p * M) when it was bound in another pose than the skeleton's rest (Morrowind's creatures are: a
     /// vertex between two far bones, as a robe's between the calves, comes out right only so); else each bone's rest inverted.</summary>
     public sealed record Mesh(string Name, Vector3[] V, Vector3[] N, Vector2[] Uv, (int Bone, float W)[][] Weights, int[][] Tris, Dictionary<string, string> Textures,
-        Dictionary<int, Matrix4x4>? SkinToBone = null);
+        Dictionary<int, Matrix4x4>? SkinToBone = null, bool Hidden = false);
     /// <summary>A clip: frames of each bone's local translation and rotation, and its scale per frame and bone when the source
     /// animates scale (null: all 1).</summary>
     public sealed record Clip(float Fps, (Vector3 T, Quaternion Q)[][] Frames, float[][]? Scales = null);
@@ -38,6 +38,13 @@ public sealed class CreatureRig
     /// <summary>The weapon styles it holds (MwCreatureSource.WeaponStyles keys: "1h", "2c"...), whose clips its graph picks by
     /// the weapon in its hand; none for a creature that fights with its own body.</summary>
     public List<string> WeaponStyles { get; } = [];
+
+    /// <summary>What else goes into the body as it is written (a Morrowind creature's particle systems): called with the
+    /// body, the data folder, each bone's node block id (by bone index) and each mesh's shape block id (by mesh index).</summary>
+    public List<Action<NifFile, string, uint[], uint[]>> BodyExtras { get; } = [];
+
+    /// <summary>How many particle systems the body got (set as it is written).</summary>
+    public int ParticleSystems { get; set; }
 
     /// <summary>Bones drawn at scale 0 (sheath nodes: what hangs there is out of sight).</summary>
     public HashSet<int> HiddenBones { get; } = [];
@@ -403,8 +410,10 @@ public sealed class CreatureRig
         var restWorld = RestWorld();
         string texDir = Path.Combine(dataDir, TextureFolder(id));
         Directory.CreateDirectory(texDir);
-        foreach (var m in Meshes)
+        var meshIds = new uint[Meshes.Count];
+        for (int mi = 0; mi < Meshes.Count; mi++)
         {
+            var m = Meshes[mi];
             if (m.V.Length > 65535) throw new InvalidDataException($"{id} {m.Name}: {m.V.Length} vertices (a NIF shape holds 65535)");
             using var vv = new vectorVector3(); using var uu = new vectorVector2(); using var nn = new vectorVector3(); using var tt = new vectorTriangle();
             for (int i = 0; i < m.V.Length; i++)
@@ -416,11 +425,13 @@ public sealed class CreatureRig
             foreach (var t in m.Tris) tt.Add(new Triangle((ushort)t[0], (ushort)t[1], (ushort)t[2]));
             string shapeName = FileSafe($"{id}_{m.Name}");
             var shape = nif.CreateShapeFromData(shapeName, vv, tt, uu, nn);
+            meshIds[mi] = hdr.GetBlockID(shape);
             string? diffuse = Texture(m.Textures.GetValueOrDefault("diffuse"), texDir, FileSafe($"{id}_{m.Name}"), "", alpha: false);
             string? normal = Texture(m.Textures.GetValueOrDefault("normal"), texDir, FileSafe($"{id}_{m.Name}"), "_n", alpha: false);
             if (diffuse is not null) nif.SetTextureSlot(shape, Path.GetRelativePath(dataDir, diffuse), 0);
             nif.SetTextureSlot(shape, normal is not null ? Path.GetRelativePath(dataDir, normal) : DfTextureExport.FlatNormal, 1);
-            nif.CalcTangentsForShape(shape);
+            // Tangents for drawn shapes (a hidden emitter shape has no texture coordinates; nifly crashes on them).
+            if (!m.Hidden) nif.CalcTangentsForShape(shape);
             BlockMeshBuilder.EditBlock<BSLightingShaderProperty>(nif, hdr.GetBlockID(nif.GetShader(shape)), sh =>
             {
                 // Matte (the models are never shiny; Morrowind's creatures have no specular): skinned, cast + receive shadows.
@@ -479,7 +490,12 @@ public sealed class CreatureRig
             }
             nif.UpdateSkinPartitions(shape);
             nif.SetDefaultPartition(shape);
+            // Not drawn (Morrowind's hidden emitter shapes: a particle array still emits from it); flagged last, once skinned.
+            if (m.Hidden) BlockMeshBuilder.EditBlock<BSTriShape>(nif, meshIds[mi], s => s.flags |= 1);
         }
+        var boneIds = nodes.Select(n => hdr.GetBlockID(n)).ToArray();
+        foreach (var extra in BodyExtras) extra(nif, dataDir, boneIds, meshIds);
+        if (BodyExtras.Count > 0) BlockMeshBuilder.AddBsxFlags(nif, nif.GetRootNode(), 1);   // animated: its effects run
         nif.Save(path);
     }
 

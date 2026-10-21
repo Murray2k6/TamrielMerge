@@ -57,8 +57,13 @@ public static class MwCreatureCheck
         var shapeParent = new Dictionary<int, int>();
         foreach (var b in nif.Blocks.OfType<NiNode>())
             foreach (int c in b.Children) if (nif.Get<NiTriShape>(c) is { } s) shapeParent[s.Index] = b.Index;
-        var shapes = nif.Blocks.OfType<NiTriShape>().Where(s => s is not NiParticles && !s.Hidden && shapeParent.ContainsKey(s.Index)
-            && nif.Get<NiTriShapeData>(s.Data) is { Vertices.Length: > 0 }).ToList();
+        // The body's shapes as the converter lays them out (drawn ones, then hidden emitter shapes, which both sides skin alike).
+        var shapes = MwCreatureSource.BodyShapes(nif);
+        var visKeys = MwCreatureSource.VisibilityKeys(nif);
+        var scene = MwCreatureSource.SceneParents(nif);
+        string ownKf = Path.Combine(Path.GetDirectoryName(model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf");
+        int ownSource = sources.FindIndex(s => s.Path.Equals(ownKf, StringComparison.OrdinalIgnoreCase));
+        int hiddenFramesRight = 0, hiddenFramesWrong = 0;
         int overFour = 0; float worstDropped = 0;
         foreach (var s in shapes)
         {
@@ -188,15 +193,52 @@ public static class MwCreatureCheck
                     foreach (var r in rows.Take(14)) say(r.Line);
                 }
                 for (int s = 0; s < Math.Min(reference.Length, ours.Length); s++)
+                {
+                    // A part Morrowind hides at this moment (its visibility keys): ours must be gathered into a point, out of sight.
+                    var keyed = MwCreatureSource.VisibilityOf(scene, visKeys, shapes[s].Index);
+                    if (keyed.Count > 0 && !keyed.All(k => MwCreatureSource.Shown(nif, visKeys, k, source == ownSource, t)))
+                    {
+                        var centre = ours[s].Aggregate(Vector3.Zero, (a, p) => a + p) / Math.Max(1, ours[s].Length);
+                        float spread = ours[s].Length == 0 ? 0 : ours[s].Max(p => Vector3.Distance(p, centre));
+                        if (spread < 0.01f) hiddenFramesRight++;
+                        else { hiddenFramesWrong++; if (spread > worst) { worst = spread; worstFrame = f; worstWhere = $"{shapes[s].Name} shown ({spread:F2} across) where Morrowind hides it (keyed: {string.Join(", ", keyed.Select(k => $"{nif.Get<NiObjectNET>(k)?.Name} {(MwCreatureSource.Shown(nif, visKeys, k, source == ownSource, t) ? "shown" : "hidden")}"))}; ours on {body.ShapeBones(s, anim, f)})"; } }
+                        continue;
+                    }
                     for (int i = 0; i < Math.Min(reference[s].Length, ours[s].Length); i++)
                     {
                         float dist = Vector3.Distance(reference[s][i], ours[s][i]);
                         sum += dist; count++;
                         if (dist > worst) { worst = dist; worstFrame = f; worstWhere = $"{shapes[s].Name} vertex {i} on {BonesOf(s, i)}: Morrowind {reference[s][i]}, ours {ours[s][i]}"; }
                     }
+                }
             }
             results.Add(new Result(clip, group, anim.Frames, worst, count > 0 ? sum / count : 0, worstFrame, worstWhere));
         }
+        // Particle systems Morrowind shows and hides (themselves or their emitter): ours on at full scale exactly when
+        // Morrowind shows them, at 0 when it hides them, every frame of every clip.
+        int particleRight = 0, particleWrong = 0; string particleFirstWrong = "";
+        foreach (var c in nif.Blocks.OfType<NiParticleSystemController>())
+        {
+            if (nif.Get<NiParticles>(c.Target) is not { } particles) continue;
+            var keyed = MwCreatureSource.VisibilityOf(scene, visKeys, particles.Index).Union(c.Emitter >= 0 ? MwCreatureSource.VisibilityOf(scene, visKeys, c.Emitter) : []).Distinct().ToList();
+            if (keyed.Count == 0 || !body.ParticleParents.TryGetValue(MwVfx.ParticleName(particles, creature: true), out var parentBone)) continue;
+            foreach (var (clip, source, _, start, stop, _, _, _) in plan)
+            {
+                string file = Path.Combine(folder, "animations", clip + ".hkx");
+                if (!File.Exists(file)) continue;
+                var anim = body.Animation(file);
+                for (int f = 0; f < anim.Frames; f++)
+                {
+                    float t = Math.Min(start + f / anim.Fps, stop);
+                    bool shown = keyed.All(k => MwCreatureSource.Shown(nif, visKeys, k, source == ownSource, t));
+                    float scale = body.Scale(anim, f, parentBone);
+                    if (shown == scale > 0.5f) particleRight++;
+                    else { particleWrong++; if (particleFirstWrong.Length == 0) particleFirstWrong = $"{MwVfx.ParticleName(particles, true)} in {clip} frame {f}: Morrowind {(shown ? "shows" : "hides")} it, ours at scale {scale}"; }
+                }
+            }
+        }
+        if (particleRight + particleWrong > 0) say($"  particle systems Morrowind shows and hides: right in {particleRight} system-frames, wrong in {particleWrong}{(particleWrong > 0 ? " (first: " + particleFirstWrong + ")" : "")}");
+        if (hiddenFramesRight + hiddenFramesWrong > 0) say($"  parts Morrowind hides: out of sight in {hiddenFramesRight} part-frames, shown in {hiddenFramesWrong}");
         return results;
     }
 
@@ -282,6 +324,11 @@ public static class MwCreatureCheck
             skeleton = ((HKX2.hkaAnimationContainer)skelRoot.m_namedVariants[0]!.m_variant!).m_skeletons[0];
             var boneIndex = skeleton.m_bones.Select((b, i) => (b.m_name, i)).ToDictionary(x => x.m_name, x => x.i);
             nif.Load(Path.Combine(folder, id + ".nif"));
+            {
+                var h = nif.GetHeader();
+                for (uint i = 0; i < h.GetNumBlocks(); i++)
+                    if (h.GetBlockById(i) is nifly.NiParticleSystem ps && nif.GetParentNode(ps)?.name.get() is { } parentName) ParticleParents.TryAdd(ps.name.get(), parentName);
+            }
             using var cache = new nifly.niflycpp.BlockCache(nif.GetHeader());
             foreach (var shape in nif.GetShapes())
             {
@@ -321,6 +368,15 @@ public static class MwCreatureCheck
         }
 
         public List<string> BoneNames => skeleton.m_bones.Select(b => b.m_name).ToList();
+
+        /// <summary>Each particle system's parent node in the body, by the system's name.</summary>
+        public Dictionary<string, string> ParticleParents { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>A bone's scale at a frame.</summary>
+        public float Scale(Anim anim, int frame, string bone) => BoneNames.IndexOf(bone) is >= 0 and var b ? anim.Transforms[frame * anim.Tracks + b].M31 : float.NaN;
+
+        /// <summary>A shape's bones with their scales at a frame (what shows or hides it).</summary>
+        public string ShapeBones(int shape, Anim anim, int frame) => string.Join(", ", shapes[shape].Bones.Distinct().Select(b => $"{skeleton.m_bones[b].m_name} x{anim.Transforms[frame * anim.Tracks + b].M31:F2}"));
 
         public Matrix4x4[] BoneWorlds(Anim anim, int frame)
         {

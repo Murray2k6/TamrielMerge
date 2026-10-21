@@ -462,9 +462,14 @@ public static class MwCreatureSource
 
         // Meshes: skinned shapes from their bind, the rest riding their parent node.
         var shapeParent = new Dictionary<int, int>();
+        var meshOf = new Dictionary<int, int>();
         foreach (var b in nif.Blocks.OfType<NiNode>())
             foreach (int c in b.Children) if (nif.Get<NiTriShape>(c) is { } s) shapeParent[s.Index] = b.Index;
-        foreach (var shape in nif.Blocks.OfType<NiTriShape>().Where(s => s is not NiParticles && !s.Hidden && shapeParent.ContainsKey(s.Index)))
+        var bodyShapes = BodyShapes(nif);
+        var visKeys = VisibilityKeys(nif);
+        var scene = SceneParents(nif);
+        var visKeyedOf = new Dictionary<int, List<int>>();   // visibility bone -> the keyed blocks it follows
+        foreach (var shape in bodyShapes)
         {
             if (nif.Get<NiTriShapeData>(shape.Data) is not { } d || d.Vertices.Length == 0) continue;
             int nv = d.Vertices.Length;
@@ -528,7 +533,66 @@ public static class MwCreatureSource
                     var (rel, _) = textures.Ensure(file);
                     if (rel is not null) tex["diffuse"] = Path.Combine(modOutDir, rel);
                 }
-            rig.Meshes.Add(new CreatureRig.Mesh(shape.Name.Length > 0 ? shape.Name : $"shape{shape.Index}", v, nrm, uv, weights, tris, tex, skinToBone));
+            meshOf[shape.Index] = rig.Meshes.Count;
+            rig.Meshes.Add(new CreatureRig.Mesh(shape.Name.Length > 0 ? shape.Name : $"shape{shape.Index}", v, nrm, uv, weights, tris, tex, skinToBone,
+                Hidden: NeverShown(nif, scene, visKeys, shape.Index)));
+        }
+
+        // Showing and hiding as Morrowind does (its visibility keys: the dremora's armour pieces, the fire atronach's sword
+        // flames): a part whose showing depends on keyed blocks rides on "visibility bones", children of its own bones at
+        // their very places, scaled 1 while Morrowind shows it and 0 while it doesn't (Skyrim draws no animated visibility;
+        // a bone at scale 0 draws what it carries in one point). One set per bone and set of keyed blocks.
+        var visBones = new Dictionary<(int Bone, string Keyed), int>();
+        int VisBone(int bone, List<int> keyed)
+        {
+            var key = (bone, string.Join(",", keyed));
+            if (visBones.TryGetValue(key, out int vb)) return vb;
+            vb = rig.Bones.Count;
+            rig.Bones.Add(new CreatureRig.Bone($"{rig.Bones[bone].Name} [vis {visBones.Count + 1}]", bone, Vector3.Zero, Quaternion.Identity));
+            restLocal.Add(NifTransform.Identity);
+            visBones[key] = vb;
+            visKeyedOf[vb] = keyed;
+            return vb;
+        }
+        foreach (var shape in bodyShapes)
+        {
+            var keyed = VisibilityOf(scene, visKeys, shape.Index);
+            if (keyed.Count == 0 || !meshOf.TryGetValue(shape.Index, out int mi)) continue;
+            var m = rig.Meshes[mi];
+            var weights = m.Weights.Select(ws => ws.Select(p => (VisBone(p.Bone, keyed), p.W)).ToArray()).ToArray();
+            var stb = m.SkinToBone?.ToDictionary(kv => VisBone(kv.Key, keyed), kv => kv.Value);
+            rig.Meshes[mi] = m with { Weights = weights, SkinToBone = stb };
+        }
+        // A particle system shows while it and its emitter do (a hidden emitter stops it).
+        var particleParent = new Dictionary<int, int>();   // Morrowind node a system hangs from -> its visibility bone
+        foreach (var c in nif.Blocks.OfType<NiParticleSystemController>())
+        {
+            if (nif.Get<NiParticles>(c.Target) is not { } particles || !scene.TryGetValue(particles.Index, out int parentNode) || !boneOf.TryGetValue(parentNode, out int parentBone)) continue;
+            var keyed = VisibilityOf(scene, visKeys, particles.Index).Union(c.Emitter >= 0 ? VisibilityOf(scene, visKeys, c.Emitter) : []).Distinct().ToList();
+            if (keyed.Count > 0) particleParent[parentNode] = VisBone(parentBone, keyed);
+        }
+
+        // Its particle systems (flames, steam, sparks), written into the body under the bones their nodes became, a particle
+        // array emitting from its own mesh (user, 2026-10-21: "we need a particle tool then as well"): MwVfx's systems.
+        if (nif.Blocks.OfType<NiParticleSystemController>().Any())
+        {
+            var vfx = new MwVfx(data, textures);
+            rig.BodyExtras.Add((body, dataDir, boneIds, meshIds) =>
+            {
+                var nodes = boneOf.Where(kv => kv.Value < boneIds.Length).ToDictionary(kv => kv.Key, kv => boneIds[kv.Value]);
+                foreach (var (node, vb) in particleParent) if (vb < boneIds.Length) nodes[node] = boneIds[vb];
+                int made = vfx.AddCreatureParticles(body, nif, nodes, mwShape => meshOf.TryGetValue(mwShape, out int mi) && mi < meshIds.Length ? meshIds[mi] : null);
+                rig.ParticleSystems = made;
+                // The particles' textures beside the rest of the data.
+                foreach (var rel in vfx.UsedTextures)
+                {
+                    string from = Path.Combine(modOutDir, rel), to = Path.Combine(dataDir, rel);
+                    if (!File.Exists(from)) { problems.Add($"{model}: particle texture {rel} not converted"); continue; }
+                    Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+                    File.Copy(from, to, overwrite: true);
+                }
+                problems.AddRange(vfx.Problems.Select(p => $"{model}: {p}"));
+            });
         }
 
         // Animations, clip by clip from the source the plan names (its own .kf, or the humanoid one under a biped): each source's
@@ -543,13 +607,16 @@ public static class MwCreatureSource
         foreach (var kd in tracksBySource.SelectMany(t => t.Values).Where(kd => kd.RotationType == 4).Take(1))
             problems.Add($"{model}: a track with per-axis rotation keys (not carried)");
         int movementRoot = MovementRoots.Select(m => rig.Bones.FindIndex(b => b.Name.Equals(m, StringComparison.OrdinalIgnoreCase))).FirstOrDefault(i => i > 0, -1);
+        // The model's visibility keys run on its own .kf's time.
+        string ownKf = Path.Combine(Path.GetDirectoryName(model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf");
+        int ownSource = sources.FindIndex(s => s.Path.Equals(ownKf, StringComparison.OrdinalIgnoreCase));
         {
             foreach (var (clip, source, _, start, stop, _, _, _) in plan)
             {
                 if (rig.Clips.ContainsKey(clip)) continue;
                 var tracks = tracksBySource[source];
                 // Scale keys (the Heart of Akulakhan's beat, a riekling's) are carried, frame by frame.
-                bool scaled = tracks.Values.Any(kd => kd.Scales.Any(s => MathF.Abs(s.Value.X - 1) > 1e-4f)) || restLocal.Any(r => MathF.Abs(r.Scale - 1) > 1e-4f) || rig.HiddenBones.Count > 0;
+                bool scaled = tracks.Values.Any(kd => kd.Scales.Any(s => MathF.Abs(s.Value.X - 1) > 1e-4f)) || restLocal.Any(r => MathF.Abs(r.Scale - 1) > 1e-4f) || rig.HiddenBones.Count > 0 || visKeyedOf.Count > 0;
                 int frames = Math.Max(2, (int)MathF.Round((stop - start) * Fps) + 1);
                 var clipFrames = new (Vector3, Quaternion)[frames][];
                 var clipScales = scaled ? new float[frames][] : null;
@@ -583,8 +650,24 @@ public static class MwCreatureSource
                             }
                         }
                         if (rig.HiddenBones.Contains(b)) s = 0;
+                        else if (visKeyedOf.TryGetValue(b, out var keyed)) s = keyed.All(k => Shown(nif, visKeys, k, source == ownSource, t)) ? 1 : 0;
                         pose[b] = (tr, q);
                         scales[b] = s;
+                    }
+                    // A hidden visibility bone gathers what it carries into one point: its origin moved to the root's, so a part
+                    // on several of them (a body skinned to many bones) folds into that one point, not onto its skeleton.
+                    var hiddenVis = visKeyedOf.Keys.Where(vb => scales[vb] == 0).ToList();
+                    if (hiddenVis.Count > 0)
+                    {
+                        var poseWorld = new Matrix4x4[rig.Bones.Count];
+                        for (int b = 0; b < rig.Bones.Count; b++)
+                        {
+                            var local = Matrix4x4.CreateScale(scales[b]) * Matrix4x4.CreateFromQuaternion(pose[b].Item2) * Matrix4x4.CreateTranslation(pose[b].Item1);
+                            poseWorld[b] = rig.Bones[b].Parent < 0 ? local : local * poseWorld[rig.Bones[b].Parent];
+                        }
+                        foreach (int vb in hiddenVis)
+                            if (Matrix4x4.Invert(poseWorld[rig.Bones[vb].Parent], out var inv))
+                                pose[vb] = (Vector3.Transform(Vector3.Zero, inv), Quaternion.Identity);
                     }
                     clipFrames[f] = pose;
                     if (clipScales is not null) clipScales[f] = scales;
@@ -612,6 +695,72 @@ public static class MwCreatureSource
     /// <summary>A Morrowind node's name as a Skyrim bone's: control characters out, the ends' spaces trimmed.</summary>
     public static string BoneName(string name) => new string(name.Where(c => !char.IsControl(c)).ToArray()).Trim();
 
+    /// <summary>Each block's visibility keys from the model's visibility controllers (NiVisController on that block).</summary>
+    public static Dictionary<int, List<(float Time, bool Visible)>> VisibilityKeys(Nif4 nif) =>
+        nif.Blocks.OfType<NiController>().Where(c => c.Type == "NiVisController" && nif.Get<NiVisData>(c.Data) is { Keys.Count: > 0 })
+            .GroupBy(c => c.Target).ToDictionary(g => g.Key, g => nif.Get<NiVisData>(g.First().Data)!.Keys);
+
+    /// <summary>Each block's parent in the model's scene (nodes, shapes and particles alike).</summary>
+    public static Dictionary<int, int> SceneParents(Nif4 nif)
+    {
+        var parents = new Dictionary<int, int>();
+        foreach (var b in nif.Blocks.OfType<NiNode>()) foreach (int c in b.Children) parents.TryAdd(c, b.Index);
+        return parents;
+    }
+
+    /// <summary>A block and its scene ancestors, itself first.</summary>
+    public static IEnumerable<int> Chain(Dictionary<int, int> parents, int block)
+    {
+        for (int b = block, guard = 0; guard < 256; guard++)
+        {
+            yield return b;
+            if (!parents.TryGetValue(b, out b)) yield break;
+        }
+    }
+
+    /// <summary>Whether a block is shown at a moment of an animation from its own .kf (<paramref name="own"/>): its keys
+    /// (a step from each to the next, the first held before it) when it has some and the clip is its own, else its flag.</summary>
+    public static bool Shown(Nif4 nif, Dictionary<int, List<(float Time, bool Visible)>> keys, int block, bool own, float t)
+    {
+        if (own && keys.TryGetValue(block, out var k))
+        {
+            bool v = k[0].Visible;
+            foreach (var (time, visible) in k) if (time <= t) v = visible; else break;
+            return v;
+        }
+        return nif.Get<NiNode>(block) is not { Hidden: true };
+    }
+
+    /// <summary>The visibility-keyed blocks a block's showing depends on (itself and its ancestors with keys), in order.</summary>
+    public static List<int> VisibilityOf(Dictionary<int, int> parents, Dictionary<int, List<(float Time, bool Visible)>> keys, int block) =>
+        Chain(parents, block).Where(keys.ContainsKey).ToList();
+
+    /// <summary>Whether a block is never shown: it or an ancestor is hidden with no keys to show it.</summary>
+    public static bool NeverShown(Nif4 nif, Dictionary<int, int> parents, Dictionary<int, List<(float Time, bool Visible)>> keys, int block) =>
+        Chain(parents, block).Any(b => nif.Get<NiNode>(b) is { Hidden: true } && !keys.ContainsKey(b));
+
+    /// <summary>The shapes a Morrowind model's Skyrim body holds, in order: those it can show (none of it and its ancestors
+    /// hidden for good; some shown only while their visibility keys say, as the dremora's armour pieces), then the hidden
+    /// ones a particle array emits from (the fire atronach's "Tri Weapon": its sword's flames), kept but not drawn.</summary>
+    public static List<NiTriShape> BodyShapes(Nif4 nif)
+    {
+        var parents = SceneParents(nif);
+        var keys = VisibilityKeys(nif);
+        var emitterShapes = new HashSet<int>();
+        void EmitterShapes(int i)
+        {
+            if (nif.Get<NiTriShape>(i) is { } s && s is not NiParticles) emitterShapes.Add(s.Index);
+            else if (nif.Get<NiNode>(i) is { } n) foreach (int ch in n.Children) EmitterShapes(ch);
+        }
+        foreach (var c in nif.Blocks.OfType<NiParticleSystemController>().Where(c => c.Type == "NiBSPArrayController")) EmitterShapes(c.Emitter);
+        bool HasData(NiTriShape s) => nif.Get<NiTriShapeData>(s.Data) is { Vertices.Length: > 0 };
+        var shapes = nif.Blocks.OfType<NiTriShape>().Where(s => s is not NiParticles && parents.ContainsKey(s.Index) && HasData(s)).ToList();
+        var drawn = shapes.Where(s => !NeverShown(nif, parents, keys, s.Index)).ToList();
+        return drawn.Concat(shapes.Where(s => !drawn.Contains(s) && emitterShapes.Contains(s.Index))).ToList();
+    }
+
+    /// <summary>Whether the body draws a shape (else it is only there for a particle array to emit from).</summary>
+    public static bool Drawn(Nif4 nif, NiTriShape shape) => !NeverShown(nif, SceneParents(nif), VisibilityKeys(nif), shape.Index);
     internal static Matrix4x4 RowMatrix(NifTransform t)
     {
         var r = t.Rotation; float s = t.Scale;
