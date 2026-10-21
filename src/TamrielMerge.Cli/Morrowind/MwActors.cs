@@ -214,6 +214,11 @@ public sealed partial class MwPluginBuilder
         int level = npdt is { } d ? d.Int(4) : 1;
         // Morrowind's level, not the stand-in's (a vanilla creature's own level or multiplier).
         npc.Configuration.Level = new NpcLevel { Level = Level(level) };
+        // Morrowind's own wander (AI_W), as people's: the stand-in's packages were often none, and a creature without one
+        // stands where it was placed (2026-10-21, creature-check: 861 of Morrowind's 2,248 placed creatures).
+        npc.Packages.Clear();
+        npc.Packages.Add(new FormLink<IPackageGetter>(PackageFor(WanderDistance(rec))));
+        npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.AIPackages;
         AddInventory(npc, rec);
         AddSpells(npc, rec);
         return npc;

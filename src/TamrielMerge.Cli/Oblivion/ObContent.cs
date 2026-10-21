@@ -558,6 +558,12 @@ public sealed partial class ObPluginBuilder
         if ((c.AIData?.Aggression ?? 0) < 80 && npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
         // Oblivion's level, not the stand-in's (a vanilla creature's own level or multiplier).
         SetLevel(npc, c.Configuration?.Flags.HasFlag(Ob.Creature.CreatureFlag.PCLevelOffset) == true, c.Configuration?.LevelOffset ?? 1, c.Configuration?.CalcMin ?? 0, c.Configuration?.CalcMax ?? 0);
+        // As people: a sandbox round where it stands, and its own Oblivion packages ahead of it (FinishNpcPackages), so
+        // it wanders, guards or travels as Oblivion has it; the stand-in's packages were often none.
+        npc.Packages.Clear();
+        npc.Packages.Add(new FormLink<IPackageGetter>(Sk(0x01B217)));   // DefaultSandboxEditorLocation512
+        npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.AIPackages;
+        if (c.AIPackages.Count > 0) npcPackageLists.Add((npc, c.AIPackages.Select(p => p.FormKey).ToList()));
         AddInventory(npc, c.Items);
         AddSpells(npc, c.Spells);
         return npc;
