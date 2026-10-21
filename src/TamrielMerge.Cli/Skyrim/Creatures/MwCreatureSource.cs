@@ -46,7 +46,12 @@ public static class MwCreatureSource
         .. Enumerable.Range(1, 3).Select(i => ($"swimhit{i}", new[] { $"SwimHit{i}" }, (bool?)null)),
         ("swimknockdown", ["SwimKnockDown"], null), ("swimdeath", ["SwimDeath"], null),
         ("swimdeathknockdown", ["SwimDeathKnockDown"], null), ("swimdeathknockout", ["SwimDeathKnockOut"], null),
+        // Over part of the body: facing into a storm (torso and right arm), a light carried in the left hand (left arm).
+        ("idlestorm", ["IdleStorm"], null), ("torch", ["Torch"], null),
     ];
+
+    /// <summary>Morrowind's spell ranges as its SpellCast group's keys name them ("Self Start", "Touch Release"...).</summary>
+    public static readonly string[] CastRanges = ["Self", "Touch", "Target"];
 
     /// <summary>The groups knocked out plays (Morrowind repeats the loop part while the actor's fatigue is below zero, then
     /// plays on to the end): as three clips "&lt;clip&gt;_in", "_loop", "_out", or one that repeats whole when the group has no
@@ -60,7 +65,42 @@ public static class MwCreatureSource
     {
         ["SwimDeath2"] = "a swimming death is SwimDeath alone (deathStateToAnimGroup)",
         ["SwimDeath3"] = "a swimming death is SwimDeath alone (deathStateToAnimGroup)",
+        ["PickProbe"] = "picking a lock is the player's alone (no AI package or script makes a creature pick one)",
     };
+
+    /// <summary>Why a group Morrowind plays only when an actor sneaks or jumps never plays on a creature: its AI never sneaks
+    /// or jumps (OpenMW: no AI package sets Stance_Sneak or a jump; only the player, or a script's ForceSneak / ForceJump /
+    /// ForceMoveJump, does), and no script of the game does it to a creature (`mw-group-census --scripts`: ForceSneak only on
+    /// NPCs, no ForceJump at all). Null for another group.</summary>
+    public static string? OnlyForced(string group) =>
+        group.StartsWith("Sneak", StringComparison.OrdinalIgnoreCase) || group.Equals("IdleSneak", StringComparison.OrdinalIgnoreCase)
+            ? "sneaking: Morrowind's AI never sneaks, and no script of the game makes a creature (ForceSneak is used on NPCs only)"
+        : group.StartsWith("Jump", StringComparison.OrdinalIgnoreCase)
+            ? "jumping: Morrowind's AI never jumps, and no script of the game makes anything jump (no ForceJump)"
+        : null;
+
+    /// <summary>The idles (2..9) some creature drawn with <paramref name="model"/> can pick by its chances.</summary>
+    public static HashSet<int> PickableIdles(MwWorld world, string model) =>
+        IdleSets(world, model).Sets.SelectMany(s => Enumerable.Range(0, 8).Where(i => s[i] > 0).Select(i => i + 2)).ToHashSet();
+
+    /// <summary>The groups the game's scripts play on the creatures drawn with <paramref name="model"/> (PlayGroup, LoopGroup:
+    /// on one of them by its ID, or from a script one of them carries), as Morrowind names them.</summary>
+    public static HashSet<string> ScriptedGroups(MwWorld world, string model)
+    {
+        var creatures = CreaturesWith(world, model);
+        var ids = creatures.Select(c => c.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var own = creatures.Select(c => c.Str("SCRI")).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var rx = new System.Text.RegularExpressions.Regex(@"^\s*(?:(?:""(?<id>[^""]+)""|(?<id>[\w\-]+))\s*->\s*)?(?:playgroup|loopgroup)[\s,]+""?(?<group>\w+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in world.Objects.Values.Where(o => o.Type == "SCPT"))
+        {
+            string text = s.Get("SCTX") is { } tx ? Tes3Plugin.Encoding.GetString(tx.Data) : "";
+            foreach (var line in text.Split('\n'))
+                if (rx.Match(line.Split(';')[0]) is { Success: true } m && (m.Groups["id"].Success ? ids.Contains(m.Groups["id"].Value) : own.Contains(s.Id)))
+                    groups.Add(m.Groups["group"].Value);
+        }
+        return groups;
+    }
 
     /// <summary>The node whose horizontal travel is the actor's movement (as Morrowind's engine takes it): "Bip01", else
     /// "Root Bone". Its X and Y stay where they are at the start of each animation group, so a flight or a walk plays in
@@ -106,8 +146,8 @@ public static class MwCreatureSource
     {
         string c = clip.ToLowerInvariant();
         string bare = c.StartsWith("swim") ? c[4..] : c;
-        if (c.StartsWith("cidle_") || c.StartsWith("cwalk") || c.StartsWith("crun") || c.StartsWith("cturn") || c.EndsWith("_loop")) return true;
-        return bare is "idle" or "idleswim" || c == "idleswim" || bare.StartsWith("walk") || bare.StartsWith("run") || bare.StartsWith("turn");
+        if (c.StartsWith("cidle_") || c.StartsWith("cwalk") || c.StartsWith("crun") || c.StartsWith("cturn") || c.EndsWith("_loop") || c.EndsWith("_hold")) return true;
+        return bare is "idle" or "idleswim" or "idlestorm" or "torch" || c == "idleswim" || bare.StartsWith("walk") || bare.StartsWith("run") || bare.StartsWith("turn");
     }
 
     /// <summary>The group each of our plain clips comes from (the first of its candidates the .kf has whole), and the time
@@ -152,7 +192,11 @@ public static class MwCreatureSource
     {
         /// <summary>The letters its other movement groups end in (RunBack1h, TurnLeft2c): a bow's, a crossbow's and a thrown
         /// weapon's are the one-handed ones (OpenMW's fallbackShortWeaponGroup).</summary>
-        public string Moves => Key is "bow" or "xbow" or "throw" ? "1h" : Key;
+        public string Moves => Key is "bow" or "xbow" or "throw" ? "1h" : Key == "spell" ? "" : Key;
+
+        /// <summary>Its turning group (a readied spell's goes before: "SpellTurnLeft", OpenMW's "spellcasting stance turning is
+        /// a special case"; a weapon's after: "TurnLeft1h").</summary>
+        public string Turn(string turn) => Key == "spell" ? "Spell" + turn : turn + Moves;
     }
 
     public static readonly WeaponStyle[] WeaponStyles =
@@ -164,6 +208,9 @@ public static class MwCreatureSource
         new("bow", "BowAndArrow", "Idle1h", "WalkForward1h", "RunForward1h", ["Shoot"]),
         new("xbow", "Crossbow", "IdleCrossbow", "WalkForward1h", "RunForward1h", ["Shoot"]),
         new("throw", "ThrowWeapon", "Idle1h", "WalkForward1h", "RunForward1h", ["Shoot"]),
+        // A spell readied: its own idle and turning, moving as with nothing in hand (a spell is no real weapon: OpenMW's
+        // fallbackShortWeaponGroup gives the plain group), its casting (SpellCast's Self, Touch and Target parts: Plan).
+        new("spell", "SpellCast", "IdleSpell", "WalkForward", "RunForward", []),
     ];
 
     /// <summary>Whether the creatures drawn with <paramref name="model"/> are bipeds (FLAG 0x01: Morrowind gives them the
@@ -195,7 +242,10 @@ public static class MwCreatureSource
     /// what it holds when it holds it, whatever its items were to start with), its items' styles first; else none.</summary>
     public static List<string> Styles(IReadOnlyList<ClipSource> sources, IReadOnlyCollection<string> held, bool biped)
     {
-        if (!biped) return [];
+        // A creature that isn't a biped holds no weapon, but a spell readied is its "spell" idle (OpenMW's getWeaponShortGroup
+        // drops only hand to hand's short group for one): IdleSpell, when it has one.
+        if (!biped)
+            return sources.Any(s => s.Groups.ContainsKey("IdleSpell")) ? ["spell"] : [];
         // (Not a thrown weapon's: thrown weapons are misc items in Skyrim, so nothing ever holds one to throw.)
         var animated = WeaponStyles.Where(w => w.Key != "throw" && sources.Any(s => (s.Keys?.Keys ?? []).Any(k => k.Text.Split('\n').Any(l => l.Trim().StartsWith(w.Group + ":", StringComparison.OrdinalIgnoreCase)))))
             .Select(w => w.Key).ToHashSet();
@@ -208,10 +258,29 @@ public static class MwCreatureSource
     /// that style's idle, walk and run ("cidle_1h", "cwalk_1h", "crun_1h"), running other ways and turning, its attacks
     /// ("weapon_1h_chop" .. a shot's "weapon_bow_shoot"), its drawing and putting away ("equip_1h", "unequip_1h").
     /// </summary>
-    public static List<ClipPlan> Plan(IReadOnlyList<ClipSource> sources, IReadOnlyCollection<string> held, bool biped)
+    /// <param name="scripted">Groups the game's scripts play on it (<see cref="ScriptedGroups"/>): each as its script plays
+    /// it (OpenMW's playGroup: from "Start", or "Loop Start", its loop part over and over, then on to "Stop"): "play_&lt;group&gt;"
+    /// whole, or "_in", "_loop", "_out" when it has loop keys.</param>
+    public static List<ClipPlan> Plan(IReadOnlyList<ClipSource> sources, IReadOnlyCollection<string> held, bool biped, IReadOnlyCollection<string>? scripted = null, IReadOnlySet<int>? pickable = null)
     {
         var styles = Styles(sources, held, biped);
         var plan = new List<ClipPlan>();
+        // (An idle none of its creatures' chances can pick, Morrowind never plays as an idle: <paramref name="pickable"/>.)
+        bool Wants(string clip) => pickable is null || !System.Text.RegularExpressions.Regex.IsMatch(clip, "^idle[2-9]$") || pickable.Contains(clip[4] - '0');
+        foreach (var group in scripted ?? [])
+            for (int s = 0; s < sources.Count; s++)
+            {
+                if (!sources[s].Groups.TryGetValue(group, out var g) || !g.Whole) continue;
+                string name = "play_" + group.ToLowerInvariant();
+                if (g.Loops && g.LoopStart >= g.Start && g.LoopStop <= g.Stop)
+                {
+                    if (g.LoopStart - g.Start >= 1 / Fps) plan.Add(new ClipPlan(name + "_in", s, group, g.Start, g.LoopStart, null));
+                    plan.Add(new ClipPlan(name + "_loop", s, group, g.LoopStart, g.LoopStop, null));
+                    if (g.Stop - g.LoopStop >= 1 / Fps) plan.Add(new ClipPlan(name + "_out", s, group, g.LoopStop, g.Stop, null));
+                }
+                else plan.Add(new ClipPlan(name, s, group, g.Start, g.Stop, null));
+                break;
+            }
         ClipPlan? Whole(string clip, IEnumerable<string> candidates, bool loop, string? hit = null)
         {
             foreach (var c in candidates)
@@ -221,7 +290,7 @@ public static class MwCreatureSource
             return null;
         }
         foreach (var (clip, candidates, who) in Wanted)
-            if ((who is null || who == biped) && Whole(clip, candidates, IsLooping(clip), clip.Contains("attack") ? "Hit" : null) is { } p) plan.Add(p);
+            if ((who is null || who == biped) && Wants(clip) && Whole(clip, candidates, IsLooping(clip), clip.Contains("attack") ? "Hit" : null) is { } p) plan.Add(p);
         // Knocked out: up to its loop, the loop, and on from it (one clip repeated whole when it has no loop keys).
         foreach (var (clip, group) in KnockOuts)
             for (int s = 0; s < sources.Count; s++)
@@ -252,15 +321,37 @@ public static class MwCreatureSource
         }
         foreach (var style in WeaponStyles.Where(w => styles.Contains(w.Key)))
         {
-            if (Whole($"cidle_{style.Key}", [style.Idle, "Idle1h", "Idle"], loop: true) is { } i) plan.Add(i);
-            if (Whole($"cwalk_{style.Key}", [style.Walk, "WalkForward1h", "WalkForward"], loop: true) is { } w) plan.Add(w);
-            if (Whole($"crun_{style.Key}", [style.Run, "RunForward1h", "RunForward"], loop: true) is { } r) plan.Add(r);
-            // Running any other way and turning with it drawn (Morrowind's RunBack1h, TurnLeft2c...; the plain group where the
-            // style has none, as OpenMW falls back), and the same in water (the swimming groups have no weapon letters).
-            foreach (var (way, group) in new[] { ("back", "RunBack"), ("left", "RunLeft"), ("right", "RunRight") })
-                if (Whole($"crun{way}_{style.Key}", [group + style.Moves, group + "1h", group], loop: true) is { } rw) plan.Add(rw);
+            // Standing, walking, running any way and turning with it drawn: the style's group, else Morrowind's fallback for it
+            // (OpenMW's fallbackShortWeaponGroup: a two-handed melee weapon's the two-handed sword's, another real weapon's the
+            // one-handed ones, no real weapon's - hand to hand, a spell - the plain group).
+            string[] Chain(string group, string own)
+            {
+                bool real = style.Key is not ("hh" or "spell");
+                return real ? [own, group + (style.Key is "2c" or "2w" ? "2c" : "1h"), group] : [own, group];
+            }
+            if (Whole($"cidle_{style.Key}", Chain("Idle", style.Idle), loop: true) is { } i) plan.Add(i);
+            // (One that isn't a biped: its spell idle alone - it moves as ever, never turns, and casts with its attacks.)
+            if (!biped) continue;
+            foreach (var (way, walkGroup, runGroup) in new[] { ("", "WalkForward", "RunForward"), ("back", "WalkBack", "RunBack"), ("left", "WalkLeft", "RunLeft"), ("right", "WalkRight", "RunRight") })
+            {
+                if (Whole($"cwalk{way}_{style.Key}", Chain(walkGroup, walkGroup + style.Moves), loop: true) is { } w) plan.Add(w);
+                if (Whole($"crun{way}_{style.Key}", Chain(runGroup, runGroup + style.Moves), loop: true) is { } r) plan.Add(r);
+            }
             foreach (var (way, group) in new[] { ("left", "TurnLeft"), ("right", "TurnRight") })
-                if (Whole($"cturn{way}_{style.Key}", [group + style.Moves, group + "1h", group], loop: true) is { } tw) plan.Add(tw);
+                if (Whole($"cturn{way}_{style.Key}", Chain(group, style.Turn(group)), loop: true) is { } tw) plan.Add(tw);
+            // A blow blocked with a shield: Morrowind's Shield group, "Block Start" to "Block Stop" (refreshHitRecoilAnims).
+            if (style.Key == "1h" && !plan.Any(p => p.Clip == "block") && Part("block", "Shield", "Block Start", ["Block Stop"], null) is { } block) plan.Add(block);
+            // A spell readied: Morrowind's cast as the spell's first effect's range says ("Self Start" up to "Self Release", where
+            // it leaves the hand, then on to "Self Stop"), and that pose held while Skyrim's engine waits to release.
+            if (style.Key == "spell")
+                foreach (var range in CastRanges)
+                    if (Part($"cast_{range.ToLowerInvariant()}_in", style.Group, $"{range} Start", [$"{range} Release"], null) is { } cin
+                        && Part($"cast_{range.ToLowerInvariant()}_out", style.Group, $"{range} Release", [$"{range} Stop"], null) is { } cout)
+                    {
+                        plan.Add(cin);
+                        plan.Add(new ClipPlan($"cast_{range.ToLowerInvariant()}_hold", cin.Source, cin.Group, cin.Stop, cin.Stop + 1 / Fps, null));
+                        plan.Add(cout);
+                    }
             foreach (var kind in style.Kinds)
             {
                 if (kind == "Shoot")
@@ -324,10 +415,24 @@ public static class MwCreatureSource
         var (biped, styles) = world is not null ? Kind(world, model) : (false, []);
         var sources = Sources(data, model, biped);
         if (sources.Count == 0) problems.Add($"{model}: no animations (no x{Path.GetFileNameWithoutExtension(model)}.kf, not a biped)");
-        var plan = Plan(sources, styles, biped);
+        var plan = Plan(sources, styles, biped, world is not null ? ScriptedGroups(world, model) : null, world is not null ? PickableIdles(world, model) : null);
         var rig = BuildBody(data, model, textures, modOutDir, problems, sources, plan);
         rig.WeaponStyles.AddRange(Styles(sources, styles, biped));
         rig.Biped = biped;
+        // The bones each part of the body is (Morrowind's blend masks, OpenMW's detectBlendMask: the nearest of "Bip01
+        // Spine1", "Bip01 L Clavicle", "Bip01 R Clavicle" at or above a bone, else the lower body), for what plays over part
+        // of it: a storm's on the torso and right arm, a carried light's on the left arm.
+        string[] roots = ["", "Bip01 Spine1", "Bip01 L Clavicle", "Bip01 R Clavicle"];
+        for (int b = 0; b < rig.Bones.Count; b++)
+        {
+            int mask = 0;
+            for (int at = b; at >= 0; at = rig.Bones[at].Parent)
+            {
+                int found = Array.FindIndex(roots, 1, r => r.Equals(rig.Bones[at].Name, StringComparison.Ordinal));
+                if (found > 0) { mask = found; break; }
+            }
+            rig.BlendMasks.Add(mask);
+        }
         if (world is not null)
         {
             float multiplier = Setting(world, "fIdleChanceMultiplier", float.NaN);
@@ -406,7 +511,17 @@ public static class MwCreatureSource
         int Int(string name) => world.Settings.TryGetValue(name, out var s) && s.Get("INTV") is { Data.Length: >= 4 } v ? v.Int() : throw new InvalidDataException($"no {name} in Morrowind's settings");
         float mult = Setting(world, "fKnockDownMult", float.NaN);
         if (float.IsNaN(mult)) throw new InvalidDataException("no fKnockDownMult in Morrowind's settings");
-        return new CreatureRecords.HitRules(mult, Int("iKnockDownOddsMult"), Int("iKnockDownOddsBase"));
+        // Each spell's range is its first effect's (OpenMW: "first effect used for casting animation"; ENAM's range at byte 4).
+        var self = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var touch = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sp in world.Objects.Values.Where(o => o.Type == "SPEL"))
+            if (sp.Get("ENAM") is { Data.Length: >= 8 } e)
+            {
+                int range = BitConverter.ToInt32(e.Data, 4);
+                string edid = "MWSpell" + MwPluginBuilder.Sanitize(sp.Id);
+                if (range == 0) self.Add(edid); else if (range == 1) touch.Add(edid);
+            }
+        return new CreatureRecords.HitRules(mult, Int("iKnockDownOddsMult"), Int("iKnockDownOddsBase")) { SelfSpells = self, TouchSpells = touch, AshStorms = ["MWWeatherAshstorm", "MWWeatherBlight"], OtherStorms = ["MWWeatherBlizzard"] };
     }
 
     static float Setting(MwWorld world, string name, float fallback) =>
@@ -599,6 +714,8 @@ public static class MwCreatureSource
             {
                 SwimSpeed = SwimSpeed(world, s, walk),
                 Agility = s[5],
+                // Fatigue comes back at fFatigueReturnBase + fFatigueReturnMult × Endurance a second (OpenMW's calculateRestoration).
+                StaminaReturn = Setting(world, "fFatigueReturnBase", 2.5f) + Setting(world, "fFatigueReturnMult", 0.02f) * s[7],
                 IdleSet = idle.Of.GetValueOrDefault(c.Id),
                 // Each attack's average blow (Morrowind: least + (most - least) × the attack's strength; chop, slash, thrust).
                 AttackAverages = Enumerable.Range(0, 3).Select(i => (s[17 + i * 2] + s[18 + i * 2]) / 2f).ToArray(),

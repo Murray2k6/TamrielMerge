@@ -17,19 +17,11 @@ public static class CreatureGroups
 {
     public sealed record Report(int Groups, int Carried, int Issues, List<string> Lines);
 
-    /// <summary>What Morrowind's groups we do not carry yet are for (each one an issue until carried).</summary>
+    /// <summary>What a Morrowind group nothing carries is for, when it is one we know (each one an issue).</summary>
     static string? NotYet(string group)
     {
         string g = group.ToLowerInvariant();
-        if (g.StartsWith("sneak") || g == "idlesneak") return "sneaking";
-        if (g.StartsWith("jump")) return "jumping";
-        if (g is "idlespell" || g.StartsWith("spellturn") || g.StartsWith("spellcast")) return "spellcasting";
-        if (g == "idlestorm") return "walking into a storm";
-        if (g == "torch") return "holding a torch";
-        if (g == "pickprobe") return "picking a lock";
-        if (g == "shield") return "blocking";
-        if (System.Text.RegularExpressions.Regex.IsMatch(g, @"^walk(forward|back|left|right)(hh|1h|2c|2w)$")) return "walking with a weapon out (a creature walks and runs at one speed: nothing tells a fight's walk from its run)";
-        if (System.Text.RegularExpressions.Regex.IsMatch(g, @"^(idle|turnleft|turnright|runforward|runback|runleft|runright)(hh|1h|2c|2w|crossbow)$")) return "a weapon style it has none of";
+        if (System.Text.RegularExpressions.Regex.IsMatch(g, @"^(idle|turnleft|turnright|walk\w+|run\w+)(hh|1h|2c|2w|crossbow|spell)$")) return "a weapon style it has none of";
         return null;
     }
 
@@ -41,7 +33,7 @@ public static class CreatureGroups
         string mp = model.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
         var (biped, held) = MwCreatureSource.Kind(world, mp);
         var sources = MwCreatureSource.Sources(data, mp, biped);
-        var plan = MwCreatureSource.Plan(sources, held, biped);
+        var plan = MwCreatureSource.Plan(sources, held, biped, MwCreatureSource.ScriptedGroups(world, mp), MwCreatureSource.PickableIdles(world, mp));
         var styles = MwCreatureSource.Styles(sources, held, biped);
 
         string folder = Path.Combine(dataDir, CreatureRig.MeshFolder(id));
@@ -94,9 +86,13 @@ public static class CreatureGroups
             if (clips.Count == 0)
             {
                 if (MwCreatureSource.NeverPlayed.TryGetValue(group, out var why)) { lines.Add($"  {group}: Morrowind never plays it ({why})"); continue; }
+                if (MwCreatureSource.OnlyForced(group) is { } forced) { lines.Add($"  {group}: Morrowind never plays it on a creature ({forced})"); continue; }
+                if (System.Text.RegularExpressions.Regex.IsMatch(group, "^Idle[2-9]$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                    && !MwCreatureSource.PickableIdles(world, mp).Contains(group[4] - '0'))
+                { lines.Add($"  {group}: none of its creatures' idle chances picks it, so Morrowind never plays it as an idle"); continue; }
                 if (biped && System.Text.RegularExpressions.Regex.IsMatch(group, @"^(swim)?attack\d$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 { lines.Add($"  {group}: a biped's attacks are its weapon's (OpenMW: random attacks only for non-bipedal creatures)"); continue; }
-                if (!biped && System.Text.RegularExpressions.Regex.IsMatch(group, @"^(swim)?turn(left|right)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                if (!biped && System.Text.RegularExpressions.Regex.IsMatch(group, @"^(swim|spell)?turn(left|right)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 { lines.Add($"  {group}: Morrowind turns only bipeds with their turning animations (OpenMW: \"It seems only bipedal actors use turning animations\")"); continue; }
                 if (System.Text.RegularExpressions.Regex.IsMatch(group, @"(throw|thrown)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 { lines.Add($"  {group}: a thrown weapon's (misc items in Skyrim: nothing throws)"); continue; }
@@ -110,12 +106,7 @@ public static class CreatureGroups
                 if (!named.Contains(clip)) { Issue($"{group}: {clip} not among the character's animations"); continue; }
                 if (!playedAt.TryGetValue(clip, out var at))
                 {
-                    // Why nothing plays it: an idle none of its creatures' chances picks (only a script's PlayGroup would), a
-                    // plain run an armed biped only runs with nothing drawn, else a gap.
-                    string why = System.Text.RegularExpressions.Regex.IsMatch(clip, @"^idle[2-9]$") ? "no creature's idle chances pick it: only a script's PlayGroup plays it, and PlayGroup isn't converted yet"
-                        : styles.Count > 0 && System.Text.RegularExpressions.Regex.IsMatch(clip, @"^run(back|left|right)?$") ? "Morrowind runs this way with nothing drawn; Skyrim gives no sign of running at a creature's one speed outside a fight"
-                        : "no clip generator plays it";
-                    Issue($"{group}: {clip} written, but {why}");
+                    Issue($"{group}: {clip} written, but no clip generator plays it");
                     continue;
                 }
                 parts.Add($"{clip} at {string.Join(", ", at.Take(3))}{(at.Count > 3 ? $" (+{at.Count - 3})" : "")}");
@@ -252,6 +243,80 @@ public static class CreatureGroups
             if (target is null || baseMachine!.m_wildcardTransitions?.m_transitions.Any(t => E(t.m_eventId) == e && t.m_toStateId == target.m_stateId) != true)
                 Issue($"{e} leads to no {state} state");
         }
+        // 7. Walking or running (iTMRun: a fight, or its AI running) wherever both are there.
+        if (!evaluate.Contains("iTMRun = cond((bTMInCombat == 1) || (bTMRunning == 1), 1, 0)")) Issue("no walking-or-running switch (iTMRun)");
+        if (plan.Any(p => p.Clip.StartsWith("run")) && !selectors.Any(s => s.m_name == "TMWalkOrRun")) Issue("it has runs, but nothing runs out of a fight");
+        if (plan.Any(p => p.Clip.StartsWith("cwalk")) && !selectors.Any(s => s.m_name == "TMCombatWalkOrRun")) Issue("it has walks with weapons out, but nothing walks with one");
+
+        // 8. Casting: the engine's start events into a cast in each hand; a biped's SpellCast parts by range, a beast's attacks;
+        // the spell leaving the hand on release (a beast) or as the part after Release starts (a biped).
+        var combat = machines.FirstOrDefault(m => m.M.m_name == "TMCombat").M;
+        foreach (var (hand, state) in new[] { ("L", 30), ("R", 31) })
+        {
+            bool entered = combat?.m_states.Any(s => s.m_transitions?.m_transitions.Any(t => t.m_toStateId == state && E(t.m_eventId).Contains(hand == "L" ? "_LH" : "_RH") || t.m_toStateId == state && E(t.m_eventId).StartsWith($"M{hand}h_Spell")) == true) == true;
+            if (combat?.m_states.All(s => s.m_stateId != state) != false || !entered) { Issue($"no cast in the {hand} hand"); continue; }
+            string fire = $"M{hand}h_SpellFire_Event";
+            bool fires = machines.Any(m => m.M.m_name.StartsWith($"TMCast{hand}") && m.M.m_states.Any(s => s.m_enterNotifyEvents?.m_events.Any(e => E(e.m_id) == fire) == true));
+            if (!fires) Issue($"the {hand} hand's cast never raises {fire}");
+        }
+        var castClips = plan.Where(p => p.Clip.StartsWith("cast_")).Select(p => p.Clip).ToList();
+        if (biped && styles.Contains("spell"))
+            foreach (var r in MwCreatureSource.CastRanges.Select(x => x.ToLowerInvariant()))
+            {
+                var parts = new[] { "in", "hold", "out" }.Select(x => $"cast_{r}_{x}").ToList();
+                if (!parts.All(castClips.Contains)) { Issue($"SpellCast's {r} part not carried ({string.Join(", ", parts.Where(x => !castClips.Contains(x)))})"); continue; }
+                var unplayed = parts.Where(x => !playedAt.ContainsKey(x)).ToList();
+                if (unplayed.Count > 0) Issue($"SpellCast's {r} part: {string.Join(", ", unplayed)} played nowhere");
+                else { carried++; lines.Add($"  SpellCast {r}: {string.Join(", ", parts.Select(x => $"{x} at {playedAt[x][0]}"))}"); }
+            }
+        else if (!biped) lines.Add("  casting: one of its attacks at random, the spell leaving as Skyrim releases it (Morrowind: \"No release text key to use, so cast immediately\")");
+        if (!evaluate.Contains("BeginCastLeft if (bWantCastLeft && bMLh_Ready && !IsCasting)") || !evaluate.Contains("BeginCastRight if (bWantCastRight && bMRh_Ready && !IsCasting)"))
+            Issue("it never begins a cast the engine wants (BeginCastLeft / BeginCastRight)");
+
+        // 9. Groups its game's scripts play: each a state on TMPlay_<group> (and TMPlayLoop_), numbered for its scripts.
+        foreach (var g in MwCreatureSource.ScriptedGroups(world, mp).Where(g => sources.Any(s => s.Groups.ContainsKey(g))))
+        {
+            string low = g.ToLowerInvariant();
+            int n = varNames.IndexOf($"iTMPlay_{low}");
+            var st = baseMachine?.m_states.FirstOrDefault(s => s.m_name == $"Play_{low}");
+            bool wired = st is not null && baseMachine!.m_wildcardTransitions?.m_transitions.Any(t => E(t.m_eventId) == $"TMPlay_{low}" && t.m_toStateId == st.m_stateId) == true;
+            if (n < 0 || !wired) Issue($"{g}: its scripts play it, but {(n < 0 ? "its graph has no number for it" : "nothing plays it on TMPlay_" + low)}");
+            else { carried++; lines.Add($"  {g}: played by its scripts (TMPlay_{low}, number {graph.m_data.m_variableInitialValues!.m_wordVariableValues[n].m_value})"); }
+        }
+
+        // 10. Over part of the body: a torch on the left arm, a storm on the torso and right arm (Morrowind's blend masks).
+        foreach (var (clip, name, weight, masks) in new[] { ("torch", "TMTorch", "fTMTorch", new[] { 2 }), ("idlestorm", "TMStorm", "fTMStorm", new[] { 1, 3 }) })
+        {
+            if (!plan.Any(p => p.Clip == clip)) continue;
+            var blend = Blenders(graph).FirstOrDefault(b => b.m_name == name);
+            var over = blend?.m_children.Count == 2 ? blend.m_children[1] : null;
+            bool bound = over?.m_variableBindingSet?.m_bindings.Any(b => b.m_memberPath == "weight" && V(b.m_variableIndex) == weight) == true;
+            int boneCount = over?.m_boneWeights?.m_boneWeights.Count(w => w > 0) ?? 0;
+            if (blend is null || !bound || boneCount == 0 || !evaluate.Any(e => e.StartsWith(weight + " =")))
+                Issue($"{clip}: not over its part of the body ({(blend is null ? "no blend" : !bound ? "weight not bound" : boneCount == 0 ? "no bones" : "no expression")})");
+            else { carried++; lines.Add($"  {clip}: over {boneCount} bones (Morrowind's {string.Join(" and ", masks.Select(m => m == 1 ? "torso" : m == 2 ? "left arm" : "right arm"))}) while {evaluate.First(e => e.StartsWith(weight + " ="))[(weight.Length + 3)..]}"); }
+        }
+        if (plan.Any(p => p.Clip == "block"))
+        {
+            if (baseMachine?.m_wildcardTransitions?.m_transitions.Any(t => E(t.m_eventId) == "blockHitStart") != true) Issue("Shield: a blocked blow never plays it");
+            else { carried++; lines.Add("  Shield: a blocked blow (blockHitStart) plays it"); }
+        }
         return new Report(groups.Count, carried, issues, lines);
+    }
+
+    static List<hkbBlenderGenerator> Blenders(hkbBehaviorGraph graph)
+    {
+        var found = new List<hkbBlenderGenerator>();
+        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        void Walk(object? o)
+        {
+            if (o is null || o is string || o.GetType().IsPrimitive || o.GetType().IsEnum || !seen.Add(o)) return;
+            if (o is System.Collections.IEnumerable list) { foreach (var it in list) Walk(it); return; }
+            if (o is hkbBlenderGenerator b) found.Add(b);
+            if (o.GetType().IsValueType) return;
+            foreach (var p in o.GetType().GetProperties().Where(p => p.Name.StartsWith("m_") && p.GetIndexParameters().Length == 0)) { try { Walk(p.GetValue(o)); } catch { } }
+        }
+        Walk(graph.m_rootGenerator);
+        return found;
     }
 }

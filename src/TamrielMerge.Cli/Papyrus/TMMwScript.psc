@@ -912,13 +912,38 @@ Bool Function InThirdPerson() Global
   Return Game.GetCameraState() != 0
 EndFunction
 
-; PlayGroup / LoopGroup: an animation group on an object (the converted model's own sequence of that name); on a person,
-; the nearest Skyrim idle for knockouts and deaths.
-Function PlayGroup(ObjectReference r, String asGroup) Global
+; PlayGroup / LoopGroup: an animation group on an object (the converted model's own sequence of that name); on a creature
+; with its own graph, as Morrowind plays it (OpenMW's playGroup): aiMode 0 after the one playing (queued), 1 at once from
+; its start, 2 at once from its loop start; its loop part aiLoops more times (PlayGroup's -1: on and on), then to its end;
+; "idle" stops it. On a person, the nearest Skyrim idle for knockouts and deaths.
+Function PlayGroup(ObjectReference r, String asGroup, Int aiMode = 0, Int aiLoops = -1) Global
   If !r
     Return
   EndIf
   Actor a = r as Actor
+  If a && a.GetAnimationVariableInt("iTMPlayStop") > 0
+    ; One of its graph's groups (each a number: iTMPlay_<group>, from 1).
+    If asGroup == "idle" || asGroup == "Idle"
+      Debug.SendAnimationEvent(a, "TMPlayStop")
+      Return
+    EndIf
+    Int k = a.GetAnimationVariableInt("iTMPlay_" + asGroup)
+    If k <= 0
+      Return
+    EndIf
+    If aiMode == 0 && a.GetAnimationVariableBool("bTMScripted")
+      a.SetAnimationVariableInt("iTMQueuedLoops", aiLoops)
+      a.SetAnimationVariableInt("iTMQueued", k)
+      Return
+    EndIf
+    a.SetAnimationVariableInt("iTMLoops", aiLoops)
+    If aiMode == 2
+      Debug.SendAnimationEvent(a, "TMPlayLoop_" + asGroup)
+    Else
+      Debug.SendAnimationEvent(a, "TMPlay_" + asGroup)
+    EndIf
+    Return
+  EndIf
   If a
     If asGroup == "knockout" || asGroup == "KnockOut"
       Debug.SendAnimationEvent(a, "BleedOutStart")

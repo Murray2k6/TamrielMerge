@@ -11221,6 +11221,39 @@ static class Program
                 // how many models have each group, and which the converter's plan takes; --model lists one model's groups.
                 var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
                 var world = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                // --scripts: every PlayGroup / LoopGroup / ForceSneak / ForceJump / ForceMoveJump line in the game's scripts, by
+                // what it plays on (an explicit "id"->, else the objects the script is attached to: creature, NPC, activator...),
+                // with the groups named.
+                if (opts.ContainsKey("scripts"))
+                {
+                    var attachedTo = new Dictionary<string, List<Morrowind.Tes3Record>>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var o in world.Objects.Values)
+                        if (o.Str("SCRI") is { Length: > 0 } sc) { if (!attachedTo.TryGetValue(sc, out var l)) attachedTo[sc] = l = []; l.Add(o); }
+                    var byKind = new SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    var groupsByKind = new SortedDictionary<string, SortedDictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+                    var callRx = new System.Text.RegularExpressions.Regex(@"^\s*(?:(?:""(?<id>[^""]+)""|(?<id>[\w\-]+))\s*->\s*)?(?<fn>playgroup|loopgroup|forcesneak|forcejump|forcemovejump)\b[\s,]*(?<group>[\w]+)?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    foreach (var s in world.Objects.Values.Where(o => o.Type == "SCPT"))
+                    {
+                        string text = s.Get("SCTX") is { } tx ? Morrowind.Tes3Plugin.Encoding.GetString(tx.Data) : "";
+                        foreach (var line in text.Split('\n'))
+                        {
+                            var m = callRx.Match(line.Split(';')[0]);
+                            if (!m.Success) continue;
+                            var targets = m.Groups["id"].Success
+                                ? (world.Objects.TryGetValue(m.Groups["id"].Value, out var t) ? [t] : new List<Morrowind.Tes3Record>())
+                                : attachedTo.GetValueOrDefault(s.Id) ?? [];
+                            string kind = targets.Count == 0 ? "unknown" : string.Join("/", targets.Select(t => t.Type).Distinct());
+                            string key = $"{m.Groups["fn"].Value.ToLowerInvariant()} on {kind}";
+                            byKind[key] = byKind.GetValueOrDefault(key) + 1;
+                            if (!groupsByKind.TryGetValue(key, out var gm)) groupsByKind[key] = gm = new(StringComparer.OrdinalIgnoreCase);
+                            string grp = m.Groups["group"].Success ? m.Groups["group"].Value : "-";
+                            string who = targets.Count == 1 ? targets[0].Id : $"{targets.Count} objects";
+                            gm[$"{grp} ({who})"] = gm.GetValueOrDefault($"{grp} ({who})") + 1;
+                        }
+                    }
+                    foreach (var (k, n) in byKind) Console.WriteLine($"{k}: {n}  " + string.Join(", ", groupsByKind[k].OrderByDescending(x => x.Value).Take(int.Parse(opts.GetValueOrDefault("top", "12"))).Select(x => $"{x.Key} x{x.Value}")));
+                    return 0;
+                }
                 var have = new SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 var taken = new SortedDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 foreach (var g in world.Objects.Values.Where(o => o.Type == "CREA" && o.Str("MODL") is { Length: > 0 }).GroupBy(o => o.Str("MODL")!.ToLowerInvariant()).OrderBy(g => g.Key))
@@ -11240,7 +11273,7 @@ static class Program
                     }
                     var (biped, styles) = Skyrim.Creatures.MwCreatureSource.Kind(world, model);
                     var sources = Skyrim.Creatures.MwCreatureSource.Sources(mwData, model, biped);
-                    var plan = Skyrim.Creatures.MwCreatureSource.Plan(sources, styles, biped);
+                    var plan = Skyrim.Creatures.MwCreatureSource.Plan(sources, styles, biped, Skyrim.Creatures.MwCreatureSource.ScriptedGroups(world, model), Skyrim.Creatures.MwCreatureSource.PickableIdles(world, model));
                     var groups = sources.SelectMany(s => s.Groups.Where(p => p.Value.Whole).Select(p => p.Key)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                     foreach (var name in groups) have[name] = have.GetValueOrDefault(name) + 1;
                     var used = plan.Select(p => p.Group).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -11928,7 +11961,8 @@ static class Program
                     Console.WriteLine($"random machines {shownRandom}, Direction blenders {shownBlend}");
                     // The expressions vanilla writes (conditions, and computed variables: "x = ..."), distinct, with how many graphs.
                     var expressions = new Dictionary<string, int>(StringComparer.Ordinal);
-                    foreach (var path in arch.Keys.Where(k => k.StartsWith(@"meshes\actors\", StringComparison.OrdinalIgnoreCase) && k.Contains(@"\behaviors\", StringComparison.OrdinalIgnoreCase) && k.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase)))
+                    foreach (var path in arch.Keys.Where(k => k.StartsWith(@"meshes\actors\", StringComparison.OrdinalIgnoreCase) && k.Contains(@"\behaviors\", StringComparison.OrdinalIgnoreCase) && k.EndsWith(".hkx", StringComparison.OrdinalIgnoreCase)
+                        && (match is null || k.Contains(match, StringComparison.OrdinalIgnoreCase))))
                     {
                         HKX2.hkbBehaviorGraph g;
                         try { g = Graph(path); } catch { continue; }

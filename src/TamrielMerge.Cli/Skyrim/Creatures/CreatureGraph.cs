@@ -162,6 +162,111 @@ public sealed class CreatureGraph
     }
 
     /// <summary>
+    /// A group a script plays (number <paramref name="number"/>, iTMPlay_&lt;group&gt;): its clip whole, or its parts - up to
+    /// its loop (skipped <paramref name="fromLoop"/>: PlayGroup's mode 2), its loop part until iTMLoops is spent at a pass's
+    /// end, on to its end - then a last state raising TMPlayDone. While it lasts bTMScripted holds, it is played by its
+    /// animation alone, and a queued request for it is taken up (its loops into iTMLoops, the queue emptied).
+    /// </summary>
+    hkbGenerator PlayedGroup(string g, int number, bool fromLoop)
+    {
+        string clip = "play_" + g;
+        bool loops = rig.Clips.ContainsKey(clip + "_loop"), hasIn = rig.Clips.ContainsKey(clip + "_in"), hasOut = rig.Clips.ContainsKey(clip + "_out");
+        string suffix = fromLoop ? "_fromloop" : "";
+        var states = new List<hkbStateMachineStateInfo>();
+        if (!loops) states.Add(State(0, "Whole", ClipGen($"Play_{g}{suffix}", clip, loop: false, triggers: [(0f, "TMPlayEnd", true)]), [To("TMPlayEnd", 3)]));
+        else
+        {
+            if (hasIn) states.Add(State(0, "In", ClipGen($"Play_{g}_in{suffix}", clip + "_in", loop: false, triggers: [(0f, "TMPlayLooping", true)]), [To("TMPlayLooping", 1)]));
+            states.Add(State(1, "Loop", ClipGen($"Play_{g}_loop{suffix}", clip + "_loop", loop: true, triggers: [(0f, "TMPlayCycle", true)]),
+                [To("TMPlayCycle", hasOut ? 2 : 3, "iTMLoops == 0")]));
+            if (hasOut) states.Add(State(2, "Out", ClipGen($"Play_{g}_out{suffix}", clip + "_out", loop: false, triggers: [(0f, "TMPlayEnd", true)]), [To("TMPlayEnd", 3)]));
+        }
+        // Its end: the state saying so (TMPlayDone), its last pose held the moment that takes.
+        string last = !loops ? clip : hasOut ? clip + "_out" : clip + "_loop";
+        var done = ClipGen($"Play_{g}_done{suffix}", last, loop: false);
+        done.m_startTime = Math.Max(0, rig.Duration(last) - 1 / 30f);
+        states.Add(State(3, "Done", done, enterEvents: [Ev("TMPlayDone")]));
+        int start = !loops ? 0 : fromLoop || !hasIn ? 1 : 0;
+        var m = Machine($"TMPlay_{g}{suffix}", start, states);
+        var take = new hkbEvaluateExpressionModifier
+        {
+            m_name = $"TMPlay_{g}{suffix}_Take", m_enable = true,
+            m_expressions = new hkbExpressionDataArray
+            {
+                m_expressionsData =
+                [
+                    new hkbExpressionData { m_expression = $"iTMLoops = cond(iTMQueued == {number}, iTMQueuedLoops, iTMLoops)", m_assignmentVariableIndex = -1, m_assignmentEventIndex = -1 },
+                    new hkbExpressionData { m_expression = $"iTMQueued = cond(iTMQueued == {number}, 0, iTMQueued)", m_assignmentVariableIndex = -1, m_assignmentEventIndex = -1 },
+                ],
+            },
+        };
+        return While(new hkbModifierGenerator { m_name = $"TMPlay_{g}{suffix}_MG", m_modifier = take, m_generator = m }, $"Play_{g}{suffix}", "bTMScripted", "bAnimationDriven");
+    }
+
+    /// <summary>The engine's events starting a cast in a hand (L or R): vanilla's creature graphs hear either kind (the flame
+    /// atronach's and spriggan's Spell_FireForget_LH, the falmer's and draugr's MLh_SpellAimStart / MLh_SpellSelfStart;
+    /// `hkx-graph --who-sends`: no graph raises them).</summary>
+    static string[] CastStartEvents(string hand) => hand == "L"
+        ? ["Spell_FireForget_LH", "Spell_Concentration_LH", "MLh_SpellSelfStart", "MLh_SpellAimedStart", "MLh_SpellAimStart", "MLh_SpellConcentrationAimStart", "MLh_SpellConcentrationSelfStart"]
+        : ["Spell_FireForget_RH", "MRh_SpellSelfStart", "MRh_SpellAimedStart", "MRh_SpellFireForgetAimStart", "MRh_SpellConcentrationAimStart", "MRh_SpellConcentrationSelfStart"];
+
+    /// <summary>
+    /// A cast as Morrowind plays it (OpenMW's updateWeaponState), timed by Skyrim's engine, which says when the spell goes
+    /// (Spell_Release / SpellRelease after its charge) and hears that it went (MLh_SpellFire_Event / MRh_...: the spell leaves
+    /// the hand): a biped plays its SpellCast group's part for the spell's range (iTMCastRange: self, touch, target) up to
+    /// "Release", holds that pose if the engine hasn't released yet, then plays on to "Stop", the spell leaving as that part
+    /// starts; a creature that isn't a biped plays one of its attacks at random and its spell leaves as it is released
+    /// (Morrowind: "No release text key to use, so cast immediately"). A release that comes early is remembered (a second
+    /// machine beside the cast, bTMReleased) so the cast still plays to its release key.
+    /// </summary>
+    hkbGenerator CastMachine(string hand, string idle)
+    {
+        string fire = $"M{hand}h_SpellFire_Event";
+        var releases = new[] { "Spell_Release", "SpellRelease" };
+        var ranges = MwCreatureSource.CastRanges.Select(r => r.ToLowerInvariant()).Where(r => rig.Clips.ContainsKey($"cast_{r}_in") && rig.Clips.ContainsKey($"cast_{r}_out")).ToList();
+        // The machine remembering a release (and, for a cast with no release key, letting the spell go at once).
+        hkbGenerator Remember(bool fireOnRelease) => Machine($"TMCast{hand}Release", 0,
+        [
+            State(0, "Waiting", ClipGen($"Cast{hand}_wait", idle, loop: true), releases.Select(r => To(r, 1))),
+            State(1, "Released", While(ClipGen($"Cast{hand}_released", idle, loop: true), $"Cast{hand}Released", "bTMReleased"), enterEvents: fireOnRelease ? [Ev(fire)] : null),
+        ]);
+        hkbGenerator Beside(hkbGenerator cast, bool fireOnRelease) => new hkbBlenderGenerator
+        {
+            m_name = $"TMCast{hand}Blend", m_referencePoseWeightThreshold = 0, m_blendParameter = 1, m_minCyclicBlendParameter = 0, m_maxCyclicBlendParameter = 1,
+            m_indexOfSyncMasterChild = -1, m_flags = 8,
+            m_children =
+            [
+                new hkbBlenderGeneratorChild { m_generator = cast, m_weight = 1, m_worldFromModelWeight = 1 },
+                new hkbBlenderGeneratorChild { m_generator = Remember(fireOnRelease), m_weight = 0, m_worldFromModelWeight = 0 },
+            ],
+        };
+        if (ranges.Count == 0)
+            return Beside(OneOf($"Cast{hand}Attack", Family("attack") is { Count: > 0 } attacks ? attacks : [idle], loop: false, endEvent: "Spell_Stop"), fireOnRelease: true);
+        hkbGenerator Range(string r) => Machine($"TMCast{hand}_{r}", 0,
+        [
+            State(0, "In", ClipGen($"Cast{hand}_{r}_in", $"cast_{r}_in", loop: false, triggers: [(0f, "TMCastAt", true)]),
+                [To("TMCastAt", 2, "bTMReleased == 1"), To("TMCastAt", 1, "bTMReleased == 0")]),
+            State(1, "Hold", ClipGen($"Cast{hand}_{r}_hold", $"cast_{r}_hold", loop: true), releases.Select(x => To(x, 2))),
+            State(2, "Out", ClipGen($"Cast{hand}_{r}_out", $"cast_{r}_out", loop: false, triggers: [(0f, "Spell_Stop", true)]), enterEvents: [Ev(fire)]),
+        ]);
+        // Its range's cast: self 0, touch 1, target 2 (one it has no animation for: the nearest it has).
+        var byRange = new List<hkbGenerator>();
+        var made = new Dictionary<string, hkbGenerator>();
+        foreach (var r in new[] { "self", "touch", "target" })
+        {
+            string has = ranges.Contains(r) ? r : ranges.Contains("target") ? "target" : ranges[0];
+            if (!made.TryGetValue(has, out var g)) made[has] = g = Range(has);
+            byRange.Add(g);
+        }
+        var pick = new hkbManualSelectorGenerator
+        {
+            m_name = $"TMCast{hand}Range", m_generators = byRange,
+            m_variableBindingSet = new hkbVariableBindingSet { m_indexOfBindingToEnable = -1, m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "selectedGeneratorIndex", m_variableIndex = Var("iTMCastRange", 3, 2), m_bitIndex = -1 }] },
+        };
+        return Beside(pick, fireOnRelease: false);
+    }
+
+    /// <summary>
     /// Moving any way: forward, right, back or left by the engine's Direction (0 forward, .25 right, .5 back, .75 left, as
     /// vanilla's directional blends), switched outright where Morrowind switches (OpenMW's update: sideways once the
     /// sideways movement is more than twice the forward, atan 2 = 63.43° off straight; backwards past 116.57°), never
@@ -242,10 +347,11 @@ public sealed class CreatureGraph
     }
 
     /// <summary>
-    /// A clip picked by the weapon in its right hand, as Skyrim's armed creatures pick theirs (a manual selector on
-    /// iRightHandType: 0 hand to hand, 1 sword, 2 dagger, 3 war axe, 4 mace, 5 greatsword, 6 battleaxe or warhammer, 7 bow,
-    /// as the draugr's graph has them; 8 staff; 9 and up the rest): that type's style among the creature's, else the
-    /// nearest it has, else <paramref name="fallback"/>.
+    /// A clip picked by what it holds, as Skyrim's armed creatures pick theirs (a manual selector on the hand type: the
+    /// engine's iRightHandType, or 9 when its right hand is empty and its left holds a spell - iTMHandType: 0 hand to hand,
+    /// 1 sword, 2 dagger, 3 war axe, 4 mace, 5 greatsword, 6 battleaxe or warhammer, 7 bow, as the draugr's graph has them;
+    /// 8 staff, 9 a spell, 10 shield, 11 torch, 12 crossbow): that type's style among the creature's, else the nearest it
+    /// has, else <paramref name="fallback"/>.
     /// </summary>
     hkbGenerator ByWeapon(string name, Func<string, string> clipFor, string fallback, bool loop, string? endEvent)
     {
@@ -253,7 +359,7 @@ public sealed class CreatureGraph
         {
             string[] wanted = type switch
             {
-                0 => ["hh"], 1 or 2 or 3 or 4 or 10 => ["1h"], 5 => ["2c"], 6 => ["2c", "2w"], 7 => ["bow", "xbow"], 8 => ["2w"], 9 or 11 or 12 => ["xbow", "bow"], _ => ["hh"],
+                0 or 11 => ["hh"], 1 or 2 or 3 or 4 or 10 => ["1h"], 5 => ["2c"], 6 => ["2c", "2w"], 7 => ["bow", "xbow"], 8 => ["2w"], 9 => ["spell", "hh"], 12 => ["xbow", "bow"], _ => ["hh"],
             };
             foreach (var s in wanted.Concat(["1h", "2c", "2w", "hh", "bow", "xbow"]))
                 if (rig.WeaponStyles.Contains(s) && rig.Clips.ContainsKey(clipFor(s))) return clipFor(s);
@@ -264,7 +370,18 @@ public sealed class CreatureGraph
         for (int type = 0; type <= 12; type++)
         {
             string clip = Pick(type);
-            if (!made.TryGetValue(clip, out var g)) made[clip] = g = ClipGen($"{name}_{clip}", clip, loop, endEvent);
+            if (!made.TryGetValue(clip, out var g))
+            {
+                // Drawing or putting away what it has no animation for: done at once (Morrowind plays nothing then).
+                if (clip == fallback && endEvent is "weapEquipOut" or "weapUnequipOut")
+                {
+                    var quick = ClipGen($"{name}_{clip}", clip, loop: false);
+                    quick.m_triggers = new hkbClipTriggerArray { m_triggers = [new hkbClipTrigger { m_localTime = 0.1f, m_event = new hkbEventProperty { m_id = Ev(endEvent) } }] };
+                    g = quick;
+                }
+                else g = ClipGen($"{name}_{clip}", clip, loop, endEvent);
+                made[clip] = g;
+            }
             children.Add(g);
         }
         return new hkbManualSelectorGenerator
@@ -274,8 +391,45 @@ public sealed class CreatureGraph
             m_variableBindingSet = new hkbVariableBindingSet
             {
                 m_indexOfBindingToEnable = -1,
-                m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "selectedGeneratorIndex", m_variableIndex = Var("iRightHandType", 3), m_bitIndex = -1 }],
+                m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "selectedGeneratorIndex", m_variableIndex = Var("iTMHandType", 3), m_bitIndex = -1 }],
             },
+        };
+    }
+
+    /// <summary>One of two generators by whether it runs (iTMRun: in a fight, or running as its AI says), when they differ.</summary>
+    hkbGenerator WalkOrRun(string name, hkbGenerator walking, hkbGenerator running) => new hkbManualSelectorGenerator
+    {
+        m_name = name,
+        m_generators = [walking, running],
+        m_variableBindingSet = new hkbVariableBindingSet
+        {
+            m_indexOfBindingToEnable = -1,
+            m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "selectedGeneratorIndex", m_variableIndex = Var("iTMRun", 3), m_bitIndex = -1 }],
+        },
+    };
+
+    /// <summary>
+    /// <paramref name="over"/> on part of the body above <paramref name="under"/> (Morrowind's blend masks: <paramref name="masks"/>
+    /// of <see cref="CreatureRig.BlendMasks"/>), while <paramref name="weightVar"/> says (0 off, 1e6 on: a blender's bones
+    /// weighed against the one beneath at a millionth, so on is the part's own pose).
+    /// </summary>
+    hkbGenerator Over(string name, hkbGenerator under, hkbGenerator over, int[] masks, string weightVar)
+    {
+        var weights = rig.BlendMasks.Select(m => masks.Contains(m) ? 1f : 0f).ToList();
+        return new hkbBlenderGenerator
+        {
+            m_name = name, m_referencePoseWeightThreshold = 0, m_blendParameter = 1, m_minCyclicBlendParameter = 0, m_maxCyclicBlendParameter = 1,
+            m_indexOfSyncMasterChild = -1, m_flags = 8,   // children of no weight stay active (the part's clip keeps its time)
+            m_children =
+            [
+                new hkbBlenderGeneratorChild { m_generator = under, m_weight = 1, m_worldFromModelWeight = 1 },
+                new hkbBlenderGeneratorChild
+                {
+                    m_generator = over, m_weight = 0, m_worldFromModelWeight = 0,
+                    m_boneWeights = new hkbBoneWeightArray { m_boneWeights = weights },
+                    m_variableBindingSet = new hkbVariableBindingSet { m_indexOfBindingToEnable = -1, m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "weight", m_variableIndex = Var(weightVar, 4), m_bitIndex = -1 }] },
+                },
+            ],
         };
     }
 
@@ -331,8 +485,15 @@ public sealed class CreatureGraph
         foreach (var clip in rig.Looks.Keys) Ev(CreatureRig.LookEvent(clip));
 
         // Variables of its own: the idle set (per actor), knocked out and in combat (its hit script sets them), and where it is.
-        foreach (var b in new[] { "bTMKnockedOut", "bTMInCombat", "bTMSwimming", "bTMKnockedDownNow", "bTMKnockedOutNow" }) Var(b);
-        Var("iTMIdleSet", 3); Var("iTMRun", 3);
+        foreach (var b in new[] { "bTMKnockedOut", "bTMInCombat", "bTMRunning", "bTMStorm", "bTMSwimming", "bTMKnockedDownNow", "bTMKnockedOutNow", "bTMReleased" }) Var(b);
+        Var("iTMIdleSet", 3); Var("iTMRun", 3); Var("iTMHandType", 3); Var("iTMCastRange", 3, 2);
+        // What the engine reads and writes for casting (the flame atronach's: bWantCastLeft, bMLh_Ready, IsCasting...), and
+        // the events of a cast (who raises which: `hkx-graph --who-sends`).
+        foreach (var b in new[] { "bWantCastLeft", "bWantCastRight", "bMLh_Ready", "bMRh_Ready", "IsCasting" }) Var(b);
+        Var("iLeftHandType", 3);
+        foreach (var e in new[] { "BeginCastLeft", "BeginCastRight", "Spell_Release", "SpellRelease", "Spell_Ready", "SpellReady", "Spell_Stop", "Spell_Interrupt", "SpellInterupt",
+            "InterruptCast", "MLh_SpellFire_Event", "MRh_SpellFire_Event", "Magic_Equip", "MLh_Equipped_Event", "MRh_Equipped_Event" })
+            Ev(e);
 
         string idle = Clip("idle"), walk = Clip("walk", "run"), run = Clip("run", "walk");
         var hits = Family("hit"); if (hits.Count == 0) hits.Add(idle);
@@ -347,7 +508,13 @@ public sealed class CreatureGraph
         var nonCombatStates = new List<hkbStateMachineStateInfo>
         {
             State(0, "Idle", Standing(idle), [To("moveStart", 1), .. turns ? new[] { To("turnLeft", 2), To("turnRight", 3) } : []]),
-            State(1, "Walk", Ways("Walk", w => Plain($"Walk_{w}", w == "forward" ? walk : Moving("walk" + w)), () => ClipGen("Walk_still", idle, loop: true)), [To("moveStop", 0)]),
+            // Walking, or running when its AI runs (Morrowind's run groups, each its walk where it has no run: OpenMW).
+            State(1, "Walk", rig.Clips.Keys.Any(c => c.StartsWith("run", StringComparison.OrdinalIgnoreCase))
+                ? WalkOrRun("TMWalkOrRun",
+                    Ways("Walk", w => Plain($"Walk_{w}", w == "forward" ? walk : Moving("walk" + w)), () => ClipGen("Walk_still", idle, loop: true)),
+                    Ways("Run", w => Plain($"Run_{w}", w == "forward" ? run : Moving("run" + w)), () => ClipGen("Run_still", idle, loop: true)))
+                : Ways("Walk", w => Plain($"Walk_{w}", w == "forward" ? walk : Moving("walk" + w)), () => ClipGen("Walk_still", idle, loop: true)),
+                [To("moveStop", 0)]),
         };
         if (turns)
         {
@@ -367,24 +534,33 @@ public sealed class CreatureGraph
         hkbGenerator Gen(string name, string clip, bool loop, string? end = null, Func<string, string>? styleClip = null) =>
             styled && styleClip is not null ? ByWeapon(name, styleClip, clip, loop, end) : ClipGen(name, clip, loop, end);
         var combatTurns = turns ? new[] { To("turnLeft", 20), To("turnRight", 21) } : [];
-        combatStates.Add(State(0, "CombatIdle", While(Gen("CombatIdle", idle, true, null, s => $"cidle_{s}"), "CombatIdle", "IsAttackReady"),
-            [To("moveStart", 1), .. combatTurns, .. attackTransitions.Select(a => To(a.Event, a.State))]));
-        // Running any way with what it holds (its style's RunBack1h..., else the plain group, else a walk, else standing).
-        hkbGenerator? CombatWay(string w)
+        // Casting: the engine's start of a cast in either hand (both vanilla's ways of saying it: the flame atronach's
+        // Spell_FireForget_LH, the falmer's MLh_SpellAimStart...), when its hands are ready (bMLh_Ready, bMRh_Ready).
+        var castTransitions = new List<hkbStateMachineTransitionInfo>();
+        foreach (var e in CastStartEvents("L")) castTransitions.Add(To(e, 30));
+        foreach (var e in CastStartEvents("R")) castTransitions.Add(To(e, 31));
+        combatStates.Add(State(0, "CombatIdle", While(Gen("CombatIdle", idle, true, null, s => $"cidle_{s}"), "CombatIdle", "IsAttackReady", "bMLh_Ready", "bMRh_Ready"),
+            [To("moveStart", 1), .. combatTurns, .. castTransitions, .. attackTransitions.Select(a => To(a.Event, a.State))]));
+        // Moving any way with what it holds, running (always in a fight: Morrowind's combat runs) or walking: its style's
+        // RunBack1h..., else the plain group, else a walk, else standing.
+        hkbGenerator? CombatWay(string w, bool running)
         {
-            string plain = w == "forward" ? run : Moving("run" + w) ?? "";
-            if (styled) return rig.Clips.ContainsKey(plain) || rig.WeaponStyles.Any(s => rig.Clips.ContainsKey(w == "forward" ? $"crun_{s}" : $"crun{w}_{s}"))
-                ? ByWeapon($"CombatRun_{w}", s => w == "forward" ? $"crun_{s}" : $"crun{w}_{s}", rig.Clips.ContainsKey(plain) ? plain : idle, loop: true, endEvent: null) : null;
-            return Plain($"CombatRun_{w}", plain);
+            string kind = running ? "run" : "walk", own = w == "forward" ? $"c{kind}_" : $"c{kind}{w}_";
+            string plain = w == "forward" ? (running ? run : walk) : Moving(kind + w) ?? "";
+            if (styled) return rig.Clips.ContainsKey(plain) || rig.WeaponStyles.Any(s => rig.Clips.ContainsKey(own + s))
+                ? ByWeapon($"Combat{kind}_{w}", s => own + s, rig.Clips.ContainsKey(plain) ? plain : idle, loop: true, endEvent: null) : null;
+            return Plain($"Combat{kind}_{w}", plain);
         }
-        combatStates.Add(State(1, "CombatRun", While(Ways("CombatRun", CombatWay, () => Gen("CombatRun_still", idle, true, null, s => $"cidle_{s}")), "CombatRun", "IsAttackReady"),
-            [To("moveStop", 0), .. attackTransitions.Select(a => To(a.Event, a.State))]));
+        hkbGenerator CombatStill(string kind) => Gen($"Combat{kind}_still", idle, true, null, s => $"cidle_{s}");
+        var combatMove = WalkOrRun("TMCombatWalkOrRun", Ways("CombatWalk", w => CombatWay(w, false), () => CombatStill("walk")), Ways("CombatRun", w => CombatWay(w, true), () => CombatStill("run")));
+        combatStates.Add(State(1, "CombatRun", While(combatMove, "CombatRun", "IsAttackReady", "bMLh_Ready", "bMRh_Ready"),
+            [To("moveStop", 0), .. castTransitions, .. attackTransitions.Select(a => To(a.Event, a.State))]));
         if (turns)
         {
-            combatStates.Add(State(20, "CombatTurnLeft", While(Gen("CombatTurnLeft", Clip("turnleft", "turnright"), true, null, s => $"cturnleft_{s}"), "CombatTurnLeft", "IsAttackReady"),
-                [To("turnStop", 0), To("turnRight", 21), To("moveStart", 1), .. attackTransitions.Select(a => To(a.Event, a.State))]));
-            combatStates.Add(State(21, "CombatTurnRight", While(Gen("CombatTurnRight", Clip("turnright", "turnleft"), true, null, s => $"cturnright_{s}"), "CombatTurnRight", "IsAttackReady"),
-                [To("turnStop", 0), To("turnLeft", 20), To("moveStart", 1), .. attackTransitions.Select(a => To(a.Event, a.State))]));
+            combatStates.Add(State(20, "CombatTurnLeft", While(Gen("CombatTurnLeft", Clip("turnleft", "turnright"), true, null, s => $"cturnleft_{s}"), "CombatTurnLeft", "IsAttackReady", "bMLh_Ready", "bMRh_Ready"),
+                [To("turnStop", 0), To("turnRight", 21), To("moveStart", 1), .. castTransitions, .. attackTransitions.Select(a => To(a.Event, a.State))]));
+            combatStates.Add(State(21, "CombatTurnRight", While(Gen("CombatTurnRight", Clip("turnright", "turnleft"), true, null, s => $"cturnright_{s}"), "CombatTurnRight", "IsAttackReady", "bMLh_Ready", "bMRh_Ready"),
+                [To("turnStop", 0), To("turnLeft", 20), To("moveStart", 1), .. castTransitions, .. attackTransitions.Select(a => To(a.Event, a.State))]));
         }
         for (int i = 0; i < Attacks.Count; i++)
         {
@@ -404,6 +580,10 @@ public sealed class CreatureGraph
             ]);
             combatStates.Add(State(10, "BowAttack", While(shot, "BowAttack", "IsAttacking", "bAllowRotation"), [To("attackStop", 0)], exitEvents: [Ev("bowReset")]));
         }
+        // A cast in each hand (the engine's release and interrupt; Spell_Stop at its end), IsCasting while it lasts.
+        foreach (var (hand, id) in new[] { ("L", 30), ("R", 31) })
+            combatStates.Add(State(id, $"Cast{hand}", While(CastMachine(hand, idle), $"Cast{hand}", "IsCasting"),
+                [To("Spell_Stop", 0), To("Spell_Interrupt", 0), To("SpellInterupt", 0)], exitEvents: [Ev("InterruptCast")]));
         var combat = Machine("TMCombat", 0, combatStates);
 
         // Drawing and sheathing (the engine waits for weaponDraw before it attacks): a weapon's own drawing and putting away.
@@ -464,16 +644,21 @@ public sealed class CreatureGraph
             State(1, "Combat", combat, [To("weapUnequip", 6)]),
             State(3, "Stagger", While(OneOf("Stagger", hits, loop: false, endEvent: "staggerStop"), "Stagger", "IsStaggering"), [To("staggerStop", 1)]),
             State(4, "Recoil", While(OneOf("Recoil", hits, loop: false, endEvent: "recoilStop"), "Recoil", "IsRecoiling"), [To("recoilStop", 1)]),
-            State(5, "Equip", equip, [To("weapEquipOut", 1)], exitEvents: [Ev("weaponDraw")]),
+            // (Readying magic too: Magic_Equip; the hands equipped as it leaves, as vanilla's raise MLh_Equipped_Event.)
+            State(5, "Equip", equip, [To("weapEquipOut", 1)], exitEvents: [Ev("weaponDraw"), Ev("MLh_Equipped_Event"), Ev("MRh_Equipped_Event")]),
             State(6, "Unequip", unequip, [To("weapUnequipOut", 0)], enterEvents: [Ev("weaponSheathe")]),
             State(8, "Hit", While(OneOf("Hit", hits, loop: false, endEvent: "TMHitStop"), "Hit", "IsStaggering", "bAnimationDriven"), [To("TMHitStop", 1)]),
             State(9, "KnockDown", While(ClipGen("KnockDown", knockdown, loop: false, endEvent: "TMKnockStop"), "KnockDown", "IsStaggering", "bAnimationDriven", "bTMKnockedDownNow"), [To("TMKnockStop", 1)]),
             State(10, "KnockOut", While(KnockOut("KnockOut", "knockout", "knockout"), "KnockOut", "IsStaggering", "bAnimationDriven", "bTMKnockedOutNow"), OutOf("knockout", "knockout", 1)),
         };
+        // A blow blocked with its shield (the engine's blockHitStart): Morrowind's Shield group, then back to fighting.
+        if (rig.Clips.ContainsKey("block"))
+            baseStates.Add(State(15, "Block", ClipGen("Block", "block", loop: false, endEvent: "blockHitStop"), [To("blockHitStop", 1)]));
         var baseWild = new List<hkbStateMachineTransitionInfo>
         {
-            To("staggerStart", 3), To("staggerForwardStart", 3), To("recoilStart", 4), To("recoilLargeStart", 4), To("weapEquip", 5), To("returnToDefault", 0),
+            To("staggerStart", 3), To("staggerForwardStart", 3), To("recoilStart", 4), To("recoilLargeStart", 4), To("weapEquip", 5), To("Magic_Equip", 5), To("returnToDefault", 0),
         };
+        if (rig.Clips.ContainsKey("block")) baseWild.Add(To("blockHitStart", 15, "bTMScripted == 0"));
         if (swims)
         {
             // In water: swimming still and moving any way (running in a fight, as Morrowind's combat runs), a biped turning, its
@@ -514,15 +699,39 @@ public sealed class CreatureGraph
             baseStates.Add(State(11, "SwimHit", While(OneOf("SwimHit", swimHits.Count > 0 ? swimHits : hits, loop: false, endEvent: "TMHitStop"), "SwimHit", "IsStaggering", "bAnimationDriven", "bTMSwimming"), [To("TMHitStop", 7)]));
             baseStates.Add(State(12, "SwimKnockDown", While(ClipGen("SwimKnockDown", swimKnockdown, loop: false, endEvent: "TMKnockStop"), "SwimKnockDown", "IsStaggering", "bAnimationDriven", "bTMKnockedDownNow", "bTMSwimming"), [To("TMKnockStop", 7)]));
             baseStates.Add(State(13, "SwimKnockOut", While(KnockOut("SwimKnockOut", "swimknockout", "knockout"), "SwimKnockOut", "IsStaggering", "bAnimationDriven", "bTMKnockedOutNow", "bTMSwimming"), OutOf("swimknockout", "knockout", 7)));
-            baseWild.Add(To("swimStart", 7));
-            baseWild.Add(To("TMHit", 11, "(bTMSwimming == 1) && (IsAttacking == 0)"));
-            baseWild.Add(To("TMKnockDown", 12, "bTMSwimming == 1"));
-            baseWild.Add(To("TMKnockOut", 13, "bTMSwimming == 1"));
+            baseWild.Add(To("swimStart", 7, "bTMScripted == 0"));
+            baseWild.Add(To("TMHit", 11, "(bTMSwimming == 1) && (IsAttacking == 0) && (bTMScripted == 0)"));
+            baseWild.Add(To("TMKnockDown", 12, "(bTMSwimming == 1) && (bTMScripted == 0)"));
+            baseWild.Add(To("TMKnockOut", 13, "(bTMSwimming == 1) && (bTMScripted == 0)"));
         }
         // A blow lands while it strikes: its attack goes on (Morrowind's attack outranks a hit's animation); knocks interrupt.
-        baseWild.Add(To("TMHit", 8, swims ? "(bTMSwimming == 0) && (IsAttacking == 0)" : "IsAttacking == 0"));
-        baseWild.Add(To("TMKnockDown", 9, swims ? "bTMSwimming == 0" : null));
-        baseWild.Add(To("TMKnockOut", 10, swims ? "bTMSwimming == 0" : null));
+        // None of it over a group a script plays (Morrowind's scripted animation outranks them all).
+        baseWild.Add(To("TMHit", 8, swims ? "(bTMSwimming == 0) && (IsAttacking == 0) && (bTMScripted == 0)" : "(IsAttacking == 0) && (bTMScripted == 0)"));
+        baseWild.Add(To("TMKnockDown", 9, swims ? "(bTMSwimming == 0) && (bTMScripted == 0)" : "bTMScripted == 0"));
+        baseWild.Add(To("TMKnockOut", 10, swims ? "(bTMSwimming == 0) && (bTMScripted == 0)" : "bTMScripted == 0"));
+
+        // Played by a script (TMMwScript.PlayGroup): each group its game's scripts play on it (Plan's "play_" clips), from its
+        // start (TMPlay_<group>) or its loop start (TMPlayLoop_<group>), its loop part as many more times as iTMLoops says
+        // (-1: on and on; its hit script counts them down), then on to its end; then the group queued behind it (iTMQueued:
+        // its number, iTMPlay_<group>), else back to what it was doing. TMPlayStop ("PlayGroup idle") ends it at once.
+        var played = rig.Clips.Keys.Where(c => c.StartsWith("play_", StringComparison.OrdinalIgnoreCase))
+            .Select(c => System.Text.RegularExpressions.Regex.Replace(c[5..], "_(in|loop|out)$", "")).Distinct().OrderBy(g => g, StringComparer.Ordinal).ToList();
+        Var("bTMScripted"); Var("iTMLoops", 3, -1); Var("iTMQueued", 3); Var("iTMQueuedLoops", 3, -1);
+        if (played.Count > 0) Var("iTMPlayStop", 3, 1);   // its scripts' sign that this graph plays groups
+        for (int k = 0; k < played.Count; k++)
+        {
+            string g = played[k];
+            Var($"iTMPlay_{g}", 3, k + 1);
+            int id = 100 + 2 * k;
+            baseWild.Add(To($"TMPlay_{g}", id));
+            baseWild.Add(To($"TMPlayLoop_{g}", id + 1));
+            // Done: the queued group next (from its start), else back to what it was doing.
+            var after = Enumerable.Range(0, played.Count).Select(q => To("TMPlayDone", 100 + 2 * q, $"iTMQueued == {q + 1}")).ToList();
+            after.Add(To("TMPlayDone", 0, "iTMQueued == 0"));
+            after.Add(To("TMPlayStop", 0));
+            baseStates.Add(State(id, $"Play_{g}", PlayedGroup(g, k + 1, fromLoop: false), after));
+            baseStates.Add(State(id + 1, $"Play_{g}_fromloop", PlayedGroup(g, k + 1, fromLoop: true), after));
+        }
         var baseMachine = Machine("TMBase", 0, baseStates, baseWild);
 
         hkbGenerator baseGen = baseMachine;
@@ -538,6 +747,14 @@ public sealed class CreatureGraph
             };
             baseGen = new hkbModifierGenerator { m_name = "TMLookAt_MG", m_modifier = look, m_generator = baseMachine };
         }
+        // Over part of the body (Morrowind's blend masks): a light carried in the left hand plays Torch on the left arm (the
+        // engine's iLeftHandType 11: a torch); facing into a storm, IdleStorm on the torso and right arm while its upper body
+        // is otherwise idle and it is out of water (OpenMW's updateIdleStormState).
+        bool masked = rig.BlendMasks.Count == rig.Bones.Count && rig.BlendMasks.Any(m => m > 0);
+        if (masked && rig.Clips.ContainsKey("torch"))
+            baseGen = Over("TMTorch", baseGen, ClipGen("Torch", "torch", loop: true), [2], "fTMTorch");
+        if (masked && rig.Clips.ContainsKey("idlestorm"))
+            baseGen = Over("TMStorm", baseGen, ClipGen("IdleStorm", "idlestorm", loop: true), [1, 3], "fTMStorm");
 
         // Dying: once, held. As Morrowind picks it (OpenMW's playRandomDeath): knocked down or out, its death from there
         // (swimming, its swimming one); else swimming, its swimming death; else one of its deaths at random. One it has no
@@ -555,12 +772,14 @@ public sealed class CreatureGraph
             ("deathknockdown", "(bTMKnockedDownNow == 1) && (bTMSwimming == 0)"),
             ("swimdeath", "(bTMSwimming == 1) && (bTMKnockedOutNow == 0) && (bTMKnockedDownNow == 0)"),
         };
+        // (Not over a group a script plays: OpenMW "Do not interrupt scripted animation by death"; its hit script sends
+        // DeathAnimation again when the group is done.)
         var rootWild = new List<hkbStateMachineTransitionInfo>();
         foreach (var evt in new[] { "DeathAnimation", "Ragdoll", "RagdollInstant" })
         {
             for (int i = 0; i < deathWays.Count; i++)
-                if (rig.Clips.ContainsKey(deathWays[i].Clip)) rootWild.Add(To(evt, 2 + i, deathWays[i].When));
-            rootWild.Add(To(evt, 1));
+                if (rig.Clips.ContainsKey(deathWays[i].Clip)) rootWild.Add(To(evt, 2 + i, $"{deathWays[i].When} && (bTMScripted == 0)"));
+            rootWild.Add(To(evt, 1, "bTMScripted == 0"));
         }
         for (int i = 0; i < deathWays.Count; i++)
             if (rig.Clips.ContainsKey(deathWays[i].Clip))
@@ -573,7 +792,15 @@ public sealed class CreatureGraph
         var expressions = new List<string>();
         if (variables.Any(v => v.Name == "iTMWay"))
             expressions.Add("iTMWay = cond(Direction < 0.176208, 0, cond(Direction < 0.323792, 1, cond(Direction < 0.676208, 2, cond(Direction < 0.823792, 3, 0))))");
-        expressions.Add("iTMRun = cond(bTMInCombat, 1, 0)");
+        // Running: in a fight (Morrowind's combat runs), else as its AI says (its hit script's bTMRunning).
+        expressions.Add("iTMRun = cond((bTMInCombat == 1) || (bTMRunning == 1), 1, 0)");
+        // What it holds: the right hand's type, or a spell's (9) when only its left holds one.
+        expressions.Add("iTMHandType = cond((iRightHandType == 0) && (iLeftHandType == 9), 9, iRightHandType)");
+        // Starting a cast the engine wants when that hand is ready and it isn't casting (vanilla's BeginCast_EEM).
+        expressions.Add("BeginCastLeft if (bWantCastLeft && bMLh_Ready && !IsCasting)");
+        expressions.Add("BeginCastRight if (bWantCastRight && bMRh_Ready && !IsCasting)");
+        if (variables.Any(v => v.Name == "fTMTorch")) expressions.Add("fTMTorch = cond(iLeftHandType == 11, 1000000, 0)");
+        if (variables.Any(v => v.Name == "fTMStorm")) expressions.Add("fTMStorm = cond((bTMStorm == 1) && (IsAttacking == 0) && (IsCasting == 0) && (bTMSwimming == 0), 1000000, 0)");
         foreach (var (clip, pace) in rig.MovePaces.OrderBy(p => p.Key, StringComparer.Ordinal))
             if (variables.Any(v => v.Name == RateVar(clip)))
                 expressions.Add($"{RateVar(clip)} = clamp(Speed / {pace.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture)}, 0, 10)");

@@ -492,8 +492,12 @@ public sealed partial class MwPapyrus
                 binks.Add(file);
                 return R($"Game.PlayBink(\"{BinkName(file)}\")", T.Void);
             }
-            case "playgroup" or "loopgroup":
-                return R($"TMMwScript.PlayGroup({self()}, \"{Word(c, 0)}\")", T.Void);
+            // PlayGroup group [mode]: its loop part on and on; LoopGroup group count [mode]: that many more times (OpenMW's
+            // animationextensions: PlayGroup's count is the most there is, LoopGroup's its count + 1 passes).
+            case "playgroup":
+                return R($"TMMwScript.PlayGroup({self()}, \"{Word(c, 0)}\", {ArgInt(c, 1)}, -1)", T.Void);
+            case "loopgroup":
+                return R($"TMMwScript.PlayGroup({self()}, \"{Word(c, 0)}\", {ArgInt(c, 2)}, {ArgInt(c, 1)})", T.Void);
             case "changeweather":
                 return R($"TMMwScript.ChangeWeather({Prop("weather:" + Word(c, 0) + ":" + Word(c, 1), "Weather", "w_" + Clean(Word(c, 0)) + "_" + Clean(Word(c, 1)))})", T.Void);
             case "modregion":

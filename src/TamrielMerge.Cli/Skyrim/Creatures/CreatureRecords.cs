@@ -110,6 +110,8 @@ public sealed class CreatureRecords
         public float SwimSpeed { get; init; } = float.NaN;
         /// <summary>Agility (Morrowind's knockdown odds on each hit); -1: none (no knockdowns from its game).</summary>
         public int Agility { get; init; } = -1;
+        /// <summary>How much stamina comes back a second (Morrowind's fatigue return); NaN: Skyrim's own.</summary>
+        public float StaminaReturn { get; init; } = float.NaN;
         /// <summary>Which of its model's idle sets it picks idles by (CreatureRig.IdleSets).</summary>
         public int IdleSet { get; init; }
         /// <summary>Each of its attacks' average blow (Morrowind's chop, slash and thrust: attack 1, 2, 3); null: one blow for all.</summary>
@@ -120,7 +122,17 @@ public sealed class CreatureRecords
 
     /// <summary>Its game's rules for a blow that lands (Morrowind's fKnockDownMult, iKnockDownOddsMult, iKnockDownOddsBase):
     /// with them its race gets the ability that flinches and knocks it down as its game does (TMMwCreatureHits.psc).</summary>
-    public sealed record HitRules(float KnockDownMult, int KnockDownOddsMult, int KnockDownOddsBase);
+    public sealed record HitRules(float KnockDownMult, int KnockDownOddsMult, int KnockDownOddsBase)
+    {
+        /// <summary>Its game's spells (by the converted EditorID) whose first effect is cast on oneself, and by touch: the
+        /// rest are cast at a target (its cast animation is that range's).</summary>
+        public IReadOnlySet<string> SelfSpells { get; init; } = new HashSet<string>();
+        public IReadOnlySet<string> TouchSpells { get; init; } = new HashSet<string>();
+        /// <summary>Its game's storm weathers (EditorID prefixes in the game plugin): those blowing from Red Mountain (ash,
+        /// blight) and the rest (a blizzard's, along +Y).</summary>
+        public IReadOnlyList<string> AshStorms { get; init; } = [];
+        public IReadOnlyList<string> OtherStorms { get; init; } = [];
+    }
 
     public const string HitScript = "TMMwCreatureHits";
 
@@ -254,7 +266,8 @@ public sealed class CreatureRecords
         race.Starting[BasicStat.Stamina] = raceStats.Stamina;
         race.Regen[BasicStat.Health] = 0;     // Morrowind's creatures heal only by resting or magic
         race.Regen[BasicStat.Magicka] = 0;
-        race.Regen[BasicStat.Stamina] = 5;
+        // Stamina comes back as its game's fatigue does (its points a second as Skyrim's percent of the most a second).
+        race.Regen[BasicStat.Stamina] = StaminaRate(raceStats) ?? 5;
         race.MovementTypeNames.AddRange(["WALK", "RUN1", "SNEK", "BLDO", "SWIM"]);
         race.EquipmentSlots.Add(Vanilla<IEquipTypeGetter>("RightHand").ToLink());
         race.BipedObjectNames[BipedObject.Body] = "BODY";
@@ -365,6 +378,12 @@ public sealed class CreatureRecords
                     o.ActorEffect ??= [];
                     o.ActorEffect.Add(ValueAbility($"Speed{pascal}{o.EditorID}", ActorValue.SpeedMult, (st.WalkSpeed / raceStats.WalkSpeed - 1) * 100).ToLink<ISpellRecordGetter>());
                 }
+                // Its own fatigue return where it isn't the race's.
+                if (StaminaRate(st) is float rate && StaminaRate(raceStats) is float raceRate && MathF.Abs(rate - raceRate) > 0.01f)
+                {
+                    o.ActorEffect ??= [];
+                    o.ActorEffect.Add(ValueAbility($"Stamina{pascal}{o.EditorID}", ActorValue.StaminaRate, rate - raceRate).ToLink<ISpellRecordGetter>());
+                }
                 mod.Npcs.Add(o);
                 bases.Add((o.FormKey, st));
                 switched++;
@@ -383,6 +402,23 @@ public sealed class CreatureRecords
             entry.Properties.Add(new ScriptFloatProperty { Name = "KnockDownMult", Data = hits.KnockDownMult });
             entry.Properties.Add(new ScriptIntProperty { Name = "KnockDownOddsMult", Data = hits.KnockDownOddsMult });
             entry.Properties.Add(new ScriptIntProperty { Name = "KnockDownOddsBase", Data = hits.KnockDownOddsBase });
+            // Its creatures' spells by Morrowind's range, and its game's weathers when it faces into storms (it has IdleStorm).
+            var spellKeys = mod.Npcs.Where(n => bases.Any(b => b.Key == n.FormKey)).SelectMany(n => n.ActorEffect ?? []).Select(l => l.FormKey).Distinct().ToList();
+            var spellIds = games.SelectMany(g => g.Spells).Where(sp => spellKeys.Contains(sp.FormKey)).ToDictionary(sp => sp.FormKey, sp => sp.EditorID ?? "");
+            ScriptObjectListProperty Spells(string propName, IReadOnlySet<string> ids)
+            {
+                var p = new ScriptObjectListProperty { Name = propName };
+                foreach (var (key, edid) in spellIds) if (ids.Contains(edid)) p.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(key) });
+                return p;
+            }
+            entry.Properties.Add(Spells("SelfSpells", hits.SelfSpells));
+            entry.Properties.Add(Spells("TouchSpells", hits.TouchSpells));
+            if (clipNames.Contains("idlestorm", StringComparer.OrdinalIgnoreCase) && hits.AshStorms.Count > 0)
+            {
+                entry.Properties.Add(new ScriptObjectProperty { Name = "AshStorms", Object = new FormLink<ISkyrimMajorRecordGetter>(StormList("TMStormsFromRedMountain", hits.AshStorms).FormKey) });
+                if (hits.OtherStorms.Count > 0)
+                    entry.Properties.Add(new ScriptObjectProperty { Name = "OtherStorms", Object = new FormLink<ISkyrimMajorRecordGetter>(StormList("TMStormsOther", hits.OtherStorms).FormKey) });
+            }
             var effect = new MagicEffect(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
             {
                 EditorID = $"TMHitsFx{pascal}",
@@ -410,6 +446,18 @@ public sealed class CreatureRecords
         return switched;
     }
 
+    /// <summary>A list (made once per plugin) of the game plugin's weathers whose EditorIDs start with one of
+    /// <paramref name="prefixes"/>.</summary>
+    FormList StormList(string editorId, IReadOnlyList<string> prefixes)
+    {
+        if (mod.FormLists.FirstOrDefault(f => f.EditorID == editorId) is { } made) return made;
+        var list = new FormList(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE) { EditorID = editorId };
+        foreach (var w in games.SelectMany(g => g.Weathers).Where(w => w.EditorID is { } e && prefixes.Any(p => e.StartsWith(p, StringComparison.OrdinalIgnoreCase))))
+            list.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(w.FormKey));
+        mod.FormLists.Add(list);
+        return list;
+    }
+
     /// <summary>An ability adding <paramref name="magnitude"/> to an actor value (SpeedMult: a faster or slower actor).</summary>
     Spell ValueAbility(string key, ActorValue value, float magnitude)
     {
@@ -435,6 +483,9 @@ public sealed class CreatureRecords
         mod.Spells.Add(spell);
         return spell;
     }
+
+    /// <summary>Its game's fatigue return as Skyrim's stamina rate (percent of its most a second); null when its game gives none.</summary>
+    static float? StaminaRate(Stats s) => float.IsNaN(s.StaminaReturn) || s.Stamina <= 0 ? null : s.StaminaReturn / s.Stamina * 100;
 
     static IEnumerable<string> KindKeywords(CreatureKind kind) => kind switch
     {

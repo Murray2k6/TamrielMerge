@@ -24,7 +24,7 @@ public static class MwCreatureCheck
         // The clips as the converter plans them (its own .kf, a biped's humanoid one, weapon styles), each against its source.
         var (biped, styles) = world is not null ? MwCreatureSource.Kind(world, model) : (false, []);
         var sources = MwCreatureSource.Sources(data, model, biped);
-        var plan = MwCreatureSource.Plan(sources, styles, biped);
+        var plan = MwCreatureSource.Plan(sources, styles, biped, world is not null ? MwCreatureSource.ScriptedGroups(world, model) : null, world is not null ? MwCreatureSource.PickableIdles(world, model) : null);
         var root = nif.Root as NiNode ?? throw new InvalidDataException($"{model}: no root node");
 
         // The node tree, parents first; the first node of a name is the one a track drives.

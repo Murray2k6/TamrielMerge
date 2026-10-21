@@ -80,6 +80,10 @@ public sealed class CreatureRig
     /// plays the set the variable iTMIdleSet names (set per actor as its 3D loads: CreatureRecords).</summary>
     public List<float[]> IdleSets { get; } = [];
 
+    /// <summary>Per bone, the part of the body it is in Morrowind's blend masks: 0 lower body, 1 torso, 2 left arm, 3 right
+    /// arm (empty: no such parts).</summary>
+    public List<int> BlendMasks { get; } = [];
+
     /// <summary>What else goes into the body as it is written (a Morrowind creature's particle systems): called with the
     /// body, the data folder, each bone's node block id (by bone index) and each mesh's shape block id (by mesh index).</summary>
     public List<Action<NifFile, string, uint[], uint[]>> BodyExtras { get; } = [];
