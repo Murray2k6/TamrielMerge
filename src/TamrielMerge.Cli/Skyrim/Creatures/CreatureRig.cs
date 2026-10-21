@@ -22,12 +22,38 @@ public sealed class CreatureRig
     public const string RootBone = "NPC Root [Root]";
 
     public sealed record Bone(string Name, int Parent, Vector3 T, Quaternion Q);
-    public sealed record Mesh(string Name, Vector3[] V, Vector3[] N, Vector2[] Uv, (int Bone, float W)[][] Weights, int[][] Tris, Dictionary<string, string> Textures);
-    public sealed record Clip(float Fps, (Vector3 T, Quaternion Q)[][] Frames);
+    /// <summary>A skinned mesh: vertices at its bind, and (<paramref name="SkinToBone"/>) the source's own skin-to-bone transform per bone
+    /// (row vectors: p_bone = p * M) when it was bound in another pose than the skeleton's rest (Morrowind's creatures are: a
+    /// vertex between two far bones, as a robe's between the calves, comes out right only so); else each bone's rest inverted.</summary>
+    public sealed record Mesh(string Name, Vector3[] V, Vector3[] N, Vector2[] Uv, (int Bone, float W)[][] Weights, int[][] Tris, Dictionary<string, string> Textures,
+        Dictionary<int, Matrix4x4>? SkinToBone = null);
+    /// <summary>A clip: frames of each bone's local translation and rotation, and its scale per frame and bone when the source
+    /// animates scale (null: all 1).</summary>
+    public sealed record Clip(float Fps, (Vector3 T, Quaternion Q)[][] Frames, float[][]? Scales = null);
 
     public List<Bone> Bones { get; } = [];
     public List<Mesh> Meshes { get; } = [];
     public Dictionary<string, Clip> Clips { get; } = [];
+
+    /// <summary>The creature's own animation events per clip (time in seconds, text): "SoundPlay.&lt;sound&gt;" for its own
+    /// sounds (<see cref="Sounds"/>), "HitFrame" where its attack lands. A clip with any replaces the borrowed graph's
+    /// sounds and hit timing with these.</summary>
+    public Dictionary<string, List<(float Time, string Text)>> Events { get; } = [];
+
+    /// <summary>The creature's own sound files by sound name (the "&lt;sound&gt;" its events play): written under
+    /// sound\fx\tamrielmerge\creatures\&lt;id&gt;\ as &lt;name&gt;.wav, one sound descriptor each (<see cref="CreatureRecords"/>).</summary>
+    public Dictionary<string, byte[]> Sounds { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The actor's collision box (centre, half extents) when the source game gives one (Morrowind's "Bounding Box"
+    /// node); else it is the body's at rest.</summary>
+    public (Vector3 Center, Vector3 HalfExtents)? Box { get; set; }
+
+    /// <summary>How fast the creature moves (units a second) in its walk and run clips when the source game says (Morrowind's
+    /// speed settings and the creature's Speed): their motion, and the movement type's speeds.</summary>
+    public Dictionary<string, float> MoveSpeeds { get; } = [];
+
+    /// <summary>Where sounds go: sound\fx\tamrielmerge\creatures\&lt;id&gt;.</summary>
+    public static string SoundFolder(string id) => $@"sound\fx\tamrielmerge\creatures\{id}";
 
     /// <summary>Reads creature.json; every bone without a parent goes under <see cref="RootBone"/> (bone 0).</summary>
     public static CreatureRig Load(string path)
@@ -107,7 +133,16 @@ public sealed class CreatureRig
         foreach (var (name, clip) in Clips)
         {
             string file = Path.Combine(meshDir, "animations", name + ".hkx");
-            WriteHavok(file, Animation(clip, name));
+            WriteHavok(file, Animation(clip, name, Events.GetValueOrDefault(name)));
+            written.Add(file);
+        }
+        string soundDir = Path.Combine(dataDir, SoundFolder(id));
+        if (Directory.Exists(soundDir)) Directory.Delete(soundDir, recursive: true);
+        foreach (var (name, wav) in Sounds)
+        {
+            Directory.CreateDirectory(soundDir);
+            string file = Path.Combine(soundDir, name + ".wav");
+            File.WriteAllBytes(file, wav);
             written.Add(file);
         }
         return written.Select(f => Path.GetRelativePath(dataDir, f)).ToList();
@@ -137,8 +172,8 @@ public sealed class CreatureRig
     {
         int tracks = Bones.Count, frames = clip.Frames.Length;
         var transforms = new List<Matrix4x4>(frames * tracks);
-        foreach (var f in clip.Frames)
-            for (int b = 0; b < tracks; b++) transforms.Add(QsTransform(f[b].T, f[b].Q));
+        for (int fi = 0; fi < frames; fi++)
+            for (int b = 0; b < tracks; b++) transforms.Add(QsTransform(clip.Frames[fi][b].T, clip.Frames[fi][b].Q, clip.Scales?[fi][b] ?? 1));
         var anim = new hkaInterleavedUncompressedAnimation
         {
             m_type = 1,   // HK_INTERLEAVED_ANIMATION
@@ -225,7 +260,7 @@ public sealed class CreatureRig
                 var p = Vector3.Zero;
                 foreach (var (b, w) in m.Weights[i])
                 {
-                    var local = Vector3.Transform(m.V[i] - rest[b].T, Quaternion.Inverse(rest[b].Q));
+                    var local = Vector3.Transform(m.V[i], SkinToBoneOf(m, b, rest));
                     p += (posed[b].T + Vector3.Transform(local, posed[b].Q)) * w;
                 }
                 lowest = MathF.Min(lowest, p.Z);
@@ -255,7 +290,16 @@ public sealed class CreatureRig
         return new Matrix3(x.X, y.X, z.X, x.Y, y.Y, z.Y, x.Z, y.Z, z.Z);
     }
 
-    static MatTransform Transform(Vector3 t, Quaternion q) => new() { translation = new nifly.Vector3(t.X, t.Y, t.Z), rotation = Rotation(q), scale = 1 };
+    static MatTransform Transform(Vector3 t, Quaternion q, float s = 1) => new() { translation = new nifly.Vector3(t.X, t.Y, t.Z), rotation = Rotation(q), scale = s };
+
+    /// <summary>A mesh's skin-to-bone transform for a bone: the source's own, else the bone's rest inverted.</summary>
+    Matrix4x4 SkinToBoneOf(Mesh m, int bone, (Vector3 T, Quaternion Q)[] restWorld)
+    {
+        if (m.SkinToBone is { } own && own.TryGetValue(bone, out var mm)) return mm;
+        var (wt, wq) = restWorld[bone];
+        Matrix4x4.Invert(Matrix4x4.CreateFromQuaternion(wq) * Matrix4x4.CreateTranslation(wt), out var inv);
+        return inv;
+    }
 
     /// <summary>The bones as nodes under the file's root, in order (index i = Bones[i]).</summary>
     List<NiNode> AddBones(NifFile nif)
@@ -276,15 +320,26 @@ public sealed class CreatureRig
     {
         using var nif = new NifFile();
         nif.CreateNamedBSFadeNode(NiVersion.getSSE(), "skeleton.nif");
-        AddRootData(nif, Meshes.SelectMany(m => m.V).ToList());
+        AddRootData(nif, Meshes.SelectMany(m => m.V).ToList(), Box);
         AddBones(nif);
         nif.Save(path);
     }
 
-    static void AddRootData(NifFile nif, IReadOnlyList<Vector3> bodyAtRest)
+    static void AddRootData(NifFile nif, IReadOnlyList<Vector3> bodyAtRest, (Vector3 Center, Vector3 HalfExtents)? box = null)
     {
         var root = nif.GetRootNode();
-        if (bodyAtRest.Count > 0)
+        if (box is { } b)
+        {
+            // The source game's own collision box for the actor.
+            var bound = BlockMeshBuilder.Owned(new BSBound
+            {
+                center = new nifly.Vector3(b.Center.X, b.Center.Y, b.Center.Z),
+                halfExtents = new nifly.Vector3(MathF.Max(b.HalfExtents.X, 8), MathF.Max(b.HalfExtents.Y, 8), MathF.Max(b.HalfExtents.Z, 8)),
+            });
+            bound.name = new NiStringRef("BBX");
+            nif.AssignExtraData(root, bound);
+        }
+        else if (bodyAtRest.Count > 0)
         {
             float halfX = bodyAtRest.Max(v => MathF.Abs(v.X)), halfY = bodyAtRest.Max(v => MathF.Abs(v.Y));
             float bottom = MathF.Min(0, bodyAtRest.Min(v => v.Z)), top = bodyAtRest.Max(v => v.Z);
@@ -355,10 +410,11 @@ public sealed class CreatureRig
             nif.CalcTangentsForShape(shape);
             BlockMeshBuilder.EditBlock<BSLightingShaderProperty>(nif, hdr.GetBlockID(nif.GetShader(shape)), sh =>
             {
-                sh.shaderFlags1 = 0x80400303u;   // specular, skinned, cast + receive shadows
+                // Matte (the models are never shiny; Morrowind's creatures have no specular): skinned, cast + receive shadows.
+                sh.shaderFlags1 = 0x80400302u;
                 sh.shaderFlags2 = 0x8001u;       // ZBuffer write, vertex animation off
-                sh.glossiness = 20;
-                sh.specularStrength = 0.4f;
+                sh.glossiness = 1;
+                sh.specularStrength = 0;
             });
 
             // Skinning: only the bones this shape uses, each with its bind (bone-to-root inverted).
@@ -369,9 +425,8 @@ public sealed class CreatureRig
             nif.SetShapeTransformGlobalToSkin(shape, new MatTransform { translation = new nifly.Vector3(0, 0, 0), rotation = Rotation(Quaternion.Identity), scale = 1 });
             for (int i = 0; i < used.Count; i++)
             {
-                var (wt, wq) = restWorld[used[i]];
-                var inv = Quaternion.Inverse(wq);
-                nif.SetShapeTransformSkinToBone(shape, (uint)i, Transform(Vector3.Transform(-wt, inv), inv));
+                Matrix4x4.Decompose(SkinToBoneOf(m, used[i], restWorld), out var sc, out var sq, out var st);
+                nif.SetShapeTransformSkinToBone(shape, (uint)i, Transform(st, sq, sc.X));
             }
             for (int v = 0; v < m.V.Length; v++)
             {
@@ -391,15 +446,14 @@ public sealed class CreatureRig
                     {
                         var bd = boneList[i];
                         var list = new vectorSkinWeight();
-                        var (wt, wq) = restWorld[used[i]];
-                        var inv = Quaternion.Inverse(wq);
+                        var toBone = SkinToBoneOf(m, used[i], restWorld);
                         var pts = new List<Vector3>();
                         for (int v = 0; v < m.V.Length; v++)
                             foreach (var (b, w) in m.Weights[v])
                                 if (b == used[i] && w > 0)
                                 {
                                     list.Add(new SkinWeight { index = (ushort)v, weight = w });
-                                    pts.Add(Vector3.Transform(m.V[v] - wt, inv));
+                                    pts.Add(Vector3.Transform(m.V[v], toBone));
                                 }
                         bd.vertexWeights = list;
                         bd.numVertices = (ushort)list.Count;

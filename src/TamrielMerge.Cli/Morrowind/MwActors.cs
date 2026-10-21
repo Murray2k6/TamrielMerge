@@ -219,6 +219,17 @@ public sealed partial class MwPluginBuilder
         npc.Packages.Clear();
         npc.Packages.Add(new FormLink<IPackageGetter>(PackageFor(WanderDistance(rec))));
         npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.AIPackages;
+        // Morrowind's flags, not the stand-in's: respawning (FLAG 0x02) and essential (0x80) as Morrowind has them; its numbers
+        // are its own, not calculated from the stand-in's class.
+        int mwFlags = rec.Get("FLAG")?.Int() ?? 0;
+        npc.Configuration.Flags &= ~(NpcConfiguration.Flag.Respawn | NpcConfiguration.Flag.Essential);
+        if ((mwFlags & 0x02) != 0) npc.Configuration.Flags |= NpcConfiguration.Flag.Respawn;
+        if ((mwFlags & 0x80) != 0) npc.Configuration.Flags |= NpcConfiguration.Flag.Essential;
+        // Morrowind's loot and spells only, not the stand-in's (a cliff racer dropped the ice wraith's teeth and essence).
+        npc.DeathItem.Clear();
+        npc.Items = null;
+        npc.ActorEffect = null;
+        npc.Configuration.TemplateFlags &= ~(NpcConfiguration.TemplateFlag.Inventory | NpcConfiguration.TemplateFlag.SpellList);
         AddInventory(npc, rec);
         AddSpells(npc, rec);
         return npc;

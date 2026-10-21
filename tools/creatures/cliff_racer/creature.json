@@ -1,0 +1,12 @@
+{
+  "game": "morrowind",
+  "model": "r\\CliffRacer.NIF",
+  "head": "Head",
+  "torso": "Body Bone",
+  "name": "Cliff Racer",
+  "actors": [
+    "MWcliffracer",
+    "MWcliffracerdiseased",
+    "MWcliffracerblighted"
+  ]
+}

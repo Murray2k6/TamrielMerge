@@ -77,7 +77,7 @@ public sealed partial class MwPluginBuilder
         return (m.Groups[5].Value, new Vector3(F(1), F(2), F(3)), F(4));
     }
 
-    static string Sanitize(string s) => new(s.Where(char.IsLetterOrDigit).ToArray());
+    internal static string Sanitize(string s) => new(s.Where(char.IsLetterOrDigit).ToArray());
 
     MwMeshConverter.Result? Mesh(string model)
     {

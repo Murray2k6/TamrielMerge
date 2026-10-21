@@ -505,20 +505,25 @@ public class NiNode : NiObjectNET
         int props = r.I32();
         Properties = new int[props];
         for (int i = 0; i < props; i++) Properties[i] = r.I32();
-        if (r.Bool()) ReadBound(r);
+        if (r.Bool()) Box = ReadBound(r);
     }
 
-    static void ReadBound(NifReader r)
+    /// <summary>The node's bounding volume when it is a box (Morrowind's "Bounding Box" node: an actor's collision): centre,
+    /// axes (rows) and half extents.</summary>
+    public (Vector3 Center, Matrix4x4 Axes, Vector3 Extents)? Box;
+
+    static (Vector3, Matrix4x4, Vector3)? ReadBound(NifReader r)
     {
         switch (r.I32())
         {
             case 0: r.Skip(16); break;                  // sphere
-            case 1: r.Skip(12 + 36 + 12); break;        // box: center, axes, extents
+            case 1: return (r.V3(), r.Matrix33(), r.V3());   // box: center, axes, extents
             case 2: r.Skip(12 + 12 + 4 + 4); break;     // capsule
             case 4: { int n = r.I32(); for (int i = 0; i < n; i++) ReadBound(r); break; }
             case 5: r.Skip(16 + 12); break;             // half space
             default: throw new InvalidDataException("unknown bounding volume");
         }
+        return null;
     }
 
     public static NiNode ReadNode(NifReader r, NiNode n)

@@ -5690,6 +5690,40 @@ static class Program
                 }
                 return 0;
             }
+            case "race-dump":
+            {
+                // Dev aid: every field of the races in --races (comma list of EditorIDs, Skyrim.esm and its DLCs), nested
+                // objects one level down, links as EditorIDs where the masters have them.
+                var ms = new[] { "Skyrim.esm", "Dawnguard.esm", "Dragonborn.esm" }.Select(m => Path.Combine(skyrimData, m))
+                    .Concat(opts.TryGetValue("plugins", out var extraPlugins) ? extraPlugins.Split(';', StringSplitOptions.RemoveEmptyEntries) : []).Select(m => SkyrimMod.CreateFromBinaryOverlay(m, SkyrimRelease.SkyrimSE)).ToList();
+                var cache = ms.ToImmutableLinkCache();
+                string Show(object? v, int depth)
+                {
+                    if (v is null) return "null";
+                    if (v is Mutagen.Bethesda.Plugins.IFormLinkGetter fl) return fl.IsNull ? "none" : cache.TryResolveIdentifier(fl.FormKey, fl.Type, out var ed) ? ed ?? fl.FormKey.ToString() : fl.FormKey.ToString();
+                    if (v is string || v.GetType().IsPrimitive || v.GetType().IsEnum || v is decimal) return v.ToString()!;
+                    if (depth > int.Parse(opts.GetValueOrDefault("depth", "2"))) return v.GetType().Name;
+                    if (v is System.Collections.IEnumerable list)
+                        return "[" + string.Join(", ", list.Cast<object?>().Take(24).Select(x => Show(x, depth + 1))) + "]";
+                    var props = v.GetType().GetProperties().Where(p => p.GetIndexParameters().Length == 0 && p.Name is not ("Registration" or "StaticRegistration" or "FormKey" or "FormVersion" or "Version2"));
+                    return "{" + string.Join("; ", props.Select(p => { try { return $"{p.Name}={Show(p.GetValue(v), depth + 1)}"; } catch { return $"{p.Name}=?"; } })) + "}";
+                }
+                // --type: the mod group (Races, BodyParts, MovementTypes, Npcs, CombatStyles, VoiceTypes...), Races by default.
+                string groupName = opts.GetValueOrDefault("type", "Races");
+                foreach (string name in opts["races"].Split(','))
+                {
+                    var r = ms.AsEnumerable().Reverse().SelectMany(m => ((System.Collections.IEnumerable)m.GetType().GetProperty(groupName)!.GetValue(m)!).Cast<Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter>()).FirstOrDefault(x => x.EditorID == name);
+                    if (r is null) { Console.WriteLine($"{name}: not found"); continue; }
+                    Console.WriteLine($"== {name}");
+                    foreach (var p in r.GetType().GetProperties().Where(p => p.GetIndexParameters().Length == 0 && p.Name is not ("Registration" or "StaticRegistration")))
+                    {
+                        string text; try { text = Show(p.GetValue(r), 1); } catch (Exception e) { text = "? " + e.GetType().Name; }
+                        Console.WriteLine($"  {p.Name} = {(text.Length > 900 ? text[..900] + "..." : text)}");
+                    }
+                }
+                foreach (var m in ms) m.Dispose();
+                return 0;
+            }
             case "packages":
             {
                 // Dev aid: Skyrim.esm AI packages whose EditorID matches --name.
@@ -10721,56 +10755,93 @@ static class Program
                 // A creature with its own skeleton (Skyrim/Creatures/CreatureRig) from tools\creatures\<--creature>: exported
                 // by Blender (export_creature.py, unless work\creature.json is newer than the config), then written as Skyrim
                 // SE files under --out (a Data folder; default out\creatures).
-                string id = opts["creature"];
-                string dir = Path.Combine(Setup.Dependencies.Root, "creatures", id);
-                string config = Path.Combine(dir, "creature.json"), work = Path.Combine(dir, "work"), exported = Path.Combine(work, "creature.json");
+                // --creature <id> (a config's, or "mw_<model>" for a Morrowind model no config covers), or --all-morrowind: every
+                // Morrowind creature model (configs first, then the automatic ones; user, 2026-10-21: "all creatures").
                 string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/creatures"));
-                Skyrim.Creatures.CreatureRig rig;
-                using (var src = System.Text.Json.JsonDocument.Parse(File.ReadAllText(config)))
+                Morrowind.Tes3Data? mwData = null; Morrowind.MwWorld? mwWorld = null;
+                Morrowind.MwWorld World() => mwWorld ??= Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind) ?? throw new InvalidOperationException("Morrowind isn't installed"));
+                var specs = opts.ContainsKey("all-morrowind")
+                    ? Skyrim.Creatures.CreatureSpec.Configured().Where(c => c.Game == "morrowind").Concat(Skyrim.Creatures.CreatureSpec.MorrowindAuto(World(), Skyrim.Creatures.CreatureSpec.Configured())).ToList()
+                    : [Skyrim.Creatures.CreatureSpec.Find(opts["creature"], World) ?? throw new InvalidDataException($"no creature {opts["creature"]}")];
+                var behaviour = new Skyrim.Creatures.CreatureBehavior(skyrimData);
+                int built = 0;
+                var failedCreatures = new List<string>();
+                foreach (var spec in specs)
                 {
-                    var sr = src.RootElement;
-                    if (sr.TryGetProperty("game", out var game) && game.GetString() == "morrowind")
+                    string id = spec.Id;
+                    try
                     {
-                        // A Morrowind creature from the user's own install (user: "morrowind has a guar model"): its model and
-                        // .kf (MwCreatureSource), textures upscaled where the cache has them, remastered when the config says.
-                        var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind) ?? throw new InvalidOperationException("Morrowind isn't installed"));
-                        string cache = Path.Combine(Setup.Dependencies.Root, "upscale", "out");
-                        if (Directory.Exists(cache)) Morrowind.MwTextures.UpscaleCache = cache;
-                        string mwTexDir = Path.Combine(work, "mwtextures");
-                        var problems = new List<string>();
-                        rig = Skyrim.Creatures.MwCreatureSource.Build(mwData, sr.GetProperty("model").GetString()!, new Morrowind.MwTextures(mwData, mwTexDir), mwTexDir, problems);
-                        // --no-remaster: as the game has it (the remaster runs Blender and the texture model).
-                        if (sr.TryGetProperty("remaster", out var levels) && !opts.ContainsKey("no-remaster"))
-                            Skyrim.Creatures.CreatureRemaster.Run(rig, work, levels.GetInt32(), problems);
-                        foreach (var pr in problems) Console.WriteLine("  problem: " + pr);
-                    }
-                    else
-                    {
-                        if (!File.Exists(exported) || File.GetLastWriteTimeUtc(exported) < File.GetLastWriteTimeUtc(config) || opts.ContainsKey("export"))
+                        string dir = Path.Combine(Skyrim.Creatures.CreatureSpec.ConfigDir, id);
+                        string config = Path.Combine(dir, "creature.json"), work = Path.Combine(dir, "work"), exported = Path.Combine(work, "creature.json");
+                        Skyrim.Creatures.CreatureRig rig;
+                        if (spec.Game == "morrowind")
                         {
-                            string blender = Setup.Dependencies.Blender ?? throw new InvalidOperationException("Blender is needed: run setup");
-                            int code = Setup.ToolScripts.Run(blender, ["-b", "--disable-autoexec", "--python", Path.Combine(Setup.Dependencies.Root, "creatures", "export_creature.py"), "--", config, work]);
-                            if (code != 0 || !File.Exists(exported)) { Console.WriteLine($"export failed ({code})"); return 1; }
+                            // A Morrowind creature from the user's own install (user: "morrowind has a guar model"): its model and .kf
+                            // (MwCreatureSource) with the game's records (its own sounds where its animations play them, hit moments,
+                            // collision box, speeds), textures upscaled where the cache has them, remastered when the config says.
+                            mwData ??= Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind) ?? throw new InvalidOperationException("Morrowind isn't installed"));
+                            string cache = Path.Combine(Setup.Dependencies.Root, "upscale", "out");
+                            if (Directory.Exists(cache)) Morrowind.MwTextures.UpscaleCache = cache;
+                            // Converted textures wait here before they are copied beside the creature: its config's work folder, or a
+                            // temporary one for an automatic creature (removed after).
+                            string mwTexDir = File.Exists(config) ? Path.Combine(work, "mwtextures") : Path.Combine(Path.GetTempPath(), "TamrielMerge", "creatures", id);
+                            var problems = new List<string>();
+                            rig = Skyrim.Creatures.MwCreatureSource.Build(mwData, spec.Model!, new Morrowind.MwTextures(mwData, mwTexDir), mwTexDir, problems, World(), id);
+                            // --no-remaster: as the game has it (the remaster runs Blender and the texture model).
+                            if (spec.Remaster is { } levels && !opts.ContainsKey("no-remaster"))
+                                Skyrim.Creatures.CreatureRemaster.Run(rig, work, levels, problems);
+                            foreach (var pr in problems) Console.WriteLine($"  {id} problem: " + pr);
+                            rig.EnsureDeath();
+                            var files = rig.Write(outDir, id);
+                            if (!File.Exists(config) && Directory.Exists(mwTexDir)) Directory.Delete(mwTexDir, recursive: true);
+                            files.AddRange(WriteBehaviour(spec, rig));
+                            Report(spec, rig, files);
                         }
-                        rig = Skyrim.Creatures.CreatureRig.Load(exported);
+                        else
+                        {
+                            if (!File.Exists(exported) || File.GetLastWriteTimeUtc(exported) < File.GetLastWriteTimeUtc(config) || opts.ContainsKey("export"))
+                            {
+                                string blender = Setup.Dependencies.Blender ?? throw new InvalidOperationException("Blender is needed: run setup");
+                                int code = Setup.ToolScripts.Run(blender, ["-b", "--disable-autoexec", "--python", Path.Combine(Setup.Dependencies.Root, "creatures", "export_creature.py"), "--", config, work]);
+                                if (code != 0 || !File.Exists(exported)) { Console.WriteLine($"{id}: export failed ({code})"); failedCreatures.Add(id); continue; }
+                            }
+                            rig = Skyrim.Creatures.CreatureRig.Load(exported);
+                            rig.EnsureDeath();   // a fall for models without a death of their own
+                            var files = rig.Write(outDir, id);
+                            files.AddRange(WriteBehaviour(spec, rig));
+                            Report(spec, rig, files);
+                        }
+                        built++;
                     }
+                    catch (Exception e) { Console.WriteLine($"{id}: failed: {e.Message}"); failedCreatures.Add(id); }
                 }
-                rig.EnsureDeath();   // a fall for models without a death of their own
-                var files = rig.Write(outDir, id);
-                // Behaviour from the template the config names (default the mudcrab's), its look-at on the config's head bone.
-                using (var cfg = System.Text.Json.JsonDocument.Parse(File.ReadAllText(config)))
+                if (specs.Count > 1) Console.WriteLine($"{built} of {specs.Count} creatures built{(failedCreatures.Count > 0 ? "; failed: " + string.Join(", ", failedCreatures) : "")}");
+                return failedCreatures.Count == 0 ? 0 : 1;
+
+                // Its own behaviour (CreatureGraph: user, 2026-10-21, "ice wraith and cliffracer arent the same"), or, for a config
+                // naming a "template", a vanilla creature's turned to it; its look-at on its head bone (the config's, else guessed).
+                List<string> WriteBehaviour(Skyrim.Creatures.CreatureSpec spec, Skyrim.Creatures.CreatureRig rig)
                 {
-                    string templateName = cfg.RootElement.TryGetProperty("template", out var tp) ? tp.GetString()! : "mudcrab";
-                    var template = Skyrim.Creatures.CreatureBehavior.Templates.GetValueOrDefault(templateName) ?? throw new InvalidDataException($"unknown behaviour template {templateName}");
-                    string? head = cfg.RootElement.TryGetProperty("head", out var hp) ? hp.GetString() : null;
+                    string? head = spec.Head ?? Skyrim.Creatures.CreatureSpec.GuessBones(rig.Bones.Select(b => b.Name).ToList()).Head;
                     int headBone = head is null ? -1 : rig.Bones.FindIndex(b => b.Name == head);
-                    var behaviour = new Skyrim.Creatures.CreatureBehavior(skyrimData);
-                    files.AddRange(behaviour.Write(outDir, id, rig, template, headBone));
-                    Console.WriteLine($"  behaviour from {templateName}: {behaviour.DeathClipsRewired} death clips play its death");
+                    if (spec.Template is { } templateName)
+                    {
+                        var template = Skyrim.Creatures.CreatureBehavior.Templates.GetValueOrDefault(templateName) ?? throw new InvalidDataException($"unknown behaviour template {templateName}");
+                        var written = behaviour.Write(outDir, spec.Id, rig, template, headBone);
+                        Console.WriteLine($"  behaviour from {templateName}: {behaviour.DeathClipsRewired} death clips play its death");
+                        return written;
+                    }
+                    var graph = new Skyrim.Creatures.CreatureGraph(rig, spec.Id, behaviour);
+                    var files = graph.Write(outDir, headBone);
+                    Console.WriteLine($"  its own behaviour: attacks {string.Join(", ", graph.Attacks.Select(a => $"{a.Event} -> {a.Clip}"))}; events {string.Join(", ", rig.Events.Select(e => $"{e.Key} {e.Value.Count}"))}; sounds {string.Join(", ", rig.Sounds.Keys)}; speeds {string.Join(", ", rig.MoveSpeeds.Select(s => $"{s.Key} {s.Value:F0}"))}; box {(rig.Box is { } bx ? $"{bx.Center} +-{bx.HalfExtents}" : "from the body")}");
+                    return files;
                 }
-                Console.WriteLine($"{id}: {rig.Bones.Count} bones, {rig.Meshes.Sum(m => m.Tris.Length)} triangles, {rig.Clips.Count} animations ({string.Join(", ", rig.Clips.Select(c => $"{c.Key} {c.Value.Frames.Length}"))})");
-                foreach (var f in files) Console.WriteLine($"  {f} ({new FileInfo(Path.Combine(outDir, f)).Length / 1024} KB)");
-                return 0;
+
+                void Report(Skyrim.Creatures.CreatureSpec spec, Skyrim.Creatures.CreatureRig rig, List<string> files)
+                {
+                    Console.WriteLine($"{spec.Id} ({spec.Name}): {rig.Bones.Count} bones, {rig.Meshes.Sum(m => m.Tris.Length)} triangles, {rig.Clips.Count} animations ({string.Join(", ", rig.Clips.Select(c => $"{c.Key} {c.Value.Frames.Length}"))})");
+                    if (specs.Count == 1) foreach (var f in files) Console.WriteLine($"  {f} ({new FileInfo(Path.Combine(outDir, f)).Length / 1024} KB)");
+                }
             }
             case "creature-pose":
             {
@@ -10877,6 +10948,116 @@ static class Program
                 Console.WriteLine($"  bones: {string.Join(", ", rig.Bones.Select(b => b.Name).Take(40))}");
                 return 0;
             }
+            case "mw-kf-groups":
+            {
+                // Dev aid: a Morrowind .kf's animation groups (--kf, e.g. meshes\xbase_anim.kf) with their times and the other
+                // keys inside each (--keys), and the nodes its tracks drive (--nodes).
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var kf = Morrowind.Nif4.Read(mwData.Read(opts["kf"]) ?? throw new FileNotFoundException(opts["kf"]), opts["kf"]);
+                var (keys, tracks) = Skyrim.Creatures.MwCreatureSource.ReadKf(kf);
+                foreach (var (g, t) in Skyrim.Creatures.MwCreatureSource.Groups(keys).OrderBy(x => x.Value.Start))
+                {
+                    Console.WriteLine($"{g}: {t.Start:F2}..{t.Stop:F2}{(t.Loops ? $" loop {t.LoopStart:F2}..{t.LoopStop:F2}" : "")}");
+                    if (opts.ContainsKey("keys"))
+                        foreach (var (time, text) in keys!.Keys.Where(k => k.Time >= t.Start && k.Time <= t.Stop))
+                            foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                                if (!line.StartsWith(g + ":", StringComparison.OrdinalIgnoreCase) || !(line.EndsWith("Start", StringComparison.OrdinalIgnoreCase) || line.EndsWith("Stop", StringComparison.OrdinalIgnoreCase)) || line.Contains(' '))
+                                    Console.WriteLine($"    {time - t.Start:F2} {line}");
+                }
+                if (opts.ContainsKey("nodes")) Console.WriteLine("nodes: " + string.Join(", ", tracks.Keys));
+                // --raw <text>: every text key containing it, with its time.
+                if (opts.TryGetValue("raw", out var rawMatch))
+                    foreach (var (time, text) in keys?.Keys ?? [])
+                        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(l => l.Contains(rawMatch, StringComparison.OrdinalIgnoreCase)))
+                            Console.WriteLine($"  {time:F2} {line}");
+                return 0;
+            }
+            case "mw-creature-census":
+            {
+                // Dev aid: every model Morrowind's creatures (CREA) are drawn with: how many creatures use it, their flags
+                // (biped, weapon and shield, swims, flies, walks), whether the model has its own x<model>.kf, a Bip01, and which
+                // of our clips its animation groups give.
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                var world = Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                var byModel = world.Objects.Values.Where(o => o.Type == "CREA" && o.Str("MODL") is { Length: > 0 }).GroupBy(o => o.Str("MODL")!.ToLowerInvariant()).OrderBy(g => g.Key);
+                int models = 0, withKf = 0;
+                foreach (var g in byModel)
+                {
+                    models++;
+                    string model = @"meshes\" + g.Key;
+                    string kf = Path.Combine(Path.GetDirectoryName(model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf");
+                    var kfBytes = mwData.Read(kf);
+                    if (kfBytes is not null) withKf++;
+                    int flags = g.Aggregate(0, (a, c) => a | (c.Get("FLAG")?.Int() ?? 0));
+                    var nifBytes = mwData.Read(model);
+                    bool bip = nifBytes is not null && System.Text.Encoding.ASCII.GetString(nifBytes).Contains("Bip01");
+                    string clips = "";
+                    if (kfBytes is not null)
+                    {
+                        var (keys, _) = Skyrim.Creatures.MwCreatureSource.ReadKf(Morrowind.Nif4.Read(kfBytes, kf));
+                        clips = string.Join(",", Skyrim.Creatures.MwCreatureSource.ChosenGroups(Skyrim.Creatures.MwCreatureSource.Groups(keys)).Select(c => c.Clip));
+                    }
+                    string f = $"{((flags & 1) != 0 ? "biped " : "")}{((flags & 4) != 0 ? "weapon " : "")}{((flags & 0x10) != 0 ? "swims " : "")}{((flags & 0x20) != 0 ? "flies " : "")}{((flags & 0x40) != 0 ? "walks" : "")}";
+                    Console.WriteLine($"{g.Key,-40} {g.Count(),3} creatures  {f,-28} {(nifBytes is null ? "NO MODEL" : "")}{(kfBytes is null ? "no kf" : "kf")} {(bip ? "Bip01" : "")}  {clips}  ({string.Join(", ", g.Select(c => c.Id).Take(4))})");
+                }
+                Console.WriteLine($"{models} models, {withKf} with their own .kf");
+                return 0;
+            }
+            case "creature-bones":
+            {
+                // Whether built creatures' bones hold together (Skyrim/Creatures/CreatureBones): --creature <id> or --all (every
+                // config in tools\creatures), built under --data (default out\creatures). skeleton.hkx against skeleton.nif, the
+                // body's binds and weights, the animations' tracks, the graph's look-at bone, the config's head and torso bones,
+                // and a Morrowind creature's bones against its model's nodes.
+                string data = Path.GetFullPath(opts.GetValueOrDefault("data", "out/creatures"));
+                var ids = opts.ContainsKey("all")
+                    ? Directory.GetDirectories(Path.Combine(data, "meshes", "actors", "tamrielmerge")).Select(Path.GetFileName).OfType<string>().Order().ToList()
+                    : [opts["creature"]];
+                Morrowind.MwWorld? boneWorld = null;
+                Morrowind.Tes3Data? mwData = null;
+                int total = 0;
+                foreach (var cid in ids)
+                {
+                    var spec = Skyrim.Creatures.CreatureSpec.Find(cid, () => boneWorld ??= Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!));
+                    if (spec is null) { Console.WriteLine($"{cid}: no config or Morrowind model, skipped"); continue; }
+                    var named = new[] { spec.Head, spec.Torso }.OfType<string>().ToList();
+                    string? mwModel = spec.Game == "morrowind" ? spec.Model : null;
+                    if (mwModel is not null) mwData ??= Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                    var rep = Skyrim.Creatures.CreatureBones.Run(data, cid, named, mwData, mwModel);
+                    Console.WriteLine($"{cid}: {rep.Bones} bones, {rep.Issues} issues");
+                    foreach (var l in rep.Lines) Console.WriteLine(l);
+                    total += rep.Issues;
+                }
+                Console.WriteLine($"{ids.Count} creatures, {total} issues");
+                return total == 0 ? 0 : 2;
+            }
+            case "mw-creature-check":
+            {
+                // Whether a Morrowind creature built with its own skeleton (--creature <id>: its tools\creatures config's model,
+                // or --model) is the original (Skyrim/Creatures/MwCreatureCheck): every animation frame skinned as Morrowind
+                // does against the written files (--data, default out\creatures) skinned as Skyrim does, vertex by vertex.
+                var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
+                string id = opts["creature"];
+                string model = opts.TryGetValue("model", out var mm) ? mm : Skyrim.Creatures.CreatureSpec.Find(id, () => Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!))?.Model ?? throw new InvalidDataException($"no creature {id}");
+                string data = Path.GetFullPath(opts.GetValueOrDefault("data", "out/creatures"));
+                var results = Skyrim.Creatures.MwCreatureCheck.Run(mwData, model, data, id, Console.WriteLine);
+                foreach (var r in results)
+                    Console.WriteLine($"  {r.Clip} (Morrowind {r.Group}, {r.Frames} frames): vertices off by {r.Mean:F3} on average, {r.Worst:F3} at worst (frame {r.WorstFrame}{(r.Worst > 0.1f ? ": " + r.WorstWhere : "")})");
+                // --keys: the .kf's text keys inside each group used (sounds, hits), at their time from the group's start.
+                if (opts.ContainsKey("keys"))
+                {
+                    string m2 = model.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
+                    string kfPath = Path.Combine(Path.GetDirectoryName(m2)!, "x" + Path.GetFileNameWithoutExtension(m2) + ".kf");
+                    var (keys, _) = Skyrim.Creatures.MwCreatureSource.ReadKf(Morrowind.Nif4.Read(mwData.Read(kfPath)!, kfPath));
+                    foreach (var (clip, group, start, stop) in Skyrim.Creatures.MwCreatureSource.ChosenGroups(Skyrim.Creatures.MwCreatureSource.Groups(keys)))
+                        Console.WriteLine($"  {clip} keys: {string.Join("; ", keys!.Keys.Where(k => k.Time >= start - 1e-4f && k.Time <= stop + 1e-4f).Select(k => $"{k.Time - start:F2} {k.Text.Replace("\r", "").Replace('\n', '|')}"))}");
+                }
+                using (var body = new Skyrim.Creatures.MwCreatureCheck.SkyrimBody(Path.Combine(data, Skyrim.Creatures.CreatureRig.MeshFolder(id)), id))
+                    Console.WriteLine($"  textures: {string.Join(", ", body.ShapeTextures)}");
+                float worst = results.Count > 0 ? results.Max(r => r.Worst) : float.NaN;
+                Console.WriteLine($"{id}: {results.Count} animations; worst vertex {worst:F3} units from Morrowind's");
+                return 0;
+            }
             case "creature-plugin":
             {
                 // The creature models' plugins (Skyrim/Creatures/CreatureRecords), one per game ("Daggerfall Creatures.esp" over
@@ -10886,11 +11067,20 @@ static class Program
                 var masterMods = new[] { "Skyrim.esm", "Dawnguard.esm", "Dragonborn.esm" }.Select(m => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, m), SkyrimRelease.SkyrimSE)).ToList();
                 var games = opts["plugins"].Split(';', StringSplitOptions.RemoveEmptyEntries).Select(p2 => SkyrimMod.CreateFromBinaryOverlay(p2, SkyrimRelease.SkyrimSE)).ToList();
                 var byGame = new Dictionary<string, Skyrim.Creatures.CreatureRecords>(StringComparer.OrdinalIgnoreCase);
-                foreach (string id in opts["creatures"].Split(',', StringSplitOptions.RemoveEmptyEntries))
+                // The creatures' built files (sounds, animations) are read from here too.
+                string plOut = Path.GetFullPath(opts.GetValueOrDefault("out", "out/creatures"));
+                Morrowind.MwWorld? mwWorld = null;
+                Morrowind.MwWorld World() => mwWorld ??= Morrowind.MwWorld.Load(GameInstalls.DataDir(Game.Morrowind)!);
+                // --creatures (ids) and/or --all-morrowind (every Morrowind model's creature built under --out).
+                var specs = (opts.TryGetValue("creatures", out var cl) ? cl.Split(',', StringSplitOptions.RemoveEmptyEntries) : [])
+                    .Select(c => Skyrim.Creatures.CreatureSpec.Find(c, World) ?? throw new InvalidDataException($"no creature {c}")).ToList();
+                if (opts.ContainsKey("all-morrowind"))
+                    specs.AddRange(Skyrim.Creatures.CreatureSpec.Configured().Where(c => c.Game == "morrowind").Concat(Skyrim.Creatures.CreatureSpec.MorrowindAuto(World(), Skyrim.Creatures.CreatureSpec.Configured()))
+                        .Where(c => specs.All(s => s.Id != c.Id) && Directory.Exists(Path.Combine(plOut, Skyrim.Creatures.CreatureRig.MeshFolder(c.Id)))));
+                foreach (var spec in specs)
                 {
-                    using var cfg = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(Setup.Dependencies.Root, "creatures", id, "creature.json")));
-                    var r = cfg.RootElement;
-                    string gamePlugin = Skyrim.Creatures.CreatureRecords.GamePlugin(r.TryGetProperty("game", out var gp) ? gp.GetString() : null);
+                    string id = spec.Id;
+                    string gamePlugin = Skyrim.Creatures.CreatureRecords.GamePlugin(spec.Game);
                     var game = games.FirstOrDefault(g => g.ModKey.FileName.String.Equals(gamePlugin, StringComparison.OrdinalIgnoreCase));
                     if (game is null) { Console.WriteLine($"{id}: {gamePlugin} not converted, left out"); continue; }
                     if (!byGame.TryGetValue(gamePlugin, out var records))
@@ -10899,12 +11089,36 @@ static class Program
                         records.AddGame(game);
                         byGame[gamePlugin] = records;
                     }
-                    string race = r.TryGetProperty("templateRace", out var tr) ? tr.GetString()!
-                        : Skyrim.Creatures.CreatureBehavior.Templates[r.TryGetProperty("template", out var tt) ? tt.GetString()! : "mudcrab"].Race;
-                    int n = records.Add(id, r.GetProperty("name").GetString()!, race, r.GetProperty("actors").EnumerateArray().Select(a2 => a2.GetString()!));
+                    if (spec.Template is null && spec.TemplateRace is null)
+                    {
+                        // Its own records (CreatureRecords.AddOwn) with its game's numbers: Morrowind's from the game's records for
+                        // every creature drawn with its model, others' from the config's "stats".
+                        Skyrim.Creatures.CreatureRecords.Stats raceStats;
+                        Dictionary<string, Skyrim.Creatures.CreatureRecords.Stats> actorStats;
+                        if (spec.Game == "morrowind")
+                            (raceStats, actorStats) = Skyrim.Creatures.MwCreatureSource.RecordStats(World(), spec.Model!);
+                        else
+                        {
+                            var st = spec.Stats ?? throw new InvalidDataException($"{id}: its config has no \"stats\" (its game's numbers)");
+                            float F(string k, float d) => st.TryGetProperty(k, out var v) ? v.GetSingle() : d;
+                            raceStats = new((int)F("health", 50), (int)F("magicka", 0), (int)F("stamina", 100), F("attackMin", 1), F("attackMax", 5), F("reach", 128), (int)F("flee", 0),
+                                Enum.Parse<Skyrim.Creatures.CreatureRecords.CreatureKind>(st.TryGetProperty("kind", out var kd) ? kd.GetString()! : "Animal", true),
+                                F("walk", 100), F("run", 250), st.TryGetProperty("flies", out var fl) && fl.GetBoolean(), st.TryGetProperty("swims", out var sw) && sw.GetBoolean(), !st.TryGetProperty("walks", out var wk) || wk.GetBoolean());
+                            actorStats = spec.Actors.ToDictionary(a2 => a2, _ => raceStats, StringComparer.OrdinalIgnoreCase);
+                        }
+                        // Head and torso: the config's, else found among its bones.
+                        var skel = (HKX2.hkRootLevelContainer)new HKX2.PackFileDeserializer().Deserialize(new HKX2.BinaryReaderEx(File.ReadAllBytes(Path.Combine(plOut, Skyrim.Creatures.CreatureRig.MeshFolder(id), "character assets", "skeleton.hkx"))));
+                        var boneNames = ((HKX2.hkaAnimationContainer)skel.m_namedVariants[0]!.m_variant!).m_skeletons[0].m_bones.Select(b => b.m_name).ToList();
+                        var guessed = Skyrim.Creatures.CreatureSpec.GuessBones(boneNames);
+                        int own = records.AddOwn(id, spec.Name, plOut, raceStats, actorStats, spec.Torso ?? guessed.Torso, spec.Head ?? guessed.Head);
+                        Console.WriteLine($"{id} ({spec.Name}): its own race and records; {own} actors switched in {records.PluginName} (health {raceStats.Health}, attack {raceStats.AttackMin}-{raceStats.AttackMax}, speed {raceStats.WalkSpeed:F0}/{raceStats.RunSpeed:F0})");
+                        continue;
+                    }
+                    string race = spec.TemplateRace ?? Skyrim.Creatures.CreatureBehavior.Templates[spec.Template!].Race;
+                    int n = records.Add(id, spec.Name, race, spec.Actors);
                     Console.WriteLine($"{id}: race, skin, {n} actors switched in {records.PluginName}");
                 }
-                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/creatures"));
+                string outDir = plOut;
                 Directory.CreateDirectory(outDir);
                 var written = byGame.Values.Select(rec => rec.Write(outDir)).ToList();
                 foreach (var w in written) Console.WriteLine($"wrote {w}");
@@ -10915,7 +11129,7 @@ static class Program
                 {
                     int copied = 0;
                     // An earlier install of these creatures goes first (another template left other files).
-                    foreach (string cid in opts["creatures"].Split(',', StringSplitOptions.RemoveEmptyEntries))
+                    foreach (string cid in specs.Select(s => s.Id))
                     {
                         string installed = Path.Combine(skyrimData, Skyrim.Creatures.CreatureRig.MeshFolder(cid));
                         if (Directory.Exists(installed)) Directory.Delete(installed, recursive: true);
@@ -10924,7 +11138,7 @@ static class Program
                         string setDir = Path.Combine(skyrimData, "meshes", "animationsetdata", project + "Data");
                         if (Directory.Exists(setDir)) Directory.Delete(setDir, recursive: true);
                     }
-                    foreach (string sub in new[] { "meshes", "textures" })
+                    foreach (string sub in new[] { "meshes", "textures", "sound" })
                     {
                         string from = Path.Combine(outDir, sub);
                         if (!Directory.Exists(from)) continue;
@@ -11008,6 +11222,7 @@ static class Program
                             if (items.Count > 0 && items[0] is short or int or string) notes.Add($"bones {t.Name}.{n} = {string.Join(",", items)}");
                         }
                         if (t.Name == "hkbClipGenerator" && n == "m_animationName") notes.Add($"clip {v}");
+                        if (t.Name == "hkaAnnotationTrackAnnotation" && n == "m_text" && o is HKX2.hkaAnnotationTrackAnnotation an) notes.Add($"annotation {an.m_time:F3} {an.m_text}");
                         if (opts.ContainsKey("states") && t.Name == "hkbStateMachineStateInfo" && n == "m_name") notes.Add($"state {v}");
                         if (opts.ContainsKey("states") && t.Name == "hkbClipGenerator" && n == "m_name" && o is HKX2.hkbClipGenerator cg) notes.Add($"clipgen {v} -> {cg.m_animationName} (mode {cg.m_mode})");
                         if (t.Name.EndsWith("StringData") && v is System.Collections.IEnumerable sl && v is not string)
@@ -11019,6 +11234,121 @@ static class Program
                 Walk(root, "root");
                 Console.WriteLine(string.Join(", ", counts.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}")));
                 foreach (var g in notes.GroupBy(x => x).OrderBy(g => g.Key)) Console.WriteLine($"  {g.Key}{(g.Count() > 1 ? $" (x{g.Count()})" : "")}");
+                return 0;
+            }
+            case "anim-data":
+            {
+                // Dev aid: a vanilla project's animation data (clips and triggers) and motion lines (--project, e.g. WolfProject).
+                if (new Skyrim.Creatures.CreatureBehavior(skyrimData).ProjectData(opts["project"]) is not { } pd) { Console.WriteLine("not found"); return 1; }
+                int lines = int.Parse(opts.GetValueOrDefault("lines", "80"));
+                Console.WriteLine("== data"); foreach (var l in pd.Data.Take(lines)) Console.WriteLine(l);
+                Console.WriteLine("== motion"); foreach (var l in pd.Motion.Take(lines)) Console.WriteLine(l);
+                return 0;
+            }
+            case "hkx-graph":
+            {
+                // Dev aid: a behaviour graph's state machines (--file: on disk or in the game's archives): each state with its
+                // generator (clips with mode and file, blenders, nested machines), the events that leave it and where to, the
+                // wildcard transitions, and the graph's variables and events. --contract: across every vanilla creature
+                // project's behaviour (meshes\actors\*\behaviors), the events and variables and how many graphs have each.
+                var arch = Directory.GetFiles(skyrimData, "Skyrim - *.bsa").Select(b => Mutagen.Bethesda.Archives.Archive.CreateReader(Mutagen.Bethesda.GameRelease.SkyrimSE, b))
+                    .SelectMany(a2 => a2.Files).GroupBy(f => f.Path, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+                HKX2.hkbBehaviorGraph Graph(string path)
+                {
+                    byte[] b = File.Exists(path) ? File.ReadAllBytes(path) : arch[path].GetBytes();
+                    var r = (HKX2.hkRootLevelContainer)new HKX2.PackFileDeserializer().Deserialize(new HKX2.BinaryReaderEx(b));
+                    return r.m_namedVariants.Select(v => v?.m_variant).OfType<HKX2.hkbBehaviorGraph>().First();
+                }
+                if (opts.ContainsKey("contract"))
+                {
+                    var events = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase); var vars = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    int graphs = 0;
+                    foreach (var path in arch.Keys.Where(k => k.StartsWith(@"meshes\actors\", StringComparison.OrdinalIgnoreCase) && k.Contains(@"\behaviors\", StringComparison.OrdinalIgnoreCase)
+                        && !k.Contains(@"\character\", StringComparison.OrdinalIgnoreCase) && k.EndsWith("behavior.hkx", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        HKX2.hkbBehaviorGraph g;
+                        try { g = Graph(path); } catch { continue; }
+                        graphs++;
+                        foreach (var e in g.m_data?.m_stringData?.m_eventNames ?? []) events[e] = events.GetValueOrDefault(e) + 1;
+                        foreach (var v in g.m_data?.m_stringData?.m_variableNames ?? []) vars[v] = vars.GetValueOrDefault(v) + 1;
+                    }
+                    int min = int.Parse(opts.GetValueOrDefault("min", "0"));
+                    Console.WriteLine($"{graphs} creature graphs");
+                    Console.WriteLine("events: " + string.Join(", ", events.Where(kv => kv.Value >= min).OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}")));
+                    Console.WriteLine("variables: " + string.Join(", ", vars.Where(kv => kv.Value >= min).OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}")));
+                    return 0;
+                }
+                // --fields: every class in the file once (the first of each), with its plain fields, nested objects' too.
+                if (opts.ContainsKey("fields"))
+                {
+                    byte[] fb = File.Exists(opts["file"]) ? File.ReadAllBytes(opts["file"]) : arch[opts["file"]].GetBytes();
+                    var froot = new HKX2.PackFileDeserializer().Deserialize(new HKX2.BinaryReaderEx(fb));
+                    var typesShown = new HashSet<Type>(); var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                    void Fields(object? o)
+                    {
+                        if (o is null || o is string || o.GetType().IsPrimitive || o.GetType().IsEnum || o.GetType().IsValueType || !visited.Add(o)) return;
+                        if (o is System.Collections.IEnumerable list) { foreach (var it in list) Fields(it); return; }
+                        var props = o.GetType().GetProperties().Where(p => p.Name.StartsWith("m_") && p.GetIndexParameters().Length == 0).ToList();
+                        if (typesShown.Add(o.GetType()))
+                            Console.WriteLine($"{o.GetType().Name}: " + string.Join("; ", props.Select(p => { object? v; try { v = p.GetValue(o); } catch { v = "?"; } return v is null or string or System.Numerics.Vector4 || v.GetType().IsPrimitive || v.GetType().IsEnum ? $"{p.Name}={v}" : v is Array arr && arr.GetType().GetElementType()!.IsPrimitive ? $"{p.Name}=[{string.Join(",", arr.Cast<object>())}]" : null; }).Where(x => x is not null)));
+                        foreach (var p in props) { try { Fields(p.GetValue(o)); } catch { } }
+                    }
+                    Fields(froot);
+                    return 0;
+                }
+                var graph = Graph(opts["file"]);
+                var sd = graph.m_data!.m_stringData!;
+                string Ev(int id) => id >= 0 && id < sd.m_eventNames.Count ? sd.m_eventNames[id] : id.ToString();
+                Console.WriteLine("variables: " + string.Join(", ", sd.m_variableNames.Select((v, i) => $"{v}={(graph.m_data.m_variableInitialValues?.m_wordVariableValues.Count > i ? graph.m_data.m_variableInitialValues.m_wordVariableValues[i].m_value : 0)}")));
+                Console.WriteLine("events: " + string.Join(", ", sd.m_eventNames));
+                var shown = new HashSet<object>(ReferenceEqualityComparer.Instance);
+                void Gen(object? o, string indent)
+                {
+                    if (o is null) return;
+                    if (!shown.Add(o)) { Console.WriteLine($"{indent}(again) {o.GetType().Name} {(o as HKX2.hkbNode)?.m_name}"); return; }
+                    switch (o)
+                    {
+                        case HKX2.hkbStateMachine sm:
+                            Console.WriteLine($"{indent}machine {sm.m_name} start {sm.m_startStateId}");
+                            foreach (var t in sm.m_wildcardTransitions?.m_transitions ?? []) Console.WriteLine($"{indent}  any --{Ev(t.m_eventId)}--> {t.m_toStateId}{(t.m_condition is null ? "" : " if " + t.m_condition.GetType().Name)}");
+                            foreach (var st in sm.m_states)
+                            {
+                                Console.WriteLine($"{indent}  state {st.m_stateId} {st.m_name}{(st.m_enterNotifyEvents is { } en ? " enter[" + string.Join(",", en.m_events.Select(e => Ev(e.m_id))) + "]" : "")}{(st.m_exitNotifyEvents is { } ex ? " exit[" + string.Join(",", ex.m_events.Select(e => Ev(e.m_id))) + "]" : "")}");
+                                foreach (var t in st.m_transitions?.m_transitions ?? []) Console.WriteLine($"{indent}    --{Ev(t.m_eventId)}--> {t.m_toStateId}{(t.m_condition is null ? "" : " if " + t.m_condition.GetType().Name)}");
+                                Gen(st.m_generator, indent + "    ");
+                            }
+                            break;
+                        case HKX2.hkbClipGenerator c:
+                            Console.WriteLine($"{indent}clip {c.m_name} {c.m_animationName} mode {c.m_mode}{(c.m_triggers is { } tr ? " triggers " + string.Join(",", tr.m_triggers.Select(x => $"{Ev(x.m_event.m_id)}@{x.m_localTime:F2}")) : "")}");
+                            break;
+                        case HKX2.hkbBlenderGenerator b:
+                            Console.WriteLine($"{indent}blender {b.m_name} flags {b.m_flags} bound {(b.m_variableBindingSet?.m_bindings.Select(x => $"{x.m_memberPath}<-{(x.m_variableIndex < sd.m_variableNames.Count ? sd.m_variableNames[x.m_variableIndex] : x.m_variableIndex.ToString())}") is { } bs ? string.Join(",", bs) : "")}");
+                            foreach (var ch in b.m_children) { Console.WriteLine($"{indent}  child weight {ch.m_weight}"); Gen(ch.m_generator, indent + "    "); }
+                            break;
+                        case HKX2.hkbModifierGenerator mg:
+                            Console.WriteLine($"{indent}modifier-gen {mg.m_name} modifier {mg.m_modifier?.GetType().Name} {mg.m_modifier?.m_name}");
+                            var mods = mg.m_modifier is HKX2.hkbModifierList ml ? ml.m_modifiers.Cast<HKX2.hkbModifier?>().ToList() : [mg.m_modifier];
+                            foreach (var md in mods.OfType<HKX2.hkbModifier>())
+                                Console.WriteLine($"{indent}  mod {md.GetType().Name} {md.m_name}{(md.m_variableBindingSet?.m_bindings is { } mb ? " bound " + string.Join(",", mb.Select(x => $"{x.m_memberPath}<->{(x.m_variableIndex < sd.m_variableNames.Count ? sd.m_variableNames[x.m_variableIndex] : x.m_variableIndex.ToString())}")) : "")}"
+                                    + (md is HKX2.BSIsActiveModifier ia ? $" active {ia.m_bIsActive0}/{ia.m_bInvertActive0} {ia.m_bIsActive1}/{ia.m_bInvertActive1} {ia.m_bIsActive2}/{ia.m_bInvertActive2} {ia.m_bIsActive3}/{ia.m_bInvertActive3} {ia.m_bIsActive4}/{ia.m_bInvertActive4}" : ""));
+                            Gen(mg.m_generator, indent + "  ");
+                            break;
+                        case HKX2.hkbManualSelectorGenerator ms:
+                            Console.WriteLine($"{indent}selector {ms.m_name} {ms.m_generators.Count} children bound {(ms.m_variableBindingSet?.m_bindings.Select(x => $"{x.m_memberPath}<-{(x.m_variableIndex < sd.m_variableNames.Count ? sd.m_variableNames[x.m_variableIndex] : x.m_variableIndex.ToString())}") is { } mbs ? string.Join(",", mbs) : "")}");
+                            for (int ci = 0; ci < ms.m_generators.Count; ci++) { Console.WriteLine($"{indent}  [{ci}]"); Gen(ms.m_generators[ci], indent + "    "); }
+                            break;
+                        case HKX2.hkbNode n:
+                            Console.WriteLine($"{indent}{n.GetType().Name} {n.m_name}");
+                            foreach (var p in n.GetType().GetProperties().Where(p => typeof(HKX2.hkbGenerator).IsAssignableFrom(p.PropertyType))) Gen(p.GetValue(n), indent + "  ");
+                            foreach (var p in n.GetType().GetProperties().Where(p => p.PropertyType.IsGenericType && p.Name.StartsWith("m_")))
+                                if (p.GetValue(n) is System.Collections.IEnumerable items)
+                                    foreach (var it in items)
+                                        if (it is HKX2.hkbGenerator ig) Gen(ig, indent + "  ");
+                                        else if (it is not null && it.GetType().GetProperty("m_generator") is { } gp) Gen(gp.GetValue(it), indent + "  ");
+                            break;
+                    }
+                }
+                Gen(graph.m_rootGenerator, "");
                 return 0;
             }
             case "hkx-roundtrip":

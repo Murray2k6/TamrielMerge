@@ -201,6 +201,30 @@ static class Midi
 /// <summary>16-bit PCM WAV post-processing.</summary>
 static class Wav
 {
+    /// <summary>A PCM WAV as 16-bit PCM (Skyrim's own effects are; Morrowind's are often 8-bit unsigned), same rate and
+    /// channels, samples unchanged in value; other encodings and 16-bit files come back as they are.</summary>
+    public static byte[] To16Bit(byte[] d)
+    {
+        if (d.Length < 12 || System.Text.Encoding.ASCII.GetString(d, 0, 4) != "RIFF") return d;
+        int p = 12, dataPos = -1, dataLen = 0, format = 0, channels = 1, rate = 22050, bits = 16;
+        while (p + 8 <= d.Length)
+        {
+            string id = System.Text.Encoding.ASCII.GetString(d, p, 4); int len = BitConverter.ToInt32(d, p + 4);
+            if (id == "fmt ") { format = BitConverter.ToInt16(d, p + 8); channels = BitConverter.ToInt16(d, p + 10); rate = BitConverter.ToInt32(d, p + 12); bits = BitConverter.ToInt16(d, p + 22); }
+            if (id == "data") { dataPos = p + 8; dataLen = Math.Min(len, d.Length - dataPos); break; }
+            p += 8 + len + (len & 1);
+        }
+        if (format != 1 || bits != 8 || dataPos < 0) return d;
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        w.Write("RIFF"u8); w.Write(36 + dataLen * 2); w.Write("WAVE"u8);
+        w.Write("fmt "u8); w.Write(16); w.Write((short)1); w.Write((short)channels); w.Write(rate); w.Write(rate * channels * 2); w.Write((short)(channels * 2)); w.Write((short)16);
+        w.Write("data"u8); w.Write(dataLen * 2);
+        for (int i = 0; i < dataLen; i++) w.Write((short)((d[dataPos + i] - 128) << 8));
+        w.Flush();
+        return ms.ToArray();
+    }
+
     /// <summary>Trims to maxSeconds, fades out the end, and normalises the peak to -1 dBFS.</summary>
     public static void FadeAndNormalise(string path, double fadeSeconds, double maxSeconds)
     {

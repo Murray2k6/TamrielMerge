@@ -368,6 +368,9 @@ public sealed class CreatureBehavior
 
     Dictionary<string, (List<string> Data, List<string> Motion)>? singleData;
 
+    /// <summary>A vanilla project's animation data and motion lines (its own files, else the single file's part).</summary>
+    public (List<string> Data, List<string> Motion)? ProjectData(string project) => TemplateData(project);
+
     /// <summary>
     /// Checks the single-file readers against the projects the archives also have as files of their own: (projects
     /// compared, those whose data, motion and set files read the same, the first differences).
@@ -520,7 +523,7 @@ public sealed class CreatureBehavior
         WriteText(path, lines);
     }
 
-    string AddToIndex(string path, string vanilla, string entry)
+    internal string AddToIndex(string path, string vanilla, string entry)
     {
         var lines = (File.Exists(path) ? File.ReadAllText(path) : Text(vanilla)).Replace("\r", "").Split('\n').Where(l => l.Length > 0).ToList();
         if (!lines.Contains(entry, StringComparer.OrdinalIgnoreCase)) lines.Add(entry);

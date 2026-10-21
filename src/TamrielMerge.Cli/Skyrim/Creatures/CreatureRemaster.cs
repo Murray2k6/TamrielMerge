@@ -46,8 +46,10 @@ public static class CreatureRemaster
                 meshes[i] = m with { Textures = tex };
             }
         }
+        // The source's own skin binds stay with each mesh (the remaster moves vertices within the same bind).
+        var binds = rig.Meshes.Where(m => m.SkinToBone is not null).GroupBy(m => m.Name).ToDictionary(g => g.Key, g => g.First().SkinToBone);
         rig.Meshes.Clear();
-        rig.Meshes.AddRange(meshes);
+        rig.Meshes.AddRange(meshes.Select(m => binds.TryGetValue(m.Name, out var b) ? m with { SkinToBone = b } : m));
     }
 
     static void SaveMeshes(CreatureRig rig, string path)
