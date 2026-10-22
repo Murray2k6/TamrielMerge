@@ -334,9 +334,13 @@ public sealed partial class ObPluginBuilder : IDisposable
         FinishNpcPackages();
         Directory.CreateDirectory(modOutDir);
         TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
+        MakePersonKeywords();
         Console.WriteLine($"  finished, to write {Util.Machine.MemoryNote()}");
         mod.WriteToBinary(Path.Combine(modOutDir, PluginName));
         Console.WriteLine($"  plugin written {Util.Machine.MemoryNote()}");
+        // Oblivion's people moving as Oblivion's do: its character animations retargeted onto Skyrim's skeleton, for the
+        // keywords its people carry (ObPeople, Skyrim/Animations/NpcAnimations).
+        WritePeopleAnimations();
         // What procedural creatures may use from Oblivion (read by the creatures step when that option is on).
         WriteCreatureCatalog(Path.Combine(modOutDir, PluginName));
         // What the progression build offers on the Mundus stones from Oblivion.

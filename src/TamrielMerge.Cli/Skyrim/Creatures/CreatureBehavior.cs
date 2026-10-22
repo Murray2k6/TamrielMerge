@@ -60,6 +60,12 @@ public sealed class CreatureBehavior
     }
 
     byte[] Read(string path) => archive.TryGetValue(path, out var f) ? f.GetBytes() : throw new FileNotFoundException(path);
+
+    /// <summary>A file in the game's animation and misc archives, or null.</summary>
+    public byte[]? ReadArchive(string path) => archive.TryGetValue(path, out var f) ? f.GetBytes() : null;
+
+    /// <summary>The archives' paths under <paramref name="folder"/> (lower case as stored).</summary>
+    public IEnumerable<string> ArchivePaths(string folder) => archive.Keys.Where(k => k.StartsWith(folder, StringComparison.OrdinalIgnoreCase));
     string Text(string path) => Encoding.ASCII.GetString(Read(path));
     internal static hkRootLevelContainer Hkx(byte[] b) => (hkRootLevelContainer)new PackFileDeserializer().Deserialize(new BinaryReaderEx(b));
     internal static T Variant<T>(hkRootLevelContainer r) where T : class => r.m_namedVariants.Select(v => v?.m_variant).OfType<T>().First();
@@ -217,7 +223,7 @@ public sealed class CreatureBehavior
     }
 
     /// <summary>Calls <paramref name="visit"/> on every Havok object reachable from <paramref name="root"/> once.</summary>
-    static void Visit(object root, Action<object> visit)
+    internal static void Visit(object root, Action<object> visit)
     {
         var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
         void Walk(object? o)

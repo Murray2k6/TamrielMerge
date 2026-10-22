@@ -90,8 +90,11 @@ public sealed partial class ObPluginBuilder
     /// </summary>
     void FinishNpcPackages()
     {
-        foreach (var (npc, keys) in npcPackageLists)
+        // By index: making a package can make the actor it names, whose own packages join the list (2026-10-21: a
+        // one-interior build ended "Collection was modified" here).
+        for (int i = 0; i < npcPackageLists.Count; i++)
         {
+            var (npc, keys) = npcPackageLists[i];
             var own = keys.Select(ObScheduledPackage).OfType<Package>().ToList();
             if (own.Count == 0) continue;
             var fallback = npc.Packages.ToList();

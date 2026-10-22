@@ -455,6 +455,8 @@ public sealed partial class ObPluginBuilder
         // A trainer (AI services Training): the skill its AI data names, up to its maximum training level.
         if (n.AIData is { } td && td.BuySellServices.ToString().Contains("Training") && ObSkillIds.TryGetValue(td.Teaches.ToString(), out var taught))
             obTrainers.Add(new(npc, taught, td.MaximumTrainingLevel));
+        // Moving and standing as Oblivion's people do (ObPeople).
+        AsOblivionPerson(npc, n, female, race, look);
         return npc;
     }
 
@@ -611,7 +613,7 @@ public sealed partial class ObPluginBuilder
         {
             Base = new FormLinkNullable<INpcGetter>(actor.FormKey),
             Placement = new Placement { Position = loc.Position, Rotation = loc.Rotation },
-            Scale = scale is { } s && MathF.Abs(s - 1) > 0.001f ? s : null,
+            Scale = PlacedScale(actor.FormKey, scale),
         };
         if (!PlaceForScripts(source, placed, cell, persistentCell)) cell.Temporary.Add(placed);
         NoteActor(placed, baseKey, cell);

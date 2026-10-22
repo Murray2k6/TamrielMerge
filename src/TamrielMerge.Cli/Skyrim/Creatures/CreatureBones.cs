@@ -87,9 +87,13 @@ public static class CreatureBones
             using var cache = new nifly.niflycpp.BlockCache(body.GetHeader());
             int shapes = 0, vertices = 0, overFour = 0, unweighted = 0, notWhole = 0; float worstBind = 0; string worstBindBone = "";
             var usedBones = new HashSet<string>();
+            // A tint copy ("<shape> [tint k]", MwCreatureSource) binds as its shape: its source shape's place by name.
+            var shapeNames = body.GetShapes().Select(s => s.name.get()).ToList();
             foreach (var shape in body.GetShapes())
             {
                 shapes++;
+                string baseName = System.Text.RegularExpressions.Regex.Replace(shape.name.get(), @" \[tint \d+\]$", "");
+                int sourceShape = baseName != shape.name.get() && shapeNames.IndexOf(baseName) is >= 0 and var at ? at : shapes - 1;
                 using var bl = new nifly.vectorstring();
                 body.GetShapeBoneList(shape, bl);
                 var verts = body.GetVertsForShape(shape);
@@ -110,7 +114,7 @@ public static class CreatureBones
                     var stb = new Matrix4x4(cx.x, cx.y, cx.z, 0, cy.x, cy.y, cy.z, 0, cz.x, cz.y, cz.z, 0, t.translation.x, t.translation.y, t.translation.z, 1);
                     // Against the source's bind for this shape and bone, else the bone's rest inverted: points go where they should.
                     Matrix4x4 expected;
-                    if (sourceBinds is not null && shapes - 1 < sourceBinds.Count && sourceBinds[shapes - 1].TryGetValue(System.Text.RegularExpressions.Regex.Replace(bl[b], @" \[vis \d+\]$", ""), out var own)) expected = own;
+                    if (sourceBinds is not null && sourceShape < sourceBinds.Count && sourceBinds[sourceShape].TryGetValue(System.Text.RegularExpressions.Regex.Replace(bl[b], @"( \[(vis|tint) \d+\])+$", ""), out var own)) expected = own;
                     else Matrix4x4.Invert(world[bi], out expected);
                     float err = new[] { Vector3.Zero, Vector3.UnitX * 50, Vector3.UnitY * 50, Vector3.UnitZ * 50 }.Max(p => Vector3.Distance(Vector3.Transform(p, Matrix4x4.CreateScale(t.scale) * stb), Vector3.Transform(p, expected)));
                     if (err > worstBind) { worstBind = err; worstBindBone = bl[b]; }

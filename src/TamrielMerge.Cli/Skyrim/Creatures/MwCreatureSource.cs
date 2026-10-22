@@ -214,12 +214,14 @@ public static class MwCreatureSource
     ];
 
     /// <summary>Whether the creatures drawn with <paramref name="model"/> are bipeds (FLAG 0x01: Morrowind gives them the
-    /// humanoid animations) and the weapon styles their inventories hold (leveled lists opened; none: hand to hand).</summary>
+    /// humanoid animations) and the weapon styles their inventories hold (leveled lists opened; none: hand to hand), for one
+    /// that fights with weapons: a biped, or one flagged "Weapon and Shield" (0x04: a goblin, Almalexia, an ice minion).</summary>
     public static (bool Biped, List<string> Styles) Kind(MwWorld world, string model)
     {
         var creatures = CreaturesWith(world, model);
         bool biped = creatures.Any(c => ((c.Get("FLAG")?.Int() ?? 0) & 0x01) != 0);
-        if (!biped) return (false, []);
+        bool armed = biped || creatures.Any(c => ((c.Get("FLAG")?.Int() ?? 0) & 0x04) != 0);
+        if (!armed) return (false, []);
         var styles = new HashSet<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         void Collect(string id)
@@ -234,18 +236,23 @@ public static class MwCreatureSource
         }
         foreach (var c in creatures)
             foreach (var f in c.All("NPCO")) Collect(Tes3Plugin.Encoding.GetString(f.Data, 4, f.Data.Length - 4).TrimEnd('\0'));
-        if (styles.Count == 0) styles.Add("hh");
-        return (true, WeaponStyles.Select(s => s.Key).Where(styles.Contains).ToList());
+        if (styles.Count == 0 && biped) styles.Add("hh");
+        return (biped, WeaponStyles.Select(s => s.Key).Where(styles.Contains).ToList());
     }
-
     /// <summary>The weapon styles a creature fights in: a biped every style its animations have (Morrowind picks the style by
     /// what it holds when it holds it, whatever its items were to start with), its items' styles first; else none.</summary>
     public static List<string> Styles(IReadOnlyList<ClipSource> sources, IReadOnlyCollection<string> held, bool biped)
     {
-        // A creature that isn't a biped holds no weapon, but a spell readied is its "spell" idle (OpenMW's getWeaponShortGroup
-        // drops only hand to hand's short group for one): IdleSpell, when it has one.
+        // A creature that isn't a biped: a spell readied is its "spell" idle (OpenMW's getWeaponShortGroup drops only hand to
+        // hand's short group for one): IdleSpell, when it has one; one that fights with weapons (its items held: Kind) moves
+        // with them as its own groups have it (Idle1h, WalkForward1h...).
         if (!biped)
-            return sources.Any(s => s.Groups.ContainsKey("IdleSpell")) ? ["spell"] : [];
+        {
+            var own = WeaponStyles.Where(w => w.Key is not ("hh" or "spell" or "throw") && held.Contains(w.Key)
+                && sources.Any(s => s.Groups.ContainsKey(w.Idle) || s.Groups.ContainsKey(w.Walk) || s.Groups.ContainsKey(w.Run))).Select(w => w.Key).ToList();
+            if (sources.Any(s => s.Groups.ContainsKey("IdleSpell"))) own.Add("spell");
+            return own;
+        }
         // (Not a thrown weapon's: thrown weapons are misc items in Skyrim, so nothing ever holds one to throw.)
         var animated = WeaponStyles.Where(w => w.Key != "throw" && sources.Any(s => (s.Keys?.Keys ?? []).Any(k => k.Text.Split('\n').Any(l => l.Trim().StartsWith(w.Group + ":", StringComparison.OrdinalIgnoreCase)))))
             .Select(w => w.Key).ToHashSet();
@@ -330,8 +337,18 @@ public static class MwCreatureSource
                 return real ? [own, group + (style.Key is "2c" or "2w" ? "2c" : "1h"), group] : [own, group];
             }
             if (Whole($"cidle_{style.Key}", Chain("Idle", style.Idle), loop: true) is { } i) plan.Add(i);
-            // (One that isn't a biped: its spell idle alone - it moves as ever, never turns, and casts with its attacks.)
-            if (!biped) continue;
+            // (One that isn't a biped: its spell idle alone - it moves as ever and casts with its attacks; with a weapon, its
+            // weapon's walking and running groups, never turning, its own attacks for blows.)
+            if (!biped)
+            {
+                if (style.Key == "spell") continue;
+                foreach (var (way, walkGroup, runGroup) in new[] { ("", "WalkForward", "RunForward"), ("back", "WalkBack", "RunBack"), ("left", "WalkLeft", "RunLeft"), ("right", "WalkRight", "RunRight") })
+                {
+                    if (Whole($"cwalk{way}_{style.Key}", Chain(walkGroup, walkGroup + style.Moves), loop: true) is { } nw) plan.Add(nw);
+                    if (Whole($"crun{way}_{style.Key}", Chain(runGroup, runGroup + style.Moves), loop: true) is { } nr) plan.Add(nr);
+                }
+                continue;
+            }
             foreach (var (way, walkGroup, runGroup) in new[] { ("", "WalkForward", "RunForward"), ("back", "WalkBack", "RunBack"), ("left", "WalkLeft", "RunLeft"), ("right", "WalkRight", "RunRight") })
             {
                 if (Whole($"cwalk{way}_{style.Key}", Chain(walkGroup, walkGroup + style.Moves), loop: true) is { } w) plan.Add(w);
@@ -841,6 +858,7 @@ public static class MwCreatureSource
         var visKeys = VisibilityKeys(nif);
         var scene = SceneParents(nif);
         var visKeyedOf = new Dictionary<int, List<int>>();   // visibility bone -> the keyed blocks it follows
+        var tintOf = new Dictionary<int, Func<(int Source, float Time), bool>>();   // tint bone -> whether its colour shows
         foreach (var shape in bodyShapes)
         {
             if (nif.Get<NiTriShapeData>(shape.Data) is not { } d || d.Vertices.Length == 0) continue;
@@ -936,6 +954,73 @@ public static class MwCreatureSource
             if (nif.Get<NiParticles>(c.Target) is not { } particles || !scene.TryGetValue(particles.Index, out int parentNode) || !boneOf.TryGetValue(parentNode, out int parentBone)) continue;
             var keyed = VisibilityOf(scene, visKeys, particles.Index).Union(c.Emitter >= 0 ? VisibilityOf(scene, visKeys, c.Emitter) : []).Distinct().ToList();
             if (keyed.Count > 0) particleParent[parentNode] = VisBone(parentBone, keyed);
+        }
+
+        // A material's diffuse colour as Morrowind animates it (NiMaterialColorController on the diffuse: the clannfear
+        // daddy's brass ring dimming 15% over its .kf, 2026-10-21). Skyrim animates no diffuse colour, and the colour of a
+        // textured shape is its vertex colours (Look), which are 8-bit: so one copy of the shape for each 8-bit colour it
+        // takes in any clip, on "tint bones" under its bones scaled 1 while Morrowind's colour is that one and 0 else
+        // (as the visibility bones), shows Morrowind's colour as exactly as a still tint is shown. Outside its own .kf's
+        // clips the colour rests as the material has it. (Its ambient colour, animated beside it, is carried no more
+        // than any shape's: Skyrim has no material ambient.)
+        int ownOfTint = sources.FindIndex(s => s.Path.Equals(Path.Combine(Path.GetDirectoryName(model)!, "x" + Path.GetFileNameWithoutExtension(model) + ".kf"), StringComparison.OrdinalIgnoreCase));
+        foreach (var shape in bodyShapes)
+        {
+            if (!meshOf.TryGetValue(shape.Index, out int mi) || rig.Meshes[mi].Hidden) continue;
+            if (Property<NiMaterialProperty>(nif, scene, shape.Index) is not { } tintMat) continue;
+            var controller = nif.Blocks.OfType<NiController>().FirstOrDefault(c => c.Type == "NiMaterialColorController" && c.Target == tintMat.Index && (c.Flags & 8) != 0 && ((c.Flags >> 4) & 7) == 1
+                && nif.Get<NiKeyData>(c.Data) is { Keys.Count: > 0 });
+            if (controller is null) continue;
+            if (nif.Blocks.OfType<NiController>().Any(c => c.Type == "NiGeomMorpherController" && c.Target == shape.Index))
+            {
+                problems.Add($"{model}: {shape.Name}: a diffuse colour animated on a morphing shape (the colour not carried)");
+                continue;
+            }
+            var tintData = nif.Get<NiTriShapeData>(shape.Data)!;
+            // Its vertex colours, where their mode takes them, stand for its diffuse in Morrowind: the material's is unseen.
+            uint mode = Property<NiVertexColorProperty>(nif, scene, shape.Index)?.VertexMode ?? 2;
+            if (mode == 2 && tintData.Colors.Length == tintData.Vertices.Length && tintData.Colors.Any(c => c != Vector4.One)) continue;
+            var colourKeys = nif.Get<NiKeyData>(controller.Data)!;
+            Vector3 ColourAt(int source, float t) => source == ownOfTint
+                ? MwKeys.Vector(colourKeys.Keys, colourKeys.Interpolation, colourKeys.Extra, ControllerTime(controller, t)) : tintMat.Diffuse;
+            // The first its resting colour (the shape as it stands, its own name), then each other one a clip takes.
+            var levels = new List<(byte R, byte G, byte B)> { TintLevel(tintMat.Diffuse) };
+            foreach (var (_, source, _, start, stop, _, _, _) in plan)
+                for (int f = 0, n = Math.Max(2, (int)MathF.Round((stop - start) * Fps) + 1); f < n; f++)
+                {
+                    var q = TintLevel(ColourAt(source, Math.Min(start + f / Fps, stop)));
+                    if (!levels.Contains(q)) levels.Add(q);
+                }
+            if (levels.Count < 2) continue;
+            var original = rig.Meshes[mi];
+            var tintTex = new Dictionary<string, string>(original.Textures);
+            // An untextured shape draws its material colour from a solid texture: white under the copies' colours.
+            if (Property<NiTexturingProperty>(nif, scene, shape.Index)?.Base is null) tintTex["diffuse"] = Path.Combine(modOutDir, textures.Solid(Vector3.One));
+            for (int k = 0; k < levels.Count; k++)
+            {
+                var level = levels[k];
+                var colour = new Vector4(level.R / 255f, level.G / 255f, level.B / 255f, 1);
+                var tintBones = new Dictionary<int, int>();
+                int TintBone(int bone)
+                {
+                    if (tintBones.TryGetValue(bone, out int tb)) return tb;
+                    tb = rig.Bones.Count;
+                    rig.Bones.Add(new CreatureRig.Bone($"{rig.Bones[bone].Name} [tint {tintOf.Count + 1}]", bone, Vector3.Zero, Quaternion.Identity));
+                    restLocal.Add(NifTransform.Identity);
+                    tintOf[tb] = (s => TintLevel(ColourAt(s.Source, s.Time)) == level);
+                    return tintBones[bone] = tb;
+                }
+                var copy = original with
+                {
+                    Name = k == 0 ? original.Name : $"{original.Name} [tint {k + 1}]",
+                    Weights = original.Weights.Select(ws => ws.Select(p => (TintBone(p.Bone), p.W)).ToArray()).ToArray(),
+                    SkinToBone = original.SkinToBone?.ToDictionary(kv => TintBone(kv.Key), kv => kv.Value),
+                    Textures = tintTex,
+                    // A white resting colour is no tint, as the still shape has it.
+                    Look = k == 0 && original.Look?.Colors is null && level == (255, 255, 255) ? original.Look : original.Look! with { Colors = Enumerable.Repeat(colour, original.V.Length).ToArray() },
+                };
+                if (k == 0) rig.Meshes[mi] = copy; else rig.Meshes.Add(copy);
+            }
         }
 
         // Vertex morphs (NiGeomMorpherController: a bear's or a wolf's jaw, a netch's swell, a kwama's feelers), every one
@@ -1056,7 +1141,7 @@ public static class MwCreatureSource
                 if (rig.Clips.ContainsKey(clip)) continue;
                 var tracks = tracksBySource[source];
                 // Scale keys (the Heart of Akulakhan's beat, a riekling's) are carried, frame by frame.
-                bool scaled = tracks.Values.Any(kd => kd.Scales.Any(s => MathF.Abs(s.Value.X - 1) > 1e-4f)) || restLocal.Any(r => MathF.Abs(r.Scale - 1) > 1e-4f) || rig.HiddenBones.Count > 0 || visKeyedOf.Count > 0;
+                bool scaled = tracks.Values.Any(kd => kd.Scales.Any(s => MathF.Abs(s.Value.X - 1) > 1e-4f)) || restLocal.Any(r => MathF.Abs(r.Scale - 1) > 1e-4f) || rig.HiddenBones.Count > 0 || visKeyedOf.Count > 0 || tintOf.Count > 0;
                 int frames = Math.Max(2, (int)MathF.Round((stop - start) * Fps) + 1);
                 var clipFrames = new (Vector3, Quaternion)[frames][];
                 var clipScales = scaled ? new float[frames][] : null;
@@ -1091,6 +1176,7 @@ public static class MwCreatureSource
                         }
                         if (rig.HiddenBones.Contains(b)) s = 0;
                         else if (visKeyedOf.TryGetValue(b, out var keyed)) s = keyed.All(k => Shown(nif, visKeys, k, source == ownSource, t)) ? 1 : 0;
+                        else if (tintOf.TryGetValue(b, out var shows)) s = shows((source, t)) ? 1 : 0;
                         // A morph bone: Morrowind's weighted targets at this moment (its keys run on the model's own .kf's time).
                         if (morphOf.TryGetValue(b, out var morph))
                         {
@@ -1107,7 +1193,7 @@ public static class MwCreatureSource
                     // A hidden visibility bone gathers what it carries into one point: its origin moved to the root's, so a part
                     // on several of them (a body skinned to many bones) folds into that one point, not onto its skeleton. An emit
                     // bone sits at its node's parent's origin, in its node's frame, as they are posed now.
-                    var hiddenVis = visKeyedOf.Keys.Where(vb => scales[vb] == 0).ToList();
+                    var hiddenVis = visKeyedOf.Keys.Concat(tintOf.Keys).Where(vb => scales[vb] == 0).ToList();
                     if (hiddenVis.Count > 0 || emitBoneOf.Count > 0)
                     {
                         var poseWorld = new Matrix4x4[rig.Bones.Count];
@@ -1287,6 +1373,10 @@ public static class MwCreatureSource
 
     /// <summary>A controller's own time at a moment of the animation: scaled by its frequency, moved by its phase, then
     /// within its span as its cycle says (flags bits 1-2: 0 repeat, 1 back and forth, 2 held at its ends).</summary>
+    /// <summary>A colour as 8-bit vertex colours hold it.</summary>
+    public static (byte R, byte G, byte B) TintLevel(Vector3 c) =>
+        ((byte)Math.Clamp(MathF.Round(c.X * 255), 0, 255), (byte)Math.Clamp(MathF.Round(c.Y * 255), 0, 255), (byte)Math.Clamp(MathF.Round(c.Z * 255), 0, 255));
+
     public static float ControllerTime(NiController c, float t)
     {
         float ct = t * c.Frequency + c.Phase, span = c.Stop - c.Start;

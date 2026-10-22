@@ -195,7 +195,40 @@ public static class CreatureLooks
                             expected.Add((s.Index, new[] { 20, 22, 21, 23 }[g], t => MwKeys.Vector(k.Keys, k.Interpolation, k.Extra, MwCreatureSource.ControllerTime(c, t)).X, g < 2 ? 0 : 1));
         }
         foreach (var c in controllers.Where(c => c.Type == "NiMaterialColorController"))
-            Issue($"{mw.Get<NiObjectNET>(c.Target)?.Name}: material colour {(c.Flags >> 4) & 7} animated by Morrowind (no Skyrim shader value for it)");
+        {
+            int target = (c.Flags >> 4) & 7;
+            string matName = mw.Get<NiObjectNET>(c.Target)?.Name ?? $"#{c.Target}";
+            if (target == 0) { lines.Add($"  {matName}: its ambient colour animated (Skyrim has no material ambient: no shape's still ambient is carried either)"); continue; }
+            if (target != 1 || mw.Get<NiKeyData>(c.Data) is not { Keys.Count: > 0 } ck) { Issue($"{matName}: material colour {target} animated by Morrowind (not carried)"); continue; }
+            // Its diffuse: each shape drawing with it as copies, one for each 8-bit colour its clips take (MwCreatureSource).
+            var (cBiped, cStyles) = world is not null ? MwCreatureSource.Kind(world, mp) : (false, []);
+            var cSources = MwCreatureSource.Sources(data, mp, cBiped);
+            var cPlan = MwCreatureSource.Plan(cSources, cStyles, cBiped, world is not null ? MwCreatureSource.ScriptedGroups(world, mp) : null, world is not null ? MwCreatureSource.PickableIdles(world, mp) : null);
+            string cOwnKf = Path.Combine(Path.GetDirectoryName(mp)!, "x" + Path.GetFileNameWithoutExtension(mp) + ".kf");
+            int cOwn = cSources.FindIndex(s => s.Path.Equals(cOwnKf, StringComparison.OrdinalIgnoreCase));
+            var mat = mw.Get<NiMaterialProperty>(c.Target)!;
+            var needed = new HashSet<(byte, byte, byte)> { MwCreatureSource.TintLevel(mat.Diffuse) };
+            foreach (var (_, source, _, start, stop, _, _, _) in cPlan)
+                for (int f = 0, n = Math.Max(2, (int)MathF.Round((stop - start) * 30) + 1); f < n; f++)
+                    needed.Add(source == cOwn ? MwCreatureSource.TintLevel(MwKeys.Vector(ck.Keys, ck.Interpolation, ck.Extra, MwCreatureSource.ControllerTime(c, Math.Min(start + f / 30f, stop)))) : MwCreatureSource.TintLevel(mat.Diffuse));
+            foreach (var s in shapes.Where(s => MwCreatureSource.Drawn(mw, s) && MwCreatureSource.Property<NiMaterialProperty>(mw, scene, s.Index) == mat))
+            {
+                string want = CreatureRig.FileSafe($"{id}_{(s.Name.Length > 0 ? s.Name : $"shape{s.Index}")}");
+                var copies = bodyShapes.Where(b => b.name.get() == want || b.name.get().StartsWith(want + " [tint ", StringComparison.Ordinal)).ToList();
+                var levels = new List<(byte, byte, byte)>();
+                bool even = true;
+                foreach (var b in copies)
+                {
+                    var cols = nif.GetColorsForShape(b)?.Select(x => MwCreatureSource.TintLevel(new Vector3(x.r, x.g, x.b))).ToList() ?? [];
+                    var level = cols.Count > 0 ? cols[0] : ((byte)255, (byte)255, (byte)255);
+                    even &= cols.All(x => x == level);
+                    levels.Add(level);
+                }
+                if (!even || levels.Distinct().Count() != levels.Count || !levels.ToHashSet().SetEquals(needed))
+                    Issue($"{s.Name}: its diffuse colour animated: {needed.Count} colours its clips take, {copies.Count} copies ({levels.Distinct().Count()} colours{(even ? "" : ", not each one colour")})");
+                else lines.Add($"  {s.Name}: its diffuse colour animated: {copies.Count} copies, one for each 8-bit colour its clips take");
+            }
+        }
 
         var root = nif.GetRootNode();
         var manager = hdr.GetBlockById(root.controllerRef.index) as nifly.NiControllerManager;
@@ -218,7 +251,7 @@ public static class CreatureLooks
         string ownKf = Path.Combine(Path.GetDirectoryName(mp)!, "x" + Path.GetFileNameWithoutExtension(mp) + ".kf");
         int ownSource = sources.FindIndex(s => s.Path.Equals(ownKf, StringComparison.OrdinalIgnoreCase));
         string animDir = Path.Combine(dataDir, CreatureRig.MeshFolder(id), "animations");
-        string[] looping = ["idle", "walk", "run"];
+
         using var cache = new nifly.niflycpp.BlockCache(hdr);
         var seen = new HashSet<string>();
         foreach (var p in plan)
@@ -229,7 +262,7 @@ public static class CreatureLooks
             int frames = Math.Max(2, (int)MathF.Round((p.Stop - p.Start) * 30) + 1);
             float length = (frames - 1) / 30f;
             if (MathF.Abs(seq.stopTime - length) > 1e-3f || seq.startTime != 0) Issue($"{seqName}: {seq.startTime}..{seq.stopTime}, its clip 0..{length}");
-            bool loops = looping.Contains(p.Clip);
+            bool loops = MwCreatureSource.IsLooping(p.Clip);
             if ((seq.cycleType == nifly.CycleType.CYCLE_LOOP) != loops) Issue($"{seqName}: cycle {seq.cycleType}, its clip {(loops ? "repeats" : "plays once")}");
             var textKeys = seq.textKeyRef.index < hdr.GetNumBlocks() && hdr.GetBlockTypeStringById(seq.textKeyRef.index) == "NiTextKeyExtraData"
                 ? Skyrim.Meshes.NiflyRaw.TextKeys(cache.EditableBlockById<nifly.NiTextKeyExtraData>(seq.textKeyRef.index)).Select(k => (Time: k.time, Text: k.value.get())).ToList() : [];

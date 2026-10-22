@@ -98,6 +98,39 @@ User: "the cliffracers need to be identical to the originals in morrowind", "ice
   (against the source's own for a Morrowind model) and weights, every animation's tracks, the graph's look-at bone, the
   head and torso, and each bone against the Morrowind node it came from.
 
+## Every group as Morrowind plays it (2026-10-21)
+
+User: "they need to be the same as the creature they are", "skyrim stamina comes back if you get to empty when your
+idle". Each Morrowind creature's graph (`CreatureGraph`) plays its groups by the rules Morrowind's engine follows (read
+from OpenMW 0.48, a reading reference):
+
+- **Idles**: its own idle chances (its AI_W) as Morrowind rolls them, Idle2..Idle9 each its own clip; standing in a
+  storm (ash and blight blowing from Red Mountain, the rest along +Y) its IdleStorm on the torso and arm when facing into
+  it; a torch held its Torch group on the left arm (blend masks by Morrowind's: the nearest of Bip01 Spine1 / L / R
+  Clavicle above a bone).
+- **Moving**: walk and run every way, run at the walk speed (a creature's), strafing at 0.75 past 63.4°, swimming at
+  its swim speed (fSwimRunBase + Athletics x fSwimRunAthleticsMult); each move played at speed / pace, capped at 10, its
+  pace the root's travel over its loop (the cliff racer's 2,990 against its 757 flight: played at 0.25, as Morrowind).
+  Turning for bipeds only.
+- **Struck**: knocked down when agility x fKnockDownMult <= the blow and the odds roll (iKnockDownOddsMult,
+  iKnockDownOddsBase) says so, else its hit (Hit1..5 at random); **knocked out** while its stamina is at nothing (or its
+  base is none), the knockout's loop held until it comes back (fFatigueReturnBase + fFatigueReturnMult x Endurance a
+  second, as Skyrim regenerates stamina standing still); dying into deathknockdown / deathknockout when knocked, its
+  swimming deaths in water (SwimDeath2/3 never, as Morrowind never plays them). The hit script `TMMwCreatureHits`
+  decides each and sends the graph its event.
+- **Casting**: a biped's SpellCast part for its spell's range (Self, Touch, Target: the first effect's), held while
+  Skyrim charges; a creature without one a random attack, as Morrowind.
+- **Scripted**: PlayGroup and LoopGroup (`TMMwScript.PlayGroup`) play the group a script names: now, from its loop
+  start, or queued; LoopGroup its count + 1 times; a death waits for a scripted group to end.
+- **Animated colour**: a material's diffuse colour Morrowind animates (the clannfear daddy's brass ring dimming 15% over
+  its .kf) as one copy of the shape for each 8-bit colour its clips take (vertex colours are 8-bit), on "tint bones"
+  scaled 1 while Morrowind's colour is that one and 0 else, sharing the shape's texture: 70 copies, right in all 1,044
+  shape-frames (`mw-creature-check`), the copies checked by `creature-looks` and their binds by `creature-bones`. Its
+  ambient colour is no more carried than any shape's (Skyrim has no material ambient).
+- **Checks**: `creature-groups` (every group's clip written, named and played, or why Morrowind never plays it; idle
+  odds; deaths; paces; casting; scripted groups; overlays): all 89 creatures, 2,385 groups, 1,990 carried and played,
+  0 issues.
+
 ## Still to do
 
 - Ragdolls (the templates die into one); body part data for the new skeletons.

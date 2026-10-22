@@ -466,6 +466,7 @@ public sealed class CreatureRig
         string texDir = Path.Combine(dataDir, TextureFolder(id));
         Directory.CreateDirectory(texDir);
         var meshIds = new uint[Meshes.Count];
+        var madeTextures = new Dictionary<(string?, string, string), string?>();
         for (int mi = 0; mi < Meshes.Count; mi++)
         {
             var m = Meshes[mi];
@@ -481,9 +482,17 @@ public sealed class CreatureRig
             string shapeName = FileSafe($"{id}_{m.Name}");
             var shape = nif.CreateShapeFromData(shapeName, vv, tt, uu, nn);
             meshIds[mi] = hdr.GetBlockID(shape);
-            string? diffuse = Texture(m.Textures.GetValueOrDefault("diffuse"), texDir, FileSafe($"{id}_{m.Name}"), "", alpha: false);
-            string? normal = Texture(m.Textures.GetValueOrDefault("normal"), texDir, FileSafe($"{id}_{m.Name}"), "_n", alpha: false);
-            string? glowMap = Texture(m.Textures.GetValueOrDefault("glow"), texDir, FileSafe($"{id}_{m.Name}"), "_g", alpha: false);
+            // A tint copy (MwCreatureSource: "<shape> [tint k]") draws with its shape's own textures, made once.
+            string texStem = FileSafe($"{id}_{System.Text.RegularExpressions.Regex.Replace(m.Name, @" \[tint \d+\]$", "")}");
+            string? Made(string? source, string suffix)
+            {
+                var key = (source, texStem, suffix);
+                if (!madeTextures.TryGetValue(key, out var path)) madeTextures[key] = path = Texture(source, texDir, texStem, suffix, alpha: false);
+                return path;
+            }
+            string? diffuse = Made(m.Textures.GetValueOrDefault("diffuse"), "");
+            string? normal = Made(m.Textures.GetValueOrDefault("normal"), "_n");
+            string? glowMap = Made(m.Textures.GetValueOrDefault("glow"), "_g");
             if (diffuse is not null) nif.SetTextureSlot(shape, Path.GetRelativePath(dataDir, diffuse), 0);
             nif.SetTextureSlot(shape, normal is not null ? Path.GetRelativePath(dataDir, normal) : DfTextureExport.FlatNormal, 1);
             var look = m.Look;

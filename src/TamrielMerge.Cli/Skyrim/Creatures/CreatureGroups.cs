@@ -92,8 +92,12 @@ public static class CreatureGroups
                 { lines.Add($"  {group}: none of its creatures' idle chances picks it, so Morrowind never plays it as an idle"); continue; }
                 if (biped && System.Text.RegularExpressions.Regex.IsMatch(group, @"^(swim)?attack\d$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 { lines.Add($"  {group}: a biped's attacks are its weapon's (OpenMW: random attacks only for non-bipedal creatures)"); continue; }
-                if (!biped && System.Text.RegularExpressions.Regex.IsMatch(group, @"^(swim|spell)?turn(left|right)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                if (!biped && System.Text.RegularExpressions.Regex.IsMatch(group, @"^(swim|spell)?turn(left|right)(hh|1h|2c|2w)?$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 { lines.Add($"  {group}: Morrowind turns only bipeds with their turning animations (OpenMW: \"It seems only bipedal actors use turning animations\")"); continue; }
+                if (!biped && group.EndsWith("hh", StringComparison.OrdinalIgnoreCase))
+                { lines.Add($"  {group}: hand to hand has no groups of its own on a creature that isn't a biped (OpenMW's getWeaponShortGroup)"); continue; }
+                if (!biped && System.Text.RegularExpressions.Regex.Match(group, @"(1h|2c|2w)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase) is { Success: true } wm && !styles.Contains(wm.Value.ToLowerInvariant()))
+                { lines.Add($"  {group}: none of its creatures holds a weapon of that kind (Morrowind plays it only for one held)"); continue; }
                 if (System.Text.RegularExpressions.Regex.IsMatch(group, @"(throw|thrown)", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 { lines.Add($"  {group}: a thrown weapon's (misc items in Skyrim: nothing throws)"); continue; }
                 Issue($"{group}: not carried ({NotYet(group) ?? "nothing plays it"})");

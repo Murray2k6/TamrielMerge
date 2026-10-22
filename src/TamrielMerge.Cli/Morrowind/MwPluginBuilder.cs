@@ -449,7 +449,7 @@ public sealed partial class MwPluginBuilder
                 {
                     Base = new FormLinkNullable<INpcGetter>(actor.FormKey),
                     Placement = new Placement { Position = new P3Float(r.Position.X, r.Position.Y, r.Position.Z), Rotation = new P3Float(r.Rotation.X, r.Rotation.Y, r.Rotation.Z) },
-                    Scale = r.Scale == 1 ? null : r.Scale,
+                    Scale = PlacedScale(actor, r.Scale),
                 };
                 if (!PlaceForScripts(r, placedActor, cell)) cell.Temporary.Add(placedActor);
                 NoteActor(placedActor, r, source.Name);
@@ -740,7 +740,7 @@ public sealed partial class MwPluginBuilder
                     {
                         Base = new FormLinkNullable<INpcGetter>(actor.FormKey),
                         Placement = new Placement { Position = new P3Float(r.Position.X, r.Position.Y, r.Position.Z), Rotation = new P3Float(r.Rotation.X, r.Rotation.Y, r.Rotation.Z) },
-                        Scale = r.Scale == 1 ? null : r.Scale,
+                        Scale = PlacedScale(actor, r.Scale),
                     };
                     if (!PlaceForScripts(r, placedActor, top))
                         CellAt(((int)MathF.Floor(r.Position.X / MwTerrain.SkyCellUnits), (int)MathF.Floor(r.Position.Y / MwTerrain.SkyCellUnits))).Temporary.Add(placedActor);
@@ -1206,10 +1206,20 @@ public sealed partial class MwPluginBuilder
         // Masters in load order (Mutagen's default is alphabetical, which would list Dragonborn before Skyrim.esm).
         var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
         TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
+        // Every people's animation set's keyword, whoever this build placed (the animations are written for all of them).
+        foreach (var set in Skyrim.Animations.NpcAnimations.Morrowind) PersonKeyword(set.Keyword);
         mod.WriteToBinary(Path.Combine(modOutDir, PluginName), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
         {
             MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
         });
+        // Morrowind's people moving as Morrowind's do: its humanoid animations retargeted onto Skyrim's skeleton, for the
+        // keywords its people carry (Skyrim/Animations/NpcAnimations).
+        if (SkyrimData is not null && personKeywords.Count > 0)
+        {
+            var written = Skyrim.Animations.NpcAnimations.Write(modOutDir, SkyrimData, data, Skyrim.Animations.NpcAnimations.Morrowind, PluginName,
+                personKeywords.ToDictionary(k => k.Key, k => k.Value.FormKey.ID, StringComparer.OrdinalIgnoreCase), s => NpcAnimationLog.Add(s));
+            NpcAnimationLog.Add($"{written.Count} people's animations; {personScale.Count} people scaled to Morrowind's height (x{(personScale.Count > 0 ? personScale.Values.Min() : 1):F3} .. x{(personScale.Count > 0 ? personScale.Values.Max() : 1):F3})");
+        }
         // What procedural creatures may use from Morrowind (read by the creatures step when that option is on).
         WriteCreatureCatalog(Path.Combine(modOutDir, PluginName));
         // What the progression build offers on the Mundus stones from Morrowind.
@@ -1218,6 +1228,9 @@ public sealed partial class MwPluginBuilder
             + $"minor x{levelling.MinorRate:0.##}, other x{levelling.MiscRate:0.##}, specialization x{levelling.SpecialRate:0.##}; level-up multipliers {string.Join(",", levelling.LevelUp)}; "
             + $"{trainerNpcs.Count} trainers teaching {TrainerSkills} skills; {SkillBooks} skill books";
     }
+
+    /// <summary>What <see cref="Write"/> wrote of its people's animations.</summary>
+    public List<string> NpcAnimationLog { get; } = [];
 
     /// <summary>What <see cref="Write"/> exported for the Mundus stones.</summary>
     public string LevellingSummary { get; private set; } = "";

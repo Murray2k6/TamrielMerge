@@ -125,7 +125,7 @@ public static class WornMesh
     // ---- bones ----
 
     /// <summary>The bone each Biped bone continues into (its length and direction run to it).</summary>
-    static string? NextOf(string bip)
+    internal static string? NextOf(string bip)
     {
         string side = bip.Contains(" L ") ? "L" : bip.Contains(" R ") ? "R" : "";
         string part = bip.Replace("Bip01 ", "").Replace("L ", "").Replace("R ", "").Trim();
@@ -189,7 +189,7 @@ public static class WornMesh
     /// (Morrowind's Bip01 frames and Skyrim's NPC frames differ by a quarter turn). The roll reference is the body's
     /// forward (+Y; both games face +Y), or up (+Z) for bones that themselves run forward (feet).
     /// </summary>
-    static Matrix4x4 Frame(Vector3 dir, bool up)
+    internal static Matrix4x4 Frame(Vector3 dir, bool up)
     {
         var x = Vector3.Normalize(dir);
         var reference = up ? Vector3.UnitZ : Vector3.UnitY;

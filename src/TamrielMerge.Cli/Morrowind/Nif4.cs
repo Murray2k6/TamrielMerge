@@ -713,6 +713,9 @@ public sealed class NiKeyframeData : NifBlock
     public List<(float Time, Vector3 Value)> Translations = [];
     /// <summary>Scale keys (value in X).</summary>
     public List<(float Time, Vector3 Value)> Scales = [];
+    /// <summary>A channel given as a curve instead of keys (Gamebryo 20's B-spline interpolators: Oblivion's people).</summary>
+    public Func<float, Vector3>? TranslationCurve;
+    public Func<float, Quaternion>? RotationCurve;
 }
 
 /// <summary>Vertex morph targets and each one's weight keys over time; with <see cref="Relative"/> the first is the

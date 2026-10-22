@@ -3597,6 +3597,7 @@ static class Program
                 builder.Write();
                 Console.WriteLine($"  barks: {builder.BarkCount} recorded lines in {builder.BarkTopicCount} voice topics (Morrowind's own recordings)");
                 Console.WriteLine($"  levelling (Mundus stones): {builder.LevellingSummary}");
+                foreach (var line in builder.NpcAnimationLog) Console.WriteLine("  people's animations: " + line);
                 // Morrowind's law (MwLaw): its crime faction and jail, who answers to it, the arrest greetings, TMMwLaw's markers.
                 if (m.Factions.FirstOrDefault(f => f.EditorID == "MWCrimeFaction") is { } mwCrime)
                 {
@@ -3881,6 +3882,50 @@ static class Program
                     Console.WriteLine(f);
                 return 0;
             }
+            case "ob-races":
+            {
+                // Dev aid: Oblivion.esm's races, each one's data as Mutagen reads it (its members by reflection).
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                using var m = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, "Oblivion.esm"), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                // --heights: each race's heights as the converter reads them from the files (ObPeople.ReadRaceHeights).
+                if (opts.ContainsKey("heights"))
+                {
+                    var heights = Oblivion.ObPluginBuilder.ReadRaceHeights(new Oblivion.ObData(dataDir));
+                    foreach (var r in m.Races) Console.WriteLine($"{r.EditorID}: {(heights.TryGetValue(r.FormKey, out var h) ? $"male {h.Male:F3}, female {h.Female:F3}" : "none")}");
+                    return 0;
+                }
+                foreach (var r in m.Races)
+                {
+                    string Show(object? o) => o is null ? "null" : o.GetType().GetProperties().Where(p => p.GetIndexParameters().Length == 0 && p.PropertyType.IsValueType || p.PropertyType == typeof(string))
+                        .Select(p => { object? v; try { v = p.GetValue(o); } catch { v = "?"; } return $"{p.Name}={v}"; }).Aggregate("", (a, b) => a + " " + b);
+                    Console.WriteLine($"{r.EditorID}: data [{Show(r.Data)}]");
+                    foreach (var p in (r.Data?.GetType().GetProperties() ?? []).Where(p => !p.PropertyType.IsValueType && p.PropertyType != typeof(string)))
+                    {
+                        object? v; try { v = p.GetValue(r.Data); } catch { v = null; }
+                        Console.WriteLine($"   {p.Name} ({p.PropertyType.Name}): [{Show(v)}]");
+                    }
+                }
+                return 0;
+            }
+            case "ob-cells":
+            {
+                // Dev aid: Oblivion.esm's interiors whose EditorID or name contains --text, with their NPCs (beast races
+                // among them, by the skeleton the NPC names), most NPCs first.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                using var m = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, "Oblivion.esm"), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                var npcs = m.Npcs.ToDictionary(n => n.FormKey, n => n);
+                string text = opts.GetValueOrDefault("text", "");
+                var rows = new List<(string Id, string Name, int People, int Beasts)>();
+                foreach (var c in m.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                {
+                    if (!(c.EditorID ?? "").Contains(text, StringComparison.OrdinalIgnoreCase) && !(c.Name ?? "").Contains(text, StringComparison.OrdinalIgnoreCase)) continue;
+                    var placed = c.Persistent.Concat(c.Temporary).OfType<Mutagen.Bethesda.Oblivion.IPlacedNpcGetter>().Select(p => npcs.GetValueOrDefault(p.Base.FormKey)).OfType<Mutagen.Bethesda.Oblivion.INpcGetter>().ToList();
+                    rows.Add((c.EditorID ?? "", c.Name ?? "", placed.Count, placed.Count(n => (n.Model?.File?.ToString() ?? "").Contains("beast", StringComparison.OrdinalIgnoreCase))));
+                }
+                foreach (var r in rows.OrderByDescending(r => r.Beasts > 0).ThenByDescending(r => r.People).Take(int.Parse(opts.GetValueOrDefault("limit", "15"))))
+                    Console.WriteLine($"{r.Id} \"{r.Name}\": {r.People} NPCs, {r.Beasts} of the beast races");
+                return 0;
+            }
             case "ob-form":
             {
                 // Dev aid: the records of Oblivion's plugins (--plugins, default Oblivion.esm;Knights.esp) whose form ID (hex,
@@ -4052,6 +4097,7 @@ static class Program
                 Console.WriteLine($"  written {Util.Machine.MemoryNote()}");
                 Console.WriteLine($"  schedules: {builder.NpcsWithSchedules} NPCs given their Oblivion packages ({builder.ScheduledPackagesMade} packages, with Oblivion's schedules and conditions), the sandbox kept last");
                 Console.WriteLine($"  levelling (Mundus stones): {builder.LevellingSummary}");
+                foreach (var line in builder.NpcAnimationLog) Console.WriteLine("  people's animations: " + line);
                 var problems = builder.Problems.Distinct().ToList();
                 File.WriteAllLines(Path.Combine(outDir, "problems.txt"), problems);
                 foreach (var p in problems.Take(40)) Console.WriteLine($"  problem: {p}");
@@ -4251,6 +4297,18 @@ static class Program
                         foreach (var c in n.Children) Walk(c, w, depth + 1);
                     }
                     foreach (var r in nif.Roots) Walk(r, Morrowind.NifTransform.Identity, 0);
+                    // --controllers: each time controller, its target, flags, times and keys.
+                    if (opts.ContainsKey("controllers"))
+                        foreach (var c in nif.Blocks.OfType<Morrowind.NiController>())
+                        {
+                            string keys = nif.Get<Morrowind.NifBlock>(c.Data) switch
+                            {
+                                Morrowind.NiKeyData k => $"{k.Keys.Count} keys (type {k.Interpolation}): " + string.Join(" ", k.Keys.Take(40).Select(x => $"{x.Time:F2}=({x.Value.X:F2},{x.Value.Y:F2},{x.Value.Z:F2})")),
+                                { } other => other.Type,
+                                null => "no data",
+                            };
+                            Console.WriteLine($"  controller {c.Type} on #{c.Target} \"{nif.Get<Morrowind.NiObjectNET>(c.Target)?.Name}\" ({nif.Get<Morrowind.NifBlock>(c.Target)?.Type}) flags {c.Flags} (target colour {(c.Flags >> 4) & 7}) {c.Start:F2}..{c.Stop:F2}: {keys}");
+                        }
                     foreach (var c in nif.Blocks.OfType<Morrowind.NiParticleSystemController>())
                         Console.WriteLine($"  particles: {c.Type} target {nif.Get<Morrowind.NiNode>(c.Target)?.Name} emitter #{c.Emitter} {nif.Get<Morrowind.NiObjectNET>(c.Emitter)?.Type} \"{nif.Get<Morrowind.NiObjectNET>(c.Emitter)?.Name}\" flags {c.EmitFlags:X} size {c.InitialSize} speed {c.Speed} life {c.Lifetime} rate {c.BirthRate} n {c.NumParticles} dims {c.EmitterDimensions}");
                 }
@@ -10984,6 +11042,250 @@ static class Program
                 Console.WriteLine($"  bones: {string.Join(", ", rig.Bones.Select(b => b.Name).Take(40))}");
                 return 0;
             }
+            case "ob-kf-probe":
+            {
+                // Dev aid: an Oblivion .kf's first transform data as nifly exposes it (its members by reflection, and their values).
+                var ob = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion)!);
+                var tmp = Path.Combine(Path.GetTempPath(), "tm-ob-kf.nif");
+                File.WriteAllBytes(tmp, ob.Read(opts["file"]) ?? throw new FileNotFoundException(opts["file"]));
+                using var nif = new nifly.NifFile();
+                nif.Load(tmp);
+                var hdr = nif.GetHeader();
+                // --keys: its text keys and length.
+                if (opts.ContainsKey("keys"))
+                {
+                    using var cacheK = new nifly.niflycpp.BlockCache(hdr);
+                    for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                        if (hdr.GetBlockById(i) is nifly.NiControllerSequence seq)
+                        {
+                            Console.WriteLine($"{seq.name.get()}: {seq.startTime:F3}..{seq.stopTime:F3}, cycle {seq.cycleType}, frequency {seq.frequency}");
+                            if (seq.textKeyRef.index < hdr.GetNumBlocks() && hdr.GetBlockById(seq.textKeyRef.index) is nifly.NiTextKeyExtraData)
+                                foreach (var k in Skyrim.Meshes.NiflyRaw.TextKeys(cacheK.EditableBlockById<nifly.NiTextKeyExtraData>(seq.textKeyRef.index))) Console.WriteLine($"  {k.time:F3} {k.value.get()}");
+                        }
+                    return 0;
+                }
+                // --links: each controlled block's node, controller type, interpolator type and priority.
+                if (opts.ContainsKey("links"))
+                {
+                    var bytesL = File.ReadAllBytes(tmp);
+                    for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                        if (hdr.GetBlockById(i) is nifly.NiControllerSequence seq)
+                        {
+                            byte[] pal = [];
+                            foreach (var link in Skyrim.Meshes.NiflyRaw.Links(seq))
+                            {
+                                uint pr = Skyrim.Meshes.NiflyRaw.Ref(link.stringPaletteRef).index;
+                                if (pal.Length == 0 && pr < hdr.GetNumBlocks() && hdr.GetBlockById(pr) is nifly.NiStringPalette sp) pal = Skyrim.Meshes.NiflyRaw.Palette(bytesL, sp);
+                                string node = link.nodeName.get() is { Length: > 0 } nn ? nn : Skyrim.Meshes.NiflyRaw.PaletteString(pal, link.nodeNameOffset);
+                                string ct = link.ctrlType.get() is { Length: > 0 } c ? c : Skyrim.Meshes.NiflyRaw.PaletteString(pal, link.controllerTypeOffset);
+                                uint ii = link.interpolatorRef.index;
+                                Console.WriteLine($"  {node} | {ct} | {(ii < hdr.GetNumBlocks() ? hdr.GetBlockTypeStringById(ii) : "none")} | priority {link.priority}");
+                            }
+                        }
+                    Console.WriteLine("block types: " + string.Join(", ", Enumerable.Range(0, (int)hdr.GetNumBlocks()).Select(b => hdr.GetBlockTypeStringById((uint)b)).GroupBy(t => t).Select(g => $"{g.Key} x{g.Count()}")));
+                    // The first of each B-spline block, its members as nifly exposes them.
+                    foreach (var type in new[] { "NiBSplineCompTransformInterpolator", "NiBSplineData", "NiBSplineBasisData" })
+                        for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                            if (hdr.GetBlockTypeStringById(i) == type)
+                            {
+                                var blk = hdr.GetBlockById(i);
+                                Console.WriteLine($"{type} (block {i}, {blk.GetType().Name}):");
+                                foreach (var p in blk.GetType().GetProperties().Where(p => p.DeclaringType != typeof(nifly.NiObject)))
+                                {
+                                    object? v; try { v = p.GetValue(blk); } catch (Exception e) { v = "! " + e.GetType().Name; }
+                                    string shown = v switch { nifly.Vector3 v3 => $"({v3.x}, {v3.y}, {v3.z})", nifly.Quaternion q => $"(w {q.w}, {q.x}, {q.y}, {q.z})", System.Collections.ICollection c => $"{c.Count} items", _ => $"{v}" };
+                                    Console.WriteLine($"  {p.Name}: {p.PropertyType.Name} = {shown}");
+                                }
+                                foreach (var m in blk.GetType().GetMethods().Where(m => m.DeclaringType == blk.GetType() && !m.IsSpecialName)) Console.WriteLine($"  method {m.Name}({string.Join(",", m.GetParameters().Select(x => x.ParameterType.Name))}) -> {m.ReturnType.Name}");
+                                break;
+                            }
+                    return 0;
+                }
+                // --raw: each transform data's rotation type and its first keys' native floats (the key layout).
+                if (opts.ContainsKey("raw"))
+                {
+                    for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                        if (hdr.GetBlockById(i) is nifly.NiTransformData td)
+                        {
+                            Console.Write($"block {i}: rotation type {td.rotationType}, {td.quaternionKeys.Count} quaternion keys, x/y/z {td.xRotations.GetNumKeys()}/{td.yRotations.GetNumKeys()}/{td.zRotations.GetNumKeys()}, translations {td.translations.GetNumKeys()} (type {td.translations.GetInterpolationType()}), scales {td.scales.GetNumKeys()}");
+                            Console.WriteLine();
+                            for (int k = 0; k < Math.Min(3, td.quaternionKeys.Count); k++)
+                            {
+                                var p = Skyrim.Meshes.NiflyRaw.Ptr(td.quaternionKeys[k]);
+                                Console.WriteLine("  q" + k + ": " + string.Join(" ", Enumerable.Range(0, 16).Select(o => BitConverter.Int32BitsToSingle(System.Runtime.InteropServices.Marshal.ReadInt32(p, o * 4)).ToString("F4"))));
+                            }
+                            for (int k = 0; k < Math.Min(2, (int)td.translations.GetNumKeys()); k++)
+                            {
+                                var key = td.translations.GetKey(k);
+                                var p = Skyrim.Meshes.NiflyRaw.Ptr(key);
+                                Console.WriteLine($"  t{k} ({key.GetType().Name}): " + string.Join(" ", Enumerable.Range(0, 14).Select(o => BitConverter.Int32BitsToSingle(System.Runtime.InteropServices.Marshal.ReadInt32(p, o * 4)).ToString("F4"))));
+                            }
+                        }
+                    return 0;
+                }
+                for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                    if (hdr.GetBlockById(i) is nifly.NiTransformData td)
+                    {
+                        foreach (var p in td.GetType().GetProperties())
+                        {
+                            object? v; try { v = p.GetValue(td); } catch (Exception e) { v = "! " + e.Message; }
+                            Console.WriteLine($"  {p.Name}: {p.PropertyType.Name} = {v}");
+                        }
+                        foreach (var m in td.GetType().GetMethods().Where(m => m.DeclaringType == td.GetType())) Console.WriteLine($"  method {m.Name}({string.Join(",", m.GetParameters().Select(x => x.ParameterType.Name))})");
+                        if (td.quaternionKeys.Count == 0) continue;
+                        var key = td.quaternionKeys[0];
+                        Console.WriteLine($"  quaternion key type {key.GetType().Name}: " + string.Join(", ", key.GetType().GetProperties().Select(p => { object? v; try { v = p.GetValue(key); } catch { v = "?"; } return $"{p.Name}={v}"; })));
+                        if (key.GetType().GetProperty("value")?.GetValue(key) is { } qv)
+                            Console.WriteLine("    value: " + string.Join(", ", qv.GetType().GetProperties().Select(p => $"{p.Name}={p.GetValue(qv)}")));
+                        Console.WriteLine($"  translations: {td.translations.GetNumKeys()} keys, type {td.translations.GetInterpolationType()}; group methods: {string.Join(", ", td.translations.GetType().GetMethods().Where(m => m.DeclaringType == td.translations.GetType()).Select(m => m.Name))}");
+                        break;
+                    }
+                return 0;
+            }
+            case "ob-list":
+            {
+                // Dev aid: the Oblivion archives' paths matching --match (regex).
+                var ob = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed"));
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var name in ob.Archives.SelectMany(a => a.Names).Distinct().Where(n => rx.IsMatch(n)).Order()) Console.WriteLine(name);
+                return 0;
+            }
+            case "npc-anims":
+            {
+                // A game's people's animations (--game morrowind or oblivion) retargeted onto Skyrim's skeleton as OAR
+                // replacements under --out (a Data folder; Skyrim/Animations/NpcAnimations), for the keywords the converted
+                // plugin (--plugin, default Morrowind.esm or Oblivion.esm) has (its TMMw... or TMOb... keywords; --keywords
+                // "EditorID=hexFormID,..." to give them without one).
+                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/npcanims"));
+                var (peopleSets, loadRig, keywordPrefix, defaultPlugin) = PeopleAnimations(opts);
+                string plugin = opts.GetValueOrDefault("plugin", defaultPlugin);
+                var keywords = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+                if (opts.TryGetValue("keywords", out var kws))
+                {
+                    foreach (var kv in kws.Split(',', StringSplitOptions.RemoveEmptyEntries)) if (kv.Split('=') is [var k, var hex]) keywords[k] = Convert.ToUInt32(hex, 16);
+                }
+                else if (File.Exists(Path.Combine(skyrimData, plugin)))
+                {
+                    using var pm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, plugin), SkyrimRelease.SkyrimSE);
+                    foreach (var kw in pm.Keywords.Where(k => k.EditorID?.StartsWith(keywordPrefix) == true)) keywords[kw.EditorID!] = kw.FormKey.ID;
+                }
+                // --tracks: the first set's sources, each with its times, keys and the skeleton's Bip01 bones it leaves alone.
+                if (opts.ContainsKey("tracks"))
+                {
+                    var rig = loadRig(peopleSets.First(s => !opts.TryGetValue("set", out var only) || s.Key.Equals(only, StringComparison.OrdinalIgnoreCase)));
+                    var bip = rig.Names.Where(n => n.StartsWith("Bip01", StringComparison.OrdinalIgnoreCase)).ToList();
+                    Console.WriteLine($"skeleton: {rig.Names.Count} nodes ({string.Join(", ", rig.Names)})");
+                    foreach (var src in rig.Sources)
+                    {
+                        var missing = bip.Where(b => !src.Tracks.ContainsKey(b)).ToList();
+                        var types = src.Tracks.Values.GroupBy(kd => $"r{kd.RotationType}/t{kd.TranslationType}").Select(g => $"{g.Key}x{g.Count()}");
+                        Console.WriteLine($"{Path.GetFileName(src.Path)}: {string.Join("; ", src.Groups.Select(g => $"{g.Key} {g.Value.Start:F3}..{g.Value.Stop:F3}{(g.Value.Loops ? " loops" : "")}"))}; {src.Tracks.Count} tracks ({string.Join(" ", types)}); leaves {missing.Count} of {bip.Count} Bip01 bones{(missing.Count > 0 && missing.Count < bip.Count ? ": " + string.Join(", ", missing.Take(12)) + (missing.Count > 12 ? " ..." : "") : "")}");
+                        if (opts.ContainsKey("keys")) foreach (var (t, text) in src.Keys?.Keys ?? []) Console.WriteLine($"    {t:F3} {text.Replace("\n", " | ")}");
+                    }
+                    var channels = Skyrim.Animations.NpcAnimations.SplineRotationNorms;
+                    var norms = channels.SelectMany(c => c.Norms).ToList();
+                    if (norms.Count > 0)
+                    {
+                        Console.WriteLine($"B-spline rotation control points: {norms.Count} in {channels.Count} channels, length {norms.Min():F4}..{norms.Max():F4}, {norms.Count(n => MathF.Abs(n - 1) > 0.01f)} more than 1% from unit; the curves' end points (which a clamped curve passes through) at most {channels.Max(c => MathF.Max(MathF.Abs(c.Norms[0] - 1), MathF.Abs(c.Norms[^1] - 1))):F5} from unit");
+                        foreach (var c in channels.Where(c => c.Norms.Any(n => MathF.Abs(n - 1) > 0.01f)).OrderByDescending(c => c.Norms.Max(n => MathF.Abs(n - 1))).Take(int.Parse(opts.GetValueOrDefault("worst", "12"))))
+                            Console.WriteLine($"  {c.Channel}: {c.Norms.Count(n => MathF.Abs(n - 1) > 0.01f)} off, lengths {string.Join(" ", c.Norms.Take(24).Select(n => n.ToString("F3")))}{(c.Norms.Length > 24 ? " ..." : "")}");
+                    }
+                    return 0;
+                }
+                // --map: how each set's skeleton lines up with Skyrim's (each Skyrim bone and the source bone driving it).
+                if (opts.ContainsKey("map"))
+                {
+                    var cb = new Skyrim.Creatures.CreatureBehavior(skyrimData);
+                    foreach (var set in peopleSets.Where(s => !opts.TryGetValue("set", out var only) || s.Key.Equals(only, StringComparison.OrdinalIgnoreCase)).Take(2))
+                    {
+                        var mwr = loadRig(set);
+                        var skr = Skyrim.Animations.NpcAnimations.SkyrimRig.From(Skyrim.Animations.ClimbAnimation.ReadSkeleton(cb.ReadArchive(set.Female ? @"meshes\actors\character\character assets female\skeleton_female.hkx" : @"meshes\actors\character\character assets\skeleton.hkx")!));
+                        var map = Skyrim.Animations.NpcAnimations.Map(mwr, skr);
+                        Console.WriteLine($"{set.Key}: Morrowind bones {string.Join(", ", mwr.Names)}");
+                        for (int b = 0; b < skr.Skeleton.Bones.Length; b++)
+                            Console.WriteLine($"  {skr.Skeleton.Bones[b]} <- {(map.Source[b] >= 0 ? mwr.Names[map.Source[b]] : "-")}");
+                        foreach (var note in map.Notes) Console.WriteLine("  note: " + note);
+                    }
+                    return 0;
+                }
+                var written = Skyrim.Animations.NpcAnimations.Write(outDir, skyrimData, loadRig, peopleSets.Where(s => !opts.TryGetValue("set", out var only) || s.Key.Equals(only, StringComparison.OrdinalIgnoreCase)).ToList(), plugin, keywords, Console.WriteLine);
+                Console.WriteLine($"{written.Count} animations written under {outDir}");
+                return 0;
+            }
+            case "npc-anim-preview":
+            {
+                // A written people's animation beside Morrowind's skeleton (NpcAnimations.Preview): --data, --set (MorrowindMen),
+                // --file (relative to the animations folder), --frames (0,10,20), --png.
+                var (peopleSets, loadRig, _, _) = PeopleAnimations(opts);
+                var set = peopleSets.First(x => x.Key.Equals(opts.GetValueOrDefault("set", peopleSets[0].Key), StringComparison.OrdinalIgnoreCase));
+                Skyrim.Animations.NpcAnimations.Preview(Path.GetFullPath(opts.GetValueOrDefault("data", "out/npcanims")), skyrimData, loadRig, set, opts["file"],
+                    opts.GetValueOrDefault("frames", "0,10,20").Split(',').Select(int.Parse).ToArray(), opts["png"]);
+                Console.WriteLine($"wrote {opts["png"]}");
+                return 0;
+            }
+            case "npc-anim-check":
+            {
+                // Whether written people's animations (--data, default out\npcanims) are Morrowind's (NpcAnimations.Check): per
+                // file the worst bone's angle from Morrowind's, the centre of mass's distance, the events.
+                string data = Path.GetFullPath(opts.GetValueOrDefault("data", "out/npcanims"));
+                var (peopleSets, loadRig, _, _) = PeopleAnimations(opts);
+                var results = Skyrim.Animations.NpcAnimations.Check(data, skyrimData, loadRig, peopleSets.Where(s => !opts.TryGetValue("set", out var only) || s.Key.Equals(only, StringComparison.OrdinalIgnoreCase)).ToList());
+                int issues = 0;
+                foreach (var r in results)
+                {
+                    bool bad = r.WorstAngle > 0.5f || r.WorstCom > 0.5f || r.Events != r.MwEvents || !r.Placed || r.Frames != r.FramesWanted || r.EventsPastEnd > 1e-4f;
+                    if (bad) issues++;
+                    if (bad || opts.ContainsKey("all"))
+                        Console.WriteLine($"  {(bad ? "ISSUE " : "")}{r.Set} {r.File}{(r.Placed ? "" : " (in the wrong folder for its events)")}: {r.Frames}/{r.FramesWanted} frames, worst bone {r.WorstAngle:F3}° ({r.WorstBone}, frame {r.WorstFrame}), centre {r.WorstCom:F3}, events {r.Events}/{r.MwEvents}{(r.Shared ? "" : $" (its clips keep their own{(r.EventsPastEnd > 0 ? $", the last {r.EventsPastEnd:F3} s past its end" : "")})")}");
+                }
+                foreach (var g in results.GroupBy(r => r.Set))
+                    Console.WriteLine($"{g.Key}: {g.Count()} animations ({g.Count(r => !r.Shared)} keeping their clips' own events), worst bone {g.Max(r => r.WorstAngle):F3}°, worst centre {g.Max(r => r.WorstCom):F3}");
+                // --clips "bow_drawlight.hkx,...": the clips playing those files and each one's events.
+                if (opts.TryGetValue("clips", out var clipFiles))
+                    foreach (var cf in clipFiles.Split(','))
+                        foreach (var (clip, evs) in Skyrim.Animations.NpcAnimations.ClipsByFile.GetValueOrDefault(cf, []))
+                            Console.WriteLine($"  {cf} <- {clip}: {string.Join(", ", evs.Select(e => $"{e.Text}@{e.Time:F3}"))}");
+                // --differing: each file whose clips keep their own events, its clips (as --clips).
+                if (opts.ContainsKey("differing"))
+                    foreach (var r in results.Where(r => !r.Shared).DistinctBy(r => r.File))
+                    {
+                        Console.WriteLine($"  {r.File}:");
+                        foreach (var (clip, evs) in Skyrim.Animations.NpcAnimations.ClipsByFile.GetValueOrDefault(r.File, []))
+                            Console.WriteLine($"      {clip}: {string.Join(", ", evs.Select(e => $"{e.Text}@{e.Time:F3}"))}");
+                    }
+                var unplayed = Skyrim.Animations.NpcAnimations.UnplayedClips;
+                Console.WriteLine($"clip data clips no behaviour of the project plays: {unplayed.Count}{(unplayed.Count > 0 ? " (" + string.Join(", ", unplayed.Take(opts.ContainsKey("all") ? unplayed.Count : 10)) + (unplayed.Count > 10 && !opts.ContainsKey("all") ? " ..." : "") + ")" : "")}");
+                Console.WriteLine($"{results.Count} animations; {issues} issues");
+                return issues == 0 ? 0 : 2;
+            }
+            case "sk-project-data":
+            {
+                // Dev aid: a vanilla behaviour project's animation data lines (its own file, else its part of the single file):
+                // --project (DefaultMale), the first --lines lines, and the clip blocks naming --match.
+                var cb = new Skyrim.Creatures.CreatureBehavior(skyrimData);
+                var pd = cb.ProjectData(opts["project"]) ?? throw new InvalidDataException($"no project {opts["project"]}");
+                // --names "965,1100": the character's animation files at those numbers (as the clip data numbers them).
+                if (opts.TryGetValue("names", out var ids) && opts.TryGetValue("character", out var characterPath))
+                {
+                    var ch = Skyrim.Creatures.CreatureBehavior.Variant<HKX2.hkbCharacterData>(Skyrim.Creatures.CreatureBehavior.Hkx(cb.ReadArchive(characterPath) ?? throw new FileNotFoundException(characterPath)));
+                    var names = ch.m_stringData!.m_animationNames;
+                    Console.WriteLine($"{names.Count} animation names");
+                    foreach (var id in ids.Split(',').Select(int.Parse)) Console.WriteLine($"  {id}: {(id < names.Count ? names[id] : "-")}");
+                }
+                // --annotations: a vanilla file's own annotations (relative to the animations folder).
+                if (opts.TryGetValue("annotations", out var annoFile))
+                {
+                    var bytes = cb.ReadArchive(@"meshes\actors\character\animations\" + annoFile) ?? throw new FileNotFoundException(annoFile);
+                    var anim = Skyrim.Creatures.CreatureBehavior.Hkx(bytes).m_namedVariants.Select(v => v?.m_variant).OfType<HKX2.hkaAnimationContainer>().First().m_animations[0];
+                    foreach (var a in anim.m_annotationTracks.SelectMany(t => t.m_annotations)) Console.WriteLine($"  {a.m_time:F3} {a.m_text}");
+                }
+                foreach (var line in pd.Data.Take(int.Parse(opts.GetValueOrDefault("lines", "12")))) Console.WriteLine(line);
+                if (opts.TryGetValue("match", out var pm))
+                    for (int i = 0; i < pd.Data.Count; i++)
+                        if (pd.Data[i].Contains(pm, StringComparison.OrdinalIgnoreCase)) Console.WriteLine($"  [{i}] " + string.Join(" | ", pd.Data.Skip(i).Take(10)));
+                Console.WriteLine($"{pd.Data.Count} data lines, {pd.Motion.Count} motion lines");
+                return 0;
+            }
             case "mw-kf-groups":
             {
                 // Dev aid: a Morrowind .kf's animation groups (--kf, e.g. meshes\xbase_anim.kf) with their times and the other
@@ -10991,6 +11293,15 @@ static class Program
                 var mwData = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind)!);
                 var kf = Morrowind.Nif4.Read(mwData.Read(opts["kf"]) ?? throw new FileNotFoundException(opts["kf"]), opts["kf"]);
                 var (keys, tracks) = Skyrim.Creatures.MwCreatureSource.ReadKf(kf);
+                // --prefix <a,b,...>: every key of those groups ("WeaponOneHand: Chop Start"...), at its time.
+                if (opts.TryGetValue("prefix", out var prefixes))
+                {
+                    var wantedGroups = prefixes.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    foreach (var (time, text) in keys?.Keys ?? [])
+                        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                            if (wantedGroups.Any(w => line.StartsWith(w + ":", StringComparison.OrdinalIgnoreCase))) Console.WriteLine($"{time:F3} {line}");
+                    return 0;
+                }
                 foreach (var (g, t) in Skyrim.Creatures.MwCreatureSource.Groups(keys).OrderBy(x => x.Value.Start))
                 {
                     Console.WriteLine($"{g}: {t.Start:F2}..{t.Stop:F2}{(t.Loops ? $" loop {t.LoopStart:F2}..{t.LoopStop:F2}" : "")}");
@@ -11735,6 +12046,13 @@ static class Program
                 Walk(root, "root");
                 Console.WriteLine(string.Join(", ", counts.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}")));
                 foreach (var g in notes.GroupBy(x => x).OrderBy(g => g.Key)) Console.WriteLine($"  {g.Key}{(g.Count() > 1 ? $" (x{g.Count()})" : "")}");
+                // An animation's length and its annotations (time, text, the track they're on).
+                foreach (var an in seen.OfType<HKX2.hkaAnimation>())
+                {
+                    Console.WriteLine($"  animation {an.GetType().Name}: {an.m_duration:F3} s, {an.m_numberOfTransformTracks} tracks");
+                    foreach (var tr in an.m_annotationTracks)
+                        foreach (var a in tr.m_annotations) Console.WriteLine($"    {a.m_time:F3} {a.m_text} ({tr.m_trackName})");
+                }
                 return 0;
             }
             case "type-members":
@@ -13127,6 +13445,19 @@ static class Program
     /// tool's own tools folder, so a run keeps what earlier runs upscaled.</summary>
     internal static string UpscaleFolder(Game game) =>
         Path.Combine(Setup.Dependencies.Root, "upscale", game == Game.Daggerfall ? "out-df" : "out");
+
+    /// <summary>The people's animation sets of --game (morrowind, the default, or oblivion), how each set's rig loads, its
+    /// keywords' EditorID prefix and the converted plugin naming them.</summary>
+    static (Skyrim.Animations.NpcAnimations.Set[] Sets, Func<Skyrim.Animations.NpcAnimations.Set, Skyrim.Animations.NpcAnimations.MwRig> Load, string KeywordPrefix, string Plugin) PeopleAnimations(Dictionary<string, string> opts)
+    {
+        if (opts.GetValueOrDefault("game", "morrowind").Equals("oblivion", StringComparison.OrdinalIgnoreCase))
+        {
+            var ob = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed"));
+            return (Skyrim.Animations.NpcAnimations.Oblivion, s => Skyrim.Animations.NpcAnimations.LoadOblivion(ob, s), "TMOb", "Oblivion.esm");
+        }
+        var mw = Morrowind.Tes3Data.Open(GameInstalls.DataDir(Game.Morrowind) ?? throw new DirectoryNotFoundException("Morrowind isn't installed"));
+        return (Skyrim.Animations.NpcAnimations.Morrowind, s => Skyrim.Animations.NpcAnimations.MwRig.Load(mw, s), "TMMw", "Morrowind.esm");
+    }
 
     /// <summary>Writes a file under a name of this process's own and moves it into place, so a reader (the app) never sees
     /// it half-written and two writers don't mix.</summary>

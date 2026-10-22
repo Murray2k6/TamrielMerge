@@ -148,7 +148,7 @@ public static class MwCreatureCheck
         var results = new List<Result>();
         string folder = Path.Combine(skyrimDataDir, CreatureRig.MeshFolder(id));
         using var body = new SkyrimBody(folder, id);
-        int bodyShapes = body.ShapeNames.Count(n => !n.EndsWith("[emit]"));
+        int bodyShapes = body.ShapeNames.Count(n => !n.EndsWith("[emit]") && !n.Contains(" [tint "));
         if (bodyShapes != shapes.Count)
             say($"  shapes: Morrowind {shapes.Count}, Skyrim {bodyShapes} (and {body.ShapeNames.Count - bodyShapes} particle emitter meshes)");
         for (int i = 0; i < Math.Min(shapes.Count, body.ShapeVertexCounts.Count); i++)
@@ -170,6 +170,25 @@ public static class MwCreatureCheck
             else emitterChecks.Add((si, pts));
         }
         float emitWorst = 0; int emitCount = 0; string emitWhere = "";
+        // A diffuse colour Morrowind animates (MwCreatureSource's tint copies, where it carries one): each frame exactly one
+        // copy shows, on Morrowind's vertices (checked below with the rest), in Morrowind's colour then, as 8 bits hold it.
+        var tints = new Dictionary<int, (List<int> Copies, Func<int, float, Vector3> ColourAt)>();
+        for (int si = 0; si < shapes.Count; si++)
+        {
+            var sh = shapes[si];
+            if (MwCreatureSource.Property<NiMaterialProperty>(nif, scene, sh.Index) is not { } tm) continue;
+            var ctl = nif.Blocks.OfType<NiController>().FirstOrDefault(c => c.Type == "NiMaterialColorController" && c.Target == tm.Index && (c.Flags & 8) != 0 && ((c.Flags >> 4) & 7) == 1
+                && nif.Get<NiKeyData>(c.Data) is { Keys.Count: > 0 });
+            if (ctl is null) continue;
+            var td = nif.Get<NiTriShapeData>(sh.Data)!;
+            uint vmode = MwCreatureSource.Property<NiVertexColorProperty>(nif, scene, sh.Index)?.VertexMode ?? 2;
+            if (vmode == 2 && td.Colors.Length == td.Vertices.Length && td.Colors.Any(c => c != Vector4.One)) continue;   // its vertex colours: the diffuse unseen
+            string want = CreatureRig.FileSafe($"{id}_{(sh.Name.Length > 0 ? sh.Name : $"shape{sh.Index}")}");
+            var copies = Enumerable.Range(0, body.ShapeNames.Count).Where(i => body.ShapeNames[i] == want || body.ShapeNames[i].StartsWith(want + " [tint ", StringComparison.Ordinal)).ToList();
+            var ck = nif.Get<NiKeyData>(ctl.Data)!;
+            tints[si] = (copies, (src, t) => src == ownSource ? MwKeys.Vector(ck.Keys, ck.Interpolation, ck.Extra, MwCreatureSource.ControllerTime(ctl, t)) : tm.Diffuse);
+        }
+        int tintRight = 0, tintWrong = 0, tintCopies = tints.Values.Sum(v => v.Copies.Count); string tintFirstWrong = "";
         foreach (var (clip, source, group, start, stop, _, _, _) in plan)
         {
             trackOf = trackOfSource[source];
@@ -184,6 +203,22 @@ public static class MwCreatureCheck
                 float t = Math.Min(start + f / anim.Fps, stop);
                 var reference = Morrowind(t, start, source == ownSource);
                 var ours = body.Pose(anim, f);
+                // Each tinted shape's copy showing now stands for it.
+                foreach (var (si, (copies, colourAt)) in tints)
+                {
+                    var showing = copies.Where(c => body.Shown(c, anim, f)).ToList();
+                    var wantLevel = MwCreatureSource.TintLevel(colourAt(source, t));
+                    var cols = showing.Count == 1 ? body.ShapeColors[showing[0]] : [];
+                    var gotLevel = cols.Length > 0 ? MwCreatureSource.TintLevel(new Vector3(cols[0].X, cols[0].Y, cols[0].Z)) : ((byte)255, (byte)255, (byte)255);
+                    bool even = cols.All(c => MwCreatureSource.TintLevel(new Vector3(c.X, c.Y, c.Z)) == gotLevel);
+                    if (showing.Count == 1 && gotLevel == wantLevel && even) tintRight++;
+                    else
+                    {
+                        tintWrong++;
+                        if (tintFirstWrong.Length == 0) tintFirstWrong = $"{shapes[si].Name} in {clip} frame {f}: {showing.Count} copies showing, colour {gotLevel} where Morrowind's is {wantLevel}";
+                    }
+                    if (showing.Count >= 1) ours[si] = ours[showing[0]];
+                }
                 if (probe is { } pr && pr.Clip == clip && pr.Frame == f)
                 {
                     // Each bone's origin, Morrowind's against ours, by name (the first of a name, as the converter names them).
@@ -289,6 +324,7 @@ public static class MwCreatureCheck
         if (particleRight + particleWrong > 0) say($"  particle systems Morrowind shows and hides: right in {particleRight} system-frames, wrong in {particleWrong}{(particleWrong > 0 ? " (first: " + particleFirstWrong + ")" : "")}");
         if (emitCount > 0) say($"  particle arrays' emitting points (along their bones): {emitWorst:F3} units from Morrowind's at worst over {emitCount} point-frames{(emitWorst > 0.05f ? " (" + emitWhere + ")" : "")}");
         if (hiddenFramesRight + hiddenFramesWrong > 0) say($"  parts Morrowind hides: out of sight in {hiddenFramesRight} part-frames, shown in {hiddenFramesWrong}");
+        if (tints.Count > 0) say($"  colours Morrowind animates ({tints.Count} shapes, {tintCopies} copies): right in {tintRight} shape-frames, wrong in {tintWrong}{(tintWrong > 0 ? " (first: " + tintFirstWrong + ")" : "")}");
         return results;
     }
 
@@ -367,6 +403,11 @@ public static class MwCreatureCheck
         public List<string> ShapeTextures { get; } = [];
         /// <summary>Each shape's name as written.</summary>
         public List<string> ShapeNames { get; } = [];
+        /// <summary>Each shape's vertex colours as written (empty without).</summary>
+        public List<Vector4[]> ShapeColors { get; } = [];
+
+        /// <summary>Whether a shape shows at a frame: every bone it rides at a scale (a visibility or tint bone at 0 hides it).</summary>
+        public bool Shown(int shape, Anim anim, int frame) => shapes[shape].Bones.All(b => anim.Transforms[frame * anim.Tracks + b].M31 > 0.5f);
 
         public sealed record Anim(int Tracks, int Frames, float Fps, IList<Matrix4x4> Transforms);
 
@@ -409,6 +450,7 @@ public static class MwCreatureCheck
                 ShapeTriangleCounts.Add(tris.Count);
                 ShapeTextures.Add(nif.GetTexturePathByIndex(shape, 0) ?? "");
                 ShapeNames.Add(shape.name.get());
+                ShapeColors.Add(nif.GetColorsForShape(shape)?.Select(c => new Vector4(c.r, c.g, c.b, c.a)).ToArray() ?? []);
             }
         }
 

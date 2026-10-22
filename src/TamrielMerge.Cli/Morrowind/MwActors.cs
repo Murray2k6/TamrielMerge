@@ -192,7 +192,66 @@ public sealed partial class MwPluginBuilder
         // NPDT's disposition: byte 44 of the full record, byte 2 of the auto-calculated one.
         if (npdt is { } nd && (nd.Data.Length >= 52 || nd.Data.Length == 12))
             Skyrim.Disposition.Start(npc, nd.Data[nd.Data.Length == 12 ? 2 : 44]);
+        // Moving as Morrowind's people do (Skyrim/Animations/NpcAnimations: its animations for this set, by keyword), and
+        // standing as tall as Morrowind's (its race's height on its skeleton, set on each placed reference: PersonScale).
+        bool beast = world.Objects.TryGetValue(raceId, out var mwRace) && mwRace.Get("RADT") is { Data.Length: >= 140 } radt && (BitConverter.ToInt32(radt.Data, 136) & 0x02) != 0;
+        var set = Skyrim.Animations.NpcAnimations.Morrowind.First(s => s.Female == female && s.Key == (beast ? (female ? "MorrowindBeastWomen" : "MorrowindBeastMen") : (female ? "MorrowindWomen" : "MorrowindMen")));
+        npc.Keywords = [PersonKeyword(set.Keyword).ToLink<IKeywordGetter>()];
+        if (raceId.Equals("Argonian", StringComparison.OrdinalIgnoreCase))
+            npc.Keywords.Add(PersonKeyword(female ? "TMMwArgonianWoman" : "TMMwArgonianMan").ToLink<IKeywordGetter>());
+        if (mwRace?.Get("RADT") is { Data.Length: >= 128 } rd && PersonHeight(set, female ? BitConverter.ToSingle(rd.Data, 124) : BitConverter.ToSingle(rd.Data, 120), race, female, look) is float scale)
+            personScale[npc.FormKey] = scale;
         return npc;
+    }
+
+    readonly Dictionary<string, Keyword> personKeywords = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<FormKey, float> personScale = [];
+
+    /// <summary>A keyword marking Morrowind's people of one animation set (made once).</summary>
+    Keyword PersonKeyword(string editorId)
+    {
+        if (personKeywords.TryGetValue(editorId, out var k)) return k;
+        k = new Keyword(mod) { EditorID = editorId };
+        mod.Keywords.Add(k);
+        return personKeywords[editorId] = k;
+    }
+
+    /// <summary>How much a placed person is scaled to stand as tall as in Morrowind: the head's height on Morrowind's
+    /// skeleton for the set times its race's height (Morrowind scales a person's height by its race's: OpenMW's
+    /// Npc::adjustScale), over the head's height on Skyrim's skeleton times the Skyrim race's height and the borrowed
+    /// look's own height (which Skyrim multiplies in). Null when a skeleton can't be read.</summary>
+    float? PersonHeight(Skyrim.Animations.NpcAnimations.Set set, float mwRaceHeight, IRaceGetter race, bool female, INpcGetter look)
+    {
+        if (!headHeights.TryGetValue(set.Key, out var heights))
+        {
+            heights = null;
+            try
+            {
+                var mw = Skyrim.Animations.NpcAnimations.MwRig.Load(data, set);
+                var (mt, _) = mw.RestPose();
+                int mh = mw.Index("Bip01 Head");
+                var archives = new Skyrim.Creatures.CreatureBehavior(SkyrimData!);
+                var sk = Skyrim.Animations.NpcAnimations.SkyrimRig.From(Skyrim.Animations.ClimbAnimation.ReadSkeleton(archives.ReadArchive(female
+                    ? @"meshes\actors\character\character assets female\skeleton_female.hkx" : @"meshes\actors\character\character assets\skeleton.hkx")!));
+                int sh = sk.Index("NPC Head [Head]");
+                if (mh >= 0 && sh >= 0) heights = (mt[mh].Z, sk.WorldT[sh].Z);
+            }
+            catch (Exception e) { Problems.Add($"person height ({set.Key}): {e.Message}"); }
+            headHeights[set.Key] = heights;
+        }
+        if (heights is not var (mwHead, skHead) || skHead <= 0 || mwRaceHeight <= 0) return null;
+        float skRace = female ? race.Height.Female : race.Height.Male;
+        float own = look.Height is > 0 ? look.Height : 1;
+        return mwHead * mwRaceHeight / (skHead * (skRace > 0 ? skRace : 1) * own);
+    }
+
+    readonly Dictionary<string, (float Mw, float Sk)?> headHeights = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A placed actor's scale: its reference's own, a person's times its height (<see cref="PersonHeight"/>).</summary>
+    float? PlacedScale(IMajorRecord actor, float refScale)
+    {
+        float s = refScale * (personScale.TryGetValue(actor.FormKey, out var p) ? p : 1);
+        return MathF.Abs(s - 1) < 1e-4f ? null : s;
     }
 
     readonly Dictionary<string, Outfit> outfits = new();

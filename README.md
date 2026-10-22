@@ -72,7 +72,8 @@ other from any of your games; *Textures & PBR…* changes its textures and makes
 - **Skyrim Special Edition** (Steam or GOG) with **[SKSE](https://skse.silverlock.org/)** and **Address Library
   for SKSE Plugins**.
 - **[Open Animation Replacer](https://www.nexusmods.com/skyrimspecialedition/mods/92109)** for the climbing animation
-  (Daggerfall's Climbing skill). Without it you still climb, in the falling pose.
+  (Daggerfall's Climbing skill) and for Morrowind's and Oblivion's people moving with their own games' animations.
+  Without it you still climb, in the falling pose, and those people move as Skyrim's do.
 - **Any of the games to convert**, from Steam or GOG: The Elder Scrolls II: Daggerfall, An Elder Scrolls Legend:
   Redguard, The Elder Scrolls III: Morrowind, The Elder Scrolls IV: Oblivion. Those not installed are left out and
   the rest still work.
@@ -163,6 +164,7 @@ How each part works, in `docs/`:
 | [distant-lod.md](docs/distant-lod.md) | the distant view: land, objects and trees |
 | [sprite-models.md](docs/sprite-models.md) | models made from Daggerfall's sprites |
 | [creatures.md](docs/creatures.md) | creatures with their own skeletons and animations |
+| [people-animations.md](docs/people-animations.md) | Morrowind's and Oblivion's people moving with their own games' animations |
 | [models.md](docs/models.md) | the model viewer and replacements |
 | [voices.md](docs/voices.md) | recorded and generated voices |
 | [videos.md](docs/videos.md) | the remastered intro videos |
@@ -200,8 +202,9 @@ Built with:
 - [SKSE](https://skse.silverlock.org/) runs the plugins; they read [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444).
 - [Open Animation Replacer](https://www.nexusmods.com/skyrimspecialedition/mods/92109) by Ershin
   ([source](https://github.com/ersh1/OpenAnimationReplacer), GPL-3.0 with its modding exceptions): plays TamrielMerge's
-  own climbing animation while you climb (Daggerfall's Climbing skill). Needed for that animation; TamrielMerge ships
-  only its own config and animation files, nothing of OAR's.
+  own climbing animation while you climb (Daggerfall's Climbing skill), and Morrowind's and Oblivion's people's
+  animations (retargeted from those games' own files onto Skyrim's skeleton when you convert) on those games' NPCs.
+  Needed for those animations; TamrielMerge ships only its own config and animation files, nothing of OAR's.
 
 The converters are this project's own code. These projects were the references for how the games work (their
 behaviour and file formats followed, their code not included):
@@ -217,7 +220,9 @@ behaviour and file formats followed, their code not included):
 - The [Dynamic Music](https://www.nexusmods.com/daggerfallunity/) mod for Daggerfall Unity: the combat playlist.
 - [RGUnity](https://github.com/RGUnity) (MIT) and the redguard-preservation notes: Redguard's models, scenes and scripts.
 - [OpenMW](https://openmw.org/) (GPL-3.0) and the [NifTools](https://github.com/niftools/nifxml) nif.xml: Morrowind's
-  NIF format, its attributes and other formulas.
+  NIF format, its attributes and other formulas; how Morrowind plays its creatures' and people's animations (which
+  animation files a person loads, idle choice, movement speeds and playback rates, knockdowns and knockouts, casting,
+  torches, storms, blend masks, PlayGroup and LoopGroup).
 - [xOBSE](https://github.com/llde/xOBSE): the list of OBSE's script commands, read from its source.
 - [UESP](https://en.uesp.net/) (CC BY-SA 2.5): the games' mechanics and Daggerfall's quest codes, for research;
   Oblivion's levelling (skill advancement, specialization and major-skill rates, character creation, trainers).
