@@ -1467,7 +1467,9 @@ public static class MwCreatureSource
         if (own && keys.TryGetValue(block, out var k))
         {
             bool v = k[0].Visible;
-            foreach (var (time, visible) in k) if (time <= t) v = visible; else break;
+            // A key holds from its own time: a frame on it (to float rounding of the frame's time, 2026-10-22: the ice raider's
+            // part at its death knockout's frame 28 fell either side by how the time was summed) takes its value.
+            foreach (var (time, visible) in k) if (time <= t + 1e-4f) v = visible; else break;
             return v;
         }
         return nif.Get<NiNode>(block) is not { Hidden: true };

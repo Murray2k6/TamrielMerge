@@ -746,6 +746,10 @@ EndFunction
 Function SetActorValueMw(Actor a, String asValue, Float afValue) Global
   If a
     a.SetActorValue(asValue, afValue)
+    ; Morrowind's SetHealth 0 kills (a dynamic stat at nothing is death); Skyrim's base value at 0 doesn't.
+    If asValue == "Health" && afValue <= 0.0 && !a.IsDead()
+      a.Kill()
+    EndIf
   EndIf
 EndFunction
 
@@ -915,7 +919,8 @@ EndFunction
 ; PlayGroup / LoopGroup: an animation group on an object (the converted model's own sequence of that name); on a creature
 ; with its own graph, as Morrowind plays it (OpenMW's playGroup): aiMode 0 after the one playing (queued), 1 at once from
 ; its start, 2 at once from its loop start; its loop part aiLoops more times (PlayGroup's -1: on and on), then to its end;
-; "idle" stops it. On a person, the nearest Skyrim idle for knockouts and deaths.
+; "idle" stops it. On a person (Papyrus compares strings ignoring case): a knockout its bleed-out, a death its death,
+; "idle" back to standing (Morrowind's scripts play only Death1 on people: mw-group-census --scripts).
 Function PlayGroup(ObjectReference r, String asGroup, Int aiMode = 0, Int aiLoops = -1) Global
   If !r
     Return
@@ -945,8 +950,13 @@ Function PlayGroup(ObjectReference r, String asGroup, Int aiMode = 0, Int aiLoop
     Return
   EndIf
   If a
-    If asGroup == "knockout" || asGroup == "KnockOut"
+    If asGroup == "knockout"
       Debug.SendAnimationEvent(a, "BleedOutStart")
+    ElseIf asGroup == "death1" || asGroup == "death2" || asGroup == "death3" || asGroup == "death4" || asGroup == "death5" || asGroup == "deathknockdown" || asGroup == "deathknockout" || asGroup == "swimdeath" || asGroup == "swimdeath2" || asGroup == "swimdeath3" || asGroup == "swimdeathknockdown" || asGroup == "swimdeathknockout"
+      ; A death group (the Black Dart gang drowned: SetHealth 0, PlayGroup Death1): dead and fallen, as Skyrim's people fall.
+      If !a.IsDead()
+        a.Kill()
+      EndIf
     ElseIf asGroup == "idle" || asGroup == "Idle"
       Debug.SendAnimationEvent(a, "IdleForceDefaultState")
     EndIf

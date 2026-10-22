@@ -296,7 +296,7 @@ public sealed class MainForm : Form
             Bullet("a main menu of its own: a flyby over the games you converted, with its own theme", last: true);
             Heading("What you need");
             Bullet("Skyrim Special Edition with SKSE and Address Library for SKSE Plugins");
-            Bullet("for the climbing animation (Daggerfall), Open Animation Replacer by Ershin: without it you climb in the falling pose");
+            Bullet("for the climbing animation (Daggerfall) and Morrowind's and Oblivion's people moving with their own games' animations, Open Animation Replacer by Ershin: without it you climb in the falling pose and those people move as Skyrim's do");
             Bullet("any of the games above from Steam or GOG: those not installed are left out, and the rest still work");
             Bullet("for voices, the Creation Kit (free on Steam); for the videos, models and menu, a graphics card", last: true);
             Heading("How to use it");

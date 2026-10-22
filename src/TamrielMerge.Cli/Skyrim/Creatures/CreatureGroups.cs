@@ -226,6 +226,29 @@ public static class CreatureGroups
             if (bound.Count != gens.Count || expr != want) Issue($"{p.Clip}: {bound.Count} of {gens.Count} generators bound; expression {expr ?? "none"}, Morrowind's pace {pace:F3}");
             else lines.Add($"  {p.Clip}: at the actor's speed over {pace:F2} (Morrowind's {(flies ? p.Group : MwCreatureSource.WalkEquivalent(p.Clip))} pace)");
         }
+        // Turning: every turn's playback at its yaw rate over half a turn a second, 1 to 1.5 times (OpenMW's turn speed), the
+        // rate measured by its hit script between its graph's TMTurnStart and TMTurnEnd.
+        var turnGens = clipGens.Where(c => ClipOf(c.G) is { } tc && CreatureGraph.IsTurn(tc)).ToList();
+        if (turnGens.Count > 0)
+        {
+            string wantTurn = $"{CreatureGraph.TurnMultVar} = clamp({CreatureGraph.TurnRateVar} / 180, 1, 1.5)";
+            int turnBound = turnGens.Count(c => c.G.m_variableBindingSet?.m_bindings.Any(b => b.m_memberPath == "playbackSpeed" && V(b.m_variableIndex) == CreatureGraph.TurnMultVar) == true);
+            var turnStates = new List<hkbStateMachineStateInfo>();
+            void States(object? o, HashSet<object> visited)
+            {
+                if (o is null || o is string || o.GetType().IsPrimitive || o.GetType().IsEnum || !visited.Add(o)) return;
+                if (o is System.Collections.IEnumerable list) { foreach (var it in list) States(it, visited); return; }
+                if (o is hkbStateMachineStateInfo si && si.m_name.Contains("Turn")) turnStates.Add(si);
+                if (o.GetType().IsValueType) return;
+                foreach (var pr in o.GetType().GetProperties().Where(pr => pr.Name.StartsWith("m_") && pr.GetIndexParameters().Length == 0)) { try { States(pr.GetValue(o), visited); } catch { } }
+            }
+            States(graph.m_rootGenerator, new HashSet<object>(ReferenceEqualityComparer.Instance));
+            string EvName(int id) => id >= 0 && id < graph.m_data!.m_stringData!.m_eventNames.Count ? graph.m_data.m_stringData.m_eventNames[id] : "";
+            int told = turnStates.Count(s => s.m_enterNotifyEvents?.m_events.Any(e => EvName(e.m_id) == "TMTurnStart") == true && s.m_exitNotifyEvents?.m_events.Any(e => EvName(e.m_id) == "TMTurnEnd") == true);
+            if (turnBound != turnGens.Count || !evaluate.Contains(wantTurn) || told != turnStates.Count)
+                Issue($"turning: {turnBound} of {turnGens.Count} turn clips at the turn's rate, expression {(evaluate.Contains(wantTurn) ? "there" : "missing")}, {told} of {turnStates.Count} turn states telling its script");
+            else lines.Add($"  turning: {turnGens.Count} turn clips at OpenMW's turn speed (yaw rate / 180 degrees a second, 1 to 1.5), {turnStates.Count} turn states telling its script");
+        }
         if (selectors.Any(s => s.m_variableBindingSet?.m_bindings.Any(b => V(b.m_variableIndex) == "iTMWay") == true))
         {
             const string way = "iTMWay = cond(Direction < 0.176208, 0, cond(Direction < 0.323792, 1, cond(Direction < 0.676208, 2, cond(Direction < 0.823792, 3, 0))))";

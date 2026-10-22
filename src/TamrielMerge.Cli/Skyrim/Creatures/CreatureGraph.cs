@@ -131,15 +131,28 @@ public sealed class CreatureGraph
         foreach (var (time, evt, fromEnd) in triggers ?? [])
             list.Add(new hkbClipTrigger { m_localTime = fromEnd ? -time : time, m_relativeToEndOfClip = fromEnd, m_event = new hkbEventProperty { m_id = Ev(evt) } });
         if (list.Count > 0) g.m_triggers = new hkbClipTriggerArray { m_triggers = list };
-        // Moving at the actor's own speed over Morrowind's pace for it (the root's expressions keep the rate).
-        if (rig.MovePaces.ContainsKey(clip))
+        // Moving at the actor's own speed over Morrowind's pace for it (the root's expressions keep the rate); turning as
+        // fast as it turns (TurnMultVar).
+        int rate = rig.MovePaces.ContainsKey(clip) ? Var(RateVar(clip), 4, Real(1)) : IsTurn(clip) ? Var(TurnMultVar, 4, Real(1)) : -1;
+        if (rate >= 0)
             g.m_variableBindingSet = new hkbVariableBindingSet
             {
                 m_indexOfBindingToEnable = -1,
-                m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "playbackSpeed", m_variableIndex = Var(RateVar(clip), 4, Real(1)), m_bitIndex = -1 }],
+                m_bindings = [new hkbVariableBindingSetBinding { m_memberPath = "playbackSpeed", m_variableIndex = rate, m_bitIndex = -1 }],
             };
         return g;
     }
+
+    /// <summary>A turning clip: turning on the spot, in a fight with a weapon (cturnleft_1h), swimming.</summary>
+    public static bool IsTurn(string clip) => clip.StartsWith("turn") || clip.StartsWith("cturn") || clip.StartsWith("swimturn");
+
+    /// <summary>
+    /// The playback speed of every turn (OpenMW 0.48 CharacterController::update: "Adjust animation speed from 1.0 to 1.5
+    /// multiplier", |yaw this frame| / duration / pi, at least 1, at most 1.5): its yaw rate in degrees a second
+    /// (<see cref="TurnRateVar"/>, which its hit script measures while it turns from its own facing: Skyrim's TurnDelta's
+    /// units are documented nowhere) over 180.
+    /// </summary>
+    public const string TurnMultVar = "fTMTurnMult", TurnRateVar = "fTMTurnRate";
 
     /// <summary>The clips of a family as Morrowind counts them ("hit1", "hit2"... up from 1 while there is one: OpenMW's
     /// chooseRandomGroup), else the one bare name a rig from another game has ("hit").</summary>
@@ -518,8 +531,8 @@ public sealed class CreatureGraph
         };
         if (turns)
         {
-            nonCombatStates.Add(State(2, "TurnLeft", ClipGen("TurnLeft", Clip("turnleft", "turnright"), loop: true), [To("turnStop", 0), To("turnRight", 3), To("moveStart", 1)]));
-            nonCombatStates.Add(State(3, "TurnRight", ClipGen("TurnRight", Clip("turnright", "turnleft"), loop: true), [To("turnStop", 0), To("turnLeft", 2), To("moveStart", 1)]));
+            nonCombatStates.Add(State(2, "TurnLeft", ClipGen("TurnLeft", Clip("turnleft", "turnright"), loop: true), [To("turnStop", 0), To("turnRight", 3), To("moveStart", 1)], [Ev("TMTurnStart")], [Ev("TMTurnEnd")]));
+            nonCombatStates.Add(State(3, "TurnRight", ClipGen("TurnRight", Clip("turnright", "turnleft"), loop: true), [To("turnStop", 0), To("turnLeft", 2), To("moveStart", 1)], [Ev("TMTurnStart")], [Ev("TMTurnEnd")]));
         }
         var nonCombat = Machine("TMNonCombat", 0, nonCombatStates);
 
@@ -558,9 +571,9 @@ public sealed class CreatureGraph
         if (turns)
         {
             combatStates.Add(State(20, "CombatTurnLeft", While(Gen("CombatTurnLeft", Clip("turnleft", "turnright"), true, null, s => $"cturnleft_{s}"), "CombatTurnLeft", "IsAttackReady", "bMLh_Ready", "bMRh_Ready"),
-                [To("turnStop", 0), To("turnRight", 21), To("moveStart", 1), .. castTransitions, .. attackTransitions.Select(a => To(a.Event, a.State))]));
+                [To("turnStop", 0), To("turnRight", 21), To("moveStart", 1), .. castTransitions, .. attackTransitions.Select(a => To(a.Event, a.State))], [Ev("TMTurnStart")], [Ev("TMTurnEnd")]));
             combatStates.Add(State(21, "CombatTurnRight", While(Gen("CombatTurnRight", Clip("turnright", "turnleft"), true, null, s => $"cturnright_{s}"), "CombatTurnRight", "IsAttackReady", "bMLh_Ready", "bMRh_Ready"),
-                [To("turnStop", 0), To("turnLeft", 20), To("moveStart", 1), .. castTransitions, .. attackTransitions.Select(a => To(a.Event, a.State))]));
+                [To("turnStop", 0), To("turnLeft", 20), To("moveStart", 1), .. castTransitions, .. attackTransitions.Select(a => To(a.Event, a.State))], [Ev("TMTurnStart")], [Ev("TMTurnEnd")]));
         }
         for (int i = 0; i < Attacks.Count; i++)
         {
@@ -684,8 +697,8 @@ public sealed class CreatureGraph
             };
             if (turns)
             {
-                swimStates.Add(State(2, "SwimTurnLeft", ClipGen("SwimTurnLeft", Clip("swimturnleft", "turnleft", "turnright"), loop: true), [To("turnStop", 0), To("turnRight", 3), To("moveStart", 1)]));
-                swimStates.Add(State(3, "SwimTurnRight", ClipGen("SwimTurnRight", Clip("swimturnright", "turnright", "turnleft"), loop: true), [To("turnStop", 0), To("turnLeft", 2), To("moveStart", 1)]));
+                swimStates.Add(State(2, "SwimTurnLeft", ClipGen("SwimTurnLeft", Clip("swimturnleft", "turnleft", "turnright"), loop: true), [To("turnStop", 0), To("turnRight", 3), To("moveStart", 1)], [Ev("TMTurnStart")], [Ev("TMTurnEnd")]));
+                swimStates.Add(State(3, "SwimTurnRight", ClipGen("SwimTurnRight", Clip("swimturnright", "turnright", "turnleft"), loop: true), [To("turnStop", 0), To("turnLeft", 2), To("moveStart", 1)], [Ev("TMTurnStart")], [Ev("TMTurnEnd")]));
             }
             for (int i = 0; i < Attacks.Count; i++)
             {
@@ -801,6 +814,11 @@ public sealed class CreatureGraph
         expressions.Add("BeginCastRight if (bWantCastRight && bMRh_Ready && !IsCasting)");
         if (variables.Any(v => v.Name == "fTMTorch")) expressions.Add("fTMTorch = cond(iLeftHandType == 11, 1000000, 0)");
         if (variables.Any(v => v.Name == "fTMStorm")) expressions.Add("fTMStorm = cond((bTMStorm == 1) && (IsAttacking == 0) && (IsCasting == 0) && (bTMSwimming == 0), 1000000, 0)");
+        if (variables.Any(v => v.Name == TurnMultVar))
+        {
+            Var(TurnRateVar, 4, Real(0));
+            expressions.Add($"{TurnMultVar} = clamp({TurnRateVar} / 180, 1, 1.5)");
+        }
         foreach (var (clip, pace) in rig.MovePaces.OrderBy(p => p.Key, StringComparer.Ordinal))
             if (variables.Any(v => v.Name == RateVar(clip)))
                 expressions.Add($"{RateVar(clip)} = clamp(Speed / {pace.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture)}, 0, 10)");

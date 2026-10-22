@@ -221,26 +221,37 @@ public static partial class NpcAnimations
             Add($"mt_jumpfall{way}.hkx", new Source("jumploop", Loop: true));
             Add($"mt_jumpland{way}.hkx", new Source("jumpland"));
         }
-        // Skyrim's fidgets standing about as Oblivion's own standing idles of the same kind.
+        // Getting up after a fall (Skyrim's and Oblivion's alike a ragdoll's): Oblivion's own, from its back and its front.
+        Add("mt_getupfromback.hkx", new Source(@"idleanims\handtohandgetupfaceup"));
+        Add("mt_getupfromfront.hkx", new Source(@"idleanims\handtohandgetupfacedown"));
+        // Skyrim's fidgets standing about as the idles Oblivion's people loiter with (ObFidgets).
         foreach (var (sk, ob) in ObFidgets(sex)) Add(sk + ".hkx", new Source(ob));
         return table;
     }
 
-    /// <summary>Skyrim's fidgets and the Oblivion idle each is (arms crossed, swatting flies, looking about, sighing,
-    /// pondering, the weight shifted).</summary>
-    static (string Skyrim, string Oblivion)[] ObFidgets(string sex) =>
-    [
-        ("mt_idle_a_arms_crossed", @"idleanims\armscrossed_sulking"), ("mt_idle_a_arms_crossedloop", @"idleanims\talk_armscrossed_still"),
-        ("mt_idle_a_swat_flies", @"idleanims\specialidle_swattingflys"), ("mt_idle_b_long_left", @"idleanims\ponder01"), ("mt_idle_b_sigh", @"idleanims\exasperated"),
-        ("mt_idle_b_sway_right", @"idleanims\talk_handsatside_moving"), ("mt_idle_nervous", @"idleanims\alertedscan"), ("mt_idle_nervous_lookaround", @"idleanims\scan"),
-        ("mt_idle_nervous_lookleft", @"idleanims\scan"), ("mt_idle_nervous_lookright", @"idleanims\scan"),
-        ($@"{sex}\mt_idle_a_left_long", @"idleanims\ponder02"), ($@"{sex}\mt_idle_a_leg_shift", @"idleanims\talk_handsatside_moving2"), ($@"{sex}\mt_idle_a_pull_pants", @"idleanims\stand1"),
-        ($@"{sex}\mt_idle_a_scratch_back", @"idleanims\ponder03"), ($@"{sex}\mt_idle_a_shakeout", @"idleanims\exhausted"), ($@"{sex}\mt_idle_a_shoulders", @"idleanims\talk_handsclasped_sway"),
-        ($@"{sex}\mt_idle_a_sigh_var1", @"idleanims\exasperated"), ($@"{sex}\mt_idle_a_sigh_var2", @"idleanims\exasperated"), ($@"{sex}\mt_idle_a_soft_right", @"idleanims\talk_handsclasped_motion"),
-        ($@"{sex}\mt_idle_a_sway_fast", @"idleanims\talk_fistsclinched_sway"), ($@"{sex}\mt_idlelookinga", @"idleanims\scan"), ($@"{sex}\mt_idlelookingb", @"idleanims\alertedscan"),
-        ($@"{sex}\mt_idlelookingc", @"idleanims\sentrylookout"), ($@"{sex}\mt_idlelookingd", @"idleanims\scan"), ($@"{sex}\mt_idlescratchhead", @"idleanims\ponder01"),
-        ($@"{sex}\mt_idlescratchheadright", @"idleanims\ponder02"),
-    ];
+    /// <summary>
+    /// Skyrim's 26 fidgets as the idles Oblivion's people play standing about: its idle tree's LoiterIdles (2026-10-22,
+    /// read from Oblivion.esm's IDLE records: not talking, sneaking, swimming or with a weapon out), whose children it tries
+    /// in turn - StandAround01 (stand1) at 50%, LoiterScan (scan) at 50% of the rest, LoiterPonder (ponder02) at 20% of
+    /// that (both those away from the player) - so of the picks that idle at all stand1 62%, scan 31%, ponder02 6%: as
+    /// many of the fidgets each (16, 8, 2), each where Skyrim's is of its kind (looking about Oblivion's scan, scratching
+    /// the head its ponder). Its beggars' and one-handed guards' own idles (a faction, a weapon in the scabbard) aren't a
+    /// file's to tell.
+    /// </summary>
+    static (string Skyrim, string Oblivion)[] ObFidgets(string sex)
+    {
+        const string Stand = @"idleanims\stand1", Scan = @"idleanims\scan", Ponder = @"idleanims\ponder02";
+        return
+        [
+            ("mt_idle_nervous", Scan), ("mt_idle_nervous_lookaround", Scan), ("mt_idle_nervous_lookleft", Scan), ("mt_idle_nervous_lookright", Scan),
+            ($@"{sex}\mt_idlelookinga", Scan), ($@"{sex}\mt_idlelookingb", Scan), ($@"{sex}\mt_idlelookingc", Scan), ($@"{sex}\mt_idlelookingd", Scan),
+            ($@"{sex}\mt_idlescratchhead", Ponder), ($@"{sex}\mt_idlescratchheadright", Ponder),
+            ("mt_idle_a_arms_crossed", Stand), ("mt_idle_a_arms_crossedloop", Stand), ("mt_idle_a_swat_flies", Stand), ("mt_idle_b_long_left", Stand),
+            ("mt_idle_b_sigh", Stand), ("mt_idle_b_sway_right", Stand), ($@"{sex}\mt_idle_a_left_long", Stand), ($@"{sex}\mt_idle_a_leg_shift", Stand),
+            ($@"{sex}\mt_idle_a_pull_pants", Stand), ($@"{sex}\mt_idle_a_scratch_back", Stand), ($@"{sex}\mt_idle_a_shakeout", Stand), ($@"{sex}\mt_idle_a_shoulders", Stand),
+            ($@"{sex}\mt_idle_a_sigh_var1", Stand), ($@"{sex}\mt_idle_a_sigh_var2", Stand), ($@"{sex}\mt_idle_a_soft_right", Stand), ($@"{sex}\mt_idle_a_sway_fast", Stand),
+        ];
+    }
 
     /// <summary>The group under an Oblivion group for the bones it leaves alone, one step: a move its weapon's idle
     /// (sneaking or swimming its sneaking or swimming one); a weapon's idle the idle without the weapon; a sneaking or

@@ -11,7 +11,9 @@ doesn't. Its race's ability.
   effect's), and facing into a storm (bTMStorm: Morrowind's IdleStorm when the storm blows within 60 degrees of straight at
   it, an ash or blight storm from Red Mountain, any other along +Y).
 - A group a script plays (TMMwScript.PlayGroup) counted through its loops (iTMLoops); dying while one plays waits for it
-  to end (Morrowind: "Do not interrupt scripted animation by death").}
+  to end (Morrowind: "Do not interrupt scripted animation by death").
+- How fast it turns while it turns (fTMTurnRate, degrees a second, from its own facing ten times a second): its graph
+  plays its turn that much faster, as OpenMW does (1 to 1.5 times, by the turn over half a turn a second).}
 
 ; The creatures of its race, each one's agility (-1: no knockdowns) and idle set.
 ActorBase[] Property Bases Auto
@@ -33,6 +35,9 @@ Float LastHealth
 Bool Out
 Bool Moving
 Bool DeathWaits
+Bool Turning
+Float TurnAngle
+Float TurnTime
 
 Event OnEffectStart(Actor akTarget, Actor akCaster)
   Me = akTarget
@@ -45,8 +50,19 @@ Event OnEffectStart(Actor akTarget, Actor akCaster)
   RegisterForAnimationEvent(Me, "moveStop")
   RegisterForAnimationEvent(Me, "TMPlayCycle")
   RegisterForAnimationEvent(Me, "TMPlayDone")
+  RegisterTurns()
   Tell()
 EndEvent
+
+Function RegisterTurns()
+  RegisterForAnimationEvent(Me, "turnLeft")
+  RegisterForAnimationEvent(Me, "turnRight")
+  RegisterForAnimationEvent(Me, "turnStop")
+  ; Its own graph's, entering and leaving a turn (sent to scripts whatever the engine's are).
+  RegisterForAnimationEvent(Me, "TMTurnStart")
+  RegisterForAnimationEvent(Me, "TMTurnEnd")
+  RegisterForAnimationEvent(Me, "moveStart")
+EndFunction
 
 ; Its graph starts afresh each time its 3D loads.
 Event OnLoad()
@@ -55,6 +71,7 @@ Event OnLoad()
     RegisterForAnimationEvent(Me, "moveStop")
     RegisterForAnimationEvent(Me, "TMPlayCycle")
     RegisterForAnimationEvent(Me, "TMPlayDone")
+    RegisterTurns()
     LastHealth = Me.GetActorValue("Health")
     Tell()
   EndIf
@@ -101,7 +118,20 @@ Event OnAnimationEvent(ObjectReference akSource, String asEventName)
   If !Me
     Return
   EndIf
+  If asEventName == "turnLeft" || asEventName == "turnRight" || asEventName == "TMTurnStart"
+    If !Turning
+      Turning = True
+      TurnAngle = Me.GetAngleZ()
+      TurnTime = Utility.GetCurrentRealTime()
+      RegisterForSingleUpdate(0.1)
+    EndIf
+    Return
+  ElseIf asEventName == "turnStop" || asEventName == "TMTurnEnd"
+    Turning = False
+    Return
+  EndIf
   If asEventName == "moveStart"
+    Turning = False
     Moving = True
     Me.SetAnimationVariableBool("bTMRunning", Me.IsRunning())
     Watch()
@@ -196,7 +226,9 @@ EndFunction
 ; While it moves, fights, lies knocked out or might face a storm: whether it runs four times a second, its fatigue (to
 ; come to) and storm, and its health once a second (so a blow's damage is that blow's, not magic's since).
 Function Watch()
-  If Out || Moving
+  If Turning
+    RegisterForSingleUpdate(0.1)
+  ElseIf Out || Moving
     RegisterForSingleUpdate(0.25)
   ElseIf Me.IsInCombat() || AshStorms
     RegisterForSingleUpdate(1.0)
@@ -210,6 +242,22 @@ Event OnUpdate()
     EndIf
     If Moving
       Me.SetAnimationVariableBool("bTMRunning", Me.IsRunning())
+    EndIf
+    If Turning
+      ; Degrees turned since the last look (the shorter way round) over the seconds between.
+      Float now = Utility.GetCurrentRealTime()
+      Float angle = Me.GetAngleZ()
+      Float turned = angle - TurnAngle
+      If turned > 180.0
+        turned -= 360.0
+      ElseIf turned < -180.0
+        turned += 360.0
+      EndIf
+      If now > TurnTime
+        Me.SetAnimationVariableFloat("fTMTurnRate", Math.Abs(turned) / (now - TurnTime))
+      EndIf
+      TurnAngle = angle
+      TurnTime = now
     EndIf
     If AshStorms
       Me.SetAnimationVariableBool("bTMStorm", InStorm())

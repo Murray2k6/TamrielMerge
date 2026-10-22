@@ -38,8 +38,20 @@ from its idle, the weapon idle's from the plain idle.
 `Table` (Morrowind) and `ObTable` (Oblivion) give each Skyrim character animation its source: standing, walking and
 running every way, turning, drawing and putting away, each attack (Skyrim's right swing, left swing and power attacks as
 each game's own), blocking, recoiling and staggering, the bow (drawn, held, loosed), casting, shield and torch, swimming,
-sneaking, jumping, and Skyrim's idle fidgets as each game's own idles. Oblivion has no knockout or death animations (its
-actors fall as ragdolls, as Skyrim's do), so those stay Skyrim's; Morrowind's knockout is Skyrim's bleed-out.
+sneaking, jumping, getting up after a fall, and Skyrim's idle fidgets as each game's own idles.
+
+- Getting up (Skyrim's mt_getupfromback / mt_getupfromfront, after a ragdoll fall): Oblivion's own get-ups
+  (handtohandgetupfaceup / facedown); Morrowind's knockout's getting up (its Loop Stop to Stop).
+- Fidgets: Oblivion's are the idles its people loiter with, read from Oblivion.esm's idle tree (LoiterIdles: stand1 at
+  50%, scan at 50% of the rest, ponder02 at 20% of that), as many of Skyrim's 26 fidget files each as Oblivion picks
+  them (16, 8, 2).
+- Diagonals: Skyrim's diagonal moves are each game's forward or back move. Morrowind's by OpenMW (it strafes only past
+  63.4°); Oblivion's by its four straight move groups (cs.uesp.net AnimGroups lists no diagonal) and the WalkBlessed
+  plugin's note that vanilla doesn't turn the body: no source says outright which Oblivion plays.
+- Oblivion has no knockout or death animations (its actors fall as ragdolls, as Skyrim's do), so Skyrim's bleed-out
+  and death stay; Morrowind's knockout is Skyrim's bleed-out.
+- Scripts: PlayGroup on a person (Morrowind's scripts play only Death1 on people: the Black Dart gang, drowned) makes
+  them dead and fallen; Morrowind's SetHealth 0 kills, as Skyrim's base value at 0 doesn't.
 
 ## Events
 
@@ -75,6 +87,6 @@ centre 0.000; 0 issues.
 
 ## Limits
 
-- Morrowind's race weight (its x/y scale) has no Skyrim equivalent.
+- Morrowind's race weight (its x/y scale) has no Skyrim equivalent (a reference's scale is one number).
 - Deaths are Skyrim's ragdolls (Oblivion's are ragdolls too).
 - Daggerfall's and Redguard's people have no source animations (sprites, and Redguard's own format).

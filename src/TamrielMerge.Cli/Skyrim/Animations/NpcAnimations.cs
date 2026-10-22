@@ -179,6 +179,9 @@ public static partial class NpcAnimations
         Add("bleedout_transout.hkx", new Source("Knockout", "Loop Stop", "Stop"));
         foreach (var down in new[] { "bleedout_forward.hkx", "bleedout_backward.hkx", "bleedout_left.hkx", "bleedout_right.hkx" }) Add(down, new Source("Knockout", "Start", "Loop Start"));
         Add("deathanimationa.hkx", new Source("Death1"));
+        // Getting up after a fall: Morrowind's own getting up (its knockout's part after the loop).
+        Add("mt_getupfromback.hkx", new Source("Knockout", "Loop Stop", "Stop"));
+        Add("mt_getupfromfront.hkx", new Source("Knockout", "Loop Stop", "Stop"));
         // Swimming.
         Add("swimidle.hkx", new Source("IdleSwim", Loop: true));
         Add("swimforward.hkx", new Source("SwimRunForward", Loop: true));

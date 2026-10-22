@@ -111,7 +111,9 @@ from OpenMW 0.48, a reading reference):
 - **Moving**: walk and run every way, run at the walk speed (a creature's), strafing at 0.75 past 63.4°, swimming at
   its swim speed (fSwimRunBase + Athletics x fSwimRunAthleticsMult); each move played at speed / pace, capped at 10, its
   pace the root's travel over its loop (the cliff racer's 2,990 against its 757 flight: played at 0.25, as Morrowind).
-  Turning for bipeds only.
+  Turning for bipeds only, the turn played 1 to 1.5 times as fast as it turns over half a turn a second (OpenMW's turn
+  speed), its yaw rate measured by its hit script from its own facing (Skyrim's TurnDelta's units are documented
+  nowhere).
 - **Struck**: knocked down when agility x fKnockDownMult <= the blow and the odds roll (iKnockDownOddsMult,
   iKnockDownOddsBase) says so, else its hit (Hit1..5 at random); **knocked out** while its stamina is at nothing (or its
   base is none), the knockout's loop held until it comes back (fFatigueReturnBase + fFatigueReturnMult x Endurance a

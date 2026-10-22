@@ -3882,6 +3882,21 @@ static class Program
                     Console.WriteLine(f);
                 return 0;
             }
+            case "sk-list":
+            {
+                // Dev aid: Skyrim's archived files matching --match (regex), under --folder (default meshes\actors\character\).
+                var cb = new Skyrim.Creatures.CreatureBehavior(skyrimData);
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var p in cb.ArchivePaths(opts.GetValueOrDefault("folder", @"meshes\actors\character\")).Where(p => rx.IsMatch(p)).Order()) Console.WriteLine(p);
+                // --clips: the character project's clips (with their events) playing each file listed.
+                if (opts.ContainsKey("clips"))
+                {
+                    Skyrim.Animations.NpcAnimations.VanillaEvents(cb, opts.ContainsKey("female"));
+                    foreach (var (file, list) in Skyrim.Animations.NpcAnimations.ClipsByFile.Where(kv => rx.IsMatch(kv.Key)).OrderBy(kv => kv.Key))
+                        foreach (var (clip, evs) in list) Console.WriteLine($"  {file} <- {clip}: {string.Join(", ", evs.Select(e => $"{e.Text}@{e.Time:F3}"))}");
+                }
+                return 0;
+            }
             case "ob-races":
             {
                 // Dev aid: Oblivion.esm's races, each one's data as Mutagen reads it (its members by reflection).
@@ -13538,8 +13553,8 @@ static class Program
             string mods = mo2 is { Length: > 0 } ? Path.Combine(mo2, "mods") : "";
             bool oar = File.Exists(Path.Combine(data, @"SKSE\Plugins\OpenAnimationReplacer.dll"))
                 || (Directory.Exists(mods) && Directory.EnumerateDirectories(mods).Any(m => File.Exists(Path.Combine(m, @"SKSE\Plugins\OpenAnimationReplacer.dll"))));
-            Console.WriteLine(oar ? "  Open Animation Replacer found: the climbing animation will play"
-                : "  Open Animation Replacer not found: install it (Nexus mod 92109, by Ershin) for the climbing animation; without it you climb in the falling pose");
+            Console.WriteLine(oar ? "  Open Animation Replacer found: the climbing animation and the converted games' people's own animations will play"
+                : "  Open Animation Replacer not found: install it (Nexus mod 92109, by Ershin) for the climbing animation and for Morrowind's and Oblivion's people moving with their own games' animations; without it you climb in the falling pose and those people move as Skyrim's do");
         }
         if (!lists) return;
         foreach (var line in Setup.PluginList.Remove(r.Gone, mo2)) Console.WriteLine($"  {line}");
