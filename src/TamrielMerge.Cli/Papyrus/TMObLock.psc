@@ -11,25 +11,28 @@ Int Property LockLevel = 0 Auto
 Bool Property Locked = False Auto
 {The lock of a swinging door.}
 Bool Property Swing = False Auto
+Bool Property ScriptActivates = False Auto
+{Its own Oblivion script has an OnActivate block, which takes the place of the default activation: the lock holds the
+level only.}
 Key Property DoorKey Auto
 Message Property Choice Auto
 {"Pick the lock", "Auto Attempt", "Leave".}
 MiscObject Property Lockpick Auto
 
 Event OnInit()
-  If !Swing
+  If !Swing && !ScriptActivates
     BlockActivation(True)
   EndIf
 EndEvent
 
 Event OnLoad()
-  If !Swing
+  If !Swing && !ScriptActivates
     BlockActivation(True)
   EndIf
 EndEvent
 
 Event OnActivate(ObjectReference akActionRef)
-  If !Swing && LetIn(akActionRef)
+  If !Swing && !ScriptActivates && LetIn(akActionRef)
     Activate(akActionRef, True)
   EndIf
 EndEvent

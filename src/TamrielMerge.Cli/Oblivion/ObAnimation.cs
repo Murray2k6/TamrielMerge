@@ -33,11 +33,14 @@ public sealed partial class ObMeshConverter
         public HashSet<uint> Moved = [];
         /// <summary>Nodes with transform controllers of their own (they loop by themselves).</summary>
         public Dictionary<uint, uint> NodeControllers = [];
-        /// <summary>What the converted model plays: sequence names and lengths.</summary>
-        public List<(string Name, float Length)> Played = [];
+        /// <summary>What the converted model plays: sequence names, lengths (seconds) and whether they loop.</summary>
+        public List<(string Name, float Length, bool Loop)> Played = [];
     }
 
     sealed record Link(uint Node, string NodeName, uint Interpolator, byte Priority);
+
+    /// <summary>A sequence's length in seconds: its span at its frequency.</summary>
+    static float Seconds(NiControllerSequence s) => (s.stopTime - s.startTime) / (s.frequency > 0 ? s.frequency : 1);
 
     /// <summary>
     /// The model's transform animation: its root's controller manager's sequences (each link to a transform
@@ -107,7 +110,7 @@ public sealed partial class ObMeshConverter
     /// their targets by name), each piece on its node, collision on its node (keyframed where it moves), then the
     /// animation.
     /// </summary>
-    void WriteAnimated(NifFile src, Animation a, List<Piece> pieces, Dictionary<uint, List<(V3[] Pts, V3 N)>> collision, string outPath, bool moving)
+    void WriteAnimated(NifFile src, Animation a, List<Piece> pieces, Dictionary<uint, List<(V3[] Pts, V3 N)>> collision, string outPath, bool moving, bool trap = false)
     {
         var sh = src.GetHeader();
         var srcRoot = src.GetRootNode();
@@ -156,7 +159,7 @@ public sealed partial class ObMeshConverter
             if (polys.Count == 0) continue;
             bool moves = moving || MovesWith(src, a, source);
             var tex = polys.Select(s => (s.Pts, s.N, new BlockMeshBuilder.Tex("", "", false))).ToList();
-            BlockMeshBuilder.AddCollision(nif, NodeFor(source), moves ? tex : Stairs(tex, false), moves, onTarget: moves);
+            BlockMeshBuilder.AddCollision(nif, NodeFor(source), moves ? tex : Stairs(tex, false), moves, onTarget: moves, trap: trap && moves);
             havok = true;
         }
         // 0x1 animated (the controllers run), 0x2 havok, 0x8 complex: vanilla MineSecretDoor01's 11.
@@ -202,7 +205,7 @@ public sealed partial class ObMeshConverter
         {
             foreach (var l in sequences[0].Links.Where(l => a.Moved.Contains(l.Node) && !a.NodeControllers.ContainsKey(l.Node)))
                 direct.Add((l.Node, null, l.Interpolator));
-            a.Played.Add(("Idle", idle.stopTime - idle.startTime));
+            a.Played.Add(("Idle", Seconds(idle), true));
             sequences = [];
         }
         foreach (var (node, source, interp) in direct)
@@ -260,7 +263,7 @@ public sealed partial class ObMeshConverter
             seq.accumRootName = new NiStringRef(root.name.get());
             NiflyRaw.Ref(seq.stringPaletteRef).index = NoBlock;
             seqIds.Add(Add(seq));
-            a.Played.Add((name, seq.stopTime - seq.startTime));
+            a.Played.Add((name, Seconds(seq), seq.cycleType != CycleType.CYCLE_CLAMP));
         }
 
         // Text keys: the start and end of the sequence (Oblivion's sound keys name Oblivion's sounds).

@@ -61,6 +61,74 @@ Int Property DialogStage = 100 Auto
 {Stage DialogStage + key opens a "Tell me about" topic: key = place, 20 + person, 40 + item.}
 Int Property RumorStage = 200 Auto
 Int[] Property RumorIds Auto
+; "Tell me about" switches, one per resource key (place n, person 20 + n, item 40 + n): 0 shown, 1 hidden by "dialog link"
+; (Daggerfall Unity TalkManager availableForDialog). The topics' responses ask for them (GetVMQuestVariable).
+Int Property Hide0 = 0 Auto Hidden
+Int Property Hide1 = 0 Auto Hidden
+Int Property Hide2 = 0 Auto Hidden
+Int Property Hide3 = 0 Auto Hidden
+Int Property Hide4 = 0 Auto Hidden
+Int Property Hide5 = 0 Auto Hidden
+Int Property Hide6 = 0 Auto Hidden
+Int Property Hide7 = 0 Auto Hidden
+Int Property Hide8 = 0 Auto Hidden
+Int Property Hide9 = 0 Auto Hidden
+Int Property Hide10 = 0 Auto Hidden
+Int Property Hide11 = 0 Auto Hidden
+Int Property Hide12 = 0 Auto Hidden
+Int Property Hide13 = 0 Auto Hidden
+Int Property Hide14 = 0 Auto Hidden
+Int Property Hide15 = 0 Auto Hidden
+Int Property Hide16 = 0 Auto Hidden
+Int Property Hide17 = 0 Auto Hidden
+Int Property Hide18 = 0 Auto Hidden
+Int Property Hide19 = 0 Auto Hidden
+Int Property Hide20 = 0 Auto Hidden
+Int Property Hide21 = 0 Auto Hidden
+Int Property Hide22 = 0 Auto Hidden
+Int Property Hide23 = 0 Auto Hidden
+Int Property Hide24 = 0 Auto Hidden
+Int Property Hide25 = 0 Auto Hidden
+Int Property Hide26 = 0 Auto Hidden
+Int Property Hide27 = 0 Auto Hidden
+Int Property Hide28 = 0 Auto Hidden
+Int Property Hide29 = 0 Auto Hidden
+Int Property Hide30 = 0 Auto Hidden
+Int Property Hide31 = 0 Auto Hidden
+Int Property Hide32 = 0 Auto Hidden
+Int Property Hide33 = 0 Auto Hidden
+Int Property Hide34 = 0 Auto Hidden
+Int Property Hide35 = 0 Auto Hidden
+Int Property Hide36 = 0 Auto Hidden
+Int Property Hide37 = 0 Auto Hidden
+Int Property Hide38 = 0 Auto Hidden
+Int Property Hide39 = 0 Auto Hidden
+Int Property Hide40 = 0 Auto Hidden
+Int Property Hide41 = 0 Auto Hidden
+Int Property Hide42 = 0 Auto Hidden
+Int Property Hide43 = 0 Auto Hidden
+Int Property Hide44 = 0 Auto Hidden
+Int Property Hide45 = 0 Auto Hidden
+Int Property Hide46 = 0 Auto Hidden
+Int Property Hide47 = 0 Auto Hidden
+Int Property Hide48 = 0 Auto Hidden
+Int Property Hide49 = 0 Auto Hidden
+Int Property Hide50 = 0 Auto Hidden
+Int Property Hide51 = 0 Auto Hidden
+Int Property Hide52 = 0 Auto Hidden
+Int Property Hide53 = 0 Auto Hidden
+Int Property Hide54 = 0 Auto Hidden
+Int Property Hide55 = 0 Auto Hidden
+Int Property Hide56 = 0 Auto Hidden
+Int Property Hide57 = 0 Auto Hidden
+Int Property Hide58 = 0 Auto Hidden
+Int Property Hide59 = 0 Auto Hidden
+Int[] Property MsgRevealFirst Auto
+Int[] Property MsgRevealCount Auto
+{Each message's named resources (their keys) in RevealKeys: shown once it is.}
+Int[] Property LogRevealFirst Auto
+Int[] Property LogRevealCount Auto
+Int[] Property RevealKeys Auto
 
 Bool Property Running = False Auto Hidden
 Bool Property Success = False Auto Hidden
@@ -69,6 +137,11 @@ Int Property FactionId = 0 Auto Hidden
 Actor Property Questor Auto Hidden
 Int Property Town = -1 Auto Hidden
 {The site town the quest was given in (TMDfQuestMachine).}
+Int Property LastPlaceSite = -1 Auto Hidden
+{The site of the place its text last named (Daggerfall Unity Quest.LastPlaceReferenced), for %di.}
+Int Property LogDay = 1 Auto Hidden
+Int Property LogMonth = 0 Auto Hidden
+{The date of its latest log entry, else of its start (Quest.GetCurrentLogMessageTime), for %qdt.}
 
 Bool[] states
 Bool[] doneA
@@ -77,6 +150,10 @@ Bool[] primary
 ObjectReference[] personRef
 Int[] personSite
 Bool[] personHidden
+Bool[] personMuted       ; "mute npc": clicks on them are ignored (Daggerfall Unity QuestResource.SetPlayerClicked)
+Bool[] personDestroyed   ; "destroy npc": gone for good, never placed or clicked again (Person.DestroyNPC)
+Bool[] foeRestrained     ; "restrain foe": each one made is no longer hostile until struck
+Int[] foeSpell           ; "cast spell on foe": up to 4 queued per foe, cast on each one made (-1 none)
 Int[] placeSite
 ObjectReference[] itemRef
 Int[] itemGold
@@ -99,6 +176,7 @@ ObjectReference[] tags
 Int[] spawnOp
 Float[] spawnNext
 Int[] spawnLeft
+Bool[] spawnSaid
 Int spellCast = -1
 Int individualClicked = -1
 Bool passing = False
@@ -160,6 +238,10 @@ Function Rearm(Int s)
   While i < n
     If Ops[i * 9 + 1] == 2 && Arg(i, 0) == s
       SetDone(i, False)
+      ; A muted person speaks again once the action can run again (Daggerfall Unity MuteNpc.RearmAction).
+      If Code(i) == 0x52 && Arg(i, 1) >= 0 && Arg(i, 1) < 16
+        personMuted[Arg(i, 1)] = False
+      EndIf
       Int k = spawnOp.Find(i)
       If k >= 0
         spawnOp[k] = -1
@@ -195,6 +277,10 @@ Bool Function Setup(Actor giver, Int giverFaction, Int townIndex)
   personRef = new ObjectReference[16]
   personSite = new Int[16]
   personHidden = new Bool[16]
+  personMuted = new Bool[16]
+  personDestroyed = new Bool[16]
+  foeRestrained = new Bool[8]
+  foeSpell = new Int[32]
   placeSite = new Int[8]
   itemRef = new ObjectReference[16]
   itemGold = new Int[16]
@@ -217,6 +303,7 @@ Bool Function Setup(Actor giver, Int giverFaction, Int townIndex)
   spawnOp = new Int[8]
   spawnNext = new Float[8]
   spawnLeft = new Int[8]
+  spawnSaid = new Bool[8]
   Int i = 0
   While i < 16
     personSite[i] = -1
@@ -230,6 +317,11 @@ Bool Function Setup(Actor giver, Int giverFaction, Int townIndex)
     i += 1
   EndWhile
   i = 0
+  While i < 32
+    foeSpell[i] = -1
+    i += 1
+  EndWhile
+  i = 0
   While i < 10
     logShown[i] = -1
     i += 1
@@ -237,6 +329,8 @@ Bool Function Setup(Actor giver, Int giverFaction, Int townIndex)
   Questor = giver
   FactionId = giverFaction
   Town = townIndex
+  LastPlaceSite = -1
+  KeepDate()
   Success = False
   rumors = 0
   ; Places first: people live in them and clocks measure the way to them.
@@ -336,13 +430,11 @@ Function Finish()
 EndFunction
 
 Function Cleanup(Bool ended)
+  ; Those travelling with the player for it stop.
+  Machine.DropFaces(self)
   Int i = 0
   While i < 16
-    ; Anyone still travelling with the player stops; people the quest made (not the questor or a town's own
-    ; individuals) leave with it.
-    If personRef[i] && Machine.EscortAlias(personRef[i] as Actor) >= 0
-      Machine.Escort("", False, personRef[i])
-    EndIf
+    ; People the quest made (not the questor or a town's own individuals) leave with it.
     If personRef[i] && personSite[i] != -2
       personRef[i].Disable()
       personRef[i].Delete()
@@ -481,7 +573,8 @@ Function Tick()
   i = 0
   While i < 8
     Int op = spawnOp[i]
-    If op >= 0 && now >= spawnNext[i] && IsSet(Arg(op, 0))
+    ; "send": only once the player is in a location (Daggerfall Unity IsPlayerInLocationRect); then as "create".
+    If op >= 0 && now >= spawnNext[i] && IsSet(Arg(op, 0)) && (Code(op) != 0x57 || Machine.CurrentTown >= 0 || Game.GetPlayer().IsInInterior())
       Int code = Code(op)
       spawnNext[i] = now + Arg(op, 2) / 1440.0
       If code == 0x54
@@ -490,6 +583,11 @@ Function Tick()
       ElseIf Utility.RandomInt(1, 100) <= Arg(op, 3)
         SpawnNearPlayer(Arg(op, 1))
         spawnLeft[i] = spawnLeft[i] - 1
+        ; Its message ("msg N"), once a quest, on the first spawn.
+        If !spawnSaid[i] && MsgOf(op) >= 0
+          spawnSaid[i] = True
+          Say(MsgOf(op))
+        EndIf
       EndIf
       If spawnLeft[i] == 0
         spawnOp[i] = -1
@@ -690,7 +788,13 @@ Bool Function RunAction(Int i)
     Int slot = spawnOp.Find(-1)
     If slot >= 0 && spawnOp.Find(i) < 0
       spawnOp[slot] = i
-      spawnNext[slot] = Utility.GetCurrentGameTime() + Arg(i, 2) / 1440.0
+      spawnSaid[slot] = False
+      If code == 0x54
+        spawnNext[slot] = Utility.GetCurrentGameTime() + Arg(i, 2) / 1440.0
+      Else
+        ; Daggerfall Unity CreateFoe: the first spawn time is as if the last were a random part of an interval ago.
+        spawnNext[slot] = Utility.GetCurrentGameTime() + Utility.RandomFloat(0.0, Arg(i, 2) as Float) / 1440.0
+      EndIf
       If code == 0x54
         ; "play sound N every M minutes K times" (Daggerfall Unity PlaySound: 0 times is for ever).
         spawnLeft[slot] = Arg(i, 3)
@@ -706,14 +810,18 @@ Bool Function RunAction(Int i)
     ; reveal, reveal on the map, and a place's location marker (0x11).
     Machine.RevealSite(placeSite[Arg(i, 1)])
   ElseIf code == 0x0A || code == 0x0B
+    ; "add dialog" shows the resources' "Tell me about" topics; "dialog link" hides them, the resource and the ones
+    ; linked to it, until named or added (Daggerfall Unity TalkManager.AddDialogForQuestInfoResource /
+    ; DialogLinkForQuestInfoResource).
+    Bool show = code == 0x0A
     If Arg(i, 1) >= 0
-      SetStage(DialogStage + Arg(i, 1))
+      ShowAbout(Arg(i, 1), show)
     EndIf
     If Arg(i, 2) >= 0
-      SetStage(DialogStage + 20 + Arg(i, 2))
+      ShowAbout(20 + Arg(i, 2), show)
     EndIf
     If Arg(i, 3) >= 0
-      SetStage(DialogStage + 40 + Arg(i, 3))
+      ShowAbout(40 + Arg(i, 3), show)
     EndIf
   ElseIf code == 0x26
     Int r = RumorIds.Find(Arg(i, 1))
@@ -754,25 +862,29 @@ Bool Function RunAction(Int i)
   ElseIf code == 0x27
     GiveToFoe(Arg(i, 1), Arg(i, 2))
   ElseIf code == 0x2C
+    ; Destroyed: removed from the world for good (restore and place no longer bring them back), their name still known.
     ObjectReference p = personRef[Arg(i, 1)]
     If p
       p.Disable()
     EndIf
     personHidden[Arg(i, 1)] = True
+    personDestroyed[Arg(i, 1)] = True
   ElseIf code == 0x2E
     If personRef[Arg(i, 1)]
       personRef[Arg(i, 1)].Disable()
     EndIf
     personHidden[Arg(i, 1)] = True
+  ElseIf code == 0x30 && personDestroyed[Arg(i, 1)]
+    ; Restoring a destroyed person does nothing (Daggerfall Unity: a destroyed person is hidden again each tick).
   ElseIf code == 0x30
     If personRef[Arg(i, 1)]
       personRef[Arg(i, 1)].Enable()
     EndIf
     personHidden[Arg(i, 1)] = False
   ElseIf code == 0x37
-    Machine.Escort(Name(1, Arg(i, 1), 1), True, personRef[Arg(i, 1)])
+    Machine.Face(self, Name(1, Arg(i, 1), 1), True)
   ElseIf code == 0x38
-    Machine.Escort(Name(1, Arg(i, 1), 1), False, personRef[Arg(i, 1)])
+    Machine.Face(self, Name(1, Arg(i, 1), 1), False)
   ElseIf code == 0x3D
     Machine.Reputation.ChangeRep(PersonFactionOf(Arg(i, 1)), Arg(i, 2), True)
   ElseIf code == 0x41
@@ -784,7 +896,7 @@ Bool Function RunAction(Int i)
   ElseIf code == 0x08
     Machine.StartStoryQuest(Arg(i, 1))
   ElseIf code == 0x31
-    Machine.CurePlayer(0)
+    Machine.CurePlayer(0, Arg(i, 1))
   ElseIf code == 0x3A
     Machine.CurePlayer(1)
   ElseIf code == 0x3B
@@ -795,12 +907,27 @@ Bool Function RunAction(Int i)
     Machine.PlayVideo(Arg(i, 1))
   ElseIf code == 0x3C
     Machine.PlayDfSound(Arg(i, 1))
-  ElseIf code == 0x3F || code == 0x40 || code == 0x44
-    FoesFollow(Arg(i, 1), code)
+  ElseIf code == 0x3F
+    Machine.Face(self, Name(4, Arg(i, 1), 1), True)
+  ElseIf code == 0x40
+    Machine.Face(self, Name(4, Arg(i, 1), 1), False)
+  ElseIf code == 0x44
+    RestrainFoe(Arg(i, 1))
   ElseIf code == 0x45
+    ; Daggerfall Unity CastSpellOnFoe: queued on the foe (Foe.QueueSpell), cast on each one there now and each made later.
+    Int f = Arg(i, 1)
+    If f >= 0 && f < 8
+      Int q = 0
+      While q < 4 && foeSpell[f * 4 + q] >= 0 && foeSpell[f * 4 + q] != Arg(i, 2)
+        q += 1
+      EndWhile
+      If q < 4
+        foeSpell[f * 4 + q] = Arg(i, 2)
+      EndIf
+    EndIf
     Int k = 0
     While k < 64
-      If foeRefs[k] && foeKind[k] == Arg(i, 1)
+      If foeRefs[k] && foeKind[k] == f
         Machine.CastDfSpell(Arg(i, 2), foeRefs[k])
       EndIf
       k += 1
@@ -812,13 +939,20 @@ Bool Function RunAction(Int i)
       Machine.PlaceStranger(placeSite[Arg(i, 1)])
     EndIf
   ElseIf code == 0x52
-    ; Muted: Daggerfall's talk screen stops offering the person's quest topics; there is nothing to stop here.
+    If Arg(i, 1) >= 0 && Arg(i, 1) < 16
+      personMuted[Arg(i, 1)] = True
+    EndIf
   ElseIf code == 0x53
     Machine.TransferPlayer(placeSite[Arg(i, 1)])
-  ElseIf code == 0x55 || code == 0x56
-    ; The questor role moves: only Daggerfall's talk screen uses it.
-    If code == 0x55 && personRef[Arg(i, 1)]
+  ElseIf code == 0x55
+    ; "add npc as questor" (Daggerfall Unity Quest.AddQuestor): the quest's questor is this person.
+    If personRef[Arg(i, 1)]
       Questor = personRef[Arg(i, 1)] as Actor
+    EndIf
+  ElseIf code == 0x56
+    ; "drop npc as questor" (Quest.DropQuestor): this person is the questor no longer.
+    If personRef[Arg(i, 1)] && Questor == personRef[Arg(i, 1)] as Actor
+      Questor = None
     EndIf
   EndIf
   ; Any other action's message is shown once it has run ("... saying N").
@@ -831,7 +965,7 @@ EndFunction
 ; ---- Events from the aliases ----
 
 Function PersonClicked(Int n)
-  If Running && n >= 0 && n < 16
+  If Running && n >= 0 && n < 16 && !personMuted[n] && !personDestroyed[n]
     clicked[n] = True
     Pass()
   EndIf
@@ -1044,6 +1178,10 @@ EndFunction
 
 ; A person to a place (-1: their home).
 Function PlacePersonAt(Int n, Int place)
+  If n < 0 || n >= 16 || personDestroyed[n]
+    ; A destroyed person can't be placed (Person.DestroyNPC).
+    Return
+  EndIf
   Int site = personSite[n]
   If place >= 0
     site = placeSite[place]
@@ -1075,8 +1213,14 @@ Function PlaceFoeAt(Int f, Int place)
   EndIf
 EndFunction
 
+; Daggerfall Unity CreatePendingFoeSpawn: the foe's count of them (Foe.SpawnCount), placed where the player isn't looking
+; (PlaceFoeFreely: 5-20 m inside, 8-25 m out; Skyrim units 80 a metre).
 Function SpawnNearPlayer(Int f)
-  SpawnFoe(f, Game.GetPlayer(), 1)
+  Int count = 1
+  If FoeCount && f >= 0 && f < FoeCount.Length && FoeCount[f] > 0
+    count = FoeCount[f]
+  EndIf
+  SpawnFoe(f, Game.GetPlayer(), count)
 EndFunction
 
 ; The first spawned foe of a kind (-1 none).
@@ -1102,9 +1246,17 @@ Function SpawnFoe(Int f, ObjectReference spot, Int count)
   While k < count
     ObjectReference a = spot.PlaceAtMe(FoeBase[f], 1, True, False)
     If spot == Game.GetPlayer()
-      ; Daggerfall's quest spawns come from out of sight, a little away.
-      Float angle = Utility.RandomFloat(0.0, 360.0)
-      a.MoveTo(spot, 600.0 * Math.Sin(angle), 600.0 * Math.Cos(angle), 0.0)
+      ; Daggerfall's quest spawns come from out of sight: behind the player (outside the field of view), 5-20 m away
+      ; inside, 8-25 m out (PlaceFoeFreely).
+      Float near = 400.0
+      Float far = 1600.0
+      If !spot.IsInInterior()
+        near = 640.0
+        far = 2000.0
+      EndIf
+      Float angle = spot.GetAngleZ() + 180.0 + Utility.RandomFloat(-60.0, 60.0)
+      Float d = Utility.RandomFloat(near, far)
+      a.MoveTo(spot, d * Math.Sin(angle), d * Math.Cos(angle), 0.0)
     EndIf
     Int slot = foeRefs.Find(None)
     If slot < 0
@@ -1113,6 +1265,17 @@ Function SpawnFoe(Int f, ObjectReference spot, Int count)
     foeRefs[slot] = a
     foeKind[slot] = f
     foeCounted[slot] = False
+    If foeRestrained[f]
+      Restrain(a as Actor)
+    EndIf
+    ; Spells queued on the foe go on each made (QuestResourceBehaviour.CastSpellQueue).
+    Int q = 0
+    While q < 4
+      If foeSpell[f * 4 + q] >= 0
+        Machine.CastDfSpell(foeSpell[f * 4 + q], a)
+      EndIf
+      q += 1
+    EndWhile
     If foeItem[f] >= 0 && itemRef[foeItem[f]]
       a.AddItem(itemRef[foeItem[f]])
       holderOf[foeItem[f]] = a
@@ -1122,27 +1285,33 @@ Function SpawnFoe(Int f, ObjectReference spot, Int count)
   EndWhile
 EndFunction
 
-; add foe face / drop foe face / restrain foe.
-Function FoesFollow(Int f, Int code)
+; "restrain foe" (Daggerfall Unity Foe.SetRestrained, QuestResourceBehaviour): every one of the foe made so far, and every
+; one made after, is no longer hostile (EnemyMotor.IsHostile false) until struck.
+Function RestrainFoe(Int f)
+  If f < 0 || f >= 8
+    Return
+  EndIf
+  foeRestrained[f] = True
   Int k = 0
   While k < 64
-    Actor a = None
-    If foeKind[k] == f
-      a = foeRefs[k] as Actor
+    If foeKind[k] == f && foeRefs[k]
+      Restrain(foeRefs[k] as Actor)
     EndIf
     k += 1
-    If a
-      If code == 0x3F
-        a.StopCombat()
-        a.SetPlayerTeammate(True)
-      ElseIf code == 0x40
-        a.SetPlayerTeammate(False)
-      Else
-        a.StopCombat()
-        a.SetActorValue("Aggression", 0)
-      EndIf
-    EndIf
   EndWhile
+EndFunction
+
+Function Restrain(Actor a)
+  If !a || a.IsDead()
+    Return
+  EndIf
+  TMDfSenses senses = a as TMDfSenses
+  If senses
+    senses.Pacify()
+  Else
+    a.StopCombat()
+    a.SetActorValue("Aggression", 0)
+  EndIf
 EndFunction
 
 Bool Function DroppedAt(Int item, Int place)
@@ -1152,28 +1321,34 @@ Bool Function DroppedAt(Int item, Int place)
   Return Machine.RefAt(itemRef[item], placeSite[place])
 EndFunction
 
-; Days a clock gives: its minutes, and for a clock to a place the way there and back (Daggerfall Unity Clock: 2.5 x
-; the cautious travel time, at least a day).
+; Days a clock gives (Daggerfall Unity Clock.SetResource): no time, a random one from a minute to a week; one, that; two,
+; a random one between them (the first if the second isn't more). Flag 16 makes it the travel time to every place of the
+; quest (each one way, at least a day, the sum x 2.5: there and back with time to spare); flag 1 with a range and no
+; time the same.
 Float Function ClockDuration(Int c)
-  Int minutes = ClockMin[c]
-  If ClockMax[c] > ClockMin[c]
+  Int minutes
+  If ClockMin[c] <= 0 && ClockMax[c] <= 0
+    minutes = Utility.RandomInt(1, 7 * 1440)
+  ElseIf ClockMax[c] > ClockMin[c]
     minutes = Utility.RandomInt(ClockMin[c], ClockMax[c])
+  Else
+    minutes = ClockMin[c]
   EndIf
-  If ClockKind[c] >= 2 || Math.LogicalAnd(ClockFlags[c], 16) != 0
-    Int travel = 0
+  Bool travel = Math.LogicalAnd(ClockFlags[c], 16) != 0
+  If !travel && Math.LogicalAnd(ClockFlags[c], 1) != 0 && ClockKind[c] > 0 && minutes == 0
+    travel = True
+  EndIf
+  If travel
+    Int total = 0
     Int p = 0
     While p < PlaceScope.Length
-      travel += Machine.TravelMinutes(Town, placeSite[p])
+      total += Machine.ClockTravelMinutes(placeSite[p], Town)
       p += 1
     EndWhile
-    travel = (travel * 5) / 2
-    If travel < 1440
-      travel = 1440
-    EndIf
-    minutes += travel
+    minutes = (total * 5) / 2
   EndIf
   If minutes <= 0
-    minutes = 1440
+    minutes = 1
   EndIf
   Return minutes / 1440.0
 EndFunction
@@ -1191,7 +1366,45 @@ Int Function Say(Int id)
     count += 1
   EndWhile
   RefreshTags()
-  Return Msgs[first + Utility.RandomInt(0, count - 1)].Show()
+  Int pick = first + Utility.RandomInt(0, count - 1)
+  ; What it names is shown in "Tell me about" (QuestMacroHelper reveals dialog links as a message is expanded).
+  If MsgRevealFirst && pick < MsgRevealFirst.Length
+    RevealFrom(MsgRevealFirst[pick], MsgRevealCount[pick])
+  EndIf
+  Return Msgs[pick].Show()
+EndFunction
+
+; A resource's "Tell me about" topic shown or hidden (key: place n, person 20 + n, item 40 + n).
+Function ShowAbout(Int aiKey, Bool show)
+  If aiKey < 0 || aiKey >= 60
+    Return
+  EndIf
+  If show
+    SetHide(aiKey, 0)
+  Else
+    SetHide(aiKey, 1)
+  EndIf
+EndFunction
+
+Function RevealFrom(Int first, Int count)
+  If !RevealKeys
+    Return
+  EndIf
+  Int k = 0
+  While k < count && first + k < RevealKeys.Length
+    ShowAbout(RevealKeys[first + k], True)
+    k += 1
+  EndWhile
+EndFunction
+
+; Today's date, kept as the quest's start or latest log entry.
+Function KeepDate()
+  GlobalVariable month = Game.GetFormFromFile(0x36, "Skyrim.esm") as GlobalVariable
+  GlobalVariable day = Game.GetFormFromFile(0x37, "Skyrim.esm") as GlobalVariable
+  If month && day
+    LogMonth = month.GetValueInt()
+    LogDay = day.GetValueInt()
+  EndIf
 EndFunction
 
 Function ShowLog(Int id, Int step)
@@ -1199,7 +1412,11 @@ Function ShowLog(Int id, Int step)
   If o < 0 || step < 0 || step >= 10
     Return
   EndIf
+  KeepDate()
   RefreshTags()
+  If LogRevealFirst && o < LogRevealFirst.Length
+    RevealFrom(LogRevealFirst[o], LogRevealCount[o])
+  EndIf
   If logShown[step] >= 0 && logShown[step] != o
     SetObjectiveDisplayed(logShown[step], False)
   EndIf
@@ -1254,8 +1471,15 @@ String Function Name(Int kind, Int i, Int mode)
     If site < 0 && personRef[i]
       site = Machine.SiteOfRef(personRef[i])
     EndIf
+    ; A person's place named is the place last referenced (Person.ExpandMacro: LastPlaceReferenced).
+    If site >= 0
+      LastPlaceSite = site
+    EndIf
     Return Machine.SiteText(site, mode)
   ElseIf kind == 2
+    If placeSite[i] >= 0
+      LastPlaceSite = placeSite[i]
+    EndIf
     Return Machine.SiteText(placeSite[i], mode)
   ElseIf kind == 3
     Int days = clockDays[i] as Int
@@ -1320,4 +1544,129 @@ EndFunction
 
 Int Function PlaceSiteOf(Int place)
   Return placeSite[place]
+EndFunction
+
+; A "Tell me about" switch by key (Papyrus has no property by number).
+Function SetHide(Int aiKey, Int value)
+  If aiKey == 0
+    Hide0 = value
+  ElseIf aiKey == 1
+    Hide1 = value
+  ElseIf aiKey == 2
+    Hide2 = value
+  ElseIf aiKey == 3
+    Hide3 = value
+  ElseIf aiKey == 4
+    Hide4 = value
+  ElseIf aiKey == 5
+    Hide5 = value
+  ElseIf aiKey == 6
+    Hide6 = value
+  ElseIf aiKey == 7
+    Hide7 = value
+  ElseIf aiKey == 8
+    Hide8 = value
+  ElseIf aiKey == 9
+    Hide9 = value
+  ElseIf aiKey == 10
+    Hide10 = value
+  ElseIf aiKey == 11
+    Hide11 = value
+  ElseIf aiKey == 12
+    Hide12 = value
+  ElseIf aiKey == 13
+    Hide13 = value
+  ElseIf aiKey == 14
+    Hide14 = value
+  ElseIf aiKey == 15
+    Hide15 = value
+  ElseIf aiKey == 16
+    Hide16 = value
+  ElseIf aiKey == 17
+    Hide17 = value
+  ElseIf aiKey == 18
+    Hide18 = value
+  ElseIf aiKey == 19
+    Hide19 = value
+  ElseIf aiKey == 20
+    Hide20 = value
+  ElseIf aiKey == 21
+    Hide21 = value
+  ElseIf aiKey == 22
+    Hide22 = value
+  ElseIf aiKey == 23
+    Hide23 = value
+  ElseIf aiKey == 24
+    Hide24 = value
+  ElseIf aiKey == 25
+    Hide25 = value
+  ElseIf aiKey == 26
+    Hide26 = value
+  ElseIf aiKey == 27
+    Hide27 = value
+  ElseIf aiKey == 28
+    Hide28 = value
+  ElseIf aiKey == 29
+    Hide29 = value
+  ElseIf aiKey == 30
+    Hide30 = value
+  ElseIf aiKey == 31
+    Hide31 = value
+  ElseIf aiKey == 32
+    Hide32 = value
+  ElseIf aiKey == 33
+    Hide33 = value
+  ElseIf aiKey == 34
+    Hide34 = value
+  ElseIf aiKey == 35
+    Hide35 = value
+  ElseIf aiKey == 36
+    Hide36 = value
+  ElseIf aiKey == 37
+    Hide37 = value
+  ElseIf aiKey == 38
+    Hide38 = value
+  ElseIf aiKey == 39
+    Hide39 = value
+  ElseIf aiKey == 40
+    Hide40 = value
+  ElseIf aiKey == 41
+    Hide41 = value
+  ElseIf aiKey == 42
+    Hide42 = value
+  ElseIf aiKey == 43
+    Hide43 = value
+  ElseIf aiKey == 44
+    Hide44 = value
+  ElseIf aiKey == 45
+    Hide45 = value
+  ElseIf aiKey == 46
+    Hide46 = value
+  ElseIf aiKey == 47
+    Hide47 = value
+  ElseIf aiKey == 48
+    Hide48 = value
+  ElseIf aiKey == 49
+    Hide49 = value
+  ElseIf aiKey == 50
+    Hide50 = value
+  ElseIf aiKey == 51
+    Hide51 = value
+  ElseIf aiKey == 52
+    Hide52 = value
+  ElseIf aiKey == 53
+    Hide53 = value
+  ElseIf aiKey == 54
+    Hide54 = value
+  ElseIf aiKey == 55
+    Hide55 = value
+  ElseIf aiKey == 56
+    Hide56 = value
+  ElseIf aiKey == 57
+    Hide57 = value
+  ElseIf aiKey == 58
+    Hide58 = value
+  ElseIf aiKey == 59
+    Hide59 = value
+  EndIf
 EndFunction

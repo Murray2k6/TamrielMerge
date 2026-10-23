@@ -58,10 +58,18 @@ FormList[] Property GroupItems Auto
 {Per Daggerfall item group: Skyrim items to pick from.}
 Spell[] Property DfSpells Auto
 Int[] Property DfSpellIds Auto
-Spell Property CureDisease Auto
 FormList Property Diseases Auto
+{Daggerfall's 17 diseases in its order (DfDiseases).}
 Quest Property VampireQuest Auto
 Spell Property WerewolfPower Auto
+Quest Property WerewolfCure Auto
+{Skyrim's Companions housekeeping quest, whose CurePlayer ends lycanthropy.}
+String[] Property RulerTitles Auto
+{By region: its province's ruler's title (FACTION.TXT ruler: King, Queen, Duke ... Lady, else Lord), for %rt.}
+String[] Property RulerNames Auto
+{By region: the ruler's name (the province's individual faction; "" none), for %rn.}
+FormList Property Lycanthropy Auto
+{Daggerfall's lycanthropy (DfDiseases.Lycanthropy): werewolf infection, wereboar infection, werewolf, wereboar.}
 Location Property IliacBay Auto
 String[] Property RegionNames Auto
 String[] Property BuildingLabels Auto
@@ -122,8 +130,83 @@ Event OnUpdate()
     StartByName("_TUTOR__", None, 0, False)
     StartByName("_BRISIEN", None, 0, False)
   EndIf
+  RacialQuests()
   RegisterForSingleUpdate(10.0)
 EndEvent
+
+; ---- lycanthropes' and vampires' quests (Daggerfall Unity PlayerEntity.Update: every 38 days StartQuest(False), every
+; 84 days StartQuest(True), by the day count; LycanthropyEffect / VampirismEffect.StartQuest) ----
+
+Int lastRacialDay = -1
+Bool vampireQuestStarted = False
+
+Function RacialQuests()
+  Int today = Math.Floor(Utility.GetCurrentGameTime())
+  If lastRacialDay < 0 || today < lastRacialDay
+    lastRacialDay = today
+    Return
+  EndIf
+  While lastRacialDay < today
+    lastRacialDay += 1
+    If lastRacialDay % 38 == 0
+      RacialQuest(False)
+    EndIf
+    If lastRacialDay % 84 == 0
+      RacialQuest(True)
+    EndIf
+  EndWhile
+EndFunction
+
+Function RacialQuest(Bool cure)
+  Bool lycanthrope = Lycanthropy && (PlayerRef.HasSpell(Lycanthropy.GetAt(2)) || PlayerRef.HasSpell(Lycanthropy.GetAt(3)))
+  Bool vampire = VampireQuest && (VampireQuest as PlayerVampireQuestScript).VampireStatus > 0
+  If lycanthrope
+    ; A cure, 1-100 under 30, unless one is running already.
+    If cure && Utility.RandomInt(1, 100) < 30 && !QuestRunning("$CUREWER")
+      StartByName("$CUREWER", None, 0, False)
+    EndIf
+  ElseIf vampire
+    If cure
+      If Utility.RandomInt(10, 100) < 30
+        StartByName("$CUREVAM", None, 0, False)
+      EndIf
+    ElseIf vampireQuestStarted
+      ; A clan's quest, 1-100 under 50 (the vampires' offer pool).
+      If Utility.RandomInt(1, 100) < 50
+        OfferClanQuest()
+      EndIf
+    ElseIf Utility.RandomInt(1, 100) < 50
+      StartByName("P0A01L00", None, 0, False)
+      vampireQuestStarted = True
+    EndIf
+  EndIf
+EndFunction
+
+Bool Function QuestRunning(String name)
+  Int i = QuestNames.Find(name)
+  Return i >= 0 && i < Quests.Length && Quests[i] && Quests[i].IsRunning()
+EndFunction
+
+; A vampire clan's quest (QuestListsManager.GetGuildQuest(Vampires, Member, ...)): one of the P0 quests at random that
+; isn't running or done once.
+Function OfferClanQuest()
+  Int count = 0
+  Int pick = -1
+  Int i = 0
+  While i < QuestNames.Length
+    String n = QuestNames[i]
+    If StringUtil.Find(n, "P0") == 0 && n != "P0A01L00" && !QuestRunning(n) && !(i < Quests.Length && DoneOnce.HasForm(Quests[i]))
+      count += 1
+      If Utility.RandomInt(1, count) == 1
+        pick = i
+      EndIf
+    EndIf
+    i += 1
+  EndWhile
+  If pick >= 0
+    StartByName(QuestNames[pick], None, 0, False)
+  EndIf
+EndFunction
 
 ; ---- Registration ----
 
@@ -857,7 +940,50 @@ Bool Function RefAt(ObjectReference r, Int site)
   Return kind == 1 || SiteTown(site) == CurrentTown
 EndFunction
 
+; The site (building or dungeon) a reference is inside, or -1 (outdoors, or a place no site is).
 Int Function SiteOfRef(ObjectReference r)
+  If !r || !r.IsInInterior()
+    Return -1
+  EndIf
+  Return SiteOfCell(r.GetParentCell())
+EndFunction
+
+; The building or dungeon whose interior is this cell: the current town's buildings first, then those of the towns
+; and the dungeons of its region (each site's arrival or start marker stands in its interior).
+Int Function SiteOfCell(Cell c)
+  If !c
+    Return -1
+  EndIf
+  Int townSite = SiteTown(CurrentTown)
+  Int region = SiteRegion(CurrentTown)
+  Int s = 0
+  While s < Sources.GetSize()
+    TMDfQuestSites src = Sources.GetAt(s) as TMDfQuestSites
+    If region < 0 || src.Regions.Find(region) >= 0
+      Int t = 0
+      While t < src.TownName.Length
+        If (region < 0 || src.TownRegion[t] == region) && (townSite < 0 || s * 100000 + 60000 + t == townSite || region >= 0)
+          Int b = src.TownFirst[t]
+          Int last = b + src.TownCount[t]
+          While b < last
+            If (src.BArrival[b] && src.BArrival[b].GetParentCell() == c) || (src.BSpawn[b] && src.BSpawn[b].GetParentCell() == c)
+              Return s * 100000 + b
+            EndIf
+            b += 1
+          EndWhile
+        EndIf
+        t += 1
+      EndWhile
+      Int d = 0
+      While d < src.DName.Length
+        If (region < 0 || src.DRegion[d] == region) && src.DStart[d] && src.DStart[d].GetParentCell() == c
+          Return s * 100000 + 30000 + d
+        EndIf
+        d += 1
+      EndWhile
+    EndIf
+    s += 1
+  EndWhile
   Return -1
 EndFunction
 
@@ -908,6 +1034,46 @@ Int Function TravelMinutes(Int fromTown, Int site)
     dx = dy
   EndIf
   Return dx * MinutesPerPixel
+EndFunction
+
+; A quest clock's travel to a site (Daggerfall Unity Clock.GetTravelTimeInSeconds): from where the player is
+; (TravelTimeCalculator.GetPlayerTravelPosition: the map pixel outdoors, else the town the player is in, else the
+; quest's), by cart, cautiously, camping out, over Daggerfall's terrain (the Iliac Bay's travel world, Travel.esp); one
+; way, at least a day. Without the travel world the pixels at MinutesPerPixel.
+Int Function ClockTravelMinutes(Int site, Int questTown)
+  If site < 0
+    Return 1440
+  EndIf
+  Int minutes = -1
+  TMTravelWorld world = Quest.GetQuest("TMTravelWorldIliacBay") as TMTravelWorld
+  If world
+    Int px
+    Int py
+    If !PlayerRef.IsInInterior() && world.Has(PlayerRef.GetWorldSpace())
+      px = world.PixelX(PlayerRef.GetPositionX())
+      py = world.PixelY(PlayerRef.GetPositionY())
+    ElseIf CurrentTown >= 0
+      px = PixelX(CurrentTown)
+      py = PixelY(CurrentTown)
+    ElseIf questTown >= 0
+      px = PixelX(questTown)
+      py = PixelY(questTown)
+    Else
+      px = PixelX(site)
+      py = PixelY(site)
+    EndIf
+    minutes = world.PixelMinutes(px, py, PixelX(site), PixelY(site), True, False, False, 192)
+  Else
+    Int from = CurrentTown
+    If from < 0
+      from = questTown
+    EndIf
+    minutes = TravelMinutes(from, site)
+  EndIf
+  If minutes < 1440
+    minutes = 1440
+  EndIf
+  Return minutes
 EndFunction
 
 Int Function PixelX(Int site)
@@ -1030,43 +1196,46 @@ String Function FactionName(Int fid)
   Return Reputation.NameOf(fid)
 EndFunction
 
-; "add face" / "drop face": Daggerfall Unity shows the face of someone travelling with the player (at most three); here
-; they follow the player (aliases Escort0-2 with Skyrim's follow-the-player package) until dropped.
-Function Escort(String name, Bool joins, ObjectReference who = None)
-  Actor a = who as Actor
+; "add face" / "drop face" (a person's or a foe's): Daggerfall Unity's EscortingFaces, the faces of those travelling with
+; the player on the HUD, nothing more (the quest itself hides and places the person: no one walks along). Skyrim's HUD
+; has no faces: their names are kept (Faces) and each joining or leaving is shown as a notice.
+String[] faceNames
+Quest[] faceQuests
+
+Function Face(Quest owner, String name, Bool joins)
+  If !faceNames
+    faceNames = new String[16]
+    faceQuests = new Quest[16]
+  EndIf
+  Int k = FaceOf(owner, name)
   If joins
-    Debug.Notification(name + " travels with you.")
-    If a && EscortAlias(a) < 0
-      Int k = EscortAlias(None)
-      If k >= 0
-        If a.GetParentCell() != PlayerRef.GetParentCell()
-          a.MoveTo(PlayerRef, 60.0, 60.0, 0.0)
-        EndIf
-        a.Enable()
-        (GetAlias(1 + k) as ReferenceAlias).ForceRefTo(a)
-        a.EvaluatePackage()
+    If k < 0
+      k = faceNames.Find("")
+      If k < 0
+        k = 0
+      EndIf
+      faceNames[k] = name
+      faceQuests[k] = owner
+      If name != ""
+        Debug.Notification(name + " travels with you.")
       EndIf
     EndIf
-  Else
+  ElseIf k >= 0
+    faceNames[k] = ""
+    faceQuests[k] = None
     If name != ""
       Debug.Notification(name + " leaves you.")
-    EndIf
-    If a
-      Int k = EscortAlias(a)
-      If k >= 0
-        (GetAlias(1 + k) as ReferenceAlias).Clear()
-        a.EvaluatePackage()
-      EndIf
     EndIf
   EndIf
 EndFunction
 
-; The escort slot holding this actor (None: a free slot), or -1.
-Int Function EscortAlias(Actor a)
+Int Function FaceOf(Quest owner, String name)
+  If !faceNames
+    Return -1
+  EndIf
   Int k = 0
-  While k < 3
-    ReferenceAlias r = GetAlias(1 + k) as ReferenceAlias
-    If r && r.GetActorReference() == a
+  While k < faceNames.Length
+    If faceQuests[k] == owner && faceNames[k] == name && name != ""
       Return k
     EndIf
     k += 1
@@ -1074,23 +1243,67 @@ Int Function EscortAlias(Actor a)
   Return -1
 EndFunction
 
-Function CurePlayer(Int what)
-  If what == 0 && CureDisease
-    CureDisease.Cast(PlayerRef, PlayerRef)
+; A quest's faces go with it.
+Function DropFaces(Quest owner)
+  If !faceNames
+    Return
+  EndIf
+  Int k = 0
+  While k < faceNames.Length
+    If faceQuests[k] == owner
+      faceNames[k] = ""
+      faceQuests[k] = None
+    EndIf
+    k += 1
+  EndWhile
+EndFunction
+
+; "cure <disease>" (what 0: that one of Daggerfall's diseases only, Daggerfall Unity CureDisease), "cure vampirism" (1),
+; "cure lycanthropy" (2: Skyrim's own cure, CompanionsHousekeepingScript.CurePlayer, else the beast form taken).
+Function CurePlayer(Int what, Int disease = -1)
+  If what == 0
+    Spell s = DiseaseSpell(disease)
+    If s
+      PlayerRef.RemoveSpell(s)
+    EndIf
   ElseIf what == 1 && VampireQuest
     (VampireQuest as PlayerVampireQuestScript).VampireCure(PlayerRef)
-  ElseIf what == 2 && WerewolfPower
-    PlayerRef.RemoveSpell(WerewolfPower)
+  ElseIf what == 2
+    If WerewolfCure
+      (WerewolfCure as CompanionsHousekeepingScript).CurePlayer()
+    ElseIf WerewolfPower
+      PlayerRef.RemoveSpell(WerewolfPower)
+    EndIf
+    ; Daggerfall's lycanthropy and its infections (DfDiseases.Lycanthropy: werewolf and wereboar infection, then curse).
+    If Lycanthropy
+      Int k = 0
+      While k < Lycanthropy.GetSize()
+        Spell s = Lycanthropy.GetAt(k) as Spell
+        If s && PlayerRef.HasSpell(s)
+          PlayerRef.RemoveSpell(s)
+        EndIf
+        k += 1
+      EndWhile
+    EndIf
+    ; CureLycanthropy: healed back to full.
+    PlayerRef.RestoreActorValue("Health", 100000.0)
   EndIf
 EndFunction
 
+; "make pc ill with <disease>": Daggerfall's disease of that number (DfDiseases), resisted by nothing (Daggerfall Unity
+; AssignBundle with BypassSavingThrows); caught at level 1 it doesn't take (TMDfDisease).
 Function MakePlayerIll(Int disease)
-  If Diseases && Diseases.GetSize() > 0
-    Spell s = Diseases.GetAt(disease % Diseases.GetSize()) as Spell
-    If s
-      PlayerRef.AddSpell(s, False)
-    EndIf
+  Spell s = DiseaseSpell(disease)
+  If s && !PlayerRef.HasSpell(s)
+    PlayerRef.AddSpell(s, False)
   EndIf
+EndFunction
+
+Spell Function DiseaseSpell(Int disease)
+  If !Diseases || disease < 0 || disease >= Diseases.GetSize()
+    Return None
+  EndIf
+  Return Diseases.GetAt(disease) as Spell
 EndFunction
 
 ; Daggerfall's quest videos (ANIMnnnn.VID) as the videos step converts them.
@@ -1141,20 +1354,31 @@ String Function MacroText(Int code, TMDfQuest q)
     EndIf
     Return PlayerRef.GetActorBase().GetName()
   ElseIf code == 8
-    Return Direction(q)
+    Return Direction(q, q.LastPlaceSite)
   ElseIf code == 9
     If CurrentTown >= 0
       Return SiteText(CurrentTown, 2)
     EndIf
     Return "town"
   ElseIf code == 10
+    ; %rt: the title of the region's ruler (MacroHelper.RegentTitle / GetRulerTitle: FACTION.TXT's ruler of its province).
+    Int rr = SiteRegion(CurrentTown)
+    If RulerTitles && rr >= 0 && rr < RulerTitles.Length && RulerTitles[rr] != ""
+      Return RulerTitles[rr]
+    EndIf
     Return "Lord"
   ElseIf code == 11
-    Return "the ruler of " + MacroText(2, q)
+    ; %rn: the ruler's name (the province's individual faction), else a name at random (RegentName).
+    Int rn = SiteRegion(CurrentTown)
+    If RulerNames && rn >= 0 && rn < RulerNames.Length && RulerNames[rn] != ""
+      Return RulerNames[rn]
+    EndIf
+    Return MacroText(14, q)
   ElseIf code == 12
     Return FactionName(q.FactionId)
   ElseIf code == 13
-    Return DateText()
+    ; %qdt: the date of the quest's log entry, else of its start (Quest.GetCurrentLogMessageTime).
+    Return DateOf(q.LogDay, q.LogMonth)
   ElseIf code == 14
     If Utility.RandomInt(0, 1) == 1
       Return FemaleNames[Utility.RandomInt(0, FemaleNames.Length - 1)]
@@ -1164,34 +1388,64 @@ String Function MacroText(Int code, TMDfQuest q)
   Return ""
 EndFunction
 
-String Function Direction(TMDfQuest q)
-  ObjectReference target = SiteRef(q.PlaceSiteOf(0), 0)
-  If !target || PlayerRef.IsInInterior() || target.GetWorldSpace() != PlayerRef.GetWorldSpace()
-    Return "that way"
+; %di: the way to the place the text last named (Quest.LastPlaceReferenced; place 0 before any), in Daggerfall Unity's
+; eight words (TalkManager.DirectionVector2DirectionHintString); "this place" there already (GetBuildingCompassDirection);
+; "...never mind..." when it can't be worked out (resolvingError: no place, or the player in an interior of no site).
+String Function Direction(TMDfQuest q, Int site)
+  If site < 0
+    site = q.PlaceSiteOf(0)
   EndIf
-  Float dx = target.GetPositionX() - PlayerRef.GetPositionX()
-  Float dy = target.GetPositionY() - PlayerRef.GetPositionY()
-  String[] names = new String[8]
-  names[0] = "north"
-  names[1] = "north-east"
-  names[2] = "east"
-  names[3] = "south-east"
-  names[4] = "south"
-  names[5] = "south-west"
-  names[6] = "west"
-  names[7] = "north-west"
-  Float angle = Math.atan(dx / (dy + 0.001))
+  ObjectReference target = SiteRef(site, 0)
+  If !target
+    Return "...never mind..."
+  EndIf
+  If PlayerRef.IsInInterior() && target.GetParentCell() == PlayerRef.GetParentCell()
+    Return "this place"
+  EndIf
+  ObjectReference from = PlayerRef
+  If PlayerRef.IsInInterior()
+    ; Inside: from the building the player is in (its site's own marker outside).
+    from = SiteRef(SiteOfCell(PlayerRef.GetParentCell()), 0)
+  EndIf
+  If !from || from.IsInInterior() || target.IsInInterior() || target.GetWorldSpace() != from.GetWorldSpace()
+    Return "...never mind..."
+  EndIf
+  Float dx = target.GetPositionX() - from.GetPositionX()
+  Float dy = target.GetPositionY() - from.GetPositionY()
+  If dx == 0.0 && dy == 0.0
+    Return "this place"
+  EndIf
+  ; Degrees anticlockwise from east, as Daggerfall Unity measures it.
+  Float angle = Math.acos(dx / Math.sqrt(dx * dx + dy * dy))
   If dy < 0.0
-    angle += 180.0
-  ElseIf dx < 0.0
-    angle += 360.0
+    angle = 360.0 - angle
   EndIf
-  Return names[(((angle + 22.5) / 45.0) as Int) % 8]
+  If angle < 22.5 || angle >= 337.5
+    Return "east"
+  ElseIf angle < 67.5
+    Return "northeast"
+  ElseIf angle < 112.5
+    Return "north"
+  ElseIf angle < 157.5
+    Return "northwest"
+  ElseIf angle < 202.5
+    Return "west"
+  ElseIf angle < 247.5
+    Return "southwest"
+  ElseIf angle < 292.5
+    Return "south"
+  EndIf
+  Return "southeast"
 EndFunction
 
+; Today's date, as the date of a log entry is kept (TMDfQuest.LogDay / LogMonth).
 String Function DateText()
   GlobalVariable month = Game.GetFormFromFile(0x36, "Skyrim.esm") as GlobalVariable
   GlobalVariable day = Game.GetFormFromFile(0x37, "Skyrim.esm") as GlobalVariable
+  Return DateOf(day.GetValueInt(), month.GetValueInt())
+EndFunction
+
+String Function DateOf(Int day, Int month)
   String[] months = new String[12]
   months[0] = "Morning Star"
   months[1] = "Sun's Dawn"
@@ -1205,5 +1459,5 @@ String Function DateText()
   months[9] = "Frostfall"
   months[10] = "Sun's Dusk"
   months[11] = "Evening Star"
-  Return day.GetValueInt() + " " + months[month.GetValueInt() % 12]
+  Return day + " " + months[month % 12]
 EndFunction

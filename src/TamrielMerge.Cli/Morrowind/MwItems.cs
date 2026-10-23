@@ -303,8 +303,23 @@ public sealed partial class MwPluginBuilder
             w.FirstPersonModel = FirstPersonStatic(path).ToNullableLink<IStaticGetter>();
             w.ObjectBounds = Bounds(mesh);
         }
+        // Its Morrowind weapon skill, for the progression's hidden skills (ProgressionSkills.WeaponSkills): WPDT 0 short
+        // blade, 1-2 long blade, 3-5 blunt, 7-8 axe (6 is a spear, the progression's Spear).
+        if (type switch { 0 => 0, 1 or 2 => 1, 7 or 8 => 2, 3 or 4 or 5 => 3, _ => -1 } is >= 0 and var kind)
+            WeaponKindList(kind).Items.Add(w.ToLink<ISkyrimMajorRecordGetter>());
         return w;
     }
+
+    /// <summary>The form list of Morrowind's weapons of one skill (MWWeaponsShortBlade, LongBlade, Axe, BluntWeapon).</summary>
+    FormList WeaponKindList(int kind)
+    {
+        if (weaponKindLists.TryGetValue(kind, out var l)) return l;
+        l = new FormList(mod) { EditorID = "MWWeapons" + WeaponKindNames[kind] };
+        mod.FormLists.Add(l);
+        return weaponKindLists[kind] = l;
+    }
+    readonly Dictionary<int, FormList> weaponKindLists = [];
+    public static readonly string[] WeaponKindNames = ["ShortBlade", "LongBlade", "Axe", "BluntWeapon"];
 
     /// <summary>Morrowind armour part -> the vanilla template its record is based on (keywords, sounds, armour type),
     /// and the slot it falls back to if its worn look can't be made: parts Skyrim has no slot for (pauldrons, greaves,

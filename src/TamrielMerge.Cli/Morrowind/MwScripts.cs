@@ -30,7 +30,13 @@ public sealed partial class MwPluginBuilder
         Directory.CreateDirectory(outDir);
         string imports = $"-i={sourceDir};{shipped};{skse};{vanilla}";
         var names = Directory.GetFiles(sourceDir, "*.psc").Select(f => Path.GetFileNameWithoutExtension(f)!).Order(StringComparer.OrdinalIgnoreCase).ToList();
-        bool Fresh(string n) => File.Exists(Path.Combine(outDir, n + ".pex")) && File.GetLastWriteTimeUtc(Path.Combine(outDir, n + ".pex")) >= File.GetLastWriteTimeUtc(Path.Combine(sourceDir, n + ".psc"));
+        // What changed since the last build into this folder, and what names it (Skyrim.PapyrusRun.Stale): a source newer
+        // than its .pex, every script naming a shipped helper whose signature changed (Papyrus binds calls by name when
+        // they run and compiles a call's default arguments into the caller, so one left as it was would call the helper the
+        // old way), and every script naming a stale one. A script compiled again counts once its .pex is this run's.
+        var stale = Skyrim.PapyrusRun.Stale(sourceDir, outDir, shipped, names, Tes3Plugin.Encoding);
+        var started = DateTime.UtcNow.AddSeconds(-2);
+        bool Fresh(string n) => File.Exists(Path.Combine(outDir, n + ".pex")) && (!stale.Contains(n) || File.GetLastWriteTimeUtc(Path.Combine(outDir, n + ".pex")) >= started);
         var log = new System.Text.StringBuilder();
         const int batch = 400;
         // Several batches at once, each in a folder of its own (2026-10-14: one at a time took 17 minutes for 4,930
@@ -46,7 +52,7 @@ public sealed partial class MwPluginBuilder
             foreach (var n in c.Names) File.Copy(Path.Combine(sourceDir, n + ".psc"), Path.Combine(chunkDir, n + ".psc"));
             string output = Run(new ProcessStartInfo(compiler)
             {
-                ArgumentList = { chunkDir, "-all", "-q", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={outDir}" },
+                ArgumentList = { chunkDir, "-all", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={outDir}" },
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             });
@@ -64,20 +70,22 @@ public sealed partial class MwPluginBuilder
         foreach (var n in names.Where(n => !Fresh(n) && !failed.Contains(n)))
             log.Append(Run(new ProcessStartInfo(compiler)
             {
-                ArgumentList = { n + ".psc", "-q", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={outDir}" },
+                ArgumentList = { n + ".psc", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={outDir}" },
                 WorkingDirectory = sourceDir,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             }));
+        Skyrim.PapyrusRun.KeepHelperSignatures(outDir, shipped);
         return (names.Where(Fresh).ToHashSet(StringComparer.OrdinalIgnoreCase), log.ToString());
 
         static string Run(ProcessStartInfo info) => Skyrim.PapyrusRun.Run(info, info.ArgumentList.Contains("-all") ? Skyrim.PapyrusRun.Batch : Skyrim.PapyrusRun.One).Output;
     }
 
-    /// <summary>Writes translated scripts' sources (Windows-1252, as Morrowind's text and Papyrus's strings are).</summary>
+    /// <summary>Writes translated scripts' sources (Windows-1252, as Morrowind's text and Papyrus's strings are); an
+    /// unchanged one keeps its date, so it isn't compiled again.</summary>
     public static void WriteScriptSources(IEnumerable<MwPapyrus.Output> outputs, string dir)
     {
         Directory.CreateDirectory(dir);
-        foreach (var o in outputs) File.WriteAllText(Path.Combine(dir, o.ScriptName + ".psc"), o.Source, Tes3Plugin.Encoding);
+        foreach (var o in outputs) Skyrim.PapyrusRun.WriteIfChanged(Path.Combine(dir, o.ScriptName + ".psc"), o.Source, Tes3Plugin.Encoding);
     }
 }

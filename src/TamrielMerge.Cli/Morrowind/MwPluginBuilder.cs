@@ -310,7 +310,7 @@ public sealed partial class MwPluginBuilder
     /// its pathgrid (PGRD, the last plugin's), else from what stands in it; placed in the cell and its triangles added to
     /// <paramref name="into"/>. False when there is nothing to put one under.
     /// </summary>
-    bool GiveFloor(Cell cell, Tes3Cell source, List<Vector3[]> into)
+    bool GiveFloor(Cell cell, Tes3Cell source, List<Vector3[]> into, bool wide = false)
     {
         var points = new List<Vector3>();
         var links = new List<(int, int)>();
@@ -344,10 +344,11 @@ public sealed partial class MwPluginBuilder
             bool stand = type is "DOOR" or "CONT" || (mesh.Max.Z - mesh.Min.Z) * r.Scale >= 40;
             (stand ? stands : rests).Add(bottom);
         }
-        var floor = Skyrim.Navmesh.InvisibleFloors.Plan(points, links, stands, rests, out string how);
+        var floor = Skyrim.Navmesh.InvisibleFloors.Plan(points, links, stands, rests, out string how, wide);
         if (floor.Count == 0) return false;
         Skyrim.Navmesh.InvisibleFloors.Place(mod, modOutDir, "mw", "MW", cell, floor);
         into.AddRange(floor.Select(f => f.Points));
+        FlooredInteriors.RemoveAll(f => f.StartsWith(cell.EditorID + " ("));
         FlooredInteriors.Add($"{cell.EditorID} ({how})");
         return true;
     }
@@ -592,21 +593,45 @@ public sealed partial class MwPluginBuilder
         // Every persistent placed object here except the start marker is a load door (linked to its partner later).
         var loadDoors = cell.Persistent.OfType<PlacedObject>().Where(d => d != StartMarker && !scriptPersistent.Contains(d)).Cast<IPlacedObjectGetter>().ToList();
         var actorsHere = cell.Temporary.Concat(cell.Persistent).OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
+        // What hurts to stand on (Hurting: the lava pools) is no floor.
+        var hazards = hazard.Count > 0 ? new Skyrim.Navmesh.NavmeshBuilder.Hazards(new Skyrim.Navmesh.WoundInput(hazard), null) : null;
+        if (hazards is not null) HazardCells++;
+        // Made on a worker while the next interiors are built (BackgroundNavmeshes), finished in the order begun.
+        Skyrim.Navmesh.NavmeshBuilder.PendingInterior? pending = null;
         try
         {
-            // What hurts to stand on (Hurting: the lava pools) is no floor.
-            var hazards = hazard.Count > 0 ? new Skyrim.Navmesh.NavmeshBuilder.Hazards(new Skyrim.Navmesh.WoundInput(hazard), null) : null;
-            if (hazards is not null) HazardCells++;
+            pending = navmeshes.BeginInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp0 && cell.Persistent.Contains(StartMarker) ? sp0.Position : null, actorsHere, hazards, null, BackgroundNavmeshes);
+        }
+        catch (Exception e) { Problems.Add($"navmesh {cell.EditorID}: {e.Message}"); return; }
+        if (BackgroundNavmeshes) navFinishes.Enqueue(Finish); else Finish();
+        void Finish()
+        {
+        try
+        {
             Skyrim.Navmesh.NavmeshBuilder.Result r;
-            try { r = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp && cell.Persistent.Contains(StartMarker) ? sp.Position : null, actorsHere, hazards); }
+            try { r = pending.Finish(); }
             catch (InvalidOperationException e) when (e.Message.StartsWith("no floor to walk on") && source is not null)
             {
                 // Nothing to walk on in it (Bloodmoon's "Solstheim" cell: Molag Bal's statue and one actor): a floor of its
                 // own, then the navmesh on it.
-                var added = new List<Vector3[]>();
-                if (!GiveFloor(cell, source, added)) throw;
-                foreach (var t in added) { var nn = Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])); polygons.Add((t, nn)); turnedUp.Add((t, nn)); }
-                r = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp2 && cell.Persistent.Contains(StartMarker) ? sp2.Position : null, actorsHere, hazards);
+                // A wide one under its pathgrid when the one along it kept nothing (InvisibleFloors.Plan).
+                int ownPolygons = polygons.Count, ownUp = turnedUp.Count;
+                Skyrim.Navmesh.NavmeshBuilder.Result? made = null;
+                foreach (bool wide in new[] { false, true })
+                {
+                    var added = new List<Vector3[]>();
+                    if (!GiveFloor(cell, source, added, wide)) continue;
+                    polygons.RemoveRange(ownPolygons, polygons.Count - ownPolygons);
+                    turnedUp.RemoveRange(ownUp, turnedUp.Count - ownUp);
+                    foreach (var t in added) { var nn = Vector3.Normalize(Vector3.Cross(t[1] - t[0], t[2] - t[0])); polygons.Add((t, nn)); turnedUp.Add((t, nn)); }
+                    try
+                    {
+                        made = navmeshes.BuildInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp2 && cell.Persistent.Contains(StartMarker) ? sp2.Position : null, actorsHere, hazards);
+                        break;
+                    }
+                    catch (InvalidOperationException again) when (again.Message.StartsWith("no floor to walk on")) { }
+                }
+                r = made ?? throw e;
             }
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
@@ -620,6 +645,18 @@ public sealed partial class MwPluginBuilder
                 }
         }
         catch (Exception e) { Problems.Add($"navmesh {cell.EditorID}: {e.Message}"); }
+        }
+    }
+
+    /// <summary>Interior navmeshes made on worker threads while the next interiors are built (<see cref="FinishNavmeshes"/>
+    /// finishes them in the order begun): every core at work (2026-10-22, the user: "should be mutithread").</summary>
+    public bool BackgroundNavmeshes { get; set; }
+    readonly Queue<Action> navFinishes = new();
+
+    /// <summary>Background navmeshes finished, oldest first, until at most <paramref name="keep"/> are left in hand.</summary>
+    public void FinishNavmeshes(int keep = 0)
+    {
+        while (navFinishes.Count > keep) navFinishes.Dequeue()();
     }
 
     /// <summary>Floor and ceiling heights at a point: the highest surface at or below <paramref name="z"/> + 10 and

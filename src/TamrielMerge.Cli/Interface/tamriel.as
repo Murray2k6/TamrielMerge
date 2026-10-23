@@ -443,7 +443,7 @@ function drawSkills() {
         row._y = PAD + 100 + i * 33;
         var n = text(row, "n", 1, 10, 4, 230, 26, 17, i == skillPick ? 0xF0E6C8 : 0xC8C0B0, i == skillPick);
         if (i < built.skills.length) {
-            var st = skillState[i];
+            var st = skillState[built.skills[i].i];
             n.text = built.skills[i].n;
             var lv = text(row, "l", 2, 236, 4, 50, 26, 17, 0xD9B76A, true, "right");
             lv.text = st != undefined ? String(st[0]) : "";
@@ -466,7 +466,7 @@ function drawSkills() {
 
 function drawSkill(i) {
     var s = built.skills[i];
-    var st = skillState[i];
+    var st = skillState[s.i];
     var x0 = PAD + 520;
     var w0 = W - PAD - 20 - x0;
     var head = text(body, "sName", 100, x0, PAD + 96, w0, 34, 24, 0xD9B76A, true);
@@ -483,7 +483,7 @@ function drawSkill(i) {
     var chains = [];
     for (var k = 0; k < built.perks.length; k++) {
         var p = built.perks[k];
-        if (p[0] != i) continue;
+        if (p[0] != s.i) continue;
         if (p[2] < 0) chains.push([k]);
         else for (var c = 0; c < chains.length; c++) if (chains[c][chains[c].length - 1] == p[2]) chains[c].push(k);
     }

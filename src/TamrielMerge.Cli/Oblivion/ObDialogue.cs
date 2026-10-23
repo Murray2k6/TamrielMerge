@@ -29,6 +29,28 @@ public sealed partial class ObPluginBuilder
 {
     static readonly FormKey PlayerRefKey = new(ModKey.FromFileName("Skyrim.esm"), 0x14);
     const string InfoScript = "TMMwInfo";
+    /// <summary>Every converted response's script (or its result script, which extends it): the topics it gives the
+    /// player, and its speaker talking while it is said.</summary>
+    const string LineScript = "TMObLine";
+
+    /// <summary>The player's topics Oblivion keeps hidden until the player learns them (AddTopic, or a response's Add
+    /// Topics said): every topic of type Topic but GREETING and those only ever offered as a choice.</summary>
+    readonly HashSet<FormKey> gatedTopics = [];
+    readonly Dictionary<FormKey, Global> topicKnown = new();
+    /// <summary>The Oblivion topic (EditorID) each converted response belongs to.</summary>
+    readonly Dictionary<DialogResponses, string> responseTopics = new();
+    public int TopicsGated => gatedTopics.Count;
+    public int ResponsesLearning { get; private set; }
+
+    /// <summary>OBTopicKnown...: whether the player knows the topic (1 once learned).</summary>
+    Global TopicKnownGlobal(FormKey topic)
+    {
+        if (topicKnown.TryGetValue(topic, out var hit)) return hit;
+        string edid = records.GetValueOrDefault(topic)?.EditorID ?? topic.ID.ToString("X6");
+        var g = new GlobalFloat(mod) { EditorID = "OBTopicKnown" + Sanitize(edid), Data = 0 };
+        mod.Globals.Add(g);
+        return topicKnown[topic] = g;
+    }
 
     Quest? obDialogueQuest;
     readonly Dictionary<FormKey, Quest> obQuests = new();
@@ -147,6 +169,8 @@ public sealed partial class ObPluginBuilder
         mod.DialogBranches.Add(choiceBranch);
 
         foreach (var q in plugins.SelectMany(p => p.Quests).GroupBy(q => q.FormKey).Select(g => g.Last())) ConvertQuest(q);
+        // The log entries' conditions, once every quest exists (they test other quests' stages).
+        foreach (var q in plugins.SelectMany(p => p.Quests).GroupBy(q => q.FormKey).Select(g => g.Last())) LogEntryConditions(q);
 
         // Topics merged across plugins; each response remembers the plugin it came from (to read its FormIDs).
         var topics = new Dictionary<FormKey, (Ob.IDialogTopicGetter Topic, List<(Ob.IDialogItemGetter Item, Ob.IOblivionModGetter Source)> Items)>();
@@ -172,15 +196,33 @@ public sealed partial class ObPluginBuilder
         // Create every topic first (choices link to topics), then fill them.
         var player = topics.Values.Where(t => t.Topic.DialogType == Ob.DialogType.Topic).ToList();
         foreach (var (topic, _) in player) TopicShell(topic, choiceOnly.Contains(topic.FormKey));
+        foreach (var (topic, _) in player)
+            if (!choiceOnly.Contains(topic.FormKey) && !string.Equals(topic.EditorID, "GREETING", StringComparison.OrdinalIgnoreCase)) gatedTopics.Add(topic.FormKey);
         foreach (var (topic, items) in player)
         {
             var skyTopic = obTopics[topic.FormKey];
+            bool gated = gatedTopics.Contains(topic.FormKey);
             foreach (var (item, source) in items)
-                if (Response(item, source) is { } r) skyTopic.Responses.Add(r);
+                if (Response(item, source) is { } r)
+                {
+                    // Offered once the player knows the topic: first, so the response's own OR groups stay as they were.
+                    if (gated)
+                    {
+                        var known = new GetGlobalValueConditionData();
+                        known.Global = new FormLinkOrIndex<IGlobalGetter>(known, TopicKnownGlobal(topic.FormKey).FormKey);
+                        r.Conditions.Insert(0, Cond(known, CompareOperator.EqualTo, 1, false, false));
+                    }
+                    // GREETING starts a conversation (a Hello said in passing is Oblivion's HELLO's, or nothing).
+                    if (string.Equals(topic.EditorID, "GREETING", StringComparison.OrdinalIgnoreCase)) r.Conditions.Insert(0, Skyrim.ForeignVoices.InConversation());
+                    responseTopics[r] = topic.EditorID ?? "";
+                    skyTopic.Responses.Add(r);
+                }
             // Kept even when empty: other responses may link to it as a choice (an empty topic is never offered).
             mod.DialogTopics.Add(skyTopic);
             if (skyTopic.Responses.Count > 0) DialogueTopics++;
         }
+        BuildBarks(topics);
+        BuildConversations(topics);
         Persuasion();
         // Money changers (CoinTrade): the faction is shared with the people who join it, made now or later.
         moneyChangers ??= Skyrim.CoinTrade.Tag(mod, "OBMoneyChangers", "Money changers");
@@ -293,18 +335,45 @@ public sealed partial class ObPluginBuilder
         };
         foreach (var s in q.Stages)
         {
+            // Every log entry, in Oblivion's order: a stage shows the first whose conditions hold and runs its result
+            // script (ObResultScripts: fragments by entry index), as Skyrim does; an entry without text still counts.
             var stage = new QuestStage { Index = s.Stage, LogEntries = [] };
             foreach (var e in s.LogEntries)
-                if (e.Entry is { Length: > 0 } text)
-                    stage.LogEntries.Add(new QuestLogEntry
-                    {
-                        Entry = text,
-                        Flags = e.Flags?.ToString().Contains("Complet", StringComparison.OrdinalIgnoreCase) == true ? QuestLogEntry.Flag.CompleteQuest : null,
-                    });
+            {
+                string flags = e.Flags?.ToString() ?? "";
+                stage.LogEntries.Add(new QuestLogEntry
+                {
+                    Entry = e.Entry is { Length: > 0 } text ? text : null,
+                    Flags = flags.Contains("Complet", StringComparison.OrdinalIgnoreCase) ? QuestLogEntry.Flag.CompleteQuest
+                        : flags.Contains("Fail", StringComparison.OrdinalIgnoreCase) ? QuestLogEntry.Flag.FailQuest : null,
+                });
+            }
             quest.Stages.Add(stage);
         }
         mod.Quests.Add(quest);
         obQuests[q.FormKey] = quest;
+    }
+
+    /// <summary>
+    /// A quest's log entries' conditions as Skyrim's (ObConditions); an entry that can never hold gets one condition
+    /// that never does, so the next entry of its stage is taken, as in Oblivion.
+    /// </summary>
+    void LogEntryConditions(Ob.IQuestGetter q)
+    {
+        if (!obQuests.TryGetValue(q.FormKey, out var quest)) return;
+        var source = plugins.LastOrDefault(p => p.Quests.ContainsKey(q.FormKey));
+        if (source is null) return;
+        foreach (var s in q.Stages)
+        {
+            var stage = quest.Stages.FirstOrDefault(x => x.Index == s.Stage);
+            if (stage is null) continue;
+            for (int e = 0; e < s.LogEntries.Count && e < stage.LogEntries.Count; e++)
+            {
+                if (s.LogEntries[e].Conditions.Count == 0) continue;
+                if (ObConditions(s.LogEntries[e].Conditions, source) is { } conditions) stage.LogEntries[e].Conditions.AddRange(conditions);
+                else stage.LogEntries[e].Conditions.Add(Cond(new GetRandomPercentConditionData(), CompareOperator.LessThan, 0, false, false));
+            }
+        }
     }
 
     void TopicShell(Ob.IDialogTopicGetter topic, bool choiceOnly)
@@ -341,9 +410,14 @@ public sealed partial class ObPluginBuilder
         obTopics[topic.FormKey] = t;
     }
 
+    /// <summary>Responses left out because a condition of theirs is one Skyrim knows never holds for them.</summary>
+    readonly HashSet<FormKey> responsesNeverHolding = new();
+    /// <summary>The conditions (dialogue, packages, journal) judged never to hold, by function: what left each out.</summary>
+    public Dictionary<string, int> NeverHoldingBy { get; } = new();
+
     DialogResponses? Response(Ob.IDialogItemGetter item, Ob.IOblivionModGetter source)
     {
-        if (Conditions(item, source) is not { } conditions) return null;
+        if (Conditions(item, source) is not { } conditions) { lock (responsesNeverHolding) responsesNeverHolding.Add(item.FormKey); return null; }
         var r = new DialogResponses(mod) { Conditions = conditions, Responses = [], Flags = new DialogResponseFlags() };
         byte n = 1;
         // One line per Oblivion line, numbered as Oblivion numbered them: each has its own recording, which becomes
@@ -368,11 +442,106 @@ public sealed partial class ObPluginBuilder
         if (flags.HasFlag(Ob.DialogItem.Flag.Random)) r.Flags.Flags |= DialogResponses.Flag.Random;
         foreach (var choice in item.Choices)
             if (obTopics.TryGetValue(choice.FormKey, out var target)) r.LinkTo.Add(target.ToLink<IDialogTopicGetter>());
-        if (Result(item.Script?.SourceCode) is { } vm) r.VirtualMachineAdapter = vm;
+        // TMObLine: the topics it gives the player once said (its Add Topics; a hidden topic it offers as a choice, which
+        // the choice needs known), and its speaker talking. The regex's subset of its result script (Result) on it,
+        // replaced by the whole script once that is compiled (ObResultScripts).
+        var entry = Result(item.Script?.SourceCode) ?? new ScriptEntry();
+        entry.Name = LineScript;
+        var learns = item.Topics.Select(t => t.FormKey).Concat(item.Choices.Select(t => t.FormKey)).Where(gatedTopics.Contains).Distinct().ToList();
+        if (learns.Count > 0)
+        {
+            entry.Properties.Add(new ScriptObjectListProperty { Name = "Learns", Objects = [.. learns.Select(k => new ScriptObjectProperty { Object = TopicKnownGlobal(k).ToLink<ISkyrimMajorRecordGetter>() })] });
+            ResponsesLearning++;
+        }
+        r.VirtualMachineAdapter = LineAdapter(entry, LineScript);
+        responsesBySource[item.FormKey] = r;
         return r;
     }
 
     // ---- Conditions ----
+
+    /// <summary>Conditions Skyrim can't test as Oblivion did, by function: taken as holding at Oblivion's usual value
+    /// (the dialogue's, packages' and journal's; conditions-untested.txt).</summary>
+    public readonly Dictionary<string, int> ConditionsUntested = new(StringComparer.OrdinalIgnoreCase);
+
+    readonly Dictionary<int, Global> playerStatGlobals = new(), miscStatGlobals = new();
+    Faction? evilFaction;
+
+    /// <summary>TMOB_PCMisc_n: the player's Oblivion misc stat n for the conditions (TMObPlayer keeps it).</summary>
+    Global MiscStatGlobal(int stat)
+    {
+        if (miscStatGlobals.TryGetValue(stat, out var hit)) return hit;
+        var g = new GlobalFloat(mod) { EditorID = $"TMOB_PCMisc_{stat}", Data = 0 };
+        mod.Globals.Add(g);
+        return miscStatGlobals[stat] = g;
+    }
+
+    /// <summary>OBEvil: Oblivion's evil people (IsActorEvil: in at least one evil faction and no other; no creature),
+    /// kept by TMObActor as their factions change.</summary>
+    Faction EvilFaction()
+    {
+        if (evilFaction is not null) return evilFaction;
+        evilFaction = new Faction(mod) { EditorID = "OBEvil", Name = "", Flags = Faction.FactionFlag.HiddenFromPC, Ranks = [] };
+        mod.Factions.Add(evilFaction);
+        return evilFaction;
+    }
+    readonly Dictionary<int, Faction> statFactions = new();
+
+    /// <summary>TMOB_PCStat_n: the player's Oblivion stat n (ObStats' numbering) for the conditions (TMObPlayer keeps it).</summary>
+    Global PlayerStatGlobal(int stat)
+    {
+        if (playerStatGlobals.TryGetValue(stat, out var hit)) return hit;
+        var g = new GlobalFloat(mod) { EditorID = $"TMOB_PCStat_{stat}", Data = 0 };
+        mod.Globals.Add(g);
+        return playerStatGlobals[stat] = g;
+    }
+
+    /// <summary>OBStat_n: an Oblivion person's or creature's stat n as its rank, for the conditions (TMObActor sets it).</summary>
+    Faction StatFaction(int stat)
+    {
+        if (statFactions.TryGetValue(stat, out var hit)) return hit;
+        var f = new Faction(mod) { EditorID = $"OBStat_{stat}", Name = "", Flags = Faction.FactionFlag.HiddenFromPC, Ranks = [] };
+        mod.Factions.Add(f);
+        return statFactions[stat] = f;
+    }
+
+    /// <summary>The persistent reference placed for an Oblivion reference (those the scripts, dialogue and packages name
+    /// are made persistent: <see cref="ConditionRefs"/>).</summary>
+    FormKey? PlacedRef(FormKey source) => placedBySource.TryGetValue(source, out var p) ? p.FormKey : null;
+
+    /// <summary>A reference's script variable by its index (GetScriptVariable): the variable of that index in the
+    /// script of the reference's base.</summary>
+    string? ScriptVariableName(FormKey reference, int index)
+    {
+        FormKey? baseKey = records.GetValueOrDefault(reference) switch
+        {
+            Ob.IPlacedObjectGetter o => o.Base.FormKey,
+            Ob.IPlacedNpcGetter n => n.Base.FormKey,
+            Ob.IPlacedCreatureGetter c => c.Base.FormKey,
+            _ => null,
+        };
+        if (baseKey is not { } b || records.GetValueOrDefault(b) is not { } rec || ObScriptWorld.ScriptLink(rec) is not { } s || records.GetValueOrDefault(s) is not Ob.IScriptGetter script) return null;
+        return script.Fields.LocalVariables.FirstOrDefault(v => v.Data?.Index == index)?.Name;
+    }
+
+    /// <summary>The references the dialogue's, packages' and journal entries' conditions name (their first or second
+    /// parameter a placed reference): made persistent like the scripts' (before the world is placed).</summary>
+    IEnumerable<FormKey> ConditionRefs()
+    {
+        var conditions = WinningResponses().SelectMany(i => i.Conditions)
+            .Concat(plugins.SelectMany(p => p.AIPackages).SelectMany(p => p.Conditions))
+            .Concat(WinningQuests().SelectMany(q => q.Stages).SelectMany(s => s.LogEntries).SelectMany(e => e.Conditions));
+        foreach (var c in conditions)
+            foreach (var raw in new[] { (uint)c.FirstParameter, (uint)c.SecondParameter })
+            {
+                if (raw == 0) continue;
+                foreach (var p in plugins)
+                {
+                    var key = Resolve(p, raw);
+                    if (records.GetValueOrDefault(key) is Ob.IPlacedObjectGetter or Ob.IPlacedNpcGetter or Ob.IPlacedCreatureGetter) { yield return key; break; }
+                }
+            }
+    }
 
     static ConditionFloat Cond(ConditionData data, CompareOperator op, float value, bool onTarget, bool or)
     {
@@ -510,13 +679,230 @@ public sealed partial class ObPluginBuilder
                         var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, ScriptGlobal("TMOB_PCInJail").FormKey); data = d; target = false;
                         break;
                     }
-                case "GetScriptVariable": case "GetIsCurrentPackage": case "GetPCExpelled": case "GetTrespassWarningLevel":
-                case "IsTrespassing": case "IsActorAVictim": case "IsActorEvil": case "GetPersuasionNumber": case "GetTotalPersuasionNumber":
+                // Skyrim's own of the same name and meaning, on the same subject.
+                case "GetIsCurrentPackage":
+                    if (ObPackage(P1()) is { } pkg) { var d = new GetIsCurrentPackageConditionData(); d.Package = new FormLinkOrIndex<IPackageGetter>(d, pkg.FormKey); data = d; }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "GetPCExpelled":
+                    if (ObFaction(P1()) is { } ef) { var d = new GetPCExpelledConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, ef.FormKey); data = d; }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "GetIsClassDefault" or "GetPCIsClass":
+                    if (ObClass(P1()) is { } dc)
+                    {
+                        if (c.Function.ToString() == "GetPCIsClass") { var d = new GetPCIsClassConditionData(); d.Class = new FormLinkOrIndex<IClassGetter>(d, dc.FormKey); data = d; }
+                        else { var d = new GetIsClassDefaultConditionData(); d.Class = new FormLinkOrIndex<IClassGetter>(d, dc.FormKey); data = d; }
+                    }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "GetEquipped":
+                    if (Item(P1()) is { } eq) { var d = new GetEquippedConditionData(); d.ItemOrList = new FormLinkOrIndex<IItemOrListGetter>(d, eq.FormKey); data = d; }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "CanPayCrimeGold":
+                {
+                    // Oblivion's one bounty, kept on Cyrodiil's crime faction (ObCrime).
+                    var d = new CanPayCrimeGoldConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, LandCrime(false).FormKey); data = d;
+                    break;
+                }
+                case "GetFactionRankDifference":
+                    if (ObFaction(P1()) is { } rf && PlacedRef(Resolve(source, (uint)c.SecondParameter)) is { } rr)
+                    {
+                        var d = new GetFactionRankDifferenceConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, rf.FormKey);
+                        d.TargetNpc = new FormLinkOrIndex<IPlacedNpcGetter>(d, rr); data = d;
+                    }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "IsCellOwner":
+                    if (interiorsBySource.TryGetValue(P1(), out var oc) && (Actor(Resolve(source, (uint)c.SecondParameter)) is Npc ownerNpc ? ownerNpc.FormKey : ObFaction(Resolve(source, (uint)c.SecondParameter))?.FormKey) is { } ownerKey)
+                    {
+                        var d = new IsCellOwnerConditionData(); d.Cell = new FormLinkOrIndex<ICellGetter>(d, oc.FormKey); d.Owner = new FormLinkOrIndex<IOwnerGetter>(d, ownerKey); data = d;
+                    }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "GetInCellParam":
+                    if (interiorsBySource.TryGetValue(P1(), out var pc) && PlacedRef(Resolve(source, (uint)c.SecondParameter)) is { } pr)
+                    {
+                        var d = new GetInCellParamConditionData(); d.Cell = new FormLinkOrIndex<ICellGetter>(d, pc.FormKey); d.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(d, pr); data = d;
+                    }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "GetInWorldspace":
+                    if (worldspaces.GetValueOrDefault(P1()) is { } ws) { var d = new GetInWorldspaceConditionData(); d.WorldspaceOrList = new FormLinkOrIndex<IWorldspaceOrListGetter>(d, ws.FormKey); data = d; }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                // A reference named: the persistent one placed for it (the scripts', dialogue's and packages' references are).
+                case "GetDistance" or "GetInSameCell" or "GetIsReference" or "GetLineOfSight" or "GetDetected" or "SameSex" or "SameRace" or "GetShouldAttack" or "GetHeadingAngle":
+                {
+                    if (PlacedRef(P1()) is not { } target2) { unknownHolds = Holds(op, 0, value); break; }
+                    switch (c.Function.ToString())
+                    {
+                        case "GetDistance": { var d = new GetDistanceConditionData(); d.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(d, target2); data = d; break; }
+                        case "GetInSameCell": { var d = new GetInSameCellConditionData(); d.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(d, target2); data = d; break; }
+                        case "GetIsReference": { var d = new GetIsReferenceConditionData(); d.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(d, target2); data = d; break; }
+                        case "GetLineOfSight": { var d = new GetLineOfSightConditionData(); d.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(d, target2); data = d; break; }
+                        case "GetHeadingAngle": { var d = new GetHeadingAngleConditionData(); d.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(d, target2); data = d; break; }
+                        case "GetDetected": { var d = new GetDetectedConditionData(); d.TargetNpc = new FormLinkOrIndex<IPlacedNpcGetter>(d, target2); data = d; break; }
+                        case "SameSex": { var d = new SameSexConditionData(); d.TargetNpc = new FormLinkOrIndex<IPlacedNpcGetter>(d, target2); data = d; break; }
+                        case "SameRace": { var d = new SameRaceConditionData(); d.TargetNpc = new FormLinkOrIndex<IPlacedNpcGetter>(d, target2); data = d; break; }
+                        default: { var d = new GetShouldAttackConditionData(); d.TargetNpc = new FormLinkOrIndex<IPlacedNpcGetter>(d, target2); data = d; break; }
+                    }
+                    break;
+                }
+                // A reference's script variable (by its index in the script of the reference's base): the translated
+                // script's property of it, read as Papyrus keeps it (an auto property's "::v_<name>_var").
+                case "GetScriptVariable":
+                    if (PlacedRef(P1()) is { } sref && ScriptVariableName(P1(), c.SecondParameter) is { } sv)
+                    {
+                        var d = new GetVMScriptVariableConditionData { VariableName = "::v_" + ObPapyrus.Clean(sv) + "_var" };
+                        d.Target = new FormLinkOrIndex<IPlacedSimpleGetter>(d, sref); data = d;
+                    }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                // An attribute or skill: Oblivion's own (ObStats), mirrored where conditions can read them: the player's in
+                // a global (TMObPlayer keeps them), another's in a faction rank (TMObActor). Health, magicka and fatigue
+                // are Skyrim's own.
+                case "GetActorValue":
+                {
+                    int av = c.FirstParameter;
+                    int stat = av <= 7 ? av : av is >= 12 and <= 32 ? 8 + av - 12 : av is >= 33 and <= 36 ? 29 + av - 33 : -1;
+                    if (stat >= 0)
+                    {
+                        if (target)
+                        {
+                            var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, PlayerStatGlobal(stat).FormKey); data = d; target = false;
+                        }
+                        else { var d = new GetFactionRankConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, StatFaction(stat).FormKey); data = d; }
+                    }
+                    else if (av is 8 or 9 or 10)
+                        data = new GetActorValueConditionData { ActorValue = av switch { 8 => ActorValue.Health, 9 => ActorValue.Magicka, _ => ActorValue.Stamina } };
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                }
+                case "GetPCFame" or "GetPCInfamy":
+                {
+                    var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, ScriptGlobal(c.Function.ToString() == "GetPCFame" ? "TMOB_PCFame" : "TMOB_PCInfamy").FormKey); data = d; target = false;
+                    break;
+                }
+                // The player's misc stat (TMObState.MiscStat), in a global TMObPlayer keeps.
+                case "GetPCMiscStat" when c.FirstParameter is >= 0 and <= 33:
+                {
+                    var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, MiscStatGlobal(c.FirstParameter).FormKey); data = d; target = false;
+                    break;
+                }
+                // The player's birthsign (TMObState's choice or the standing stone, by TMObState's numbering) in a global:
+                // 1 when it is this one.
+                case "GetIsPlayerBirthsign":
+                {
+                    int sign = scriptWorld?.Birthsigns.FindIndex(b => string.Equals(b, records.GetValueOrDefault(P1())?.EditorID, StringComparison.OrdinalIgnoreCase)) ?? -1;
+                    bool isIt = op == CompareOperator.EqualTo && value == 1 || op == CompareOperator.NotEqualTo && value == 0;
+                    bool isNot = op == CompareOperator.EqualTo && value == 0 || op == CompareOperator.NotEqualTo && value == 1;
+                    if (sign >= 0 && (isIt || isNot))
+                    {
+                        var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, ScriptGlobal("TMOB_PCBirthsign").FormKey);
+                        list.Add(Cond(d, isIt ? CompareOperator.EqualTo : CompareOperator.NotEqualTo, sign, false, or));
+                        continue;
+                    }
+                    unknownHolds = Holds(op, 0, value);
+                    break;
+                }
+                // Evil: in an evil faction and no other (a person; ObEvil keeps OBEvil so as factions change).
+                case "IsActorEvil":
+                {
+                    var d = new GetInFactionConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, EvilFaction().FormKey); data = d;
+                    break;
+                }
+                // A guard spoken to while the player has a bounty.
+                case "IsTurnArrest" when !or && (op == CompareOperator.EqualTo && value == 1 || op == CompareOperator.NotEqualTo && value == 0):
+                {
+                    list.Add(Cond(new IsGuardConditionData(), CompareOperator.EqualTo, 1, target, false));
+                    var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, ScriptGlobal("TMOB_PCCrimeGold").FormKey);
+                    list.Add(Cond(d, CompareOperator.GreaterThan, 0, false, false));
+                    continue;
+                }
+                case "GetGold": data = new GetGoldConditionData(); break;
+                case "GetDisease": data = new GetDiseaseConditionData(); break;
+                case "IsPlayersLastRiddenHorse": data = new IsPlayersLastRiddenMountConditionData(); break;
+                case "IsSpellTarget":
+                    if (ObSpell(P1()) is { } st) { var d = new IsSpellTargetConditionData(); d.MagicItem = new FormLinkOrIndex<IMagicItemGetter>(d, st.FormKey); data = d; }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "GetPCFactionMurder" or "GetPCFactionAttack":
+                    if (ObFaction(P1()) is { } cf)
+                    {
+                        if (c.Function.ToString() == "GetPCFactionMurder") { var d = new GetPCFactionMurderConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, cf.FormKey); data = d; }
+                        else { var d = new GetPCFactionAttackConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, cf.FormKey); data = d; }
+                    }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                // GetCrime criminal type: Oblivion's crime types (0 steal, 1 pickpocket, 2 trespass, 3 attack, 4 murder) are Skyrim's.
+                case "GetCrime":
+                    if (PlacedRef(P1()) is { } criminal || P1() == new FormKey(ModKey.FromFileName("Oblivion.esm"), 0x14))
+                    {
+                        var d = new GetCrimeConditionData { CrimeType = (CrimeType)c.SecondParameter };
+                        d.Criminal = new FormLinkOrIndex<IPlacedNpcGetter>(d, PlacedRef(P1()) ?? PlayerRefKey); data = d;
+                    }
+                    else unknownHolds = Holds(op, 0, value);
+                    break;
+                case "IsTrespassing": data = new IsTrespassingConditionData(); break;
+                case "IsInMyOwnedCell": data = new IsInMyOwnedCellConditionData(); break;
+                case "IsInInterior": data = new IsInInteriorConditionData(); break;
+                case "IsRidingHorse": data = new IsRidingMountConditionData(); break;
+                case "GetDead": data = new GetDeadConditionData(); break;
+                case "GetFriendHit": data = new GetFriendHitConditionData(); break;
+                case "GetIsCreature": data = new GetIsCreatureConditionData(); break;
+                case "GetSitting": data = new GetSittingConditionData(); break;
+                case "IsRaining": data = new IsRainingConditionData(); break;
+                case "IsSnowing": data = new IsSnowingConditionData(); break;
+                case "IsPleasant": data = new IsPleasantConditionData(); break;
+                case "IsSneaking": data = new IsSneakingConditionData(); break;
+                case "GetClothingValue": data = new GetClothingValueConditionData(); break;
+                case "GetIsGhost": data = new GetIsGhostConditionData(); break;
+                case "GetIsAlerted": data = new GetIsAlertedConditionData(); break;
+                case "GetClassDefaultMatch": data = new GetClassDefaultMatchConditionData(); break;
+                case "GetAlarmed": data = new GetAlarmedConditionData(); break;
+                case "IsTorchOut": data = new IsTorchOutConditionData(); break;
+                case "IsWeaponOut": data = new IsWeaponOutConditionData(); break;
+                case "SameRaceAsPC": data = new SameRaceAsPCConditionData(); break;
+                case "IsInCombat": data = new IsInCombatConditionData(); break;
+                case "IsPCAMurderer": data = new IsPCAMurdererConditionData(); break;
+                case "GetTimeDead": data = new GetTimeDeadConditionData(); break;
+                case "GetAttacked": data = new GetAttackedConditionData(); break;
+                case "GetLocked": data = new GetLockedConditionData(); break;
+                case "GetDisabled": data = new GetDisabledConditionData(); break;
+                case "GetDayOfWeek": data = new GetDayOfWeekConditionData(); break;
+                case "GetCurrentAIProcedure": data = new GetCurrentAIProcedureConditionData(); break;
+                case "IsPlayerMovingIntoNewSpace": data = new IsPlayerMovingIntoNewSpaceConditionData(); break;
+                case "IsContinuingPackagePCNear": data = new IsContinuingPackagePCNearConditionData(); break;
+                case "GetTrespassWarningLevel": data = new GetTrespassWarningLevelConditionData(); break;
+                case "IsActorAVictim": data = new IsActorAVictimConditionData(); break;
+                // The player isn't on an Xbox.
+                case "IsXBox": unknownHolds = Holds(op, 0, value); break;
+                case "GetPlayerInSEWorld":
+                {
+                    var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, ScriptGlobal("TMOB_PCInSEWorld").FormKey); data = d; target = false;
+                    break;
+                }
+                case "GetAmountSoldStolen":
+                {
+                    var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, ScriptGlobal("TMOB_PCAmountSoldStolen").FormKey); data = d; target = false;
+                    break;
+                }
+                case "GetPersuasionNumber": case "GetTotalPersuasionNumber":
                     unknownHolds = Holds(op, 0, value); break;
                 default: unknownHolds = true; break;   // thresholds and states Skyrim can't test pass
             }
             if (data is not null) list.Add(Cond(data, op, value, target, or));
-            else if (unknownHolds == false && !or) return null;
+            else
+            {
+                if (c.Function.ToString() != "IsXBox") lock (ConditionsUntested) ConditionsUntested[c.Function.ToString()] = ConditionsUntested.GetValueOrDefault(c.Function.ToString()) + 1;
+                if (unknownHolds == false && !or)
+                {
+                    lock (NeverHoldingBy) NeverHoldingBy[c.Function.ToString()] = NeverHoldingBy.GetValueOrDefault(c.Function.ToString()) + 1;
+                    return null;
+                }
+            }
         }
         return list;
     }
@@ -527,7 +913,21 @@ public sealed partial class ObPluginBuilder
     /// The parts of a result script Skyrim can act on (SetStage, StartQuest, StopQuest, set of globals and quest
     /// variables, AddItem/RemoveItem on the player, StartCombat player), as TMMwInfo properties.
     /// </summary>
-    DialogResponsesAdapter? Result(string? source)
+    /// <summary>A response's script with its Begin and End fragments (the script's, or inherited from TMObLine).</summary>
+    static DialogResponsesAdapter LineAdapter(ScriptEntry entry, string script) => new()
+    {
+        Scripts = [entry],
+        ScriptFragments = new ScriptFragments
+        {
+            ExtraBindDataVersion = 2,
+            FileName = script,
+            OnBegin = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = script, FragmentName = "Fragment_Begin" },
+            OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = script, FragmentName = "Fragment_End" },
+        },
+    };
+
+    /// <summary>The regex's subset of a result script as TMMwInfo's properties (on TMObLine, which extends it).</summary>
+    ScriptEntry? Result(string? source)
     {
         if (string.IsNullOrWhiteSpace(source)) return null;
         var stageQuests = new List<FormKey>(); var stages = new List<int>();
@@ -587,15 +987,6 @@ public sealed partial class ObPluginBuilder
         if (items.Count > 0) { entry.Properties.Add(Objects("Items", items)); entry.Properties.Add(new ScriptIntListProperty { Name = "ItemCounts", Data = [.. counts] }); }
         if (attack) entry.Properties.Add(new ScriptBoolProperty { Name = "Attack", Data = true });
         if (disposition != 0) entry.Properties.Add(new ScriptIntProperty { Name = "Disposition", Data = disposition });
-        return new DialogResponsesAdapter
-        {
-            Scripts = [entry],
-            ScriptFragments = new ScriptFragments
-            {
-                ExtraBindDataVersion = 2,
-                FileName = InfoScript,
-                OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = InfoScript, FragmentName = "Fragment_End" },
-            },
-        };
+        return entry;
     }
 }

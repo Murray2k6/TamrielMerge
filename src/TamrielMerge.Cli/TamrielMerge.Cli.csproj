@@ -16,6 +16,12 @@
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <!-- Collections on every core (2026-10-22: with one, the parallel model conversion stood paused 1.17 s of every
+         second, 1.6 cores of 16 at work; with these, no pause measurable, 6.9 cores, at the same 6 GB). -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="DotRecast.Recast" Version="2026.3.1" />
     <!-- LZ4 for compressed archives (BsaWriter.Pack); Mutagen reads them with the same library. -->

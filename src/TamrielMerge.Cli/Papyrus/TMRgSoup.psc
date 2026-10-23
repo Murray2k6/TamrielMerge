@@ -33,8 +33,10 @@ Int[] Property UseItems Auto
 {Items the script checks the player's selected item against (ActiveItem() = n), and the menu to choose among them.}
 Message Property UseMenu Auto
 Message[] Property Menus Auto
-{The script's menus (a door that answers, a choice outside Skyrim's dialogue), by number: a button per item, shown
-when its RG.MenuShow global is 1.}
+{The script's menus (a door that answers, a choice outside Skyrim's dialogue), their pages of nine items one after
+another: a button per item, shown when its RG.MenuShow global is 1, and "More..." on a page with more after it.}
+Int[] Property MenuStarts Auto
+{Where each menu's first page is in Menus, by menu number.}
 ObjectReference Property MyLight Auto
 Bool Property ActsOnPlayer = False Auto
 {Redguard's player scripts (item use scripts, COMMON): "me" is Cyrus.}
@@ -63,7 +65,6 @@ Int thread = 0
 Float due0 = 0.0
 Float due1 = 0.0
 Float _yield = 0.0
-Float multiDue = 0.0
 Bool busy = False
 Bool loaded = False
 Bool activated = False
@@ -80,7 +81,6 @@ Float startAX
 Float startAY
 Float startAZ
 Bool started = False
-Int ambientId = -1
 Int chosenItem = -1
 Int[] menuIndex
 Int menuSel = -1
@@ -133,10 +133,12 @@ EndEvent
 
 Event OnUnload()
   loaded = Shell
+  AmbientRun()
 EndEvent
 
 Event OnCellDetach()
   loaded = Shell
+  AmbientRun()
 EndEvent
 
 Function Begin()
@@ -169,8 +171,9 @@ Event OnUpdate()
   If !loaded || killed
     Return
   EndIf
+  AmbientRun()
   Tick()
-  If killed || (pc0 < 0 && (!Interrupt || pc1 < 0))
+  If killed || (pc0 < 0 && (!Interrupt || pc1 < 0)) && !AmbientRunning()
     Return
   EndIf
   Float now = Utility.GetCurrentRealTime()
@@ -199,12 +202,23 @@ Event OnUpdate()
   RegisterForSingleUpdate(next)
 EndEvent
 
+; GetFramePassed's ticks: the engine's nominal ticks since the last run (12.14 a second), the fraction carried over.
+Float lastTickAt = -1.0
+Float tickCarry = 0.0
+Int framesPassed = 1
+
 Function Tick()
   If busy
     Return
   EndIf
   busy = True
   Float now = Utility.GetCurrentRealTime()
+  If lastTickAt >= 0.0 && now >= lastTickAt
+    Float ticks = (now - lastTickAt) * 12.14 + tickCarry
+    framesPassed = Math.Floor(ticks)
+    tickCarry = ticks - framesPassed
+  EndIf
+  lastTickAt = now
   If Interrupt && hookOn && pc1 >= 0 && now >= due1
     thread = 1
     _pc = pc1
@@ -283,12 +297,218 @@ Float Function Retry(Float poll)
   Return poll
 EndFunction
 
-; A multitask: runs alongside; WaitOnTasks waits for it.
-Function Multi(Float seconds)
-  Float until = Utility.GetCurrentRealTime() + seconds
-  If until > multiDue
-    multiDue = until
+; ---- multitasks (engine/SOUP.html: six task slots an actor's two threads share; a multitask's slot is named by its
+; call's address) ----
+; A multitask runs alongside its thread for its time, or, for a person walking somewhere, until they get there (the
+; walk on a thread of its own: PathToReference holds its caller until arrival). Issued again while it runs it doesn't
+; run again (the translator asks TaskRunning first); TaskStop ends it (a walk stops where the person is, a moving
+; object stops; an ambient sound's task ends, its sound playing on); WaitOnTasks waits for all of them.
+
+Int[] mSite
+Float[] mDue
+Actor[] mWalker
+ObjectReference[] mMarker
+Float[] mPace
+Bool[] mWalking
+ObjectReference[] mMover
+Int[] mGen
+Bool nextIsMulti = False
+Int nextSlot = -1
+
+Function Slots()
+  If mSite
+    Return
   EndIf
+  mSite = new Int[6]
+  mDue = new Float[6]
+  mWalker = new Actor[6]
+  mMarker = new ObjectReference[6]
+  mPace = new Float[6]
+  mWalking = new Bool[6]
+  mMover = new ObjectReference[6]
+  mGen = new Int[6]
+  Int k = 0
+  While k < 6
+    mSite[k] = -1
+    k += 1
+  EndWhile
+  RegisterForModEvent(WalkEvent(), "OnWalk")
+EndFunction
+
+String Function WalkEvent()
+  Return "TMRgWalk" + GetFormID()
+EndFunction
+
+Bool Function SlotBusy(Int k)
+  If mSite[k] < 0
+    Return False
+  EndIf
+  If mWalker[k]
+    Return mWalking[k]
+  EndIf
+  Return Utility.GetCurrentRealTime() < mDue[k]
+EndFunction
+
+Int Function FreeSlot()
+  Int k = 0
+  While k < 6
+    If !SlotBusy(k)
+      Return k
+    EndIf
+    k += 1
+  EndWhile
+  Return -1
+EndFunction
+
+; Before a multitask's call: the slot it will hold (a walk it starts goes there).
+Function MultiBegin()
+  Slots()
+  nextIsMulti = True
+  nextSlot = FreeSlot()
+  If nextSlot >= 0
+    mSite[nextSlot] = -1
+    mWalker[nextSlot] = None
+    mWalking[nextSlot] = False
+    mMover[nextSlot] = None
+    mGen[nextSlot] = mGen[nextSlot] + 1
+  EndIf
+EndFunction
+
+; After it: the slot holds it for its time (or its walk). With all six taken, Redguard's slots are full: not kept.
+Function MultiAt(Int site, Float seconds)
+  Slots()
+  Int k = nextSlot
+  nextIsMulti = False
+  nextSlot = -1
+  If k < 0
+    k = FreeSlot()
+  EndIf
+  If k < 0
+    Return
+  EndIf
+  mSite[k] = site
+  mDue[k] = Utility.GetCurrentRealTime() + seconds
+  If !mWalker[k]
+    mMover[k] = Who
+  EndIf
+EndFunction
+
+Bool Function TaskRunning(Int site)
+  Slots()
+  Int k = mSite.Find(site)
+  If k >= 0
+    If SlotBusy(k)
+      Return True
+    EndIf
+    mSite[k] = -1
+  EndIf
+  AmbientSlots()
+  Return ambSite.Find(site) >= 0
+EndFunction
+
+; TaskStop(label): the task at that call's address ends (its handler not run again: a sound plays on).
+Function TaskStop(Int site)
+  Slots()
+  Int k = mSite.Find(site)
+  If k >= 0
+    EndSlot(k)
+  EndIf
+  AmbientSlots()
+  Int j = ambSite.Find(site)
+  If j >= 0
+    ambSite[j] = -1
+    ambChan[j] = -1
+  EndIf
+EndFunction
+
+Function EndSlot(Int k)
+  mGen[k] = mGen[k] + 1
+  If mWalker[k] && mWalking[k]
+    ; The walk's target where the person stands: their PathToReference returns.
+    mWalking[k] = False
+    If mMarker[k]
+      mMarker[k].MoveTo(mWalker[k])
+    EndIf
+  ElseIf mMover[k] && !(mMover[k] as Actor) && Utility.GetCurrentRealTime() < mDue[k]
+    mMover[k].StopTranslation()
+  EndIf
+  mSite[k] = -1
+EndFunction
+
+; The longest timed multitask's time left; -1 while a walk runs (its end unknown).
+Float Function MultiLeft()
+  If !mSite
+    Return 0.0
+  EndIf
+  Float now = Utility.GetCurrentRealTime()
+  Float left = 0.0
+  Int k = 0
+  While k < 6
+    If SlotBusy(k)
+      If mWalker[k]
+        Return -1.0
+      EndIf
+      If mDue[k] - now > left
+        left = mDue[k] - now
+      EndIf
+    EndIf
+    k += 1
+  EndWhile
+  Return left
+EndFunction
+
+; A multitask walk: the person paths to the point on a thread of their own (OnWalk), at the pace given.
+Function WalkAsync(Actor a, Float tx, Float ty, Float tz, Float pace)
+  Int k = nextSlot
+  If k < 0
+    Return
+  EndIf
+  If !mMarker[k]
+    mMarker[k] = a.PlaceAtMe(Game.GetFormFromFile(0x0000003B, "Skyrim.esm"), 1, True, False)
+  EndIf
+  mMarker[k].SetPosition(tx, ty, tz)
+  If a.GetDistance(mMarker[k]) < 16.0
+    Return
+  EndIf
+  mWalker[k] = a
+  mPace[k] = pace
+  mWalking[k] = True
+  SendModEvent(WalkEvent(), "", k)
+EndFunction
+
+Event OnWalk(String eventName, String strArg, Float numArg, Form sender)
+  Int k = numArg as Int
+  If k < 0 || k >= 6 || !mWalker[k] || !mMarker[k]
+    Return
+  EndIf
+  Int gen = mGen[k]
+  Actor a = mWalker[k]
+  ObjectReference m = mMarker[k]
+  Float start = a.GetDistance(m)
+  a.PathToReference(m, mPace[k])
+  If mGen[k] != gen
+    ; Stopped (TaskStop, KillMyTasks).
+    Return
+  EndIf
+  If a.GetDistance(m) > 48.0 && a.GetDistance(m) < start + 64.0
+    ; Stuck on the way (no navmesh through a moving part): the rest by a short slide.
+    a.TranslateTo(m.GetPositionX(), m.GetPositionY(), m.GetPositionZ(), a.GetAngleX(), a.GetAngleY(), a.GetAngleZ(), 150.0, 0.0)
+  EndIf
+  mWalking[k] = False
+EndEvent
+
+; Skyrim's people walk about 90 units a second and run about 300: the pace a time asks for.
+Float Function PaceFor(Float dist, Float seconds)
+  Float pace = 0.0
+  If seconds > 0.05
+    pace = (dist / seconds - 90.0) / 210.0
+  EndIf
+  If pace < 0.0
+    Return 0.0
+  ElseIf pace > 1.0
+    Return 1.0
+  EndIf
+  Return pace
 EndFunction
 
 Function Gosub(Int target, Int back)
@@ -637,6 +857,11 @@ Float Function MoveTo3(Float tx, Float ty, Float tz, Float seconds)
   If a
     ; People walk there (Skyrim's pathing, at the pace the time asks) and stand exactly where the script put them.
     If a != Game.GetPlayer()
+      If nextIsMulti && nextSlot >= 0
+        ; A multitask walk: alongside the script, until they get there.
+        WalkAsync(a, tx, ty, tz, PaceFor(dist, seconds))
+        Return seconds
+      EndIf
       WalkTo(a, tx, ty, tz, seconds)
       Return 0.0
     EndIf
@@ -662,17 +887,7 @@ Function WalkTo(Actor a, Float tx, Float ty, Float tz, Float seconds)
   If dist < 16.0
     Return
   EndIf
-  Float pace = 0.0
-  If seconds > 0.05
-    ; Skyrim's people walk about 90 units a second and run about 300.
-    pace = (dist / seconds - 90.0) / 210.0
-  EndIf
-  If pace < 0.0
-    pace = 0.0
-  ElseIf pace > 1.0
-    pace = 1.0
-  EndIf
-  a.PathToReference(walkMarker, pace)
+  a.PathToReference(walkMarker, PaceFor(dist, seconds))
   If a.GetDistance(walkMarker) > 48.0 && a.GetDistance(walkMarker) < dist + 64.0
     ; Stuck on the way (no navmesh through a moving part): the rest by a short slide.
     a.TranslateTo(tx, ty, tz, a.GetAngleX(), a.GetAngleY(), a.GetAngleZ(), 150.0, 0.0)
@@ -703,15 +918,31 @@ Float Function S_Wait(Int t)
   Return t * 0.1
 EndFunction
 
+; The six task slots are shared by the main body and the entry part (the thread run to endint): WaitOnTasks waits
+; while any other slot is taken, WaitNonMulti while another blocking one is (Redguard Preservation, engine/SOUP.html
+; "Wait, WaitOnTasks, and WaitNonMulti"). Here the other thread holds a blocking slot while it waits on a task (its
+; next run due later than the next frame).
+Bool Function OtherThreadBlocked()
+  Float now = Utility.GetCurrentRealTime()
+  If thread == 0
+    Return Interrupt && pc1 >= 0 && due1 > now + 0.02
+  EndIf
+  Return pc0 >= 0 && due0 > now + 0.02
+EndFunction
+
 Float Function S_WaitOnTasks()
-  Float left = multiDue - Utility.GetCurrentRealTime()
-  If left < 0.0
-    Return 0.0
+  Float left = MultiLeft()
+  If left < 0.0 || left == 0.0 && (AmbientRunning() || OtherThreadBlocked())
+    ; A walk lasts until the person arrives, an ambient sound's task until the listener leaves its range.
+    Return Retry(0.25)
   EndIf
   Return left
 EndFunction
 
 Float Function S_WaitNonMulti()
+  If OtherThreadBlocked()
+    Return Retry(0.1)
+  EndIf
   Return 0.0
 EndFunction
 
@@ -884,7 +1115,11 @@ Float Function S_MoveMarker(Int n, Int speed)
   EndIf
   If a
     If a != Game.GetPlayer()
-      a.PathToReference(m, 0.5)
+      If nextIsMulti && nextSlot >= 0
+        WalkAsync(a, m.GetPositionX(), m.GetPositionY(), m.GetPositionZ(), 0.5)
+      Else
+        a.PathToReference(m, 0.5)
+      EndIf
     EndIf
     Return 0.0
   EndIf
@@ -941,8 +1176,19 @@ Int Function S_ResetPosition(Int x, Int y, Int z)
   Return 0
 EndFunction
 
-Float Function S_FacePlayer(Int speed)
-  Return FaceRef(Game.GetPlayer())
+; FacePlayer(duration): a task turning Who toward the player, done when duration - 1 ticks have passed
+; (engine/SOUP.html; the game's calls give 12 and 8: 0.9 s and 0.58 s).
+Float Function S_FacePlayer(Int duration)
+  Float seconds = 0.3
+  If duration > 1
+    seconds = (duration - 1) / 12.14
+  EndIf
+  Actor p = Game.GetPlayer()
+  If !p || p == Who
+    Return 0.0
+  EndIf
+  TurnTo(Who.GetAngleX(), Who.GetAngleY(), Who.GetAngleZ() + Who.GetHeadingAngle(p), seconds)
+  Return seconds
 EndFunction
 
 Float Function S_FacePlayerInertia(Int speed)
@@ -1001,9 +1247,17 @@ Float Function S_PlayerParallelLineUp(Int x, Int z, Int angle)
 EndFunction
 
 ; A teleporter: Cyrus put at an offset from this object (256ths: x east, y down, z north), facing d (2048ths).
+; MovePlayerAboveMe(x, y, z, angle) (engine/SOUP.html): the player placed at an offset (256ths, Redguard's x east,
+; y down, z north) turned by Who's orientation and added to its position.
 Int Function S_MovePlayerAboveMe(Int a, Int b, Int c, Int d)
   Actor p = Game.GetPlayer()
-  p.SetPosition(Who.GetPositionX() + a / 256.0, Who.GetPositionY() + c / 256.0, Who.GetPositionZ() - b / 256.0)
+  Float[] ax = LocalAxis(0)
+  Float[] ay = LocalAxis(1)
+  Float[] az = LocalAxis(2)
+  Float ox = (ax[0] * a + ay[0] * b + az[0] * c) / 256.0
+  Float oy = (ax[1] * a + ay[1] * b + az[1] * c) / 256.0
+  Float oz = (ax[2] * a + ay[2] * b + az[2] * c) / 256.0
+  p.SetPosition(Who.GetPositionX() + ox, Who.GetPositionY() + oy, Who.GetPositionZ() + oz)
   p.SetAngle(0.0, 0.0, -d * 360.0 / 2048.0)
   Return 0
 EndFunction
@@ -1081,7 +1335,15 @@ EndFunction
 
 Int Function S_KillMyTasks()
   Who.StopTranslation()
-  multiDue = 0.0
+  Slots()
+  Int k = 0
+  While k < 6
+    If mSite[k] >= 0
+      EndSlot(k)
+    EndIf
+    k += 1
+  EndWhile
+  AmbientEnd()
   Return 0
 EndFunction
 
@@ -1404,16 +1666,37 @@ EndFunction
 
 ; ---- the player ----
 
+; ACTIVATE(label) / TorchActivate(label) (Redguard Preservation engine/hud.html): true on the call made while the
+; player uses the object (here: activates it in Skyrim, consumed by the first call), unless the player is locked
+; out, has a sword drawn, or the activation hold-off runs; ACTIVATE needs no torch burning, TorchActivate a burning one
+; (a torch in the left hand). Firing starts the hold-off for every object: 22 ticks (1.8 s). A label without an RTX
+; entry never activates (the translator writes 0).
 Int Function S_ACTIVATE(Int label)
-  If activated
-    activated = False
-    Return 1
-  EndIf
-  Return 0
+  Return Activation(False)
 EndFunction
 
 Int Function S_TorchActivate(Int label)
-  Return S_ACTIVATE(label)
+  Return Activation(True)
+EndFunction
+
+Int Function Activation(Bool torch)
+  If !activated
+    Return 0
+  EndIf
+  activated = False
+  Actor p = Game.GetPlayer()
+  Float now = Utility.GetCurrentRealTime()
+  If RG.LockedOut() || p.IsWeaponDrawn() || (p.GetEquippedItemType(0) == 11) != torch || now < RG.ActivateHold
+    Return 0
+  EndIf
+  RG.ActivateHold = now + 22.0 / 12.14
+  Return 1
+EndFunction
+
+; Deactivate: the hold-off ends (engine/hud.html).
+Int Function S_Deactivate()
+  RG.ActivateHold = 0.0
+  Return 0
 EndFunction
 
 Int Function S_PlayerDistance()
@@ -1491,7 +1774,30 @@ Int Function S_PlayerOnScape()
   Return B(!Game.GetPlayer().IsInInterior())
 EndFunction
 
+; PlayerStatus() (engine/SOUP.html): the class of the first of its rules the player meets, 0 for none: queued motion or a
+; jump (1-4), falling (5-7), sliding (8), living states (9-12), animation groups (15-20), moved since the update began
+; (21). The game's scripts test only for 0 (2 of them: standing still on something). Here: in the air 5, moved since this
+; actor last ran 21, else 0.
+Float statusX
+Float statusY
+Float statusZ
+Bool statusSeen = False
+
 Int Function S_PlayerStatus()
+  Actor p = Game.GetPlayer()
+  Float x = p.GetPositionX()
+  Float y = p.GetPositionY()
+  Float z = p.GetPositionZ()
+  Bool moved = statusSeen && (x - statusX) * (x - statusX) + (y - statusY) * (y - statusY) + (z - statusZ) * (z - statusZ) > 1.0
+  statusX = x
+  statusY = y
+  statusZ = z
+  statusSeen = True
+  If p.GetAnimationVariableBool("bInJumpState")
+    Return 5
+  ElseIf moved
+    Return 21
+  EndIf
   Return 0
 EndFunction
 
@@ -1566,20 +1872,104 @@ Int Function S_UnlightTorch()
   Return 0
 EndFunction
 
-Int Function S_InKey(Int k)
-  Return 0
-EndFunction
-
-Int Function S_GetFramePassed()
+; InKey(code) (engine/SOUP.html "InKey"): 1 while the key of the low byte's character is down, with each modifier the
+; next three bytes name held (s Shift, c Control, a Alt); a character with no key 0.
+Int Function S_InKey(Int code)
+  Int dx = KeyOf(Math.LogicalAnd(code, 255))
+  If dx < 0 || !Input.IsKeyPressed(dx)
+    Return 0
+  EndIf
+  Int m = 1
+  While m < 4
+    Int c = Math.LogicalAnd(Math.RightShift(code, 8 * m), 255)
+    If c == 115 || c == 83
+      If !Input.IsKeyPressed(42) && !Input.IsKeyPressed(54)
+        Return 0
+      EndIf
+    ElseIf c == 99 || c == 67
+      If !Input.IsKeyPressed(29) && !Input.IsKeyPressed(157)
+        Return 0
+      EndIf
+    ElseIf c == 97 || c == 65
+      If !Input.IsKeyPressed(56) && !Input.IsKeyPressed(184)
+        Return 0
+      EndIf
+    EndIf
+    m += 1
+  EndWhile
   Return 1
 EndFunction
 
-Int Function S_QuickRnd(Int n)
-  Return Utility.RandomInt(0, n)
+; A character's DirectInput key (letters either case, digits, space), or -1.
+Int Function KeyOf(Int c)
+  If c >= 65 && c <= 90
+    c += 32
+  EndIf
+  If c >= 97 && c <= 122
+    Int[] letters = new Int[26]
+    letters[0] = 30
+    letters[1] = 48
+    letters[2] = 46
+    letters[3] = 32
+    letters[4] = 18
+    letters[5] = 33
+    letters[6] = 34
+    letters[7] = 35
+    letters[8] = 23
+    letters[9] = 36
+    letters[10] = 37
+    letters[11] = 38
+    letters[12] = 50
+    letters[13] = 49
+    letters[14] = 24
+    letters[15] = 25
+    letters[16] = 16
+    letters[17] = 19
+    letters[18] = 31
+    letters[19] = 20
+    letters[20] = 22
+    letters[21] = 47
+    letters[22] = 17
+    letters[23] = 45
+    letters[24] = 21
+    letters[25] = 44
+    Return letters[c - 97]
+  ElseIf c >= 49 && c <= 57
+    Return c - 47
+  ElseIf c == 48
+    Return 11
+  ElseIf c == 32
+    Return 57
+  EndIf
+  Return -1
 EndFunction
 
-Int Function S_Rnd(Int n)
-  Return Utility.RandomInt(0, n)
+; GetFramePassed (engine/SOUP.html): the whole nominal ticks of the current update, the engine's about 12.14 a second
+; (normal_frame_rate 12 per 18 BIOS ticks): those since this actor's last run here, the fraction carried.
+Int Function S_GetFramePassed()
+  Return framesPassed
+EndFunction
+
+; QuickRnd(mask): one draw of the shared stream, masked (engine/SOUP.html "Rnd and QuickRnd").
+Int Function S_QuickRnd(Int mask)
+  Return Math.LogicalAnd(RG.Draw(), mask)
+EndFunction
+
+; Rnd(bound): one draw masked with the smallest of 1, 3, 7 .. 16383 that holds bound values (none past 16384), then the
+; remainder by the bound: 0 to bound - 1. A bound of 0 or less still draws, and gives 0.
+Int Function S_Rnd(Int bound)
+  Int draw = RG.Draw()
+  If bound <= 0
+    Return 0
+  EndIf
+  If bound <= 16384
+    Int mask = 1
+    While mask + 1 < bound
+      mask = mask * 2 + 1
+    EndWhile
+    draw = Math.LogicalAnd(draw, mask)
+  EndIf
+  Return draw % bound
 EndFunction
 
 Int Function S_TestGlobalFlag(Int i)
@@ -1738,12 +2128,46 @@ Int Function S_ShowItem(Int n, Int a, Int b, Int c)
   Return 0
 EndFunction
 
+; ShowItem's text (the translator's: the item's description or the call's RTX line) as a line.
+Int Function S_ShowText(String text)
+  Debug.Notification(text)
+  Return 0
+EndFunction
+
 Int Function S_ShowItemNoRtx(Int n, Int a, Int b)
   Return 0
 EndFunction
 
-; Redguard takes everything from Cyrus when he is caught; Skyrim keeps the player's things.
+; DropAllItems (engine/SOUP.html): DropItem of every item Cyrus owns, by item number, then no item selected. Its one
+; caller is ITEMLIST (the catacombs' prison: Cyrus wakes up stripped, counts first, and gets everything back when he
+; finds his things, CatacombsFoundStuff). Only Redguard's items (RGItems) go; the player's own Skyrim things stay.
 Int Function S_DropAllItems()
+  Actor p = Game.GetPlayer()
+  Int n = RG.Items.GetSize()
+  Int i = 0
+  While i < n
+    Form f = ItemForm(i)
+    If f
+      Int c = p.GetItemCount(f)
+      If c > 0
+        p.RemoveItem(f, c, True)
+      EndIf
+    EndIf
+    i += 1
+  EndWhile
+  RG.SelectedItem = 0
+  Return 0
+EndFunction
+
+; OpenShell(name): the scene's program of that name run on its own, as an item's use script is (a shell placed at the
+; player: RGShells, by the translator's number).
+Int Function S_OpenShell(Int i)
+  If RG.Shells && i >= 0 && i < RG.Shells.GetSize()
+    Form f = RG.Shells.GetAt(i)
+    If f as Activator
+      Game.GetPlayer().PlaceAtMe(f)
+    EndIf
+  EndIf
   Return 0
 EndFunction
 
@@ -1762,53 +2186,173 @@ EndFunction
 
 ; ---- sound and speech ----
 
-Int Function S_Sound(Int n, Int vol, Int pan)
-  If n < 0 || n >= RG.Sounds.GetSize()
+; ---- sound (Redguard Preservation, engine/sound.html; the channels on RG) ----
+; Sound(effect, volume offset, rate offset): placed at Who, its volume Redguard's line over distance (each offset's
+; own output model: RgScripts.BuildSounds), started even where that is 0. FlatSound: centred, at the effect's volume
+; plus the offset. Both at the effect's rate plus the rate offset, owned by this object, from channel 6.
+
+; The entry for a play, and the gain left to apply when no entry was built for its exact offset (a variable's).
+Float soundGain = 1.0
+
+Int Function EntryFor(Int kind, Int n, Int vol, Int rate)
+  soundGain = 1.0
+  Int e = RG.SoundEntry(kind, n, vol, rate)
+  If e >= 0
+    Return e
+  EndIf
+  e = RG.SoundEntry(kind, n, 0, rate)
+  If e < 0
+    e = RG.SoundEntry(kind, n, 0, 0)
+  EndIf
+  If e < 0 && kind == 1
+    e = RG.SoundEntry(1, n, 0, 0)
+  EndIf
+  soundGain = (127 + vol) / 127.0
+  Return e
+EndFunction
+
+Int Function S_Sound(Int n, Int vol, Int rate)
+  If n < 0 || 127 + vol <= 0
     Return 0
   EndIf
-  Sound s = RG.Sounds.GetAt(n) as Sound
-  If s
-    s.Play(Who)
-  EndIf
+  RG.PlayEntry(EntryFor(0, n, vol, rate), n, Self, Who, 6, soundGain)
   Return 0
 EndFunction
 
-Int Function S_FlatSound(Int n, Int vol, Int pan)
-  Return S_Sound(n, vol, pan)
+Int Function S_FlatSound(Int n, Int vol, Int rate)
+  If n < 0
+    Return 0
+  EndIf
+  RG.PlayEntry(EntryFor(1, n, vol, rate), n, Self, Game.GetPlayer(), 6, soundGain)
+  Return 0
 EndFunction
 
-Float Function S_AmbientSound(Int n, Int vol, Int pan)
-  If n < 0 || n >= RG.Sounds.GetSize()
+; AmbientSound(effect, volume offset, rate offset): a multitask per call site (called again while it runs, it doesn't
+; run again). Each run: past the distance where its volume is 0, or with this object no longer updated (its cell
+; unloaded), its sound stops and the task ends; otherwise its sound starts if it isn't playing (a one-shot effect
+; again when it ends). The volume and pan follow the listener (Skyrim places it at Who with the offset's curve).
+; Ending the task (KillMyTasks) leaves its sound playing.
+Int[] ambSite
+Int[] ambEntry
+Int[] ambEffect
+Int[] ambChan
+ObjectReference[] ambWho
+
+Function AmbientSlots()
+  If ambSite
+    Return
+  EndIf
+  ambSite = new Int[6]
+  ambEntry = new Int[6]
+  ambEffect = new Int[6]
+  ambChan = new Int[6]
+  ambWho = new ObjectReference[6]
+  Int k = 0
+  While k < 6
+    ambSite[k] = -1
+    ambChan[k] = -1
+    k += 1
+  EndWhile
+EndFunction
+
+; In range of the listener, in a cell that is loaded (the emitter is often an XMarker, which has no 3D of its own).
+Bool Function Heard(ObjectReference r, Int entry)
+  If !r
+    Return False
+  EndIf
+  Cell c = r.GetParentCell()
+  Return c && c.IsAttached() && Game.GetPlayer().GetDistance(r) < RG.SoundReachOf(entry)
+EndFunction
+
+Float Function S_AmbientSound(Int n, Int vol, Int rate, Int site)
+  AmbientSlots()
+  If ambSite.Find(site) >= 0 || n < 0 || 127 + vol <= 0
     Return 0.0
   EndIf
-  Sound s = RG.Sounds.GetAt(n) as Sound
-  If s
-    If ambientId >= 0
-      Sound.StopInstance(ambientId)
-    EndIf
-    ambientId = s.Play(Who)
+  Int e = EntryFor(0, n, vol, rate)
+  If e < 0 || !Heard(Who, e)
+    Return 0.0
   EndIf
+  Int k = ambSite.Find(-1)
+  If k < 0
+    Return 0.0
+  EndIf
+  ambSite[k] = site
+  ambEntry[k] = e
+  ambEffect[k] = n
+  ambWho[k] = Who
+  ambChan[k] = RG.PlayEntry(e, n, Self, Who, 6, soundGain)
   Return 0.0
 EndFunction
 
-Int Function S_EndMySounds()
-  If ambientId >= 0
-    Sound.StopInstance(ambientId)
-    ambientId = -1
+; Each run of the ambient tasks (every update while the cell is loaded).
+Function AmbientRun()
+  If !ambSite
+    Return
   EndIf
+  Int k = 0
+  While k < 6
+    If ambSite[k] >= 0
+      If !loaded || !Heard(ambWho[k], ambEntry[k])
+        RG.StopChannel(ambChan[k])
+        ambSite[k] = -1
+        ambChan[k] = -1
+      ElseIf !RG.ChannelPlaying(ambChan[k])
+        ambChan[k] = RG.PlayEntry(ambEntry[k], ambEffect[k], Self, ambWho[k], 6, 1.0)
+      EndIf
+    EndIf
+    k += 1
+  EndWhile
+EndFunction
+
+Bool Function AmbientRunning()
+  If !ambSite
+    Return False
+  EndIf
+  Int k = 0
+  While k < 6
+    If ambSite[k] >= 0
+      Return True
+    EndIf
+    k += 1
+  EndWhile
+  Return False
+EndFunction
+
+; Ends the ambient tasks without stopping their sounds (KillMyTasks; TaskStop).
+Function AmbientEnd()
+  If ambSite
+    Int k = 0
+    While k < 6
+      ambSite[k] = -1
+      ambChan[k] = -1
+      k += 1
+    EndWhile
+  EndIf
+EndFunction
+
+Int Function S_EndMySounds()
+  RG.EndSounds(-1, Self)
   Return 0
 EndFunction
 
 Int Function S_EndMySound(Int n)
-  Return S_EndMySounds()
+  If n >= 0
+    RG.EndSounds(n, Self)
+  EndIf
+  Return 0
 EndFunction
 
 Int Function S_EndSound(Int n)
-  Return S_EndMySounds()
+  If n >= 0
+    RG.EndSounds(n, None)
+  EndIf
+  Return 0
 EndFunction
 
 Int Function S_StopAllSounds()
-  Return S_EndMySounds()
+  RG.StopAllSounds()
+  Return 0
 EndFunction
 
 ; A line (RTX): said by Who when it is an actor with a voiced topic, else its recording played there (Cyrus's at the
@@ -1831,12 +2375,13 @@ Float Function Line(Int i, String text, Float seconds, Bool cyrus, Int gesture)
   If t && a && !cyrus
     a.Say(t)
   Else
+    ; Speech takes a channel from 0 with no owner (StopAllSounds stops it, EndMySounds doesn't).
     Sound s = f as Sound
     If s
       If cyrus
-        s.Play(Game.GetPlayer())
+        RG.PlaySound(s, seconds, -1, None, Game.GetPlayer(), 0, 1.0)
       Else
-        s.Play(Who)
+        RG.PlaySound(s, seconds, -1, None, Who, 0, 1.0)
       EndIf
     EndIf
     If text != ""
@@ -1846,6 +2391,15 @@ Float Function Line(Int i, String text, Float seconds, Bool cyrus, Int gesture)
   Float until = Utility.GetCurrentRealTime() + seconds
   If until > RG.DialogDue
     RG.DialogDue = until
+  EndIf
+  Return seconds
+EndFunction
+
+; AmbientRTX(label): the line's recording as a sound, centred (at the player), owned by this object from channel 0,
+; its text not shown; a multitask lasting the recording (not restarted).
+Float Function AmbientLine(Int i, Float seconds)
+  If i >= 0 && i < RG.Lines.GetSize()
+    RG.PlaySound(RG.Lines.GetAt(i) as Sound, seconds, -1, Self, Game.GetPlayer(), 0, 1.0)
   EndIf
   Return seconds
 EndFunction
@@ -1991,11 +2545,16 @@ Int Function S_UnShowBitmap(Int a)
   Return 0
 EndFunction
 
-; A full-screen picture (the observatory telescope's star fields, the mages' mirror's visions): picture number a (the translator's, from
-; the image's file name) shown as a page.
+; ViewGXA(image, frame, count): a task showing one GXA image over the world for count - 1 ticks of the engine's
+; 12.14 a second (engine/SOUP.html); the observatory telescope's star fields (count 36: 2.9 s). Picture number a is
+; the translator's, from the image's file name.
 Float Function S_ViewGXA(Int a, Int b, Int c)
-  RG.ShowPicture(a)
-  Return 0.0
+  Float seconds = 0.0
+  If c > 1
+    seconds = (c - 1) / 12.14
+  EndIf
+  RG.ShowPictureFor(a, seconds)
+  Return seconds
 EndFunction
 
 ; A movie (MENU.INI movie_name[n]) played as Skyrim plays Bink: Redguard queued it for the next map change, which
@@ -2030,9 +2589,9 @@ EndFunction
 
 Int Function S_menuNew()
   RG.ClearMenu()
-  menuIndex = new Int[10]
+  menuIndex = new Int[63]
   Int i = 0
-  While i < 10
+  While i < 63
     menuIndex[i] = -1
     i += 1
   EndWhile
@@ -2040,27 +2599,67 @@ Int Function S_menuNew()
   Return 0
 EndFunction
 
-; Item (RTX tag) number button of this script's current menu, answering index when chosen.
-Int Function S_menuAddItem(Int button, Int index)
+; Item slot (the translator's: the item's place in this menu) added, answering index when chosen.
+Int Function S_menuAddItem(Int slot, Int index)
   If !menuIndex
     S_menuNew()
   EndIf
-  If button >= 0 && button < 10
-    RG.ShowMenuItem(button)
-    menuIndex[button] = index
+  If slot >= 0 && slot < menuIndex.Length
+    menuIndex[slot] = index
   EndIf
   Return 0
 EndFunction
 
+; The menu's pages, nine items each (RgScripts.MenuPages): a page shows the items added on it and, when items were
+; added on a later page, "More..." (its tenth button), which turns to the next page.
 Float Function S_menuProc(Int menu)
-  If !Menus || menu < 0 || menu >= Menus.Length || !Menus[menu] || !menuIndex
+  If !Menus || !menuIndex || menu < 0
     Return 0.0
   EndIf
-  Int b = Menus[menu].Show()
-  If b >= 0 && b < 10
-    menuSel = menuIndex[b]
+  Int first = menu
+  Int pages = 1
+  If MenuStarts && menu < MenuStarts.Length
+    first = MenuStarts[menu]
+    If menu + 1 < MenuStarts.Length
+      pages = MenuStarts[menu + 1] - first
+    Else
+      pages = Menus.Length - first
+    EndIf
   EndIf
-  RG.ClearMenu()
+  Int p = 0
+  While p < pages && first + p < Menus.Length
+    RG.ClearMenu()
+    Int b = 0
+    While b < 9
+      Int slot = p * 9 + b
+      If slot < menuIndex.Length && menuIndex[slot] >= 0
+        RG.ShowMenuItem(b)
+      EndIf
+      b += 1
+    EndWhile
+    Bool more = False
+    Int s = (p + 1) * 9
+    While s < menuIndex.Length && !more
+      more = menuIndex[s] >= 0
+      s += 1
+    EndWhile
+    If more && p + 1 < pages
+      RG.ShowMenuItem(9)
+    EndIf
+    Int pick = -1
+    If Menus[first + p]
+      pick = Menus[first + p].Show()
+    EndIf
+    RG.ClearMenu()
+    If pick == 9 && more && p + 1 < pages
+      p += 1
+    Else
+      If pick >= 0 && pick < 9 && p * 9 + pick < menuIndex.Length
+        menuSel = menuIndex[p * 9 + pick]
+      EndIf
+      Return 0.0
+    EndIf
+  EndWhile
   Return 0.0
 EndFunction
 

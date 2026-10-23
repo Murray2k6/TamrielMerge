@@ -42,6 +42,8 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
     public List<DfLocation> ExteriorOnly { get; } = [];
     public int Messages { get; private set; }
     public int Objectives { get; private set; }
+    /// <summary>"Tell me about" topics made (every quest resource with an answer).</summary>
+    public int AboutTopics { get; private set; }
     public int Topics { get; private set; }
     public List<string> Problems { get; } = [];
 
@@ -139,17 +141,8 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         }
 
         // Sounds, cures and diseases.
-        var cure = new Spell(mod)
-        {
-            EditorID = "DFQuestCureDisease", Name = "Cure Disease", ObjectBounds = new ObjectBounds(), Type = SpellType.Spell, CastType = CastType.FireAndForget,
-            TargetType = TargetType.Self, Description = "", Flags = SpellDataFlag.ManualCostCalc | SpellDataFlag.NoAbsorbOrReflect,
-            Effects = [new Effect { BaseEffect = (Vanilla<IMagicEffectGetter>("AlchCureDisease")?.FormKey ?? FormKey.Null).ToNullableLink<IMagicEffectGetter>(), Data = new EffectData() }],
-        };
-        mod.Spells.Add(cure);
-        var diseases = new FormList(mod) { EditorID = "DFQuestDiseases" };
-        foreach (var d in new[] { "DiseaseAtaxia", "DiseaseBoneBreakFever", "DiseaseBrainRot", "DiseaseRattles", "DiseaseRockjoint", "DiseaseWitbane", "DiseaseCollywobbles" })
-            if (Vanilla<ISpellGetter>(d) is { } s) diseases.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(s.FormKey));
-        mod.FormLists.Add(diseases);
+        // Daggerfall's own 17 diseases, in its order: "make pc ill with" and "cure" name one by its number.
+        var diseases = DfDiseases.List(mod, DfText.Load(arena2));
         var sound = masters[0].SoundMarkers.Where(s => s.EditorID?.StartsWith("QST") == true).OrderBy(s => s.EditorID, StringComparer.Ordinal).FirstOrDefault();
 
         // The quests.
@@ -187,8 +180,11 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             new ScriptBoolListProperty { Name = "RegionRedguard", Data = [.. DfFactions.RegionIsRedguard] },
             Strs("MaleNames", maleNames), Strs("FemaleNames", femaleNames),
             Objs("GroupItems", groupLists),
-            Obj("CureDisease", cure.FormKey), Obj("Diseases", diseases.FormKey),
+            Obj("Diseases", diseases.FormKey),
             Strs("RegionNames", DfLocations.RegionNames), Strs("BuildingLabels", BuildingLabels),
+            // %rt, %rn: each region's ruler (its province faction's title and individual).
+            Strs("RulerTitles", Enumerable.Range(0, DfLocations.RegionNames.Length).Select(r => factions.Ruler(r).Title)),
+            Strs("RulerNames", Enumerable.Range(0, DfLocations.RegionNames.Length).Select(r => factions.Ruler(r).Name ?? "")),
             Strs("Gods", ["Akatosh", "Arkay", "Dibella", "Julianos", "Kynareth", "Mara", "Stendarr", "Zenithar"]),
             Strs("Oaths", ["By the gods", "By Akatosh", "Gods' blood", "By the Nine", "By Stendarr"]),
             Obj("MerchantsGroup", groupFactions[1].FormKey), Obj("NobilityGroup", groupFactions[3].FormKey),
@@ -204,6 +200,11 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         }
         if (Vanilla<IQuestGetter>("PlayerVampireQuest") is { } vq) props.Add(Obj("VampireQuest", vq.FormKey));
         if (Vanilla<ISpellGetter>("WerewolfChange") is { } wp) props.Add(Obj("WerewolfPower", wp.FormKey));
+        // Skyrim's own lycanthropy cure (CompanionsHousekeepingScript.CurePlayer: the beast form, its immunity and the
+        // ring's power taken, the change ended), for "cure lycanthropy".
+        if (masters[0].Quests.FirstOrDefault(q => q.VirtualMachineAdapter?.Scripts.Any(s => s.Name == "CompanionsHousekeepingScript") == true) is { } housekeeping)
+            props.Add(Obj("WerewolfCure", housekeeping.FormKey));
+        props.Add(Obj("Lycanthropy", DfDiseases.Lycanthropy(mod, masters[0], diseases).FormKey));
         if (sound is not null) props.Add(Obj("QuestSound", sound.FormKey));
         props.AddRange(Summoning());
         // The sounds quests play ("play sound N": DAGGER.SND's record N), as Daggerfall's own sounds.
@@ -215,15 +216,8 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             props.Add(Objs("DfSounds", madeSounds.Select(m => m.Marker)));
         }
         Machine.Aliases.Add(new QuestAlias { ID = 0, Name = "Player", ForcedReference = new FormLinkNullable<IPlacedGetter>(PlayerRef) });
-        // "add face": up to three people travelling with the player (Daggerfall Unity's escort faces), following them.
-        var follow = Vanilla<IPackageGetter>("PlayerFollowerPackage");
-        for (uint e = 1; e <= EscortSlots; e++)
-        {
-            var escort = new QuestAlias { ID = e, Name = $"Escort{e - 1}", Flags = QuestAlias.Flag.Optional | QuestAlias.Flag.AllowReserved | QuestAlias.Flag.AllowReuseInQuest };
-            if (follow is not null) escort.PackageData.Add(new FormLink<IPackageGetter>(follow.FormKey));
-            Machine.Aliases.Add(escort);
-        }
-        Machine.NextAliasID = 1 + EscortSlots;
+        // "add face" is Daggerfall Unity's HUD faces only (TMDfQuestMachine.Face): no one is made to follow.
+        Machine.NextAliasID = 1;
         Machine.VirtualMachineAdapter = new QuestAdapter
         {
             Scripts = [new ScriptEntry { Name = "TMDfQuestMachine", Properties = [.. props] }, Law()],
@@ -347,9 +341,6 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             Int("SheogorathIndex", Array.FindIndex(Daedra, d => d.Name == "Sheogorath")),
         ];
     }
-
-    /// <summary>People who can travel with the player at once ("add face"; Daggerfall Unity shows three faces).</summary>
-    const uint EscortSlots = 3;
 
     /// <summary>The City Watch who come for a player whose legal standing has fallen (passive: they talk first).</summary>
     public FormKey? CityWatch { get; init; }
@@ -640,9 +631,15 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         };
         static readonly Dictionary<string, int> Pronouns = new() { ["%g"] = 1, ["%g1"] = 1, ["%g2"] = 2, ["%g3"] = 3, ["%g2self"] = 4 };
 
+        /// <summary>The resources the last converted text names by name (Daggerfall Unity's NameMacro1, "_symbol_"), as
+        /// "Tell me about" keys (place n, person 20 + n, item 40 + n): naming one shows its topic (QuestMacroHelper reveals
+        /// dialog links).</summary>
+        public readonly List<int> Named = [];
+
         /// <summary>Daggerfall's text with its symbols and macros as alias text replacement (TagAlias + token).</summary>
         public string Convert(string text, int tagAlias)
         {
+            Named.Clear();
             var sb = new StringBuilder();
             int last = -1, at = 0;
             var spans = Symbol.Matches(text).Cast<Match>().Select(m => (m.Index, m.Length, Sym: true, M: m))
@@ -665,6 +662,11 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
                         : q.Clocks.FindIndex(p => p.Hash == h) is >= 0 and var ci ? (3, ci) : null;
                     if (r is not { } res) { sb.Append(name); continue; }
                     if (res.Kind == 1) last = res.Index;
+                    if (mode == 1 && res.Kind is 0 or 1 or 2)
+                    {
+                        int key = res.Kind == 2 ? res.Index : res.Kind == 1 ? 20 + res.Index : 40 + res.Index;
+                        if (!Named.Contains(key)) Named.Add(key);
+                    }
                     sb.Append($"<Alias={TagName(Of(res.Kind, res.Index, mode))}>");
                 }
                 else
@@ -708,7 +710,6 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         var logIds = new List<int>();
         var rumorIds = new List<int>();
         var individuals = new List<int>();
-        var dialogKeys = new SortedSet<int>();
         foreach (var o in q.Ops)
         {
             var info = DfQuestOps.Of(o.Code);
@@ -740,12 +741,6 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             if (o.Code == 0x17 && !logIds.Contains(a[1])) logIds.Add(a[1]);
             if (o.Code == 0x26 && !rumorIds.Contains(a[1])) rumorIds.Add(a[1]);
             if (o.Code == 0x4E && !individuals.Contains(a[1])) individuals.Add(a[1]);
-            if (o.Code is 0x0A or 0x0B)
-            {
-                if (a[1] >= 0) dialogKeys.Add(a[1]);
-                if (a[2] >= 0) dialogKeys.Add(20 + a[2]);
-                if (a[3] >= 0) dialogKeys.Add(40 + a[3]);
-            }
         }
 
         // Aliases: the player, people, items, individuals, then name tags (after the text is converted).
@@ -769,14 +764,23 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         // Messages (all variants), owned by the quest so the tags fill in; prompts get Yes and No.
         var msgRecs = new List<FormKey>();
         var msgIds = new List<int>();
+        // Each message's named resources (their "Tell me about" keys), shown once it is: MsgRevealFirst / MsgRevealCount
+        // into RevealKeys.
+        var revealFirst = new List<int>();
+        var revealCount = new List<int>();
+        var revealKeys = new List<int>();
         string Text(string raw) => tokens.Convert(raw, tagAlias);
         foreach (var (id, variants) in q.Messages.OrderBy(m => m.Key))
             for (int v = 0; v < variants.Count; v++)
             {
+                string description = Text(variants[v]);
+                revealFirst.Add(revealKeys.Count);
+                revealCount.Add(tokens.Named.Count);
+                revealKeys.AddRange(tokens.Named);
                 var m = new Message(mod)
                 {
                     EditorID = $"{edid}_{id}_{v}",
-                    Description = Text(variants[v]),
+                    Description = description,
                     Quest = rec.ToNullableLink<IQuestGetter>(),
                     Flags = Message.Flag.MessageBox,
                     MenuButtons = [],
@@ -788,15 +792,22 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
                 Messages++;
             }
 
-        // The log: one objective per log message.
+        // The log: one objective per log message (what it names shown once it is: LogRevealFirst / LogRevealCount).
+        var logRevealFirst = new List<int>();
+        var logRevealCount = new List<int>();
         for (int i = 0; i < logIds.Count; i++)
         {
             string text = q.Messages.TryGetValue(logIds[i], out var v) && v.Count > 0 ? Text(v[0]) : "";
+            logRevealFirst.Add(revealKeys.Count);
+            logRevealCount.Add(text.Length > 0 ? tokens.Named.Count : 0);
+            if (text.Length > 0) revealKeys.AddRange(tokens.Named);
             rec.Objectives.Add(new QuestObjective { Index = (ushort)i, DisplayText = text, Targets = [] });
             Objectives++;
         }
 
-        // "Tell me about ..." per resource with an answer (anyInfo), opened by "add dialog"/"dialog link"; rumours.
+        // "Tell me about ..." for every resource with an answer (anyInfo) (Daggerfall Unity TalkManager: on the list while
+        // the quest runs, unless "dialog link" hides it; "add dialog", or a message, log entry or answer naming it, shows it
+        // again): TMDfQuest's Hide<key> (0 shown, 1 hidden), which the responses ask for. Rumours as before.
         var groups = Enumerable.Range(0, 5).Select(g => GroupFaction(mod, g)).ToList();
         var stages = new SortedSet<int>();
         void About(int key, int kind, int index, int answer, int rumors)
@@ -806,30 +817,33 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             mod.DialogBranches.Add(branch);
             var topic = NewTopic($"{edid}About{key}", $"Tell me about <Alias={Tokens.TagName(tokens.Of(kind, index, 1))}>.", rec, branch);
             branch.StartingTopic = topic.ToNullableLink<IDialogTopicGetter>();
-            stages.Add(100 + key);
             var said = lines.Concat(rumors > 0 && q.Messages.TryGetValue(rumors, out var r) ? r : []).ToList();
             foreach (var l in said)
             {
-                var resp = Line(Text(l), [StageDone(rec, 100 + key), .. AnyTownsperson(groups)], random: said.Count > 1);
-                if (kind == 2)
-                    resp.VirtualMachineAdapter = new DialogResponsesAdapter
+                var shown = new GetVMQuestVariableConditionData { VariableName = $"::Hide{key}_var" };
+                shown.Quest = new FormLinkOrIndex<IQuestGetter>(shown, rec.FormKey);
+                string text = Text(l);
+                var named = tokens.Named.ToList();
+                var resp = Line(text, [Cond(shown, CompareOperator.EqualTo, 0), .. AnyTownsperson(groups)], random: said.Count > 1);
+                // The answer shows what it names (GetAnswerFromTokensArray reveals dialog links), and a place's marks it.
+                var props = new List<ScriptProperty> { Obj("Machine", Machine!.FormKey), Int("Service", 1), Obj("DfQuest", rec.FormKey), Int("Place", kind == 2 ? index : -1) };
+                if (named.Count > 0) props.Add(Ints("Reveals", named));
+                resp.VirtualMachineAdapter = new DialogResponsesAdapter
+                {
+                    Scripts = [new ScriptEntry { Name = "TMDfQuestTopic", Properties = [.. props] }],
+                    ScriptFragments = new ScriptFragments
                     {
-                        Scripts = [new ScriptEntry { Name = "TMDfQuestTopic", Properties = [Obj("Machine", Machine!.FormKey), Int("Service", 1), Obj("DfQuest", rec.FormKey), Int("Place", index)] }],
-                        ScriptFragments = new ScriptFragments
-                        {
-                            ExtraBindDataVersion = 2, FileName = "TMDfQuestTopic",
-                            OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfQuestTopic", FragmentName = "Fragment_End" },
-                        },
-                    };
+                        ExtraBindDataVersion = 2, FileName = "TMDfQuestTopic",
+                        OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfQuestTopic", FragmentName = "Fragment_End" },
+                    },
+                };
                 topic.Responses.Add(resp);
             }
+            AboutTopics++;
         }
-        foreach (int key in dialogKeys)
-        {
-            if (key < 20 && key < q.Places.Count) About(key, 2, key, q.Places[key].Text1, q.Places[key].Text2);
-            else if (key is >= 20 and < 40 && key - 20 < q.People.Count) About(key, 1, key - 20, q.People[key - 20].Text1, q.People[key - 20].Text2);
-            else if (key >= 40 && key - 40 < q.Items.Count) About(key, 0, key - 40, q.Items[key - 40].Text1, 0);
-        }
+        for (int p = 0; p < q.Places.Count && p < 20; p++) About(p, 2, p, q.Places[p].Text1, q.Places[p].Text2);
+        for (int p = 0; p < q.People.Count && p < 20; p++) About(20 + p, 1, p, q.People[p].Text1, q.People[p].Text2);
+        for (int p = 0; p < q.Items.Count && p < 20; p++) About(40 + p, 0, p, q.Items[p].Text1, 0);
         if (rumorIds.Count > 0)
         {
             var branch = new DialogBranch(mod) { EditorID = $"{edid}RumorsBranch", Quest = rec.ToLink<IQuestGetter>(), Category = DialogBranch.CategoryType.Player, Flags = DialogBranch.Flag.TopLevel };
@@ -869,6 +883,8 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             Ints("FoeType", q.Foes.Select(f => f.Type)), Ints("FoeCount", q.Foes.Select(f => f.Count)),
             Objs("FoeBase", q.Foes.Select(f => Foe?.Invoke(f.Type) ?? FormKey.Null)),
             Objs("Msgs", msgRecs), Ints("MsgIds", msgIds), Ints("LogIds", logIds), Ints("RumorIds", rumorIds),
+            Ints("MsgRevealFirst", revealFirst), Ints("MsgRevealCount", revealCount), Ints("LogRevealFirst", logRevealFirst), Ints("LogRevealCount", logRevealCount),
+            Ints("RevealKeys", revealKeys),
             Ints("TokenKind", tokens.List.Select(t => t.Kind)), Ints("TokenIndex", tokens.List.Select(t => t.Index)), Ints("TokenMode", tokens.List.Select(t => t.Mode)),
             Int("PersonAlias", personAlias), Int("ItemAlias", itemAlias), Int("IndividualAlias", individualAlias), Int("TagAlias", tagAlias),
             Ints("IndividualFactions", individuals),

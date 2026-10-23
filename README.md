@@ -216,13 +216,20 @@ behaviour and file formats followed, their code not included):
   enemy senses and spawning, the quest engine (its task rules and commands, QuestListsManager's offers), reputation,
   guilds, shops, holidays and taverns, and the songs' playlists (SongManager); its classes (DFCareer, ClassFile),
   level-ups, skill advancement, advantages and disadvantages, racial abilities and climbing (ClimbingMotor,
-  FormulaHelper) for the levelling on the Mundus stones.
+  FormulaHelper) for the levelling on the Mundus stones; its diseases and lycanthropy (DiseaseEffect,
+  LycanthropyEffect, FormulaHelper's monster-hit infections), riddle answers (DaggerfallAction), the talk
+  manager's topics (TalkManager), quest foes, clocks and travel times (CreateFoe, Clock, TravelTimeCalculator).
 - The [Dynamic Music](https://www.nexusmods.com/daggerfallunity/) mod for Daggerfall Unity: the combat playlist.
-- [RGUnity](https://github.com/RGUnity) (MIT) and the redguard-preservation notes: Redguard's models, scenes and scripts.
+- [RGUnity](https://github.com/RGUnity) (MIT) and the [Redguard Preservation](https://michidk.github.io/redguard-preservation/)
+  notes: Redguard's models, scenes and scripts; its script engine (engine/SOUP.html: task slots, waits, TaskStop,
+  random numbers, InKey, PlayerStatus), sound (engine/sound.html: channels, owners, the volume curve), activation
+  (engine/hud.html), lighting (engine/model-lighting.html) and the SFX and RGM formats.
 - [OpenMW](https://openmw.org/) (GPL-3.0) and the [NifTools](https://github.com/niftools/nifxml) nif.xml: Morrowind's
   NIF format, its attributes and other formulas; how Morrowind plays its creatures' and people's animations (which
   animation files a person loads, idle choice, movement speeds and playback rates, knockdowns and knockouts, casting,
   torches, storms, blend masks, PlayGroup and LoopGroup).
 - [xOBSE](https://github.com/llde/xOBSE): the list of OBSE's script commands, read from its source.
+- The [Construction Set wiki](https://cs.uesp.net/) (Oblivion's): what Oblivion's script functions and conditions
+  do, and how its people's conversations run (HELLO, Link To, next speaker, the conversation settings).
 - [UESP](https://en.uesp.net/) (CC BY-SA 2.5): the games' mechanics and Daggerfall's quest codes, for research;
   Oblivion's levelling (skill advancement, specialization and major-skill rates, character creation, trainers).

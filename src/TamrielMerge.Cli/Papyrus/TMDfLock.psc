@@ -15,6 +15,12 @@ EndEvent
 
 Event OnActivate(ObjectReference akActionRef)
   Actor player = Game.GetPlayer()
+  ; A door that is also an action object (TMDfAction): its triggers first (Daggerfall Unity runs them as the door is
+  ; used), and a door notice's first use keeps it shut.
+  TMDfAction doorAction = (Self as ObjectReference) as TMDfAction
+  If doorAction && doorAction.Used(akActionRef)
+    Return
+  EndIf
   If akActionRef != player || !IsLocked()
     Activate(akActionRef, True)
     Return

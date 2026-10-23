@@ -98,11 +98,68 @@ public sealed partial class ObPluginBuilder : IDisposable
     ObMeshConverter.Result? Mesh(string model)
     {
         if (converted.TryGetValue(model, out var hit)) return hit;
-        try { hit = meshes.Convert(model, modOutDir); }
-        catch (Exception e) { Problems.Add($"model {model}: {e.Message}"); hit = null; }
-        Problems.AddRange(meshes.Notes);
-        meshes.Notes.Clear();
-        return converted[model] = hit;
+        var (made, problem) = ConvertModel(model);
+        if (problem is not null) Problems.Add(problem);
+        DrainMeshNotes();
+        return converted[model] = made;
+    }
+
+    /// <summary>A model converted (its default form: what <see cref="Mesh"/> places), or why not; safe on any thread.</summary>
+    (ObMeshConverter.Result? Made, string? Problem) ConvertModel(string model)
+    {
+        // A model Oblivion's own data hasn't (testGlass's Weapons\Glass\testGlass.NIF): Oblivion draws nothing there either.
+        if (!data.Exists(model.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model))
+            return (null, $"model {model}: not in Oblivion's own data (nothing drawn, in Oblivion as here)");
+        try { return (meshes.Convert(model, modOutDir), null); }
+        catch (Exception e) { return (null, $"model {model}: {e.Message}"); }
+    }
+
+    void DrainMeshNotes()
+    {
+        lock (meshes.Notes)
+        {
+            Problems.AddRange(meshes.Notes);
+            meshes.Notes.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Every model the world's references place (their bases' own: statics, activators, furniture, lights, doors,
+    /// containers, flora; not items or actors, made otherwise), converted ahead on every core, so placing them finds each
+    /// made (2026-10-22, the user: "it shouldnt take 2 hours", "should be mutithread": converting each on first use, one
+    /// at a time while the cells were built, held the build to one core for most of its 161 minutes). Returns the models
+    /// made and those that couldn't be.
+    /// </summary>
+    public (int Made, int Failed) PrepareModels()
+    {
+        var models = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in Merge())
+            foreach (var r in m.Refs.Values)
+            {
+                if (r is not Ob.IPlacedObjectGetter o || o.Base.FormKeyNullable is not { } key || !records.TryGetValue(key, out var rec)) continue;
+                // Trees are Skyrim's (their SpeedTree .spt files are no models to convert: 2026-10-22, 139 of them said
+                // "not in Oblivion's own data").
+                if (IsItem(rec) || rec is Ob.INpcGetter or Ob.ICreatureGetter or Ob.ILeveledCreatureGetter or Ob.ITreeGetter) continue;
+                string? file = rec is Ob.ILightGetter l ? l.Model?.File : (rec as Ob.IModeledGetter)?.Model?.File;
+                if (file is { Length: > 0 } && !IsMarker(file) && !converted.ContainsKey(file)) models.Add(file);
+            }
+        var made = new System.Collections.Concurrent.ConcurrentDictionary<string, ObMeshConverter.Result?>(StringComparer.OrdinalIgnoreCase);
+        var problems = new System.Collections.Concurrent.ConcurrentBag<string>();
+        // Biggest first, so the last to finish aren't the slowest; half the logical cores (memory: each holds a model).
+        var order = models.OrderByDescending(m => data.Size(m.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? m : @"meshes\" + m)).ToList();
+        // Handed out one at a time (a list is otherwise cut into fixed ranges up front: 2026-10-22, two threads of eight
+        // still working, holding the big models, the rest out of work).
+        Parallel.ForEach(System.Collections.Concurrent.Partitioner.Create(order, System.Collections.Concurrent.EnumerablePartitionerOptions.NoBuffering),
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 2) }, model =>
+        {
+            var (result, problem) = ConvertModel(model);
+            made[model] = result;
+            if (problem is not null) problems.Add(problem);
+        });
+        foreach (var model in order) converted[model] = made[model];
+        Problems.AddRange(problems.Order(StringComparer.Ordinal));
+        DrainMeshNotes();
+        return (made.Values.Count(r => r is not null), made.Values.Count(r => r is null));
     }
 
     static ObjectBounds Bounds(ObMeshConverter.Result? r)
@@ -330,8 +387,14 @@ public sealed partial class ObPluginBuilder : IDisposable
         FinishMagic();
         FinishJails();
         SwingDoorTwinCount = Skyrim.SwingDoorTwins.AddAll(mod);
-        // Each NPC's own Oblivion packages (their conditions name the quests, made by now).
+        // The packages made before the world was placed, aimed at what they name; then each NPC's own Oblivion packages
+        // (their conditions name the quests, made by now).
+        AimPackagesAgain();
         FinishNpcPackages();
+        FinishAnimationLengths();
+        FinishLines();
+        FinishQuestItems();
+        FinishConditionMirrors();
         Directory.CreateDirectory(modOutDir);
         TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
         MakePersonKeywords();

@@ -25,20 +25,220 @@ Idle Property IdleStop Auto
 {IdleForceDefaultState: back to standing.}
 FormList Property Pictures Auto
 {The screen pictures (ViewGXA's images) as notes that show the image, by the scripts' picture number.}
+FormList Property Shells Auto
+{The programs OpenShell runs on their own (activators carrying them), by the translator's number.}
 TMRgMove Property Mover Auto
 {Ledges, ropes and hanging (the quest RGMovement).}
 GlobalVariable Property FirstPersonAfterShots Auto
 {1: after a cutscene that showed Cyrus in third person, the camera goes back to first person (0: it stays, as
 Redguard's own camera did).}
 
+Float[] Property EffectSeconds Auto
+{RGSounds starts with every effect by index as FlatSound(n, 0, 0) plays it (None where unused): how long each plays,
+all its loops (0: until stopped).}
+Int[] Property SoundKeys Auto
+{The entries after those, the other ways scripts play an effect: (kind x 128 + effect) x 1024 + volume offset + 512,
+kind 0 placed (Sound, AmbientSound: the offset's own output model), 1 centred (FlatSound: the effect's volume plus
+the offset).}
+Int[] Property SoundRates Auto
+{Each of those entries' rate offset (its recording plays at the effect's rate plus it).}
+Float[] Property SoundSeconds Auto
+{How long each of those plays, all its loops (0: until stopped).}
+Float[] Property SoundReach Auto
+{How far off each of those is heard when placed: Redguard's volume is 0 from there on (0 for a centred one).}
+
 Int[] potions
 Int Property SelectedItem = 1 Auto Hidden
 Int lockouts = 0
 Float Property DialogDue = 0.0 Auto Hidden
+Float Property ActivateHold = 0.0 Auto Hidden
+{Redguard's activation hold-off: no object activates before this real time (22 ticks after one fires; Deactivate
+clears it).}
+Int Property RndState = 1 Auto Hidden
+{The engine's shared random stream (Redguard Preservation, engine/SOUP.html "Rnd and QuickRnd"): an unsigned 32-bit
+state, 1 at the start, stepped state * 1103515245 + 12345 for each draw.}
+
+; One draw of the shared stream: (state >> 16) & 32767 after the step (Papyrus's Int wraps as the engine's does).
+Int Function Draw()
+  RndState = RndState * 1103515245 + 12345
+  Return Math.LogicalAnd(Math.RightShift(RndState, 16), 32767)
+EndFunction
 
 Event OnInit()
   potions = new Int[32]
+  Channels()
 EndEvent
+
+; ---- sound: Redguard's 16 sample channels (Redguard Preservation, engine/sound.html) ----
+; A start takes the first idle channel at or above its start index (0 speech, 6 the scripts' sounds); with none idle
+; the sound is dropped, never stealing one. Each remembers its owner (the object whose script started it) and effect,
+; for EndSound (an effect, whoever's), EndMySound (an effect of the owner's), EndMySounds (all the owner's) and
+; StopAllSounds (all 16). A channel is idle again when its sound has played out (all its loops; a sound looping until
+; stopped holds it until then).
+
+Int[] chanId
+Int[] chanEffect
+ObjectReference[] chanOwner
+Float[] chanEnd
+
+Function Channels()
+  If chanId
+    Return
+  EndIf
+  chanId = new Int[16]
+  chanEffect = new Int[16]
+  chanOwner = new ObjectReference[16]
+  chanEnd = new Float[16]
+  Int c = 0
+  While c < 16
+    chanId[c] = -1
+    chanEffect[c] = -1
+    c += 1
+  EndWhile
+EndFunction
+
+Int Function Effects()
+  If EffectSeconds
+    Return EffectSeconds.Length
+  EndIf
+  Return 0
+EndFunction
+
+; The RGSounds entry for an effect played one way (kind 0 placed, 1 centred) at a volume and rate offset, -1 for none.
+Int Function SoundEntry(Int kind, Int effect, Int off, Int rate)
+  If effect < 0 || effect >= Effects()
+    Return -1
+  EndIf
+  If kind == 1 && off == 0 && rate == 0
+    If Sounds.GetAt(effect) as Sound
+      Return effect
+    EndIf
+    Return -1
+  EndIf
+  If !SoundKeys
+    Return -1
+  EndIf
+  If off < -512
+    off = -512
+  ElseIf off > 511
+    off = 511
+  EndIf
+  Int wanted = (kind * 128 + effect) * 1024 + off + 512
+  Int i = SoundKeys.Find(wanted)
+  While i >= 0 && SoundRates[i] != rate
+    i = SoundKeys.Find(wanted, i + 1)
+  EndWhile
+  If i < 0
+    Return -1
+  EndIf
+  Return Effects() + i
+EndFunction
+
+Float Function SoundReachOf(Int entry)
+  Int i = entry - Effects()
+  If SoundReach && i >= 0 && i < SoundReach.Length
+    Return SoundReach[i]
+  EndIf
+  Return 0.0
+EndFunction
+
+Float Function SoundSecondsOf(Int entry)
+  Int i = entry - Effects()
+  If i < 0
+    If entry >= 0 && entry < Effects()
+      Return EffectSeconds[entry]
+    EndIf
+  ElseIf SoundSeconds && i < SoundSeconds.Length
+    Return SoundSeconds[i]
+  EndIf
+  Return 0.0
+EndFunction
+
+Bool Function ChannelPlaying(Int c)
+  Channels()
+  If c < 0 || c >= 16 || chanId[c] < 0
+    Return False
+  EndIf
+  If chanEnd[c] > 0.0 && Utility.GetCurrentRealTime() >= chanEnd[c]
+    ; Played out (a sound looping a number of times is stopped after the last).
+    Sound.StopInstance(chanId[c])
+    chanId[c] = -1
+    chanOwner[c] = None
+    chanEffect[c] = -1
+    Return False
+  EndIf
+  Return True
+EndFunction
+
+; Starts a sound on the first idle channel from first: the entry's sound at the given reference (placed, or the
+; player for a centred one), its volume scaled by gain (1: as built). Returns the channel, -1 when dropped.
+Int Function PlaySound(Sound s, Float seconds, Int effect, ObjectReference owner, ObjectReference at, Int first, Float gain)
+  Channels()
+  If !s || !at
+    Return -1
+  EndIf
+  Int c = first
+  While c < 16 && ChannelPlaying(c)
+    c += 1
+  EndWhile
+  If c >= 16
+    Return -1
+  EndIf
+  Int id = s.Play(at)
+  If gain < 1.0
+    If gain < 0.0
+      gain = 0.0
+    EndIf
+    Sound.SetInstanceVolume(id, gain)
+  EndIf
+  chanId[c] = id
+  chanEffect[c] = effect
+  chanOwner[c] = owner
+  If seconds > 0.0
+    chanEnd[c] = Utility.GetCurrentRealTime() + seconds
+  Else
+    chanEnd[c] = 0.0
+  EndIf
+  Return c
+EndFunction
+
+Int Function PlayEntry(Int entry, Int effect, ObjectReference owner, ObjectReference at, Int first, Float gain)
+  If entry < 0 || entry >= Sounds.GetSize()
+    Return -1
+  EndIf
+  Return PlaySound(Sounds.GetAt(entry) as Sound, SoundSecondsOf(entry), effect, owner, at, first, gain)
+EndFunction
+
+Function StopChannel(Int c)
+  Channels()
+  If c >= 0 && c < 16 && chanId[c] >= 0
+    Sound.StopInstance(chanId[c])
+    chanId[c] = -1
+    chanOwner[c] = None
+    chanEffect[c] = -1
+  EndIf
+EndFunction
+
+; Stops every playing channel of the effect (any: -1) and owner (anyone's: None).
+Function EndSounds(Int effect, ObjectReference owner)
+  Channels()
+  Int c = 0
+  While c < 16
+    If ChannelPlaying(c) && (effect < 0 || chanEffect[c] == effect) && (!owner || chanOwner[c] == owner)
+      StopChannel(c)
+    EndIf
+    c += 1
+  EndWhile
+EndFunction
+
+Function StopAllSounds()
+  Channels()
+  Int c = 0
+  While c < 16
+    StopChannel(c)
+    c += 1
+  EndWhile
+EndFunction
 
 Int Function GetPotion(Int i)
   If !potions
@@ -273,6 +473,48 @@ EndFunction
 ; ---- screen pictures ----
 
 ; ViewGXA: the image full page, as a note the player reads (closing it goes back to the game).
+String[] Property PicturePaths Auto
+{Each picture's texture as a book page names it (img://Textures/...png), by picture number.}
+Int[] Property PictureSizes Auto
+{Each picture's width and height, two numbers per picture.}
+String Property PictureMenu = "TamrielMerge/rgpicture" AutoReadOnly
+
+Int pictureShowing = -1
+Float pictureSeconds = 0.0
+
+; ViewGXA: the picture drawn over the game for the task's time (engine/SOUP.html), in the picture menu
+; (Interface\TamrielMerge\rgpicture.swf, SKSE); without SKSE, its page opened.
+Function ShowPictureFor(Int i, Float seconds)
+  If SKSE.GetVersion() > 0 && PicturePaths && i >= 0 && i < PicturePaths.Length && PicturePaths[i] != "" && !UI.IsMenuOpen("CustomMenu")
+    pictureShowing = i
+    pictureSeconds = seconds
+    RegisterForModEvent("TM_PictureReady", "OnPictureReady")
+    UI.OpenCustomMenu(PictureMenu)
+    Return
+  EndIf
+  ShowPicture(i)
+EndFunction
+
+Event OnPictureReady(String eventName, String strArg, Float numArg, Form sender)
+  UnregisterForModEvent("TM_PictureReady")
+  Int i = pictureShowing
+  If i < 0
+    UI.CloseCustomMenu()
+    Return
+  EndIf
+  String[] args = new String[3]
+  args[0] = PicturePaths[i]
+  args[1] = PictureSizes[i * 2] as String
+  args[2] = PictureSizes[i * 2 + 1] as String
+  UI.InvokeStringA("CustomMenu", "_root.Show", args)
+  ; Real time, whether or not the menu holds the game.
+  Utility.WaitMenuMode(pictureSeconds)
+  pictureShowing = -1
+  If UI.IsMenuOpen("CustomMenu")
+    UI.CloseCustomMenu()
+  EndIf
+EndEvent
+
 Function ShowPicture(Int i)
   If !Pictures || i < 0 || i >= Pictures.GetSize()
     Return

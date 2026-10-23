@@ -125,7 +125,10 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     }
 
     DfText? text;
-    readonly Dictionary<int, Message> riddles = new();
+    readonly HashSet<int> riddles = new();
+    DfSound? sounds;
+    bool soundsLoaded;
+    readonly Dictionary<int, SoundMarker?> actionSounds = new();
 
     /// <summary>Daggerfall's furniture and props as vanilla objects (also for town streets).</summary>
     public PropReplacer Props => props;
@@ -256,7 +259,12 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         var hungClutter = new List<PlacedObject>();
         var standingLights = new List<PlacedObject>();
         var campfireRefs = new List<PlacedObject>();
-        var actions = new ActionObjectBuilder(mod, models, modOutDir, Spells) { Text = text ??= DfText.Load(arena2), Riddles = riddles, QuestGlobal = QuestGlobal };
+        if (!soundsLoaded) { sounds = DfSound.Load(arena2); soundsLoaded = true; }
+        var actions = new ActionObjectBuilder(mod, models, modOutDir, Spells)
+        {
+            Text = text ??= DfText.Load(arena2), Riddles = riddles, QuestGlobal = QuestGlobal,
+            Sounds = sounds, SoundMarkers = actionSounds, SensesQuest = Creatures?.Senses?.FormKey,
+        };
         var floorPolys = dungeon.Polygons(models).Where(q => q.Normal.Y > 0.7f).ToList();
         // Slanted ones too (a cove, a vault): hung things hang from them (2026-10-16: 186 chains hung from nothing).
         // Hung things hang from the dungeon's own shell as the block meshes have it: not from a door, a moving part or a
@@ -295,6 +303,8 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 var o = block.Objects[index];
                 var pos = ToSkyrim(origin + o.Position);
                 PlacedNpc? personRef = null;   // a person standing for a flat, which a dialogue action (29) talks through
+                // What this object places (a moving flat takes it along).
+                int temporaryBefore = cell.Temporary.Count, persistentBefore = cell.Persistent.Count;
                 if (o.Type == DfRdbObjectType.Light)
                 {
                     cell.Temporary.Add(new PlacedObject(mod)
@@ -523,12 +533,31 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 }
                 // A flat with an action (whatever shows it: a light, clutter, a person, nothing for editor flats) also
                 // gets its action, as an invisible activator the player or a chain triggers.
-                if (ActionObjectBuilder.IsActionFlat(o) && actions.PlaceFlat(cell, o, index, origin, personRef) is not null)
-                    fixtureCounts[$"action flat (action {o.Action!.Flags})"] = fixtureCounts.GetValueOrDefault($"action flat (action {o.Action!.Flags})") + 1;
+                if (ActionObjectBuilder.IsActionFlat(o))
+                {
+                    // The flat's own references (its torch, item, marker; not a person), for a flat that moves.
+                    var riders = cell.Temporary.Skip(temporaryBefore).Concat(cell.Persistent.Skip(persistentBefore)).OfType<PlacedObject>().ToList();
+                    int movingBefore = actions.FlatsMoving;
+                    if (actions.PlaceFlat(cell, o, index, origin, personRef, riders) is not null)
+                        fixtureCounts[$"action flat (action {o.Action!.Flags})"] = fixtureCounts.GetValueOrDefault($"action flat (action {o.Action!.Flags})") + 1;
+                    if (actions.FlatsMoving > movingBefore)
+                        foreach (var rider in riders.Where(cell.Temporary.Contains).ToList())
+                        {
+                            // Named by the flat's script: persistent.
+                            cell.Temporary.Remove(rider);
+                            rider.SkyrimMajorRecordFlags |= (SkyrimMajorRecord.SkyrimMajorRecordFlag)PersistentFlag;
+                            cell.Persistent.Add(rider);
+                        }
+                }
             }
             int links = actions.LinkChains(cell, block, origin);
             if (links > 0) fixtureCounts["action chain links"] = fixtureCounts.GetValueOrDefault("action chain links") + links;
         }
+        if (actions.Sounded > 0) fixtureCounts["action sounds"] = actions.Sounded;
+        if (actions.DoorNotices > 0) fixtureCounts["door notices"] = actions.DoorNotices;
+        if (actions.Trespasses > 0) fixtureCounts["door trespass checks"] = actions.Trespasses;
+        if (actions.TrapsWithoutSpell > 0) fixtureCounts["spell traps whose spell SPELLS.STD lacks"] = actions.TrapsWithoutSpell;
+        if (actions.FlatsMoving > 0) fixtureCounts["flats moving what stands for them"] = actions.FlatsMoving;
         start ??= enter ?? throw new InvalidDataException($"{location.Name} has no start or enter marker");
         enter ??= start;
         // Where a new game begins: Daggerfall Unity prefers the enter marker (StartDungeonInterior, preferEnterMarker),

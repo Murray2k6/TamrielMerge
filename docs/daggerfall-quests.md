@@ -110,7 +110,10 @@ Zenithar 8, the other temples 7:
   Sheogorath 60C00Y00, Boethiah U0C00Y00, Namira 30C00Y00, Meridia 10C00Y00, Vaernima 90C00Y00, Nocturnal 40C00Y00,
   Mephala Z0C00Y00, Azura T0C00Y00); refusing brings 3-5 Daedra.
 
-The Mages Guild's and temples' summoning services (Daggerfall Unity Services 66, 456...) are not offered yet.
+The Mages Guild's and temples' summoning services (Daggerfall Unity's MagesGuild and Temple services) are offered as
+"Summon a Daedra Prince." to their people once the player holds the rank that opens the summoning chambers
+(Skyrim/TownGuilds.cs AddSummoning, called by DaggerfallPluginBuilder and DaggerfallTowns); the quest machine calls the
+prince whose day it is, as for anyone outside a coven.
 
 ## Legal standing (TMDfLaw)
 
@@ -179,8 +182,7 @@ script on DFQuestMachine) reads it as Daggerfall Unity's PlayerEntity and Dagger
 
 - Untested in game. Arrays over 128 entries come from script properties (catalogue, factions, sites); Papyrus allows
   that for properties, but it wants checking in game, as does the name-tag text replacement.
-- The covens' summoning, the court and the escorts are untested in game. A coven's summoning only from its witches:
-  the Mages Guild's and temples' summoning services aren't offered.
+- The covens' and guilds' summoning, the court and the escorts are untested in game.
 - "mute npc" and the questor role have nothing to act on in Skyrim's dialogue; prompts and messages are message boxes
   (not voiced).
 - Clocks to a place use 90 minutes per map pixel of the longer axis, x2.5, at least a day, instead of Daggerfall Unity's

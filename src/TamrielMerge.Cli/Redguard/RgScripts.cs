@@ -53,6 +53,9 @@ public sealed partial class RgPluginBuilder
     public int ScriptsCompiled { get; private set; }
     public int ScriptsAttached { get; private set; }
     public List<string> CompileFailures { get; } = [];
+    /// <summary>The last compile's errors and warnings (compiler and assembler, PapyrusRun.Tally; scripts-compile.txt).</summary>
+    public int CompileErrors { get; private set; }
+    public int CompileWarnings { get; private set; }
     public bool CompilerFound { get; private set; }
     /// <summary>Per scene, statements (counted as the audit counts: every scene's every program).</summary>
     public Dictionary<string, (int Statements, Dictionary<RgPapyrus.Category, int> Counts)> ScriptsByScene { get; } = [];
@@ -97,6 +100,9 @@ public sealed partial class RgPluginBuilder
     sealed class ScriptContext(RgPluginBuilder b, Scene scene, string actor, Npc? speaker) : RgPapyrus.Context
     {
         public (int Index, string Text, float Seconds) Line(int tag, bool cyrus) => b.ScriptLine(tag, cyrus ? null : speaker);
+        public bool HasRtx(int tag) => b.rtx?.Entries.ContainsKey(TagString(tag)) == true;
+        public int Shell(string program) => b.ShellIndex(scene, program);
+        public string ItemText(int item) => b.ItemDefs.FirstOrDefault(d => d.Id == item) is { } d ? b.ItemDescription(d) : "";
         public int LogStage(int tag) => b.LogStage(tag);
         // A person sending Cyrus on by a map they chose (VILEKID after the riddles) isn't a door where they stand.
         public bool LoadWorldIsDoor(int? map, int? marker, bool setByScript) =>
@@ -179,7 +185,7 @@ public sealed partial class RgPluginBuilder
             ScriptStatements += sceneStatements;
             ScriptsByScene[scene.Name] = (sceneStatements, sceneCounts);
         }
-        log?.Invoke($"scripts: {sceneScripts.Count} programs in {scenes.Count} scenes as {scriptsByKey.Count} Papyrus scripts, {ScriptStatements} statements");
+        log?.Invoke($"scripts: {sceneScripts.Count} programs in {scenes.Count} scenes as {scriptsByKey.Count} Papyrus scripts, {ScriptStatements} statements; {papyrus.ActivateWithoutPrompt} ACTIVATE labels without an RTX entry (never activated, as in Redguard)");
     }
 
     /// <summary>The scene's translated script for an object, when it does anything.</summary>
@@ -256,12 +262,22 @@ public sealed partial class RgPluginBuilder
     }
 
     /// <summary>A sound marker playing a wav under sound\ (a copy of a vanilla descriptor: a made-up one crashed the
-    /// game), looping or once, in a sound category.</summary>
-    SoundMarker SoundFor(string edid, string relWav, string category, bool loop)
+    /// game), looping or once, in a sound category; with an output model and static attenuation (dB) of its own when
+    /// given (Redguard's sound effects: BuildSounds).</summary>
+    SoundMarker SoundFor(string edid, string relWav, string category, bool loop, FormKey? outputModel = null, float? staticDb = null)
     {
         var template = SkyrimEsm.SoundDescriptors.First(d => d.EditorID == (loop ? "OBJWindmillSolitudeLPSD" : "VOCShoutFXThrowVoice"));
         var descriptor = mod.SoundDescriptors.DuplicateInAsNewRecord(template);
         descriptor.EditorID = edid + "SD";
+        if (outputModel is { } om) descriptor.OutputModel = new FormLinkNullable<ISoundOutputModelGetter>(om);
+        if (staticDb is { } db)
+        {
+            // Redguard's own volume and rate, nothing varied.
+            descriptor.StaticAttenuation = db;
+            descriptor.PercentFrequencyShift = 0;
+            descriptor.PercentFrequencyVariance = 0;
+            descriptor.Variance = 0;
+        }
         descriptor.SoundFiles.Clear();
         descriptor.SoundFiles.Add(new Mutagen.Bethesda.Plugins.Assets.AssetLink<Mutagen.Bethesda.Skyrim.Assets.SkyrimSoundAssetType>(relWav));
         descriptor.Category = new FormLinkNullable<ISoundCategoryGetter>(SkyrimEsm.SoundCategories.First(c => c.EditorID == category).FormKey);
@@ -393,6 +409,11 @@ public sealed partial class RgPluginBuilder
         state.Properties.Add(ObjProp("Flags", flagsList.FormKey));
         state.Properties.Add(ObjProp("Items", itemList?.FormKey));
         state.Properties.Add(ObjProp("Sounds", soundsList.FormKey));
+        state.Properties.Add(new ScriptFloatListProperty { Name = "EffectSeconds", Data = [.. soundBaseSeconds] });
+        state.Properties.Add(new ScriptIntListProperty { Name = "SoundKeys", Data = [.. soundKeys] });
+        state.Properties.Add(new ScriptIntListProperty { Name = "SoundRates", Data = [.. soundRates] });
+        state.Properties.Add(new ScriptFloatListProperty { Name = "SoundSeconds", Data = [.. soundSeconds] });
+        state.Properties.Add(new ScriptFloatListProperty { Name = "SoundReach", Data = [.. soundReach] });
         state.Properties.Add(ObjProp("Lines", linesList.FormKey));
         if (mod.Quests.Contains(logQuest!)) state.Properties.Add(ObjProp("LogQuest", logQuest!.FormKey));
         state.Properties.Add(ObjProp("Fireball", Sk(0x07E56D)));   // TrapFirebolt01
@@ -413,6 +434,13 @@ public sealed partial class RgPluginBuilder
         state.Properties.Add(ObjProp("PlayerIdles", IdleList("RGPlayerIdles", RgPapyrus.CyrusIdles).FormKey));
         state.Properties.Add(ObjProp("IdleStop", Sk(0x0E4242)));   // IdleStop
         state.Properties.Add(ObjProp("Pictures", BuildPictures().FormKey));
+        if (PictureMenuBuilt)
+        {
+            var paths = new ScriptStringListProperty { Name = "PicturePaths" };
+            paths.Data.AddRange(picturePaths);
+            state.Properties.Add(paths);
+            state.Properties.Add(new ScriptIntListProperty { Name = "PictureSizes", Data = [.. pictureSizes] });
+        }
         state.Properties.Add(ObjProp("Mover", MovementQuest().FormKey));
         var firstPerson = new GlobalShort(mod) { EditorID = "RGCameraFirstPerson", Data = 0 };
         mod.Globals.Add(firstPerson);
@@ -452,6 +480,27 @@ public sealed partial class RgPluginBuilder
             ScriptsAttached++;
         }
 
+        // OpenShell's programs: activators carrying them, placed at the player when opened (RGShells).
+        var shells = new FormList(mod) { EditorID = "RGShells" };
+        mod.FormLists.Add(shells);
+        foreach (var (shellScene, program) in shellRequests)
+        {
+            var scene = scenes[shellScene];
+            var key = sceneScripts.Keys.FirstOrDefault(k => k.Scene == shellScene && k.Actor.Equals(program, StringComparison.OrdinalIgnoreCase));
+            if (key.Actor is null || sceneScripts[key] is not { } o || !compiled.Contains(o.ScriptName))
+            {
+                Problems.Add($"OpenShell('{program}') in {shellScene}: no compiled program of that name");
+                shells.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(Sk(0x3B)));
+                continue;
+            }
+            var shell = new Mutagen.Bethesda.Skyrim.Activator(mod) { EditorID = $"RGShell{Sanitize(shellScene)}{Sanitize(key.Actor)}", ObjectBounds = new ObjectBounds() };
+            shell.VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [Entry(o, scene, key.Actor, shell: true)] };
+            mod.Activators.Add(shell);
+            shells.Items.Add(shell.ToLink<ISkyrimMajorRecordGetter>());
+            ScriptsAttached++;
+        }
+        state.Properties.Add(ObjProp("Shells", shells.FormKey));
+
         // The world's objects.
         foreach (var ((sceneName, index), (carrier, kind)) in carriers)
         {
@@ -483,7 +532,8 @@ public sealed partial class RgPluginBuilder
             }
             ScriptsAttached++;
         }
-        log?.Invoke($"scripts: {ScriptsWritten} written, {ScriptsCompiled} compiled, {ScriptsAttached} attached ({ScriptsIdle} with nothing for Skyrim to do left off); {linesList.Items.Count} lines, {sfxMarkers.Count(kv => kv.Value is not null)} sound effects");
+        foreach (var failure in CompileFailures.Take(40)) Problems.Add("script compile: " + failure);
+        log?.Invoke($"scripts: {ScriptsWritten} written, {ScriptsCompiled} compiled ({CompileErrors} compiler errors, {CompileWarnings} warnings this compile: scripts-compile.txt), {ScriptsAttached} attached ({ScriptsIdle} with nothing for Skyrim to do left off); {linesList.Items.Count} lines, {sfxMarkers.Count(kv => kv.Value is not null)} sound effects ({SoundVariants} more ways scripts play them, {SoundsLooping} looping, {SoundsSilent} silent plays, {SoundsPastBank} past the bank playing nothing as in Redguard); {MenuPagesMade} more menu pages for menus of more than nine items; {shellRequests.Count} OpenShell programs");
     }
 
     public int ScriptsIdle { get; private set; }
@@ -530,9 +580,16 @@ public sealed partial class RgPluginBuilder
         if (UsesMarkers(o)) entry.Properties.Add(ObjProp("Markers", MarkersOf(scene).FormKey));
         if (o.Menus.Count > 0)
         {
+            // Every menu's pages one after another; MenuStarts: where each menu's first page is.
             var list = new ScriptObjectListProperty { Name = "Menus" };
-            foreach (var items in o.Menus) list.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(MenuMessage(items).FormKey) });
+            var starts = new List<int>();
+            foreach (var items in o.Menus)
+            {
+                starts.Add(list.Objects.Count);
+                foreach (var page in MenuPages(items)) list.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(page.FormKey) });
+            }
             entry.Properties.Add(list);
+            entry.Properties.Add(new ScriptIntListProperty { Name = "MenuStarts", Data = [.. starts] });
         }
         if (o.UseItems.Count > 0)
         {
@@ -624,23 +681,43 @@ public sealed partial class RgPluginBuilder
     readonly List<Global> menuShow = [];
     readonly Dictionary<string, Message> menuMessages = [];
 
-    /// <summary>A script's menu as a message box: a button per item (its RTX text), shown when menuAddItem added it.</summary>
-    Message MenuMessage(List<int> items)
+    /// <summary>
+    /// A script's menu as message boxes, nine items a page: a button per item (its RTX text), shown when menuAddItem
+    /// added it (RGMenuShow0-8), and on a page with more after it a tenth, "More...", shown when one of those was added
+    /// (RGMenuShow9). TMRgSoup.S_menuProc goes through the pages.
+    /// </summary>
+    List<Message> MenuPages(List<int> items)
     {
-        string key = string.Join(",", items);
-        if (menuMessages.TryGetValue(key, out var hit)) return hit;
-        var msg = new Message(mod) { EditorID = $"RGMenu{menuMessages.Count}", Description = " ", Flags = Message.Flag.MessageBox, MenuButtons = [] };
-        for (int i = 0; i < items.Count; i++)
+        var pages = new List<Message>();
+        for (int first = 0; first < Math.Max(1, items.Count); first += 9)
         {
-            var button = new MessageButton { Text = Text(items[i]) ?? TagString(items[i]) };
-            var d = new GetGlobalValueConditionData();
-            d.Global = new FormLinkOrIndex<IGlobalGetter>(d, menuShow[i].FormKey);
-            button.Conditions.Add(new ConditionFloat { Data = d, CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1 });
-            msg.MenuButtons.Add(button);
+            var page = items.Skip(first).Take(9).ToList();
+            bool more = first + 9 < items.Count;
+            string key = string.Join(",", page) + (more ? "+" : "");
+            if (!menuMessages.TryGetValue(key, out var msg))
+            {
+                msg = new Message(mod) { EditorID = $"RGMenu{menuMessages.Count}", Description = " ", Flags = Message.Flag.MessageBox, MenuButtons = [] };
+                for (int i = 0; i < page.Count; i++) msg.MenuButtons.Add(Shown(new MessageButton { Text = Text(page[i]) ?? TagString(page[i]) }, i));
+                if (more) msg.MenuButtons.Add(Shown(new MessageButton { Text = "More..." }, 9));
+                mod.Messages.Add(msg);
+                menuMessages[key] = msg;
+                if (first > 0) MenuPagesMade++;
+            }
+            pages.Add(msg);
         }
-        mod.Messages.Add(msg);
-        return menuMessages[key] = msg;
+        return pages;
     }
+
+    MessageButton Shown(MessageButton button, int global)
+    {
+        var d = new GetGlobalValueConditionData();
+        d.Global = new FormLinkOrIndex<IGlobalGetter>(d, menuShow[global].FormKey);
+        button.Conditions.Add(new ConditionFloat { Data = d, CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1 });
+        return button;
+    }
+
+    /// <summary>Menu pages after a menu's first (menus of more than nine items).</summary>
+    public int MenuPagesMade { get; private set; }
 
     readonly Dictionary<string, Message> useMenus = [];
 
@@ -668,41 +745,177 @@ public sealed partial class RgPluginBuilder
         return useMenus[key] = msg;
     }
 
-    /// <summary>MAIN.SFX's effects the scripts play, as sound markers in RGSounds by index (None where unused).</summary>
+    // Redguard's sound output (Redguard Preservation, engine/sound.html "Volume and pan"): a positional sound's volume is
+    // clamp(127 - a + off, 0, 127), a = clamp(d * D >> 16, 0, 127) for the distance d up to the radius R (silent past
+    // it): R = sound_distance x 36 = 2304 world units (Skyrim units here), D = floor(65536 / floor(R / 128)) = 3640, so
+    // it falls linearly from the listener. A flat sound is centred at clamp(base + off, 0, 127) (base: the effect's own
+    // volume byte). Both play at the effect's rate plus the rate offset (512-44000 Hz).
+    const double SoundRadius = 2304, SoundDivisor = 3640;
+    const int SoundPositional = 0, SoundFlat = 1;
+
+    /// <summary>A sound variant's key as TMRgState.SoundKey makes it: (kind x 128 + effect) x 1024 + offset + 512.</summary>
+    static int SoundKey(int kind, int effect, int off) => (kind * 128 + effect) * 1024 + Math.Clamp(off, -512, 511) + 512;
+
+    readonly Dictionary<int, (SoundOutputModel Model, float StaticDb, float Reach)?> outputModels = [];
+
+    /// <summary>
+    /// Skyrim's output model for a positional sound of volume offset off: placed (HRTF), its attenuation Redguard's line
+    /// from 100% at the listener (or from where a raised volume stops being clipped at 127) to silence (or the radius),
+    /// as the curve's five points; the volume at the listener as the descriptor's static attenuation (dB). Null when
+    /// it is never heard.
+    /// </summary>
+    (SoundOutputModel Model, float StaticDb, float Reach)? OutputFor(int off)
+    {
+        if (outputModels.TryGetValue(off, out var known)) return known;
+        double step = 65536.0 / SoundDivisor;   // world units per point of attenuation
+        double top = Math.Clamp(127 + off, 0, 127);
+        if (top <= 0) return outputModels[off] = null;
+        double V(double d) => d > SoundRadius ? 0 : Math.Clamp(127 - Math.Clamp(Math.Floor(d / step), 0, 127) + off, 0, 127);
+        double min = Math.Max(0, off) * step, max = Math.Min(SoundRadius, (127 + off) * step);
+        if (min > max - 1) min = max - 1;
+        var template = SkyrimEsm.SoundOutputModels.First(m => m.FormKey == Sk(0x05A28A));   // SOMMono01400: placed, mono
+        var model = mod.SoundOutputModels.DuplicateInAsNewRecord(template);
+        model.EditorID = $"RGSoundOutput{(off < 0 ? "Minus" : "Plus")}{Math.Abs(off)}";
+        var curve = new byte[5];
+        for (int i = 0; i < 5; i++) curve[i] = (byte)Math.Round(100 * V(min + (max - min) * i / 4.0) / top);
+        model.Attenuation = new SoundOutputAttenuation
+        {
+            Unknown = template.Attenuation?.Unknown ?? 0,
+            MinDistance = (float)min,
+            MaxDistance = (float)max,
+            Curve = curve,
+            Unknown2 = template.Attenuation?.Unknown2.ToArray() ?? new byte[3],
+        };
+        return outputModels[off] = (model, (float)(20 * Math.Log10(127 / top)), (float)max);
+    }
+
+    /// <summary>
+    /// MAIN.SFX's effects the scripts play, in RGSounds: first every effect by index as FlatSound(n, 0, 0) plays it
+    /// (centred, at its own volume and rate; None where unused), then each other way a script plays one (Sound and
+    /// AmbientSound placed with their volume offset's output model, FlatSound centred at its volume; at the call's rate),
+    /// with the keys, lengths and reaches TMRgState looks them up by (SoundKeys, SoundRates, SoundSeconds, SoundReach).
+    /// An effect loops as its loop flag says: until stopped (0xFF), or that many times (the length covers them all).
+    /// </summary>
     void BuildSounds()
     {
-        var used = new HashSet<int>();
         int sound = Fn("Sound"), flat = Fn("FlatSound"), ambient = Fn("AmbientSound");
-        foreach (var scene in scenes.Values)
-            foreach (var c in scene.Script.Calls)
-                if ((c.Function == sound || c.Function == flat || c.Function == ambient) && c.Args.Length > 0 && c.Args[0] is int n && n >= 0) used.Add(n);
-        var ambientOnly = scenes.Values.SelectMany(s => s.Script.Calls).Where(c => c.Function == ambient && c.Args.Length > 0 && c.Args[0] is int).Select(c => c.Args[0]!.Value).ToHashSet();
+        var used = new HashSet<int>();
+        var variants = new SortedSet<(int Kind, int Effect, int Off, int Rate)>();
+        foreach (var c in scenes.Values.SelectMany(s => s.Script.Calls))
+        {
+            if (c.Function != sound && c.Function != flat && c.Function != ambient) continue;
+            int kind = c.Function == flat ? SoundFlat : SoundPositional;
+            if (c.Args.Length == 0 || c.Args[0] is not int n)
+            {
+                // An effect a variable names (FlatSound(var2, 0, 0)): every effect's base entry stands ready.
+                variablePlays++;
+                continue;
+            }
+            if (n < 0) continue;
+            used.Add(n);
+            int off = c.Args.Length > 1 && c.Args[1] is int o ? o : 0, rate = c.Args.Length > 2 && c.Args[2] is int r ? r : 0;
+            if (c.Args.Length > 1 && c.Args[1] is null || c.Args.Length > 2 && c.Args[2] is null) variablePlays++;
+            // Placed sounds also get an offset-0 entry for calls whose offset a variable gives.
+            if (kind == SoundPositional) variants.Add((kind, n, 0, 0));
+            if (kind == SoundFlat && off == 0 && rate == 0) continue;
+            variants.Add((kind, n, off, rate));
+        }
         var sfx = RgSfx.Load(Path.Combine(rgDir, "sound", "MAIN.SFX"));
         if (sfx is null) { Problems.Add("sound\\MAIN.SFX not found: no sound effects"); return; }
+        var keys = new List<int>();
+        var rates = new List<int>();
+        var seconds = new List<float>();
+        var reach = new List<float>();
+        string sfxDir = Path.Combine("fx", "tamrielmerge", "rg", "sfx");
+        SoundMarker? Make(int i, int kind, int off, int rateOff)
+        {
+            var e = sfx.Effects[i];
+            int hz = rateOff == 0 ? e.SampleRate : Math.Clamp(e.SampleRate + rateOff, 512, 44000);
+            string rel = Path.Combine(sfxDir, rateOff == 0 ? $"sfx{i:D3}.wav" : $"sfx{i:D3}_{hz}hz.wav");
+            string wav = Path.Combine(modOutDir, "sound", rel);
+            try
+            {
+                if (!File.Exists(wav))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(wav)!);
+                    string raw = Path.Combine(Path.GetTempPath(), $"tm_rg_sfx_{Guid.NewGuid():N}.wav");
+                    try { if (sfx.WriteWav(i, raw, hz)) Resample(raw, wav); }
+                    finally { File.Delete(raw); }
+                }
+                if (!File.Exists(wav)) return null;
+                string edid = $"RGSfx{i:D3}{(kind == SoundFlat ? "Flat" : "")}{(off < 0 ? "Minus" : off > 0 ? "Plus" : "")}{(off != 0 ? Math.Abs(off).ToString() : "")}{(rateOff != 0 ? $"At{hz}" : "")}";
+                bool loop = e.Loop != 0;
+                float length = e.Loop == 0xFF ? 0f : (float)(e.Seconds(hz) * Math.Max(1, e.Loop));
+                if (kind == SoundFlat)
+                {
+                    double v = Math.Clamp(e.BaseVolume + off, 0, 127);
+                    if (v <= 0) return null;
+                    var m = SoundFor(edid, rel, "AudioCategorySFX", loop, Sk(0x07EDCA), (float)(20 * Math.Log10(127 / v)));   // SOMStereo: centred
+                    lastSeconds = length; lastReach = 0f;
+                    return m;
+                }
+                if (OutputFor(off) is not { } output) return null;
+                var placed = SoundFor(edid, rel, "AudioCategorySFX", loop, output.Model.FormKey, output.StaticDb);
+                lastSeconds = length; lastReach = output.Reach;
+                return placed;
+            }
+            catch (Exception ex) { Problems.Add($"sound effect {i}: {ex.Message}"); return null; }
+        }
+        // The base entries by effect index (FlatSound(n, 0, 0): an effect a variable names may be any); Papyrus arrays
+        // hold 128, MAIN.SFX's 118 effects fit.
+        var baseSeconds = new List<float>();
         for (int i = 0; i < sfx.Effects.Count; i++)
         {
-            SoundMarker? marker = null;
-            if (used.Contains(i))
-            {
-                string rel = Path.Combine("fx", "tamrielmerge", "rg", "sfx", $"sfx{i:D3}.wav");
-                string wav = Path.Combine(modOutDir, "sound", rel);
-                try
-                {
-                    if (!File.Exists(wav))
-                    {
-                        Directory.CreateDirectory(Path.GetDirectoryName(wav)!);
-                        string raw = Path.Combine(Path.GetTempPath(), $"tm_rg_sfx_{Guid.NewGuid():N}.wav");
-                        try { if (sfx.WriteWav(i, raw)) Resample(raw, wav); }
-                        finally { File.Delete(raw); }
-                    }
-                    if (File.Exists(wav)) marker = SoundFor($"RGSfx{i:D3}", rel, "AudioCategorySFX", loop: ambientOnly.Contains(i) && sfx.Effects[i].Type == 3);
-                }
-                catch (Exception e) { Problems.Add($"sound effect {i}: {e.Message}"); }
-            }
+            lastSeconds = 0f;
+            SoundMarker? marker = used.Contains(i) || variablePlays > 0 && sfx.Effects[i].Length > 0 ? Make(i, SoundFlat, 0, 0) : null;
+            baseSeconds.Add(marker is null ? 0f : lastSeconds);
             sfxMarkers[i] = marker;
             soundsList!.Items.Add(marker is null ? new FormLink<ISkyrimMajorRecordGetter>(Sk(0x3B)) : marker.ToLink<ISkyrimMajorRecordGetter>());
         }
+        foreach (var (kind, i, off, rate) in variants)
+        {
+            // Past the bank (CC_BRAZE's AmbientSound(127)): Redguard starts nothing (engine/sound.html), nor does
+            // TMRgSoup (no entry).
+            if (i >= sfx.Effects.Count) { SoundsPastBank++; continue; }
+            if (Make(i, kind, off, rate) is { } m)
+            {
+                soundsList!.Items.Add(m.ToLink<ISkyrimMajorRecordGetter>());
+                keys.Add(SoundKey(kind, i, off)); rates.Add(rate); seconds.Add(lastSeconds); reach.Add(lastReach);
+                SoundVariants++;
+            }
+            else if (kind == SoundPositional && Math.Clamp(127 + off, 0, 127) == 0) SoundsSilent++;
+        }
+        if (baseSeconds.Count > 128 || keys.Count > 128)
+            Problems.Add($"sounds: {baseSeconds.Count} effects and {keys.Count} other ways to play them, past the 128 a Papyrus array holds: those past it are not found (TMRgState.SoundEntry)");
+        soundBaseSeconds = [.. baseSeconds.Take(128)];
+        soundKeys = [.. keys.Take(128)]; soundRates = [.. rates.Take(128)]; soundSeconds = [.. seconds.Take(128)]; soundReach = [.. reach.Take(128)];
+        SoundsLooping = sfx.Effects.Where((e, i) => e.Loop != 0 && sfxMarkers.GetValueOrDefault(i) is not null).Count();
     }
+
+    readonly List<(string Scene, string Program)> shellRequests = [];
+
+    /// <summary>OpenShell's program in a scene as its RGShells number (one per scene and program).</summary>
+    int ShellIndex(Scene scene, string program)
+    {
+        int i = shellRequests.FindIndex(r => r.Scene == scene.Name && r.Program.Equals(program, StringComparison.OrdinalIgnoreCase));
+        if (i >= 0) return i;
+        if (!scene.Script.Programs.Keys.Any(k => k.Equals(program, StringComparison.OrdinalIgnoreCase))) return -1;
+        shellRequests.Add((scene.Name, program));
+        return shellRequests.Count - 1;
+    }
+
+    int variablePlays;
+    float lastSeconds, lastReach;
+    List<int> soundKeys = [], soundRates = [];
+    List<float> soundSeconds = [], soundReach = [], soundBaseSeconds = [];
+    /// <summary>Ways the scripts play an effect besides FlatSound(n, 0, 0) (offsets, rates, placed), each its own sound.</summary>
+    public int SoundVariants { get; private set; }
+    /// <summary>Placed plays whose offset makes them silent everywhere (127 + offset at most 0).</summary>
+    public int SoundsSilent { get; private set; }
+    /// <summary>Effects that loop (until stopped, or a number of times).</summary>
+    public int SoundsLooping { get; private set; }
+    /// <summary>Plays of an effect past MAIN.SFX's last, silent as in Redguard.</summary>
+    public int SoundsPastBank { get; private set; }
 
     /// <summary>
     /// Compiles the Redguard scripts that changed (sources newer than their .pex), importing the tool's Papyrus folder
@@ -730,7 +943,7 @@ public sealed partial class RgPluginBuilder
             var psi = new System.Diagnostics.ProcessStartInfo(compiler) { WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true };
             psi.ArgumentList.Add(target);
             if (all) psi.ArgumentList.Add("-all");
-            psi.ArgumentList.Add("-q");
+            // Not quiet: the assembler's "N error(s), M warning(s)" lines are what counts the warnings (PapyrusRun.Tally).
             psi.ArgumentList.Add("-f=TESV_Papyrus_Flags.flg");
             psi.ArgumentList.Add($"-i={imports}");
             psi.ArgumentList.Add($"-o={Path.GetFullPath(outDir)}");
@@ -777,7 +990,11 @@ public sealed partial class RgPluginBuilder
             File.WriteAllText(stamp, libHash);
             foreach (var n in stale.Where(n => !Fresh(n))) output += Run(n + ".psc", false, sourceDir);
             log?.Invoke($"scripts: compiled {stale.Count} changed scripts in {sw.Elapsed.TotalSeconds:F0}s ({chunks.Count} batches, up to {parallel} at once)");
-            foreach (var line in output.Split('\n').Where(l => l.Contains("): ")).Take(200)) CompileFailures.Add(line.Trim());
+            var (errors, warnings, said) = Skyrim.PapyrusRun.Tally(output);
+            CompileErrors = errors;
+            CompileWarnings = warnings;
+            File.WriteAllLines(Path.Combine(outDir, "..", "scripts-compile.txt"), said);
+            foreach (var line in said.Where(l => !l.Contains("warning", StringComparison.OrdinalIgnoreCase)).Take(200)) CompileFailures.Add(line);
         }
         var ok = names.Where(Fresh).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var n in names.Where(n => !ok.Contains(n)).Take(20)) Problems.Add($"script {n} didn't compile");
@@ -803,6 +1020,10 @@ public sealed partial class RgPluginBuilder
         readonly List<ItemDef> defs = LoadItemDefs(rgDir);
         public string Actor { get; set; } = "";
         public (int Index, string Text, float Seconds) Line(int tag, bool cyrus) => (0, "", 1f);
+        readonly RgRtx? rtx = RgRtx.Load(Path.Combine(rgDir, "ENGLISH.RTX"));
+        public bool HasRtx(int tag) => rtx?.Entries.ContainsKey(TagString(tag)) == true;
+        public int Shell(string program) => 0;
+        public string ItemText(int item) => defs.Any(d => d.Id == item) ? "text" : "";
         public int LogStage(int tag) => 10;
         public bool LoadWorldIsDoor(int? map, int? marker, bool setByScript) => !(setByScript && People.ContainsKey(Actor)) && marker is not null;
         public Vector3 Place(Vector3 redguard) => RgSpace.Point(redguard);

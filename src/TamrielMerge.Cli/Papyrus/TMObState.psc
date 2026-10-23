@@ -16,6 +16,10 @@ FormList Property RestrainedActors Auto
 FormList Property NoRumors Auto
 FormList Property StolenItems Auto
 {Items the player took without paying, for GetAmountSoldStolen.}
+FormList Property QuestItems Auto
+{TMObQuestItems: Oblivion's quest items (its records' flag, SetQuestObject), which the player keeps (TMObPlayer).}
+FormList Property QuestItemsCleared Auto
+{TMObQuestItemsCleared: those SetQuestObject made ordinary again (a list's own entries can't be taken off it).}
 Faction[] Property CrimeFactions Auto
 {The factions scripts ask GetPCFactionMurder / Steal / Attack about.}
 ReferenceAlias[] Property PackageSlots Auto
@@ -56,6 +60,7 @@ Float gateAngle
 
 ObjectReference[] animRefs
 Float[] animEnds
+String[] animGroups
 Int[] crimeTypes
 Form[] crimeCriminals
 Form[] crimeVictims
@@ -65,7 +70,14 @@ Actor[] bountyActors
 Int[] bountyGold
 Int[] miscStats
 Actor[] speakers
-Float[] speakEnds
+TopicInfo[] speakLines
+Float[] speakStarts
+Bool[] speakTalking
+Bool[] speakLooking
+TopicInfo[] learnedLines
+VoiceType[] learnedVoices
+Float[] learnedLengths
+Int learnedNext
 Int fedSeen = -1
 Int ownFeeds
 
@@ -73,6 +85,7 @@ Function Init()
   If !animRefs
     animRefs = new ObjectReference[64]
     animEnds = new Float[64]
+    animGroups = new String[64]
     crimeTypes = new Int[64]
     crimeCriminals = new Form[64]
     crimeVictims = new Form[64]
@@ -81,7 +94,22 @@ Function Init()
     bountyGold = new Int[32]
     miscStats = new Int[34]
     speakers = new Actor[16]
-    speakEnds = new Float[16]
+  EndIf
+  If !animGroups
+    animGroups = new String[64]
+  EndIf
+  If !speakLines
+    speakLines = new TopicInfo[16]
+    speakStarts = new Float[16]
+    speakTalking = new Bool[16]
+    speakLooking = new Bool[16]
+    learnedLines = new TopicInfo[64]
+    learnedVoices = new VoiceType[64]
+    learnedLengths = new Float[64]
+  EndIf
+  If !speakForced
+    speakForced = new Bool[16]
+    speakForcedAt = new Float[16]
   EndIf
 EndFunction
 
@@ -89,23 +117,477 @@ Event OnInit()
   Init()
 EndEvent
 
+; SetQuestObject: an item made a quest item or not.
+Function SetQuestItem(Form akItem, Bool abQuest)
+  If !akItem || !QuestItems || !QuestItemsCleared
+    Return
+  EndIf
+  If abQuest
+    If QuestItemsCleared.HasForm(akItem)
+      QuestItemsCleared.RemoveAddedForm(akItem)
+    EndIf
+    If !QuestItems.HasForm(akItem)
+      QuestItems.AddForm(akItem)
+    EndIf
+  ElseIf QuestItems.HasForm(akItem) && !QuestItemsCleared.HasForm(akItem)
+    QuestItemsCleared.AddForm(akItem)
+  EndIf
+EndFunction
+
+Bool Function IsQuestItem(Form akItem)
+  Return QuestItems && akItem && QuestItems.HasForm(akItem) && !(QuestItemsCleared && QuestItemsCleared.HasForm(akItem))
+EndFunction
+
+; ---- Oblivion's attributes and skills ----
+
+; The scripts' GetAV / SetAV / ModAV / ForceAV of an attribute (0-7) or skill (8-28, Oblivion's order) - Oblivion's
+; own (user, 2026-10-23: "Keep original stats"). A person's or creature's: its Oblivion value (TMObActor.OblivionStat)
+; plus what scripts changed. The player's where it lives: a skill Skyrim keeps (Block, Sneak...) Skyrim's, the others
+; the progression's (TMSkills: Athletics, Mysticism...; Blade and Blunt hidden ones), the attributes the progression's
+; (TMPassives). An actor not of Oblivion: Skyrim's nearest value (SkyrimStatAv).
+String[] Property PlayerStatAv Auto
+{Each skill's (and AI value's) Skyrim actor value where Skyrim keeps the player's ("" otherwise).}
+String[] Property PlayerStatId Auto
+{Each skill's progression skill where the progression keeps the player's ("" otherwise).}
+String[] Property SkyrimStatAv Auto
+{Each skill's nearest Skyrim actor value, for actors that aren't Oblivion's (the attributes "": Skyrim's have none, 0).}
+Int Property StatCount = 33 AutoReadOnly
+
+Actor[] statActors
+Int statNext
+Float[] sd0
+Float[] sd1
+Float[] sd2
+Float[] sd3
+Float[] sd4
+Float[] sd5
+Float[] sd6
+Float[] sd7
+Float[] sd8
+Float[] sd9
+Float[] sd10
+Bool warnedProgression
+
+; 32 actors of 33 stats: 1,056 changes in eleven arrays of 100 (Papyrus makes none longer than 128).
+Float[] Function StatPage(Int aiPart)
+  If !sd10
+    sd10 = new Float[100]
+  EndIf
+  If !sd9
+    sd0 = new Float[100]
+    sd1 = new Float[100]
+    sd2 = new Float[100]
+    sd3 = new Float[100]
+    sd4 = new Float[100]
+    sd5 = new Float[100]
+    sd6 = new Float[100]
+    sd7 = new Float[100]
+    sd8 = new Float[100]
+    sd9 = new Float[100]
+  EndIf
+  If aiPart == 0
+    Return sd0
+  ElseIf aiPart == 1
+    Return sd1
+  ElseIf aiPart == 2
+    Return sd2
+  ElseIf aiPart == 3
+    Return sd3
+  ElseIf aiPart == 4
+    Return sd4
+  ElseIf aiPart == 5
+    Return sd5
+  ElseIf aiPart == 6
+    Return sd6
+  ElseIf aiPart == 7
+    Return sd7
+  ElseIf aiPart == 8
+    Return sd8
+  ElseIf aiPart == 9
+    Return sd9
+  EndIf
+  Return sd10
+EndFunction
+
+Float Function StatDelta(Int aiSlot, Int aiStat)
+  Int flat = aiSlot * StatCount + aiStat
+  Return StatPage(flat / 100)[flat % 100]
+EndFunction
+
+Function SetStatDelta(Int aiSlot, Int aiStat, Float afValue)
+  Int flat = aiSlot * StatCount + aiStat
+  Float[] page = StatPage(flat / 100)
+  page[flat % 100] = afValue
+EndFunction
+
+; The actor's slot of changes (made when asked: a free one, a dead actor's, else the oldest).
+Int Function StatSlot(Actor a, Bool abMake)
+  If !statActors
+    statActors = new Actor[32]
+  EndIf
+  Int i = statActors.Find(a)
+  If i >= 0 || !abMake
+    Return i
+  EndIf
+  i = statActors.Find(None)
+  If i < 0
+    i = 0
+    While i < statActors.Length && !statActors[i].IsDead()
+      i += 1
+    EndWhile
+    If i >= statActors.Length
+      i = statNext
+      statNext = (statNext + 1) % statActors.Length
+    EndIf
+  EndIf
+  statActors[i] = a
+  Int k = 0
+  While k < StatCount
+    SetStatDelta(i, k, 0.0)
+    k += 1
+  EndWhile
+  Return i
+EndFunction
+
+TMPassives Function Passives()
+  Quest q = Quest.GetQuest("TMProgression")
+  If q
+    Return (q as TMPassives)
+  EndIf
+  WarnProgression()
+  Return None
+EndFunction
+
+TMSkills Function Skills()
+  Quest q = Quest.GetQuest("TMProgression")
+  If q
+    Return (q as TMSkills)
+  EndIf
+  WarnProgression()
+  Return None
+EndFunction
+
+Function WarnProgression()
+  If !warnedProgression
+    warnedProgression = True
+    Debug.Notification("Oblivion's attributes and skills need TamrielMerge Progression.esp.")
+  EndIf
+EndFunction
+
+; The player's stat (abBase: without what fortifies it).
+Float Function PlayerStat(Actor p, Int aiStat, Bool abBase)
+  If aiStat < 8
+    TMPassives passives = Passives()
+    If passives
+      Return passives.AttributeValue(aiStat)
+    EndIf
+    Return 0.0
+  EndIf
+  Int s = aiStat - 8
+  If PlayerStatAv[s] != ""
+    If abBase
+      Return p.GetBaseActorValue(PlayerStatAv[s])
+    EndIf
+    Return p.GetActorValue(PlayerStatAv[s])
+  EndIf
+  TMSkills skills = Skills()
+  If skills
+    Return skills.EffectiveLevel(skills.Index(PlayerStatId[s]))
+  EndIf
+  Return 0.0
+EndFunction
+
+Function SetPlayerStat(Actor p, Int aiStat, Float afValue)
+  If aiStat < 8
+    TMPassives passives = Passives()
+    If passives
+      passives.ModAttribute(aiStat, (afValue - passives.AttributeValue(aiStat)) as Int)
+    EndIf
+    Return
+  EndIf
+  Int s = aiStat - 8
+  If PlayerStatAv[s] != ""
+    ; The base set, with what fortifies it on top.
+    Float fortified = p.GetActorValue(PlayerStatAv[s]) - p.GetBaseActorValue(PlayerStatAv[s])
+    p.SetActorValue(PlayerStatAv[s], afValue - fortified)
+    Return
+  EndIf
+  TMSkills skills = Skills()
+  If skills
+    skills.SetEffectiveLevel(skills.Index(PlayerStatId[s]), afValue as Int)
+  EndIf
+EndFunction
+
+; ModPCSkill: the player's skill raised as by use (its levels counting towards the character's).
+Function RaisePlayerSkill(Int aiStat, Int aiBy)
+  If aiStat < 8 || aiBy <= 0
+    Return
+  EndIf
+  Int s = aiStat - 8
+  If PlayerStatAv[s] != ""
+    Game.IncrementSkillBy(PlayerStatAv[s], aiBy)
+    Return
+  EndIf
+  TMSkills skills = Skills()
+  If skills
+    Int i = skills.Index(PlayerStatId[s])
+    Int k = 0
+    While k < aiBy && i >= 0
+      skills.RaiseOne(i)
+      k += 1
+    EndWhile
+  EndIf
+EndFunction
+
+Float Function StatBaseOf(Actor a, Int aiStat)
+  TMObActor ob = a as TMObActor
+  If ob
+    Float v = ob.OblivionStat(aiStat)
+    If v >= 0.0
+      Return v
+    EndIf
+  EndIf
+  If SkyrimStatAv[aiStat] == ""
+    Return 0.0
+  EndIf
+  Return a.GetBaseActorValue(SkyrimStatAv[aiStat])
+EndFunction
+
+Float Function GetStat(Actor a, Int aiStat, Bool abBase = False)
+  If !a || aiStat < 0 || aiStat >= StatCount
+    Return 0.0
+  EndIf
+  If a == PlayerRef
+    Return PlayerStat(a, aiStat, abBase)
+  EndIf
+  Float v = StatBaseOf(a, aiStat)
+  Int slot = StatSlot(a, False)
+  If slot >= 0
+    v += StatDelta(slot, aiStat)
+  EndIf
+  If v < 0.0
+    v = 0.0
+  EndIf
+  Return v
+EndFunction
+
+Function SetStat(Actor a, Int aiStat, Float afValue)
+  If !a || aiStat < 0 || aiStat >= StatCount
+    Return
+  EndIf
+  If afValue < 0.0
+    afValue = 0.0
+  EndIf
+  If a == PlayerRef
+    SetPlayerStat(a, aiStat, afValue)
+    Return
+  EndIf
+  Int slot = StatSlot(a, True)
+  SetStatDelta(slot, aiStat, afValue - StatBaseOf(a, aiStat))
+  MirrorStat(a, aiStat)
+  ; What follows in Skyrim's AI: Aggression as the conversion gives it (80 and up very aggressive), Energy as it is.
+  If aiStat == 29
+    If afValue >= 80.0
+      a.SetActorValue("Aggression", 2.0)
+    Else
+      a.SetActorValue("Aggression", 0.0)
+    EndIf
+  ElseIf aiStat == 31
+    a.SetActorValue("Energy", afValue)
+  EndIf
+EndFunction
+
+Function ModStat(Actor a, Int aiStat, Float afBy)
+  SetStat(a, aiStat, GetStat(a, aiStat) + afBy)
+EndFunction
+
+; ---- what the dialogue's conditions read (Skyrim's conditions read globals and faction ranks, not scripts) ----
+
+Int[] Property StatMirrors Auto
+{The stats (ObStats' numbers) the conditions ask of: each the player's in StatGlobals, another's rank in StatFactions.}
+GlobalVariable[] Property StatGlobals Auto
+Faction[] Property StatFactions Auto
+Int[] Property MiscMirrors Auto
+{The misc stats the conditions ask of, each in MiscGlobals.}
+GlobalVariable[] Property MiscGlobals Auto
+GlobalVariable Property BirthsignGlobal Auto
+{TMOB_PCBirthsign: the player's birthsign by this script's numbering (-1 none).}
+FormList Property EvilFactions Auto
+{Oblivion's evil factions.}
+FormList Property OblivionFactions Auto
+{All of Oblivion's factions (IsActorEvil: an evil one and no other).}
+Faction Property EvilFaction Auto
+{OBEvil: those who are.}
+
+; The player's, now (TMObPlayer: every few seconds and as a conversation opens).
+Function MirrorPlayer()
+  Int i = 0
+  While StatMirrors && i < StatMirrors.Length
+    If StatGlobals[i]
+      StatGlobals[i].SetValue(GetStat(PlayerRef, StatMirrors[i]))
+    EndIf
+    i += 1
+  EndWhile
+  i = 0
+  While MiscMirrors && i < MiscMirrors.Length
+    If MiscGlobals[i]
+      MiscGlobals[i].SetValue(MiscStat(MiscMirrors[i]))
+    EndIf
+    i += 1
+  EndWhile
+  If BirthsignGlobal
+    BirthsignGlobal.SetValue(PlayerBirthsign())
+  EndIf
+EndFunction
+
+; The player's birthsign by this script's numbering: the one chosen here, else the standing stone the progression
+; holds the player to (TMPassives.PlayerSign, its ObSigns), else -1.
+Int Function PlayerBirthsign()
+  If ChosenBirthsign >= 0
+    Return ChosenBirthsign
+  EndIf
+  Quest q = Quest.GetQuest("TMProgression")
+  If q
+    TMPassives passives = q as TMPassives
+    If passives && passives.ObSigns
+      Int sign = passives.PlayerSign()
+      If sign >= 0
+        Return passives.ObSigns.Find(sign)
+      EndIf
+    EndIf
+  EndIf
+  Return -1
+EndFunction
+
+; An Oblivion person's or creature's, as it loads and as a script changes them (TMObActor, SetStat).
+Function MirrorActor(Actor a)
+  If !a
+    Return
+  EndIf
+  Int i = 0
+  While StatMirrors && i < StatMirrors.Length
+    MirrorStat(a, StatMirrors[i])
+    i += 1
+  EndWhile
+  If EvilFaction && EvilFactions && OblivionFactions
+    Bool evil = False
+    If !IsCreature(a)
+      Faction[] all = a.GetFactions(-128, 127)
+      Bool other = False
+      Int k = 0
+      While all && k < all.Length
+        If EvilFactions.HasForm(all[k])
+          evil = True
+        ElseIf OblivionFactions.HasForm(all[k])
+          other = True
+        EndIf
+        k += 1
+      EndWhile
+      evil = evil && !other
+    EndIf
+    If evil
+      a.SetFactionRank(EvilFaction, 0)
+    ElseIf a.IsInFaction(EvilFaction)
+      a.RemoveFromFaction(EvilFaction)
+    EndIf
+  EndIf
+EndFunction
+
+Function MirrorStat(Actor a, Int aiStat)
+  If !StatMirrors || a == PlayerRef
+    Return
+  EndIf
+  Int i = StatMirrors.Find(aiStat)
+  If i >= 0 && StatFactions[i]
+    Int v = GetStat(a, aiStat) as Int
+    If v > 127
+      v = 127
+    EndIf
+    a.SetFactionRank(StatFactions[i], v)
+  EndIf
+EndFunction
+
+; ---- the play clock ----
+
+; Oblivion's scripts count time in frames, which stop in menus and conversations (MenuMode): GetSecondsPassed and
+; ScriptEffectElapsedSeconds give a run's share of play time. Real time less the time in those menus (TMObPlayer tells
+; of each opening and closing, OnMenuOpen/OnMenuClose); real time starts again from 0 each time the game is loaded,
+; counted by ClockLoads.
+Float pausedTotal = 0.0
+Float pausedSince = -1.0
+Int menusOpen = 0
+Int Property ClockLoads = 0 Auto Hidden
+Int Property Launches = 0 Auto Hidden
+{Times the game was started up (GetGameRestarted): LaunchMarker's name, set with SKSE's SetName, which no save keeps,
+is the plugin's again after each start.}
+MiscObject Property LaunchMarker Auto
+
+Function MenuOpened()
+  If menusOpen <= 0
+    menusOpen = 0
+    pausedSince = Utility.GetCurrentRealTime()
+  EndIf
+  menusOpen += 1
+EndFunction
+
+Function MenuClosed()
+  menusOpen -= 1
+  If menusOpen <= 0 && pausedSince >= 0.0
+    pausedTotal += Utility.GetCurrentRealTime() - pausedSince
+    pausedSince = -1.0
+    menusOpen = 0
+  EndIf
+EndFunction
+
+; A save loaded or a new game begun (TMObPlayer): the clock starts again, GetGameLoaded is true once to each script.
+Function GameLoaded()
+  pausedTotal = 0.0
+  pausedSince = -1.0
+  menusOpen = 0
+  ClockLoads += 1
+  If LaunchMarker && LaunchMarker.GetName() != "TamrielMerge started"
+    Launches += 1
+    LaunchMarker.SetName("TamrielMerge started")
+  EndIf
+EndFunction
+
+; Seconds of play since the game was loaded.
+Float Function PlayTime()
+  If pausedSince >= 0.0
+    Return pausedSince - pausedTotal
+  EndIf
+  Return Utility.GetCurrentRealTime() - pausedTotal
+EndFunction
+
 ; ---- animations ----
 
-; Plays an Oblivion animation group (the model's controller sequence of that name, when it has one) and remembers for
-; how long it plays, for IsAnimPlaying. aiFlag is Oblivion's (0 start over, 1 start at the next loop, 2 the same).
+String[] Property AnimKeys Auto
+{"model|group" (lower case) for every animation group of every converted model, by the model path its record carries
+(ObScriptRecords.FinishAnimationLengths), with each group's length in seconds and whether it loops.}
+Float[] Property AnimLengths Auto
+Bool[] Property AnimLoops Auto
+
+; Plays an Oblivion animation group (the model's controller sequence of that name) and remembers for how long it plays
+; (its sequence's length; a loop until another group starts), for IsAnimPlaying. A group the model hasn't plays
+; nothing, as in Oblivion. aiFlag is Oblivion's (0 start over, 1 start at the next loop, 2 the same).
 Function PlayGroup(ObjectReference akRef, String asGroup, Int aiFlag = 0)
   If !akRef
     Return
   EndIf
   Init()
-  akRef.PlayGamebryoAnimation(asGroup, aiFlag == 0)
-  Float dur = 2.0
-  If StringUtil.Find(asGroup, "Fast") == 0
-    dur = 1.0
-  ElseIf asGroup == "SpecialIdle" || asGroup == "Idle"
-    dur = 3.0
+  Int k = -1
+  Form base = akRef.GetBaseObject()
+  If base && AnimKeys
+    k = AnimKeys.Find(base.GetWorldModelPath() + "|" + asGroup)
   EndIf
   Int i = animRefs.Find(akRef)
+  If k < 0
+    If i >= 0
+      animRefs[i] = None
+    EndIf
+    Return
+  EndIf
+  akRef.PlayGamebryoAnimation(asGroup, aiFlag == 0)
   If i < 0
     i = animRefs.Find(None)
   EndIf
@@ -113,14 +595,166 @@ Function PlayGroup(ObjectReference akRef, String asGroup, Int aiFlag = 0)
     i = OldestAnim()
   EndIf
   animRefs[i] = akRef
-  animEnds[i] = Utility.GetCurrentRealTime() + dur
+  animGroups[i] = asGroup
+  If AnimLoops[k]
+    animEnds[i] = -1.0
+  Else
+    animEnds[i] = PlayTime() + AnimLengths[k]
+  EndIf
 EndFunction
 
+; LoopGroup: the group played aiCount times over (a sequence that ends, started again as it ends; one that loops by
+; itself, left to; IsAnimPlaying true for the count's length either way).
+ObjectReference[] loopRefs
+String[] loopGroups
+Int[] loopLeft
+Float[] loopNext
+Float[] loopLength
+
+Function LoopGroup(ObjectReference akRef, String asGroup, Int aiCount)
+  PlayGroup(akRef, asGroup, 0)
+  Int i = animRefs.Find(akRef)
+  If i < 0 || aiCount <= 1
+    Return
+  EndIf
+  Int k = AnimKeys.Find(akRef.GetBaseObject().GetWorldModelPath() + "|" + asGroup)
+  Float seconds = AnimLengths[k]
+  animEnds[i] = PlayTime() + seconds * aiCount
+  If AnimLoops[k]
+    Return
+  EndIf
+  If !loopRefs
+    loopRefs = new ObjectReference[16]
+    loopGroups = new String[16]
+    loopLeft = new Int[16]
+    loopNext = new Float[16]
+    loopLength = new Float[16]
+  EndIf
+  Int j = loopRefs.Find(akRef)
+  If j < 0
+    j = loopLeft.Find(0)
+  EndIf
+  If j < 0
+    j = 0
+  EndIf
+  loopRefs[j] = akRef
+  loopGroups[j] = asGroup
+  loopLeft[j] = aiCount - 1
+  loopLength[j] = seconds
+  loopNext[j] = PlayTime() + seconds
+  WakeIn(seconds)
+EndFunction
+
+; The next OnUpdate (LoopGroup's replays, ForceSubtitle's lines that never started): as soon as the soonest wants it.
+Float wakeAt = -1.0
+
+Function WakeIn(Float afSeconds)
+  Float at = Utility.GetCurrentRealTime() + afSeconds
+  If wakeAt < 0.0 || at < wakeAt
+    wakeAt = at
+    RegisterForSingleUpdate(afSeconds)
+  EndIf
+EndFunction
+
+Event OnUpdate()
+  wakeAt = -1.0
+  Float soonest = -1.0
+  ; ForceSubtitle lines that never started.
+  If speakForced
+    Float real = Utility.GetCurrentRealTime()
+    Int s = 0
+    While s < speakForced.Length
+      If speakForced[s] && !speakTalking[s]
+        If real - speakForcedAt[s] >= 2.0
+          ReleaseSubtitle(s)
+        ElseIf soonest < 0.0 || 2.0 - (real - speakForcedAt[s]) < soonest
+          soonest = 2.0 - (real - speakForcedAt[s])
+        EndIf
+      EndIf
+      s += 1
+    EndWhile
+  EndIf
+  If !loopRefs
+    If soonest >= 0.0
+      WakeIn(soonest)
+    EndIf
+    Return
+  EndIf
+  Float now = PlayTime()
+  Int j = 0
+  While j < loopRefs.Length
+    If loopLeft[j] > 0 && loopRefs[j]
+      If now >= loopNext[j] - 0.01
+        loopRefs[j].PlayGamebryoAnimation(loopGroups[j], True)
+        loopLeft[j] = loopLeft[j] - 1
+        loopNext[j] = now + loopLength[j]
+      EndIf
+      If loopLeft[j] > 0 && (soonest < 0.0 || loopNext[j] - now < soonest)
+        soonest = loopNext[j] - now
+      EndIf
+    EndIf
+    j += 1
+  EndWhile
+  If soonest >= 0.0
+    WakeIn(soonest)
+  EndIf
+EndEvent
+
+; Reset3DState: the model back as it was first drawn (a pressed button up again, a played sequence's nodes back where
+; they began): its 3D unloaded and loaded again. Oblivion runs no OnLoad for it; the converted scripts' OnLoad asks
+; IsResetting and leaves that one out.
+ObjectReference[] resetRefs
+Float[] resetAt
+
+Function Reset3D(ObjectReference akRef)
+  If !akRef || !akRef.Is3DLoaded()
+    Return
+  EndIf
+  Init()
+  If !resetRefs
+    resetRefs = new ObjectReference[8]
+    resetAt = new Float[8]
+  EndIf
+  Int i = animRefs.Find(akRef)
+  If i >= 0
+    animRefs[i] = None
+  EndIf
+  Int k = resetRefs.Find(akRef)
+  If k < 0
+    k = resetRefs.Find(None)
+  EndIf
+  If k < 0
+    k = 0
+  EndIf
+  resetRefs[k] = akRef
+  resetAt[k] = Utility.GetCurrentRealTime()
+  akRef.Disable(False)
+  akRef.Enable(False)
+EndFunction
+
+; Whether akRef is loading again for Reset3DState (once: the OnLoad it brings).
+Bool Function IsResetting(ObjectReference akRef)
+  If !resetRefs
+    Return False
+  EndIf
+  Int k = resetRefs.Find(akRef)
+  If k < 0
+    Return False
+  EndIf
+  resetRefs[k] = None
+  Return Utility.GetCurrentRealTime() - resetAt[k] < 10.0
+EndFunction
+
+; The slot to reuse when all are taken: one whose animation is over, else the one ending first (a loop last).
 Int Function OldestAnim()
+  Float now = PlayTime()
   Int oldest = 0
-  Int i = 1
+  Int i = 0
   While i < animEnds.Length
-    If animEnds[i] < animEnds[oldest]
+    If animEnds[i] >= 0.0 && animEnds[i] <= now
+      Return i
+    EndIf
+    If animEnds[oldest] < 0.0 || (animEnds[i] >= 0.0 && animEnds[i] < animEnds[oldest])
       oldest = i
     EndIf
     i += 1
@@ -128,13 +762,17 @@ Int Function OldestAnim()
   Return oldest
 EndFunction
 
-Bool Function IsAnimPlaying(ObjectReference akRef)
+; Whether the reference is playing an animation group (asGroup: that one), started by PlayGroup / LoopGroup.
+Bool Function IsAnimPlaying(ObjectReference akRef, String asGroup = "")
   Init()
   Int i = animRefs.Find(akRef)
   If i < 0
     Return False
   EndIf
-  If Utility.GetCurrentRealTime() < animEnds[i]
+  If asGroup != "" && animGroups[i] != asGroup
+    Return False
+  EndIf
+  If animEnds[i] < 0.0 || PlayTime() < animEnds[i]
     Return True
   EndIf
   animRefs[i] = None
@@ -143,23 +781,167 @@ EndFunction
 
 ; ---- speech ----
 
-; Oblivion's Say returns how long the line lasts, and IsTalking is true meanwhile; Skyrim's says nothing of either, so
-; a typical line's length is used.
-Float Function Said(ObjectReference akSpeaker)
+; Oblivion's IsTalking is true from a line's first word to its last, and Say returns how long the line lasts. Every
+; converted response tells as it starts and ends (TMObLine's fragments). Its length is its own: Oblivion's recording of
+; it in the speaker's voice (TMObLine.Lengths, measured from the recordings; a line Oblivion didn't record, by its
+; words at the rate Oblivion's recorded lines are spoken), and once said in that voice what it lasted.
+VoiceType[] Property VoiceTypes Auto
+{The voices TMObLine.Lengths are given in.}
+
+Int Function SpeakerSlot(Actor akActor)
+  Int i = speakers.Find(akActor)
+  If i < 0
+    i = speakers.Find(None)
+  EndIf
+  If i < 0
+    ; All taken: one not talking now.
+    i = speakTalking.Find(False)
+  EndIf
+  If i < 0
+    i = 0
+  EndIf
+  Return i
+EndFunction
+
+Function LineStarted(Actor akSpeaker, TopicInfo akLine)
+  If !akSpeaker
+    Return
+  EndIf
+  Init()
+  Int i = SpeakerSlot(akSpeaker)
+  If speakers[i] != akSpeaker
+    speakLooking[i] = False
+  EndIf
+  speakers[i] = akSpeaker
+  speakLines[i] = akLine
+  speakStarts[i] = Utility.GetCurrentRealTime()
+  speakTalking[i] = True
+EndFunction
+
+Function LineEnded(Actor akSpeaker, TopicInfo akLine)
+  If !akSpeaker
+    Return
+  EndIf
+  Init()
+  Int i = speakers.Find(akSpeaker)
+  If i < 0 || speakLines[i] != akLine
+    Return
+  EndIf
+  speakTalking[i] = False
+  ReleaseSubtitle(i)
+  If speakLooking[i]
+    speakLooking[i] = False
+    akSpeaker.ClearLookAt()
+  EndIf
+  ; What a line without a recording of its own lasted in this voice.
+  If Recorded(akSpeaker, akLine) <= 0.0
+    Int k = learnedNext
+    learnedLines[k] = akLine
+    learnedVoices[k] = akSpeaker.GetVoiceType()
+    learnedLengths[k] = Utility.GetCurrentRealTime() - speakStarts[i]
+    learnedNext = (k + 1) % learnedLines.Length
+  EndIf
+EndFunction
+
+; The line's recording in the speaker's voice: its length; minus its estimate (by its words) when Oblivion recorded none.
+Float Function Recorded(Actor akSpeaker, TopicInfo akLine)
+  TMObLine line = akLine as TMObLine
+  If !line || !line.Lengths || !VoiceTypes
+    Return 0.0
+  EndIf
+  Int v = VoiceTypes.Find(akSpeaker.GetVoiceType())
+  If v < 0 || v >= line.Lengths.Length
+    Return 0.0
+  EndIf
+  Return line.Lengths[v]
+EndFunction
+
+Float Function LineLength(Actor akSpeaker, TopicInfo akLine)
+  Float recorded = Recorded(akSpeaker, akLine)
+  If recorded > 0.0
+    Return recorded
+  EndIf
+  VoiceType voice = akSpeaker.GetVoiceType()
+  Int k = 0
+  While k < learnedLines.Length
+    If learnedLines[k] == akLine && learnedVoices[k] == voice
+      Return learnedLengths[k]
+    EndIf
+    k += 1
+  EndWhile
+  Return -recorded
+EndFunction
+
+; Say / SayTo: SayTo's speaker looks at the one it speaks to while it speaks; with ForceSubtitle the line's subtitle
+; shows whatever the player's setting (bGeneralSubtitles on until the last such line ends, or none starts).
+Bool[] speakForced
+Float[] speakForcedAt
+Int forcedLines
+Bool subtitlesWere
+
+Function SayTopic(ObjectReference akSpeaker, Topic akTopic, Actor akTarget = None, Bool abForceSubtitle = False)
+  If !akSpeaker || !akTopic
+    Return
+  EndIf
   Init()
   Actor a = akSpeaker as Actor
-  If a
-    Int i = speakers.Find(a)
-    If i < 0
-      i = speakers.Find(None)
-    EndIf
-    If i < 0
-      i = 0
+  If a && (akTarget || abForceSubtitle)
+    Int i = SpeakerSlot(a)
+    If speakers[i] != a
+      speakForced[i] = False
     EndIf
     speakers[i] = a
-    speakEnds[i] = Utility.GetCurrentRealTime() + 4.0
+    speakTalking[i] = False
+    If akTarget
+      a.SetLookAt(akTarget)
+      speakLooking[i] = True
+    EndIf
+    If abForceSubtitle && !speakForced[i]
+      If forcedLines <= 0
+        forcedLines = 0
+        subtitlesWere = Utility.GetINIBool("bGeneralSubtitles:Interface")
+        Utility.SetINIBool("bGeneralSubtitles:Interface", True)
+      EndIf
+      forcedLines += 1
+      speakForced[i] = True
+      speakForcedAt[i] = Utility.GetCurrentRealTime()
+      WakeIn(2.0)
+    EndIf
   EndIf
-  Return 4.0
+  akSpeaker.Say(akTopic)
+EndFunction
+
+Function ReleaseSubtitle(Int i)
+  If !speakForced[i]
+    Return
+  EndIf
+  speakForced[i] = False
+  forcedLines -= 1
+  If forcedLines <= 0
+    forcedLines = 0
+    Utility.SetINIBool("bGeneralSubtitles:Interface", subtitlesWere)
+  EndIf
+EndFunction
+
+; Say's value: how long the line it says lasts (0 when there is nothing to say). The line starts a moment after (its
+; Begin fragment); this waits for it.
+Float Function SayTimed(ObjectReference akSpeaker, Topic akTopic, Actor akTarget = None, Bool abForceSubtitle = False)
+  Float asked = Utility.GetCurrentRealTime()
+  SayTopic(akSpeaker, akTopic, akTarget, abForceSubtitle)
+  Actor a = akSpeaker as Actor
+  If !a || !akTopic
+    Return 0.0
+  EndIf
+  Int tries = 0
+  While tries < 40
+    Int i = speakers.Find(a)
+    If i >= 0 && speakTalking[i] && speakStarts[i] >= asked
+      Return LineLength(a, speakLines[i])
+    EndIf
+    Utility.Wait(0.025)
+    tries += 1
+  EndWhile
+  Return 0.0
 EndFunction
 
 Bool Function IsTalking(Actor akActor)
@@ -171,7 +953,7 @@ Bool Function IsTalking(Actor akActor)
   EndIf
   Init()
   Int i = speakers.Find(akActor)
-  Return i >= 0 && Utility.GetCurrentRealTime() < speakEnds[i]
+  Return i >= 0 && speakTalking[i]
 EndFunction
 
 ; ---- script packages ----
@@ -311,10 +1093,20 @@ Event OnUpdateGameTime()
   EndIf
 EndEvent
 
-; Wait / StopWaiting: the actor holds still while that package is its current one.
+; Wait / StopWaiting (CS wiki, read 2026-10-23): "wait" behaviour for that package, which "works only if PackageID is the
+; actor's current package, and if the current package is a Follow or Accompany package": the actor stops where it is
+; until StopWaiting resumes the package.
 Function WaitOn(Actor akActor, Package akPackage, Bool abWait)
-  If akActor && (!akPackage || akActor.GetCurrentPackage() == akPackage || !abWait)
-    akActor.SetDontMove(abWait)
+  If !akActor
+    Return
+  EndIf
+  If !abWait
+    akActor.SetDontMove(False)
+    Return
+  EndIf
+  Int kind = PackageType(akActor)
+  If (!akPackage || akActor.GetCurrentPackage() == akPackage) && (kind == 1 || kind == 7)
+    akActor.SetDontMove(True)
   EndIf
 EndFunction
 
@@ -1057,6 +1849,100 @@ Function PositionAt(ObjectReference akRef, ObjectReference akAnchor, Float afX, 
   akRef.MoveTo(akAnchor)
   akRef.SetPosition(afX, afY, afZ)
   akRef.SetAngle(0.0, 0.0, afAngleZ)
+EndFunction
+
+; GetEquippedObject (OBSE): by Oblivion's biped slot numbers (0 head, 1 hair, 2 upper body, 3 lower body, 4 hand,
+; 5 foot, 6 right ring, 7 left ring, 8 amulet, 13 shield, 14 torch; 16 the weapon, 17 the ammunition), on the Skyrim
+; slots the converted items wear them in (ObWorn.LookFor, ObContent: 30, 31, 32, 53, 33, 37, 36, 36, 35, 39).
+Form Function EquippedObject(Actor akActor, Int aiSlot) Global
+  If !akActor
+    Return None
+  EndIf
+  If aiSlot == 16
+    Return akActor.GetEquippedWeapon()
+  ElseIf aiSlot == 17
+    Int i = akActor.GetNumItems()
+    While i > 0
+      i -= 1
+      Form f = akActor.GetNthForm(i)
+      If f as Ammo && akActor.IsEquipped(f)
+        Return f
+      EndIf
+    EndWhile
+    Return None
+  ElseIf aiSlot == 14
+    Form left = akActor.GetEquippedObject(0)
+    If left as Light
+      Return left
+    EndIf
+    Return None
+  EndIf
+  Int[] slots = new Int[14]
+  slots[0] = 30
+  slots[1] = 31
+  slots[2] = 32
+  slots[3] = 53
+  slots[4] = 33
+  slots[5] = 37
+  slots[6] = 36
+  slots[7] = 36
+  slots[8] = 35
+  slots[13] = 39
+  If aiSlot < 0 || aiSlot > 13 || slots[aiSlot] == 0
+    Return None
+  EndIf
+  Return akActor.GetWornForm(Armor.GetMaskForSlot(slots[aiSlot]))
+EndFunction
+
+; PlaceAtMe with a distance and direction (Oblivion's 0 ahead, 1 behind, 2 left, 3 right of where akRef faces): each
+; of the count placed there; the last returned.
+ObjectReference Function PlaceNear(ObjectReference akRef, Form akWhat, Int aiCount, Float afDistance, Int aiDirection) Global
+  If !akRef || !akWhat
+    Return None
+  EndIf
+  Float heading = akRef.GetAngleZ()
+  If aiDirection == 1
+    heading += 180.0
+  ElseIf aiDirection == 2
+    heading -= 90.0
+  ElseIf aiDirection == 3
+    heading += 90.0
+  EndIf
+  Float x = akRef.GetPositionX() + afDistance * Math.Sin(heading)
+  Float y = akRef.GetPositionY() + afDistance * Math.Cos(heading)
+  ObjectReference made = None
+  Int i = 0
+  While i < aiCount || (i == 0 && aiCount <= 0)
+    made = akRef.PlaceAtMe(akWhat, 1)
+    If made
+      made.SetPosition(x, y, akRef.GetPositionZ())
+    EndIf
+    i += 1
+  EndWhile
+  Return made
+EndFunction
+
+; IsSpellTarget: the spell on the actor (an ability or disease it has, or every effect of it active on it; Skyrim can't
+; tell which spell an active effect came from).
+Bool Function IsSpellTarget(Actor akActor, Spell akSpell) Global
+  If !akActor || !akSpell
+    Return False
+  EndIf
+  If akActor.HasSpell(akSpell)
+    Return True
+  EndIf
+  Int n = akSpell.GetNumEffects()
+  If n <= 0
+    Return False
+  EndIf
+  Int i = 0
+  While i < n
+    If !akActor.HasMagicEffect(akSpell.GetNthEffectMagicEffect(i))
+      Return False
+    EndIf
+    i += 1
+  EndWhile
+  Return True
 EndFunction
 
 ; HasMagicEffect by Oblivion effect code: any of the converted effects for that code.

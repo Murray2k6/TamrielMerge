@@ -63,8 +63,20 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     public sealed record MessageForm(string EditorID, string Text, List<string> Buttons);
     public sealed record Output(string ScriptName, string Extends, string Kind, string Source, List<Property> Properties, int Statements, int Translated, Dictionary<string, int> Missing, List<MessageForm> Messages)
     {
+        /// <summary>Statements and conditions translated as Oblivion does them (no <see cref="Gap"/>).</summary>
+        public int Faithful { get; init; }
+        /// <summary>What the translated but unfaithful ones fall short in, with how many.</summary>
+        public Dictionary<string, int> Gaps { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         /// <summary>The packages the script adds as script packages (EditorID → how many times).</summary>
         public Dictionary<string, int> ScriptPackages { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The topics the script says and asks how long they last (Say's value: their responses' lengths).</summary>
+        public HashSet<string> TimedTopics { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>The script calls TrapUpdate: its object a trap (its collision on the trap layer).</summary>
+        public bool Trap { get; init; }
+        /// <summary>The script has an OnActivate block, which takes the place of the default activation.</summary>
+        public bool Activates { get; init; }
+        /// <summary>What the script locks: "" its own reference, else the references named (EditorIDs).</summary>
+        public HashSet<string> LockTargets { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
     // ---- types ----
@@ -102,7 +114,8 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     string blockContext = "";     // the event being written (for akActionRef etc.)
     int statements, translated;
     bool lineOk;
-    bool usesSecondsPassed, usesButtons, usesSay, usesActionRef, usesDisposition, usesContainer, usesStart, usesEffectElapsed;
+    bool usesSecondsPassed, usesButtons, usesActionRef, usesDisposition, usesContainer, usesStart, usesLoaded, usesRestarted, usesTrap;
+    readonly HashSet<string> timedTopics = new(StringComparer.OrdinalIgnoreCase), lockTargets = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>The script has MenuMode blocks (OB_MenuMode, run while menus are open and after a message box).</summary>
     bool hasMenuMode;
     /// <summary>The script closes Oblivion gates: it's on a gate, whose activation by the player is how the player
@@ -151,21 +164,29 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         }
     }
 
-    /// <param name="scriptKind">Object, Quest or MagicEffect (Oblivion's script type).</param>
+    /// <param name="scriptKind">Object, Quest or MagicEffect (Oblivion's script type); Result (a dialogue response's
+    /// result script: a TopicInfo fragment, Fragment_End, the speaker its reference) or Stage (a quest stage log entry's
+    /// result script: OB_Run on the quest, called from the quest's fragment), each a single block (<see cref="ParseFragment"/>).</param>
     /// <param name="onActor">An object script on an NPC or creature.</param>
     /// <param name="questDelay">A quest script's update interval (Oblivion's default 5 seconds).</param>
-    public Output Translate(Script script, string scriptEditorId, string scriptKind, bool onActor = false, float questDelay = 5)
+    /// <param name="fragmentQuest">For Result and Stage: the quest (EditorID) whose script's variables the script may name
+    /// without the quest.</param>
+    public Output Translate(Script script, string scriptEditorId, string scriptKind, bool onActor = false, float questDelay = 5, string? fragmentQuest = null)
     {
         kind = scriptKind; actor = onActor;
         locals.Clear(); properties.Clear(); missing.Clear(); scriptPackages.Clear();
-        statements = translated = 0;
-        usesSecondsPassed = usesButtons = usesSay = usesActionRef = usesDisposition = usesContainer = usesStart = usesEffectElapsed = false;
+        statements = translated = faithful = 0;
+        gaps.Clear(); lineGaps.Clear();
+        usesSecondsPassed = usesButtons = usesActionRef = usesDisposition = usesContainer = usesStart = usesLoaded = usesRestarted = usesTrap = false;
         messages.Clear();
+        timedTopics.Clear();
+        lockTargets.Clear();
         scriptId = scriptEditorId;
         ownQuest = kind == "Quest" ? world.QuestOf(scriptEditorId) : null;
+        this.fragmentQuest = kind is "Result" or "Stage" ? fragmentQuest : null;
         bool isFunction = script.Blocks.Any(b => b.Type.Equals("Function", StringComparison.OrdinalIgnoreCase));
         if (isFunction) kind = "Function";
-        string extends = kind switch { "Quest" => "Quest", "MagicEffect" => "ActiveMagicEffect", "Function" => "Quest", _ => actor ? "Actor" : "ObjectReference" };
+        string extends = kind switch { "Quest" or "Stage" => "Quest", "MagicEffect" => "ActiveMagicEffect", "Function" => "Quest", "Result" => "TMObLine", _ => actor ? "Actor" : "ObjectReference" };
         string name = world.ScriptName(scriptEditorId);
         // A variable's type as the world sees it: a ref variable only ever holding numbers is a number.
         var declared = world.Variables(name);
@@ -253,9 +274,16 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         {
             start.AppendLine("Event OnLoad()");
             if (hasActivate) start.AppendLine("  BlockActivation()   ; Oblivion's OnActivate replaces the default activation");
-            if (hasUpdate) start.AppendLine("  RegisterForSingleUpdate(0.5)");
+            if (hasUpdate) start.AppendLine($"  RegisterForSingleUpdate({Frame})");
             foreach (var r in registrations) start.AppendLine("  " + r);
             blockContext = "onload";
+            // The OnLoad Reset3DState brings (TMObState.Reset3D) isn't one Oblivion runs.
+            if (onLoad.Count > 0)
+            {
+                start.AppendLine($"  If {St()}.IsResetting(Self)");
+                start.AppendLine("    Return");
+                start.AppendLine("  EndIf");
+            }
             foreach (var b in onLoad) WriteStatements(start, b.Body, 1);
             blockContext = "";
             start.AppendLine("EndEvent");
@@ -263,7 +291,13 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             if (hasUpdate || menuNames.Count > 0)
             {
                 start.AppendLine("Event OnUnload()");
-                if (hasUpdate) start.AppendLine("  UnregisterForUpdate()");
+                // Picked up, it goes on running in its holder's inventory (OnContainerChanged).
+                if (hasUpdate)
+                {
+                    start.AppendLine("  If !__container");
+                    start.AppendLine("    UnregisterForUpdate()");
+                    start.AppendLine("  EndIf");
+                }
                 if (menuNames.Count > 0) start.AppendLine("  UnregisterForAllMenus()");
                 start.AppendLine("EndEvent");
                 start.AppendLine();
@@ -272,7 +306,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         else if (kind == "MagicEffect" && (hasUpdate || registrations.Count > 0) && !groups.Any(g => g.Key == "scripteffectstart"))
         {
             start.AppendLine("Event OnEffectStart(Actor akTarget, Actor akCaster)");
-            if (hasUpdate) start.AppendLine("  RegisterForSingleUpdate(0.5)");
+            if (hasUpdate) start.AppendLine($"  RegisterForSingleUpdate({Frame})");
             foreach (var r in registrations) start.AppendLine("  " + r);
             start.AppendLine("EndEvent");
             start.AppendLine();
@@ -304,18 +338,41 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             start.AppendLine();
         }
         // GetContainer: the container the object went into last (OnContainerChanged).
-        if (usesContainer && kind == "Object" && !eventGroups.Any(g => g.Key.StartsWith("Event OnContainerChanged(", StringComparison.Ordinal)))
+        // An object's GameMode goes on while it is carried: the container it is in, and its update started there.
+        bool carried = kind == "Object" && hasUpdate;
+        string containerLines = "  __container = akNewContainer" + Environment.NewLine
+            + (carried ? $"  If akNewContainer{Environment.NewLine}    RegisterForSingleUpdate({Frame}){Environment.NewLine}  EndIf{Environment.NewLine}" : "");
+        if ((usesContainer || carried) && kind == "Object" && !eventGroups.Any(g => g.Key.StartsWith("Event OnContainerChanged(", StringComparison.Ordinal)))
         {
             start.AppendLine("Event OnContainerChanged(ObjectReference akNewContainer, ObjectReference akOldContainer)");
-            start.AppendLine("  __container = akNewContainer");
+            start.Append(containerLines);
             start.AppendLine("EndEvent");
             start.AppendLine();
         }
+        // A magic effect's frames end with it.
+        if (kind == "MagicEffect" && hasUpdate)
+        {
+            const string finish = "Event OnEffectFinish(Actor akTarget, Actor akCaster)";
+            if (groups.Any(g => g.Key == "scripteffectfinish"))
+                body.Replace(finish + Environment.NewLine, finish + Environment.NewLine + "  __effectEnded = True" + Environment.NewLine);
+            else
+            {
+                start.AppendLine(finish);
+                start.AppendLine("  __effectEnded = True");
+                start.AppendLine("EndEvent");
+                start.AppendLine();
+            }
+        }
 
-        if (usesSay) St();   // SayTimed below needs the helper quest's property
+        if (usesSecondsPassed || usesLoaded || usesRestarted) St();   // OB_Frame and OB_GameLoaded below need the helper quest's property
         var head = new StringBuilder();
-        head.AppendLine($"ScriptName {name} extends {extends}");
-        head.AppendLine($"{{Converted from Oblivion's {scriptEditorId} ({scriptKind}) by TamrielMerge.}}");
+        head.AppendLine($"ScriptName {name} extends {extends}{(kind is "Result" or "Stage" ? " Hidden" : "")}");
+        head.AppendLine(kind switch
+        {
+            "Result" => "{Converted from an Oblivion dialogue response's result script by TamrielMerge.}",
+            "Stage" => $"{{Converted from the result script of Oblivion's {fragmentQuest} quest stage (log entry {scriptEditorId}) by TamrielMerge.}}",
+            _ => $"{{Converted from Oblivion's {scriptEditorId} ({scriptKind}) by TamrielMerge.}}",
+        });
         head.AppendLine();
         foreach (var (v, t) in locals.Where(l => !(kind == "Quest" && ownQuest is not null && l.Value is T.Int or T.Float)))
             head.AppendLine($"{(t == T.Unknown ? "Form[]" : PapyrusType(t))} Property {Var(v)} Auto Hidden");
@@ -324,7 +381,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         // Every quest script has its delay (SetQuestDelay from any script sets it).
         if (kind == "Quest") head.AppendLine($"Float Property QuestDelay = {F(questDelay)} Auto Hidden");
         if (kind == "Function") head.AppendLine("Float __result");
-        if (usesContainer) head.AppendLine("ObjectReference __container");
+        if (usesContainer || carried) head.AppendLine("ObjectReference __container");
         if (usesStart)
             foreach (var s in new[] { "X", "Y", "Z", "AX", "AY", "AZ" }) head.AppendLine($"Float __start{s}");
         if (usesDisposition)
@@ -342,15 +399,6 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             head.AppendLine("  akActor.ModActorValue(\"Variable09\", target - now)");
             head.AppendLine("EndFunction");
         }
-        if (usesSay)
-        {
-            head.AppendLine();
-            head.AppendLine("; Oblivion's Say gives the line's length; Skyrim's doesn't, so a typical line's is used (TMObState.Said).");
-            head.AppendLine("Float Function SayTimed(ObjectReference akSpeaker, Topic akTopic)");
-            head.AppendLine("  akSpeaker.Say(akTopic)");
-            head.AppendLine($"  Return {St()}.Said(akSpeaker)");
-            head.AppendLine("EndFunction");
-        }
         if (usesButtons)
         {
             head.AppendLine("Int __button = -1");
@@ -363,41 +411,59 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         }
         if (usesSecondsPassed)
         {
-            head.AppendLine("Float __lastSeconds = -1.0");
+            // GetSecondsPassed / ScriptEffectElapsedSeconds: the play time (TMObState.PlayTime: frames stop in MenuMode)
+            // since the script last ran, the same all through a run; nothing on its first run after a load.
+            head.AppendLine("Float __framePassed = 0.0");
+            head.AppendLine("Float __frameAt = -1.0");
+            head.AppendLine("Int __frameLoads = -1");
             head.AppendLine();
-            head.AppendLine("Float Function SecondsPassed()");
-            head.AppendLine("  Float now = Utility.GetCurrentRealTime()");
-            head.AppendLine("  Float passed = 0.0");
-            head.AppendLine("  If __lastSeconds >= 0.0");
-            head.AppendLine("    passed = now - __lastSeconds");
+            head.AppendLine("Function OB_Frame()");
+            head.AppendLine($"  TMObState st = {St()}");
+            head.AppendLine("  Float now = st.PlayTime()");
+            head.AppendLine("  __framePassed = 0.0");
+            head.AppendLine("  If __frameAt >= 0.0 && __frameLoads == st.ClockLoads");
+            head.AppendLine("    __framePassed = now - __frameAt");
             head.AppendLine("  EndIf");
-            head.AppendLine("  __lastSeconds = now");
-            head.AppendLine("  Return passed");
+            head.AppendLine("  __frameAt = now");
+            head.AppendLine("  __frameLoads = st.ClockLoads");
             head.AppendLine("EndFunction");
         }
-        if (usesEffectElapsed)
+        foreach (var (used, fn, count) in new[] { (usesLoaded, "OB_GameLoaded", "ClockLoads"), (usesRestarted, "OB_GameRestarted", "Launches") })
         {
-            head.AppendLine("Float __lastEffectSeconds = -1.0");
+            if (!used) continue;
+            head.AppendLine($"Int __seen{count} = -1");
             head.AppendLine();
-            head.AppendLine("; ScriptEffectElapsedSeconds: the time since the effect's script last ran.");
-            head.AppendLine("Float Function EffectElapsed()");
-            head.AppendLine("  Float now = Utility.GetCurrentRealTime()");
-            head.AppendLine("  Float passed = 0.0");
-            head.AppendLine("  If __lastEffectSeconds >= 0.0");
-            head.AppendLine("    passed = now - __lastEffectSeconds");
+            head.AppendLine($"Bool Function {fn}()");
+            head.AppendLine($"  Int now = {St()}.{count}");
+            head.AppendLine($"  If __seen{count} == now");
+            head.AppendLine("    Return False");
             head.AppendLine("  EndIf");
-            head.AppendLine("  __lastEffectSeconds = now");
-            head.AppendLine("  Return passed");
+            head.AppendLine($"  __seen{count} = now");
+            head.AppendLine("  Return True");
             head.AppendLine("EndFunction");
         }
+        if (usesTrap) WriteTrap(head);
+        if (kind == "Quest" && hasUpdate)
+        {
+            head.AppendLine("Float __questDue = 0.0");
+            head.AppendLine("Int __questLoads = -1");
+        }
+        if (kind == "MagicEffect" && hasUpdate) head.AppendLine("Bool __effectEnded");
         if (usesActionRef) head.AppendLine("ObjectReference __actionRef");
         head.AppendLine();
         var output = head.Append(start).Append(body).ToString()
             .Replace(ActionRefMarker + Environment.NewLine, usesActionRef ? "  __actionRef = akActionRef" + Environment.NewLine : "")
-            .Replace(ContainerMarker + Environment.NewLine, usesContainer ? "  __container = akNewContainer" + Environment.NewLine : "");
+            .Replace(ContainerMarker + Environment.NewLine, usesContainer || carried ? containerLines : "")
+            .Replace(FrameMarker + Environment.NewLine, usesSecondsPassed ? "  OB_Frame()" + Environment.NewLine : "");
         return new Output(name, extends, kind, output, properties.Values.ToList(), statements, translated, new Dictionary<string, int>(missing), [.. messages])
         {
+            Faithful = faithful,
+            Gaps = new Dictionary<string, int>(gaps, StringComparer.OrdinalIgnoreCase),
             ScriptPackages = new Dictionary<string, int>(scriptPackages, StringComparer.OrdinalIgnoreCase),
+            TimedTopics = new HashSet<string>(timedTopics, StringComparer.OrdinalIgnoreCase),
+            LockTargets = new HashSet<string>(lockTargets, StringComparer.OrdinalIgnoreCase),
+            Activates = hasActivate,
+            Trap = usesTrap,
         };
     }
 
@@ -465,8 +531,19 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         "scripteffectstart" => "Event OnEffectStart(Actor akTarget, Actor akCaster)",
         "scripteffectfinish" => "Event OnEffectFinish(Actor akTarget, Actor akCaster)",
         "function" => FunctionHeader(b),
+        FragmentBlock when kind == "Result" => "Function Fragment_End(ObjectReference akSpeakerRef)",
+        FragmentBlock when kind == "Stage" => "Function OB_Run()",
         _ => null,
     };
+
+    /// <summary>The block a fragment's statements are parsed into (<see cref="ParseFragment"/>).</summary>
+    const string FragmentBlock = "tmfragment";
+
+    /// <summary>A result script (dialogue's or a quest stage's: statements, no blocks, no variables) parsed as one block.</summary>
+    public static Script ParseFragment(string source) => Parse($"begin {FragmentBlock}\n{source}\nend");
+
+    /// <summary>For a Result or Stage: the quest whose script's variables it names bare.</summary>
+    string? fragmentQuest;
 
     void WriteEvent(StringBuilder sb, string header, List<Block> blocks)
     {
@@ -478,23 +555,20 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             Missing("block " + blocks[0].Type);
             return;
         }
-        bool function = header.Contains(" Function ");
-        sb.AppendLine(header);
+        bool function = header.Contains(" Function ") || header.StartsWith("Function ", StringComparison.Ordinal);
         var types = blocks.Select(b => b.Type.ToLowerInvariant()).ToList();
         if (types.Any(t => t is "gamemode" or "scripteffectupdate"))
         {
-            // Rescheduled first, so a Return in the block doesn't stop the loop; a quest's only while it runs.
-            if (kind == "Quest")
-            {
-                sb.AppendLine("  If !IsRunning()");
-                sb.AppendLine("    Return");
-                sb.AppendLine("  EndIf");
-                sb.AppendLine("  RegisterForSingleUpdate(QuestDelay)");
-            }
-            else sb.AppendLine("  RegisterForSingleUpdate(0.5)");
+            WriteFrame(sb, blocks);
+            return;
         }
-        if (types.Contains("scripteffectstart") && kind == "MagicEffect") sb.AppendLine("  RegisterForSingleUpdate(0.5)");
-        if (function)
+        sb.AppendLine(header);
+        // A response's result script extends TMObLine: its end (the speaker done talking) first.
+        if (kind == "Result" && header.StartsWith("Function Fragment_End(", StringComparison.Ordinal)) sb.AppendLine("  Parent.Fragment_End(akSpeakerRef)");
+        if (types.Contains("scripteffectstart") && kind == "MagicEffect") sb.AppendLine($"  RegisterForSingleUpdate({Frame})");
+        // A block asking how long since the script last ran: measured as it starts (GetSecondsPassed's one value a run).
+        if (blocks.Any(b => Calls(new Script("", [], [b])).Any(c => TimesTheRun(c.Function)))) sb.AppendLine(FrameMarker);
+        if (function && kind == "Function")
             foreach (var p in blocks[0].Parameters) sb.AppendLine($"  {Var(p)} = a_{Clean(p)}");
         if (header.Contains("akActionRef")) sb.AppendLine(ActionRefMarker);
         if (header.StartsWith("Event OnContainerChanged(", StringComparison.Ordinal)) sb.AppendLine(ContainerMarker);
@@ -515,15 +589,153 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             blockContext = b.Type.ToLowerInvariant();
             // Filters from the block's parameter (OnActivate Player, OnAdd Player, OnTriggerActor …).
             string? filter = BlockFilter(blockContext, b.Parameters);
+            blockGap = BlockGap(blockContext, b.Parameters);
             int depth = 1;
             if (filter is not null) { sb.AppendLine($"  If {filter}"); depth = 2; }
             WriteStatements(sb, b.Body, depth);
             if (filter is not null) sb.AppendLine("  EndIf");
+            blockGap = null;
         }
-        if (function) sb.AppendLine("  Return __result");
+        if (function && kind == "Function") sb.AppendLine("  Return __result");
         sb.AppendLine(function ? "EndFunction" : "EndEvent");
         sb.AppendLine();
         blockContext = "";
+    }
+
+    /// <summary>The interval that is the next frame: Papyrus sends an update no sooner than the frame after it is due.</summary>
+    const string Frame = "0.01";
+    /// <summary>Where a run's time is measured (OB_Frame), when the script asks for it.</summary>
+    const string FrameMarker = "  ;@frame@";
+
+    bool TimesTheRun(string fn) => (functions[fn]?.Name ?? fn).ToLowerInvariant() is "getsecondspassed" or "scripteffectelapsedseconds" or "rotate";
+
+    /// <summary>
+    /// GameMode and ScriptEffectUpdate: Oblivion runs them once a frame, an object's while it is in the loaded area (an
+    /// item's while its holder is), a magic effect's while it lasts, a quest's every QuestDelay seconds while it runs
+    /// (fQuestDelayTime, 5, or SetQuestDelay); none of them in MenuMode, a conversation included (Skyrim's goes on
+    /// around it). The blocks become OB_GameMode, so a Return in them ends the run; the update is asked for again once
+    /// it is over, so no two runs overlap.
+    /// </summary>
+    void WriteFrame(StringBuilder sb, List<Block> blocks)
+    {
+        sb.AppendLine("Event OnUpdate()");
+        switch (kind)
+        {
+            case "Quest":
+                sb.AppendLine("  If !IsRunning()");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine("  If UI.IsMenuOpen(\"Dialogue Menu\")");
+                sb.AppendLine("    RegisterForSingleUpdate(0.1)");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+                // The delay is play time: what passed in a conversation doesn't count.
+                sb.AppendLine($"  TMObState st = {St()}");
+                sb.AppendLine("  Float now = st.PlayTime()");
+                sb.AppendLine("  If __questLoads == st.ClockLoads && now < __questDue");
+                sb.AppendLine("    RegisterForSingleUpdate(__questDue - now)");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine(FrameMarker);
+                sb.AppendLine("  OB_GameMode()");
+                sb.AppendLine("  __questLoads = st.ClockLoads");
+                sb.AppendLine("  __questDue = st.PlayTime() + QuestDelay");
+                sb.AppendLine("  RegisterForSingleUpdate(QuestDelay)");
+                break;
+            case "MagicEffect":
+                sb.AppendLine("  If __effectEnded");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine("  If UI.IsMenuOpen(\"Dialogue Menu\")");
+                sb.AppendLine("    RegisterForSingleUpdate(0.1)");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine(FrameMarker);
+                sb.AppendLine("  OB_GameMode()");
+                sb.AppendLine("  If !__effectEnded");
+                sb.AppendLine($"    RegisterForSingleUpdate({Frame})");
+                sb.AppendLine("  EndIf");
+                break;
+            default:
+                sb.AppendLine("  If !Is3DLoaded()");
+                // Carried: run while the holder is in the loaded area, looked at again now and then while it isn't.
+                sb.AppendLine("    If !__container");
+                sb.AppendLine("      Return");
+                sb.AppendLine("    ElseIf !__container.Is3DLoaded()");
+                sb.AppendLine("      RegisterForSingleUpdate(5.0)");
+                sb.AppendLine("      Return");
+                sb.AppendLine("    EndIf");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine("  If UI.IsMenuOpen(\"Dialogue Menu\")");
+                sb.AppendLine("    RegisterForSingleUpdate(0.1)");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine(FrameMarker);
+                sb.AppendLine("  OB_GameMode()");
+                sb.AppendLine($"  RegisterForSingleUpdate({Frame})");
+                break;
+        }
+        sb.AppendLine("EndEvent");
+        sb.AppendLine();
+        sb.AppendLine("Function OB_GameMode()");
+        foreach (var b in blocks)
+        {
+            blockContext = b.Type.ToLowerInvariant();
+            blockGap = BlockGap(blockContext, b.Parameters);
+            WriteStatements(sb, b.Body, 1);
+            blockGap = null;
+        }
+        sb.AppendLine("EndFunction");
+        sb.AppendLine();
+        blockContext = "";
+    }
+
+    /// <summary>
+    /// Oblivion's TrapUpdate (CS wiki TrapUpdate; UESP Oblivion talk:Traps, confirmed on the player and skeletons): while
+    /// the script calls it, each actor in contact with the trap's moving parts takes fTrapDamage + fLevelledDamage x its
+    /// level and is pushed back fTrapPushBack (fTrapDeathPushBack when the hit kills, if set) - on first contact, or every
+    /// frame of it with bTrapContinuous - when they meet at fTrapMinVelocity or faster (game units a second; Skyrim gives
+    /// the speed in Havok's, 69.99 to a unit). Skyrim's OnTrapHitStart / OnTrapHit report the contacts (the trap layer,
+    /// ObMeshConverter.TrapModels), and ProcessTrapHit deals the hit as Skyrim's own traps do.
+    /// </summary>
+    void WriteTrap(StringBuilder sb)
+    {
+        string V(string name, string def) => locals.Keys.FirstOrDefault(k => k.Equals(name, StringComparison.OrdinalIgnoreCase)) is { } k ? Var(k) : def;
+        const string args = "ObjectReference akTarget, Float afXVel, Float afYVel, Float afZVel, Float afXPos, Float afYPos, Float afZPos, Int aeMaterial, Bool abInitialHit, Int aeMotionType";
+        const string pass = "akTarget, afXVel, afYVel, afZVel, afXPos, afYPos, afZPos, aeMaterial";
+        sb.AppendLine("Float __trapAt = -100.0");
+        sb.AppendLine();
+        sb.AppendLine($"Event OnTrapHitStart({args})");
+        sb.AppendLine($"  OB_TrapHit({pass})");
+        sb.AppendLine("EndEvent");
+        sb.AppendLine();
+        sb.AppendLine($"Event OnTrapHit({args})");
+        sb.AppendLine($"  If {V("bTrapContinuous", "0")} != 0");
+        sb.AppendLine($"    OB_TrapHit({pass})");
+        sb.AppendLine("  EndIf");
+        sb.AppendLine("EndEvent");
+        sb.AppendLine();
+        sb.AppendLine("Function OB_TrapHit(ObjectReference akTarget, Float afXVel, Float afYVel, Float afZVel, Float afXPos, Float afYPos, Float afZPos, Int aeMaterial)");
+        sb.AppendLine("  Actor victim = akTarget as Actor");
+        sb.AppendLine("  If !victim || victim.IsDead() || Utility.GetCurrentRealTime() - __trapAt > 0.25");
+        sb.AppendLine("    Return");
+        sb.AppendLine("  EndIf");
+        sb.AppendLine("  Float speed = Math.Sqrt(afXVel * afXVel + afYVel * afYVel + afZVel * afZVel) * 69.99125");
+        sb.AppendLine($"  If speed < {V("fTrapMinVelocity", "0.0")}");
+        sb.AppendLine("    Return");
+        sb.AppendLine("  EndIf");
+        sb.AppendLine($"  Float damage = {V("fTrapDamage", "0.0")} + {V("fLevelledDamage", "0.0")} * victim.GetLevel()");
+        sb.AppendLine($"  Float push = {V("fTrapPushBack", "0.0")}");
+        string death = V("fTrapDeathPushBack", "");
+        if (death.Length > 0)
+        {
+            sb.AppendLine($"  If {death} > 0.0 && damage >= victim.GetActorValue(\"Health\")");
+            sb.AppendLine($"    push = {death}");
+            sb.AppendLine("  EndIf");
+        }
+        sb.AppendLine("  akTarget.ProcessTrapHit(Self, damage, push, afXVel, afYVel, afZVel, afXPos, afYPos, afZPos, aeMaterial, 0.0)");
+        sb.AppendLine("EndFunction");
+        sb.AppendLine();
     }
 
     string? BlockFilter(string type, List<string> parameters)
@@ -553,10 +765,20 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 if (parameters.Count < 2) return crime;
                 return $"{crime} && {FormCompare(new Code("akCriminal", T.Form), "==", Expr(new Name(parameters[1]))).Text}";
             }
-            case "onmagiceffecthit" when parameters.Count > 0: return null;   // effect code: matched by name later
+            // OnMagicEffectHit CODE: an effect converted from that Oblivion effect (its list, TMOb effects by code).
+            case "onmagiceffecthit" when parameters.Count > 0: return $"akEffect && {EffectList(parameters[0])}.HasForm(akEffect)";
+            // OnActorEquip ITEM: that item put on.
+            case "onactorequip" when parameters.Count > 0: return Is("akBaseObject", T.Form);
             default: return null;
         }
     }
+
+    /// <summary>What a whole block's statements fall short in, as Skyrim runs it (each of them counted under it).</summary>
+    string? blockGap;
+
+    /// <summary>A block kind Skyrim runs otherwise than Oblivion (none now: GameMode's frames, OnMagicEffectHit's and
+    /// OnActorEquip's filters are Oblivion's).</summary>
+    static string? BlockGap(string type, List<string> parameters) => null;
 
     string FunctionHeader(Block b)
     {
@@ -588,8 +810,10 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         {
             lineOk = true;
             lineMissing.Clear();
+            lineGaps.Clear();
+            if (blockGap is not null) lineGaps.Add(blockGap);
             string c = Condition(cond);
-            if (lineOk) { translated++; return c; }
+            if (lineOk) { translated++; CountFaithful(); return c; }
             return $"False   ; {Todo()}: " + c;
         }
         foreach (var s in body)
@@ -597,6 +821,8 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             statements++;
             lineOk = true;
             lineMissing.Clear();
+            lineGaps.Clear();
+            if (blockGap is not null) lineGaps.Add(blockGap);
             switch (s)
             {
                 case Set set:
@@ -640,8 +866,24 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                     lineOk = false;
                     break;
             }
-            if (lineOk) translated++;
+            if (lineOk) { translated++; CountFaithful(); }
         }
+    }
+
+    /// <summary>
+    /// A statement (or condition) translated but not as Oblivion does it: what it falls short in. Counted apart from the
+    /// faithful ones (<see cref="Output.Faithful"/>, <see cref="Output.Gaps"/>) (2026-10-22: every such line had counted as
+    /// translated, and the build said 100%).
+    /// </summary>
+    void Gap(string what) => lineGaps.Add(what);
+    readonly List<string> lineGaps = [];
+    readonly Dictionary<string, int> gaps = new(StringComparer.OrdinalIgnoreCase);
+    int faithful;
+
+    void CountFaithful()
+    {
+        if (lineGaps.Count == 0) { faithful++; return; }
+        foreach (var g in lineGaps.Distinct()) gaps[g] = gaps.GetValueOrDefault(g) + 1;
     }
 
     string Assignment(Set set)
@@ -662,6 +904,12 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 string g = FormProperty(n.Id, "GlobalVariable");
                 var v = op.Length > 0 ? new Code($"{g}.GetValue() {op} {Paren(value.Text)}", T.Float) : value;
                 return $"{g}.SetValue({Convert(v, T.Float)})";
+            }
+            case Name n when n.Target is null && FragmentQuestVariable(n) is { } qv:
+            {
+                if (Member(qv) is not { } slot) return Fail(MemberProblem(qv), "None").Text;
+                var v = op.Length > 0 ? new Code($"{slot.Read} {op} {Paren(value.Text)}", Arith(slot.Type, value.Type)) : value;
+                return slot.Write(Convert(v, slot.Type));
             }
             case Name n when n.Target is not null:
             {
@@ -824,6 +1072,8 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         if (functions[n.Id] is not null) return CallCode(new Call(n.Id, null, []), statement: false);
         if (n.Id.Equals(DeadCode, StringComparison.Ordinal)) return new Code("False   ; Oblivion never runs this either (an else without its if)", T.Bool);
         if (n.Id.Equals("__unparsed__", StringComparison.Ordinal)) return Fail("unreadable condition", "False");
+        // A result script naming its quest's variable without the quest (Oblivion reads it as the quest's).
+        if (FragmentQuestVariable(n) is { } qv) return Member(qv) is { } qslot ? new Code(qslot.Read, qslot.Type) : Fail(MemberProblem(qv), "0");
         if (world.FindInScript(scriptId, n.Id) is { PapyrusType: "FormID" } formId) return new Code(formId.EditorID, T.Int);
         if (world.FindInScript(scriptId, n.Id) is { } known)
         {
@@ -868,6 +1118,14 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         string prop = FormProperty(form.EditorID, form.PapyrusType);
         string access = $"({prop} as {form.ScriptName}).{Var(n.Id)}";
         return new Slot(access, t, v => $"{access} = {v}");
+    }
+
+    /// <summary>A bare name in a Result or Stage script that is a variable of its quest's script: quest.name.</summary>
+    Name? FragmentQuestVariable(Name n)
+    {
+        if (fragmentQuest is null || n.Target is not null || locals.ContainsKey(n.Id)) return null;
+        var asMember = new Name(n.Id, new Name(fragmentQuest));
+        return MemberIsVariable(asMember) ? asMember : null;
     }
 
     bool MemberIsVariable(Name n) =>
@@ -915,8 +1173,10 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         if (c.Target is not null) return Expr(c.Target);
         return kind switch
         {
-            "Quest" when functions[c.Function] is { Reference: false } => new Code(PlayerRef(), T.Actor),
-            "Quest" => Fail("call without a reference in a quest script", "None"),
+            "Quest" or "Stage" when functions[c.Function] is { Reference: false } => new Code(PlayerRef(), T.Actor),
+            "Quest" or "Stage" => Fail("call without a reference in a quest script", "None"),
+            // A dialogue result acts on the speaker.
+            "Result" => new Code("akSpeakerRef", T.Ref),
             "MagicEffect" => new Code("GetTargetActor()", T.Actor),
             "Function" => new Code("akSelf", T.Ref),
             _ => new Code("Self", actor ? T.Actor : T.Ref),
@@ -931,6 +1191,10 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     Code Arg(Call c, int i) => i >= c.Args.Count ? new Code("None", T.Unknown)
         : c.Args[i] is Str s && !s.Value.Contains(' ') && world.Find(s.Value) is not null ? Expr(new Name(s.Value)) : Expr(c.Args[i]);
     string ArgNum(Call c, int i, string def = "0") => i < c.Args.Count ? Num(Expr(c.Args[i])) : def;
+    /// <summary>A number argument for an Int parameter: a Float (a global's GetValue, a float variable) cast, as Papyrus
+    /// widens Int to Float but never narrows.</summary>
+    string ArgInt(Call c, int i, string def = "0") => i < c.Args.Count ? Int(Expr(c.Args[i])) : def;
+    static string Int(Code c) => c.Type is T.Bool or T.Float ? $"({Paren(c.Text)} as Int)" : c.Text;
     /// <summary>A bare word argument (axis, actor value, animation group) as written.</summary>
     static string Word(Call c, int i) => i < c.Args.Count && c.Args[i] is Name n ? n.Id : i < c.Args.Count && c.Args[i] is Str s ? s.Value : "";
 
@@ -942,23 +1206,34 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         string self() => AsRef(Subject(c));
         string actorSelf() => AsActor(Subject(c));
         Code R(string text, T type) => new(text, type);
+        string named = info?.Name ?? c.Function;
+        // Translated, but not as Oblivion does it (Gap): nothing done though Oblivion does something, or an approximation.
+        Code Nothing(string text) { Gap($"{named} does nothing"); return R(text, T.Void); }
+        // Confidence and Responsibility changed: Oblivion's value (what scripts and dialogue read) is right, Skyrim's
+        // own fleeing and crimes don't follow it.
+        Code AiStatGap(int stat, Code code) => stat is 30 or 32 ? Approx("Skyrim's own fleeing and crimes don't follow it", code) : code;
+        Code Approx(string what, Code code) { Gap($"{named}: {what}"); return code; }
         switch (canonical)
         {
             // quests and globals
             case "getstage": return R($"{Quest(c, 0)}.GetStage()", T.Int);
-            case "setstage": return R($"{Quest(c, 0)}.SetStage({ArgNum(c, 1)})", T.Bool);
-            case "getstagedone": return R($"{Quest(c, 0)}.IsStageDone({ArgNum(c, 1)})", T.Bool);
+            case "setstage": return R($"{Quest(c, 0)}.SetStage({ArgInt(c, 1)})", T.Bool);
+            case "getstagedone": return R($"{Quest(c, 0)}.IsStageDone({ArgInt(c, 1)})", T.Bool);
             case "startquest": return R($"{Quest(c, 0)}.Start()", T.Bool);
             case "stopquest": return R($"{Quest(c, 0)}.Stop()", T.Void);
             case "completequest": return R($"{Quest(c, 0)}.CompleteQuest()", T.Void);
             case "getquestrunning": return R($"{Quest(c, 0)}.IsRunning()", T.Bool);
             case "getquestcompleted": return R($"{Quest(c, 0)}.IsCompleted()", T.Bool);
-            case "setquestobject": return R("; SetQuestObject: quest items are flagged on the converted item", T.Void);
+            // SetQuestObject item 0/1: in TMObQuestItems or not (TMObPlayer keeps those with the player).
+            case "setquestobject": return R($"{St()}.SetQuestItem({Arg(c, 0).Text}, {ArgNum(c, 1, "1")} != 0)", T.Void);
+            // OBSE: SetQuestItem flag [item], IsQuestItem [item] (the calling reference's base without one).
+            case "setquestitem": return R($"{St()}.SetQuestItem({(c.Args.Count > 1 ? Arg(c, 1).Text : $"{self()}.GetBaseObject()")}, {ArgNum(c, 0, "1")} != 0)", T.Void);
+            case "isquestitem": return R($"{St()}.IsQuestItem({(c.Args.Count > 0 ? Arg(c, 0).Text : $"{self()}.GetBaseObject()")})", T.Bool);
             case "getglobalvalue": return R($"{FormProperty(Word(c, 0), "GlobalVariable")}.GetValue()", T.Float);
             case "setquestdelay":
                 if (c.Args.Count > 0 && c.Args[0] is Name qn && world.Find(qn.Id) is { PapyrusType: "Quest", ScriptName: { } qs })
                     return R($"({FormProperty(qn.Id, "Quest")} as {qs}).QuestDelay = {Convert(Arg(c, 1), T.Float)}", T.Void);
-                return R($"; SetQuestDelay on a quest without a script", T.Void);
+                return R($"; SetQuestDelay on a quest without a script: its delay times nothing, in Oblivion as here", T.Void);
             // activation and enabling
             case "activate":
                 if (c.Args.Count == 0) return R(blockContext == "onactivate" ? $"{self()}.Activate(akActionRef, true)" : $"{self()}.Activate({PlayerRef()}, true)", T.Bool);
@@ -975,7 +1250,15 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "getisid": return R(c.Args.Count > 0 && c.Args[0] is Num idn ? $"{self()}.GetBaseObject() == Game.GetForm({(long)idn.Value})" : $"{self()}.GetBaseObject() == {Arg(c, 0).Text}", T.Bool);
             case "getparentref": return R($"{self()}.GetEnableParent()", T.Ref);
             // Locks at Oblivion's levels (and the converted doors' and containers' Oblivion locks, TMObLock).
-            case "lock": return R($"TMObState.LockAt({self()}, {(c.Args.Count > 0 ? Convert(Arg(c, 0), T.Int) : "-1")})", T.Void);
+            // What it locks has an Oblivion lock (TMObLock) to hold the level: Oblivion's own, or one given to everything a
+            // script locks (LockTargets: the script's own reference, or the named ones); one held in a variable may not.
+            case "lock":
+            {
+                string? lockOn = c.Target is null ? "" : c.Target is Name { Target: null } tn ? tn.Id : null;
+                if (lockOn is not null) lockTargets.Add(lockOn);
+                var code = R($"TMObState.LockAt({self()}, {(c.Args.Count > 0 ? Convert(Arg(c, 0), T.Int) : "-1")})", T.Void);
+                return lockOn is null ? Approx("a reference in a variable without an Oblivion lock: Skyrim's tiers", code) : code;
+            }
             case "unlock": return R($"TMObState.UnlockRef({self()})", T.Void);
             case "getlocked": return R($"TMObState.IsLockedRef({self()})", T.Bool);
             case "getlocklevel": return R($"TMObState.OblivionLockLevel({self()})", T.Int);
@@ -984,7 +1267,10 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             // placement
             case "movetomarker" or "moveto":
                 return R($"{self()}.MoveTo({AsRef(Arg(c, 0))}, {ArgNum(c, 1, "0.0")}, {ArgNum(c, 2, "0.0")}, {ArgNum(c, 3, "0.0")})", T.Void);
-            case "placeatme": return R($"{self()}.PlaceAtMe({Arg(c, 0).Text}, {ArgNum(c, 1, "1")})", T.Ref);
+            // PlaceAtMe item [count] [distance] [direction: 0 ahead, 1 behind, 2 left, 3 right] (TMObState.PlaceNear).
+            case "placeatme":
+                if (c.Args.Count > 2) return R($"TMObState.PlaceNear({self()}, {Arg(c, 0).Text}, {ArgInt(c, 1, "1")}, {ArgNum(c, 2)}, {ArgInt(c, 3, "0")})", T.Ref);
+                return R($"{self()}.PlaceAtMe({Arg(c, 0).Text}, {ArgInt(c, 1, "1")})", T.Ref);
             case "getdistance": return R($"{self()}.GetDistance({AsRef(Arg(c, 0))})", T.Float);
             case "getincell": return R($"{self()}.GetParentCell() == {FormProperty(Word(c, 0), "Cell")}", T.Bool);
             case "getinsamecell": return R($"{self()}.GetParentCell() == {AsRef(Arg(c, 0))}.GetParentCell()", T.Bool);
@@ -1002,34 +1288,49 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 string v = ArgNum(c, 1);
                 return R($"{s}.SetAngle({(a == "X" ? v : s + ".GetAngleX()")}, {(a == "Y" ? v : s + ".GetAngleY()")}, {(a == "Z" ? v : s + ".GetAngleZ()")})", T.Void);
             }
-            case "rotate": return R($"{self()}.SetAngle({self()}.GetAngleX(), {self()}.GetAngleY(), {self()}.GetAngleZ() + {ArgNum(c, 1)})", T.Void);
+            // Rotate axis rate: turned at the rate (degrees a second) for the run's time, as Oblivion turns it each frame.
+            case "rotate":
+            {
+                usesSecondsPassed = true;
+                string by = $"({ArgNum(c, 1)}) * __framePassed";
+                string ax = Axis(c);
+                return R($"{self()}.SetAngle({self()}.GetAngleX(){(ax == "X" ? " + " + by : "")}, {self()}.GetAngleY(){(ax == "Y" ? " + " + by : "")}, {self()}.GetAngleZ(){(ax == "Z" ? " + " + by : "")})", T.Void);
+            }
             // items and inventory
-            case "additem": return R($"{self()}.AddItem({Arg(c, 0).Text}, {ArgNum(c, 1, "1")})", T.Void);
-            case "removeitem": return R($"{self()}.RemoveItem({Arg(c, 0).Text}, {ArgNum(c, 1, "1")})", T.Void);
+            case "additem": return R($"{self()}.AddItem({Arg(c, 0).Text}, {ArgInt(c, 1, "1")})", T.Void);
+            case "removeitem": return R($"{self()}.RemoveItem({Arg(c, 0).Text}, {ArgInt(c, 1, "1")})", T.Void);
             case "getitemcount": return R($"{self()}.GetItemCount({Arg(c, 0).Text})", T.Int);
             case "removeallitems": return R(c.Args.Count > 0 ? $"{self()}.RemoveAllItems({AsRef(Arg(c, 0))})" : $"{self()}.RemoveAllItems()", T.Void);
             case "equipitem": return R($"{actorSelf()}.EquipItem({Arg(c, 0).Text})", T.Void);
             case "unequipitem": return R($"{actorSelf()}.UnequipItem({Arg(c, 0).Text})", T.Void);
-            case "drop": return R($"{self()}.DropObject({Arg(c, 0).Text}, {ArgNum(c, 1, "1")})", T.Ref);
+            case "drop": return R($"{self()}.DropObject({Arg(c, 0).Text}, {ArgInt(c, 1, "1")})", T.Ref);
             // spells and magic
             case "addspell": return R($"{actorSelf()}.AddSpell({Spell(c, 0)})", T.Bool);
             case "removespell": return R($"{actorSelf()}.RemoveSpell({Spell(c, 0)})", T.Bool);
             case "cast": return R($"{Spell(c, 0)}.Cast({self()}, {AsRef(Arg(c, 1))})", T.Void);
-            case "isspelltarget": return R($"{actorSelf()}.HasSpell({Spell(c, 0)})", T.Bool);
+            case "isspelltarget": return Approx("the spell's effects on the actor, from it or another spell", R($"TMObState.IsSpellTarget({actorSelf()}, {Spell(c, 0)})", T.Bool));
             case "dispel": return R($"{actorSelf()}.DispelSpell({Spell(c, 0)})", T.Bool);
             // actors
             case "getdead": return R($"{actorSelf()}.IsDead()", T.Bool);
             case "kill" or "killactor": return R(c.Args.Count > 0 ? $"{actorSelf()}.Kill({AsActor(Arg(c, 0))})" : $"{actorSelf()}.Kill()", T.Void);
             case "resurrect" or "resurrectactor": return R($"{actorSelf()}.Resurrect()", T.Void);
-            case "reset3dstate" or "disablelinkedpathpoints" or "enablelinkedpathpoints" or "trapupdate":
-                return R($"; {info?.Name ?? c.Function}: nothing to do in Skyrim", T.Void);
+            // The model as first drawn: its 3D loaded again (TMObState.Reset3D).
+            case "reset3dstate": return R($"{St()}.Reset3D({self()})", T.Void);
+            // The trap strikes this frame (OB_TrapHit: what its moving parts touch, on the trap layer).
+            case "trapupdate":
+                usesTrap = true;
+                if (locals.Keys.Any(k => k.Equals("fTrapDeathPushBack", StringComparison.OrdinalIgnoreCase)))
+                    Gap("TrapUpdate: fTrapDeathPushBack in place of the push back on a killing hit (the CS wiki's guess)");
+                return R("__trapAt = Utility.GetCurrentRealTime()", T.Void);
+            case "disablelinkedpathpoints" or "enablelinkedpathpoints":
+                return Nothing($"; {info?.Name ?? c.Function}: nothing to do in Skyrim");
             case "setownership":
                 if (c.Args.Count == 0) return R($"{self()}.SetActorOwner({PlayerRef()}.GetActorBase())", T.Void);
                 return R(c.Args[0] is Name on && world.Find(on.Id)?.PapyrusType == "Faction" ? $"{self()}.SetFactionOwner({FormProperty(on.Id, "Faction")})" : $"{self()}.SetActorOwner({Paren(Arg(c, 0).Text)} as ActorBase)", T.Void);
             case "disableplayercontrols": return R("Game.DisablePlayerControls()", T.Void);
             case "enableplayercontrols": return R("Game.EnablePlayerControls()", T.Void);
             case "getdeadcount": return R($"({Paren(Arg(c, 0).Text)} as ActorBase).GetDeadCount()", T.Int);
-            case "getdetectionlevel": return R($"({AsActor(Arg(c, 0))}.IsDetectedBy({actorSelf()}) as Int) * 3", T.Int);
+            case "getdetectionlevel": return Approx("0 or 3", R($"({AsActor(Arg(c, 0))}.IsDetectedBy({actorSelf()}) as Int) * 3", T.Int));
             case "forceweather": return R($"({Paren(Arg(c, 0).Text)} as Weather).ForceActive(true)", T.Void);
             case "setweather": return R($"({Paren(Arg(c, 0).Text)} as Weather).SetActive(true)", T.Void);
             case "releaseweatheroverride": return R("Weather.ReleaseOverride()", T.Void);
@@ -1040,7 +1341,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "modpcinfamy": return R($"{Generated("TMOB_PCInfamy", "GlobalVariable")}.Mod({Convert(Arg(c, 0), T.Float)})", T.Float);
             case "setpcfame": return R($"{Generated("TMOB_PCFame", "GlobalVariable")}.SetValue({Convert(Arg(c, 0), T.Float)})", T.Void);
             case "setpcinfamy": return R($"{Generated("TMOB_PCInfamy", "GlobalVariable")}.SetValue({Convert(Arg(c, 0), T.Float)})", T.Void);
-            case "triggerhitshader": return R($"Game.TriggerScreenBlood({(c.Args.Count > 0 ? Convert(Arg(c, 0), T.Int) : "1")})", T.Void);
+            case "triggerhitshader": return Approx("screen blood", R($"Game.TriggerScreenBlood({(c.Args.Count > 0 ? Convert(Arg(c, 0), T.Int) : "1")})", T.Void));
             case "setfactionreaction": return R($"{FormProperty(Word(c, 0), "Faction")}.SetReaction({FormProperty(Word(c, 1), "Faction")}, {Convert(Arg(c, 2), T.Int)})", T.Void);
             case "setactoralpha": return R($"{actorSelf()}.SetAlpha({Convert(Arg(c, 0), T.Float)})", T.Void);
             case "isswimming": return R($"{actorSelf()}.IsSwimming()", T.Bool);
@@ -1059,20 +1360,21 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "getiscurrentpackage": return R($"{actorSelf()}.GetCurrentPackage() == {Arg(c, 0).Text}", T.Bool);
             case "getinfaction": return R($"{actorSelf()}.IsInFaction({FormProperty(Word(c, 0), "Faction")})", T.Bool);
             case "getfactionrank": return R($"{actorSelf()}.GetFactionRank({FormProperty(Word(c, 0), "Faction")})", T.Int);
-            case "setfactionrank": return R($"{actorSelf()}.SetFactionRank({FormProperty(Word(c, 0), "Faction")}, {ArgNum(c, 1)})", T.Void);
-            case "modfactionrank": return R($"{actorSelf()}.ModFactionRank({FormProperty(Word(c, 0), "Faction")}, {ArgNum(c, 1)})", T.Void);
+            case "setfactionrank": return R($"{actorSelf()}.SetFactionRank({FormProperty(Word(c, 0), "Faction")}, {ArgInt(c, 1)})", T.Void);
+            case "modfactionrank": return R($"{actorSelf()}.ModFactionRank({FormProperty(Word(c, 0), "Faction")}, {ArgInt(c, 1)})", T.Void);
             case "setessential": return R($"({Arg(c, 0).Text} as ActorBase).SetEssential({ArgNum(c, 1)} != 0)", T.Void);
             case "setunconscious": return R($"{actorSelf()}.SetUnconscious({ArgNum(c, 0)} != 0)", T.Void);
             case "setalert": return R($"{actorSelf()}.SetAlert({ArgNum(c, 0)} != 0)", T.Void);
             case "setghost": return R($"{actorSelf()}.SetGhost({ArgNum(c, 0)} != 0)", T.Void);
-            case "setforcerun": return R($"; SetForceRun {ArgNum(c, 0)}: the package decides in Skyrim", T.Void);
-            case "setforcesneak": return R($"{actorSelf()}.StartSneaking()", T.Void);
+            case "setforcerun": return Nothing($"; SetForceRun {ArgNum(c, 0)}: the package decides in Skyrim");
+            case "setforcesneak": return Approx("starts sneaking whatever its argument", R($"{actorSelf()}.StartSneaking()", T.Void));
             case "getsitting": return R($"{actorSelf()}.GetSitState()", T.Int);
             case "getsleeping": return R($"{actorSelf()}.GetSleepState()", T.Int);
             case "getdetected": return R($"{AsActor(Arg(c, 0))}.IsDetectedBy({actorSelf()})", T.Bool);
             case "getlos" or "getlineofsight": return R($"{actorSelf()}.HasLOS({AsRef(Arg(c, 0))})", T.Bool);
             case "getunconscious": return R($"{actorSelf()}.IsUnconscious()", T.Bool);
-            case "getweaponanimtype" or "isweaponout": return R($"{actorSelf()}.IsWeaponDrawn()", T.Bool);
+            case "getweaponanimtype": return Approx("weapon drawn", R($"{actorSelf()}.IsWeaponDrawn()", T.Bool));
+            case "isweaponout": return R($"{actorSelf()}.IsWeaponDrawn()", T.Bool);
             case "getisrace": return R($"{actorSelf()}.GetRace() == {FormProperty(Word(c, 0), "Race")}", T.Bool);
             case "getissex": return R($"{actorSelf()}.GetActorBase().GetSex() == {(Word(c, 0).StartsWith("F", StringComparison.OrdinalIgnoreCase) ? 1 : 0)}", T.Bool);
             case "getlevel": return R($"{actorSelf()}.GetLevel()", T.Int);
@@ -1083,8 +1385,8 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "getdisposition" when IsPlayer(c, 0):
                 return R($"(50.0 + {actorSelf()}.GetActorValue(\"Variable09\")) as Int", T.Int);
             // Between two others: their relationship rank (TMObState.Disposition).
-            case "moddisposition": return R($"TMObState.ModDisposition({actorSelf()}, {AsActor(Arg(c, 0))}, {Convert(Arg(c, 1), T.Float)})", T.Void);
-            case "getdisposition": return R($"TMObState.Disposition({actorSelf()}, {AsActor(Arg(c, 0))})", T.Int);
+            case "moddisposition": return Approx("a relationship rank", R($"TMObState.ModDisposition({actorSelf()}, {AsActor(Arg(c, 0))}, {Convert(Arg(c, 1), T.Float)})", T.Void));
+            case "getdisposition": return Approx("a relationship rank", R($"TMObState.Disposition({actorSelf()}, {AsActor(Arg(c, 0))})", T.Int));
             // Oblivion's Say returns how long the line lasts (scripts wait on it); Skyrim's returns nothing, so a value is
             // estimated by SayTimed.
             case "startconversation" when c.Args.Count < 2:
@@ -1092,16 +1394,39 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 // Between two others: the speaker turns to the other and greets (Oblivion's GREETING topic).
                 if (c.Args.Count == 1 && c.Args[0] is Name pn && pn.Id.Equals("player", StringComparison.OrdinalIgnoreCase) && statement)
                     return R($"{self()}.Activate({PlayerRef()})", T.Void);
-                if (c.Args.Count == 1 && statement && world.Find("GREETING") is not null)
-                    return R($"{actorSelf()}.SetLookAt({AsRef(Arg(c, 0))})\n{self()}.Say({FormProperty("GREETING", "Topic")})\n{St()}.Said({self()})", T.Void);
-                return Fail("StartConversation between NPCs", "None");
-            case "say" or "sayto" or "startconversation":
+                // Between two others: a conversation from HELLO, as Oblivion's random ones (TMObConversations).
+                if (c.Args.Count == 1 && statement)
+                {
+                    Gap("StartConversation: started where they stand, the speaker not walking over first");
+                    return R($"TMObConversations.StartConversation({actorSelf()}, {AsActor(Arg(c, 0))}, None)", T.Void);
+                }
+                return Fail("StartConversation without a target", "None");
+            // Say TopicID [ForceSubtitle], SayTo Target TopicID [ForceSubtitle]: the topic's response for the speaker;
+            // SayTo looks at the one spoken to. Its value: the response's length (TMObState.SayTimed).
+            case "say" or "sayto":
             {
-                if (Word(c, canonical == "say" ? 0 : 1).Length == 0) return Fail($"{c.Function} without a topic", "None");
-                string topic = FormProperty(Word(c, canonical == "say" ? 0 : 1), "Topic");
-                if (statement) return R($"{self()}.Say({topic})\n{St()}.Said({self()})", T.Void);
-                usesSay = true;
-                return R($"SayTimed({self()}, {topic})", T.Float);
+                int at = canonical == "say" ? 0 : 1;
+                string topicId = Word(c, at);
+                if (topicId.Length == 0) return Fail($"{c.Function} without a topic", "None");
+                string topic = FormProperty(topicId, "Topic");
+                string target = canonical == "sayto" ? AsActor(Arg(c, 0)) : "None";
+                // ForceSubtitle: the line's subtitle shown whatever the player's setting (TMObState: bGeneralSubtitles on
+                // while it is said).
+                string force = c.Args.Count > at + 1 ? $"{ArgNum(c, at + 1)} != 0" : "False";
+                if (statement) return R($"{St()}.SayTopic({self()}, {topic}, {target}, {force})", T.Void);
+                timedTopics.Add(topicId);
+                return R($"{St()}.SayTimed({self()}, {topic}, {target}, {force})", T.Float);
+            }
+            case "startconversation":
+            {
+                if (Word(c, 1).Length == 0) return Fail($"{c.Function} without a topic", "None");
+                string topic = FormProperty(Word(c, 1), "Topic");
+                // With the player: the topic said to them (a force-greet's line). Between two others: a conversation from
+                // the topic, in turns by its links (TMObConversations); Oblivion walks the speaker over first.
+                if (c.Args[0] is Name tn && tn.Id.Equals("player", StringComparison.OrdinalIgnoreCase))
+                    return R($"{St()}.SayTopic({self()}, {topic}, {AsActor(Arg(c, 0))})", statement ? T.Void : T.Float);
+                Gap("StartConversation: started where they stand, the speaker not walking over first");
+                return R($"TMObConversations.StartConversation({actorSelf()}, {AsActor(Arg(c, 0))}, {topic})", statement ? T.Void : T.Float);
             }
             case "issneaking": return R($"{actorSelf()}.IsSneaking()", T.Bool);
             case "getequipped": return R($"{actorSelf()}.IsEquipped({Arg(c, 0).Text})", T.Bool);
@@ -1118,57 +1443,78 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "stoplook": return R($"{actorSelf()}.ClearLookAt()", T.Void);
             case "pushactoraway": return R($"{AsActor(Arg(c, 0))}.PushActorAway({actorSelf()}, {ArgNum(c, 1)})", T.Void);
             // actor values
-            case "getactorvalue" or "getav": return R($"{actorSelf()}.GetActorValue(\"{AV(Word(c, 0))}\")", T.Float);
-            case "getbaseactorvalue" or "getbaseav": return R($"{actorSelf()}.GetBaseActorValue(\"{AV(Word(c, 0))}\")", T.Float);
-            case "setactorvalue" or "setav": return R($"{actorSelf()}.SetActorValue(\"{AV(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
-            case "modactorvalue" or "modav": return R($"{actorSelf()}.ModActorValue(\"{AV(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
-            case "forceactorvalue" or "forceav": return R($"{actorSelf()}.ForceActorValue(\"{AV(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
+            // An attribute or skill: Oblivion's own (TMObState.GetStat: the actor's Oblivion value, the player's where it
+            // lives); any other actor value Skyrim's of the same meaning.
+            case "getactorvalue" or "getav" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var gs: return R($"{St()}.GetStat({actorSelf()}, {gs})", T.Float);
+            case "getbaseactorvalue" or "getbaseav" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var bs: return R($"{St()}.GetStat({actorSelf()}, {bs}, True)", T.Float);
+            case "setactorvalue" or "setav" or "forceactorvalue" or "forceav" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var ss:
+                return AiStatGap(ss, R($"{St()}.SetStat({actorSelf()}, {ss}, {ArgNum(c, 1)})", T.Void));
+            case "modactorvalue" or "modav" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var ms:
+                return AiStatGap(ms, R($"{St()}.ModStat({actorSelf()}, {ms}, {ArgNum(c, 1)})", T.Void));
+            case "getactorvalue" or "getav": return R($"{actorSelf()}.GetActorValue(\"{AVg(Word(c, 0))}\")", T.Float);
+            case "getbaseactorvalue" or "getbaseav": return R($"{actorSelf()}.GetBaseActorValue(\"{AVg(Word(c, 0))}\")", T.Float);
+            case "setactorvalue" or "setav": return R($"{actorSelf()}.SetActorValue(\"{AVg(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
+            case "modactorvalue" or "modav": return R($"{actorSelf()}.ModActorValue(\"{AVg(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
+            case "forceactorvalue" or "forceav": return R($"{actorSelf()}.ForceActorValue(\"{AVg(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
             // sound, visuals, animation
             case "playsound" or "playsound3d": return R($"{FormProperty(Word(c, 0), "Sound")}.Play({self()})", T.Int);
             case "playmagicshadervisuals" or "pms": return R($"{FormProperty(Word(c, 0), "EffectShader")}.Play({self()}, {ArgNum(c, 1, "-1.0")})", T.Void);
             case "stopmagicshadervisuals" or "sms": return R($"{FormProperty(Word(c, 0), "EffectShader")}.Stop({self()})", T.Void);
-            case "pickidle": return R($"; PickIdle: idles are chosen by Skyrim's idle system", T.Void);
+            // PickIdle: the actor picks a new idle now (after a script changed what idles test). Its package evaluated
+            // again, Skyrim picks its idles anew (forcing the default state would stand a sitting one up); Oblivion's own
+            // idle tree isn't converted.
+            case "pickidle":
+                Gap("PickIdle: Skyrim's idles picked again, not Oblivion's idle tree");
+                return R($"{actorSelf()}.EvaluatePackage()", T.Void);
             case "playbink": return R($"Game.PlayBink(\"{Word(c, 0)}\")", T.Void);
-            case "fadetoblack" or "imod": return R("Game.FadeOutGame(true, true, 0.5, 1.0)", T.Void);
+            case "fadetoblack" or "imod": return Approx("a fixed fade", R("Game.FadeOutGame(true, true, 0.5, 1.0)", T.Void));
             // messages
             case "message": return R($"Debug.Notification({Format(c)})", T.Void);
             case "messagebox":
                 if (c.Args.Count(a => a is Str) > 1) return MessageWithButtons(c);
                 return R($"Debug.MessageBox({Format(c)})", T.Void);
             case "getbuttonpressed": usesButtons = true; return R("TakeButton()", T.Int);
-            case "printc" or "printtoconsole" or "print": return R($"Debug.Trace({Format(c)})", T.Void);
+            case "printc" or "printtoconsole" or "print": return Approx("to the Papyrus log", R($"Debug.Trace({Format(c)})", T.Void));
             case "showmap": return R($"{AsRef(Arg(c, 0))}.AddToMap({ArgNum(c, 1)} != 0)", T.Void);
-            case "addtopic": return R($"; AddTopic {Word(c, 0)}: Skyrim topics need no unlocking", T.Void);
+            // The topic shown to the player from now on (its OBTopicKnown global, which its responses ask for).
+            case "addtopic":
+                if (Word(c, 0).Length == 0) return Fail("AddTopic without a topic", "");
+                return R($"{TopicKnown(Word(c, 0))}.SetValue(1.0)", T.Void);
             // time and chance
             case "getrandompercent": return R("Utility.RandomInt(0, 99)", T.Int);
             case "rand": return R($"Utility.RandomFloat({ArgNum(c, 0)}, {ArgNum(c, 1)})", T.Float);
-            case "getsecondspassed": usesSecondsPassed = true; return R("SecondsPassed()", T.Float);
+            case "getsecondspassed": usesSecondsPassed = true; return R("__framePassed", T.Float);
             case "getcurrenttime": return R("(Game.GetFormFromFile(0x38, \"Skyrim.esm\") as GlobalVariable).GetValue()", T.Float);
+            // Oblivion's numbering (0 Sundas .. 6 Loredas) of the day Skyrim's calendar shows: a new game begins on Sundas
+            // (UESP Skyrim:Calendar), a day a whole game day.
             case "getdayofweek": return R("((Utility.GetCurrentGameTime() as Int) % 7)", T.Int);
-            case "getgamesetting": return R($"Game.GetGameSettingFloat(\"{Word(c, 0)}\")", T.Float);
+            case "getgamesetting": return Approx("Skyrim's setting of that name", R($"Game.GetGameSettingFloat(\"{Word(c, 0)}\")", T.Float));
             // OBSE (onto SKSE)
-            case "iskeypressed" or "iskeypressed2" or "iskeypressed3": return R($"Input.IsKeyPressed({ArgNum(c, 0)})", T.Bool);
+            case "iskeypressed" or "iskeypressed2" or "iskeypressed3": return R($"Input.IsKeyPressed({ArgInt(c, 0)})", T.Bool);
             case "iscontrolpressed": return R($"Input.IsKeyPressed(Input.GetMappedKey(\"{ControlName(ArgNum(c, 0))}\"))", T.Bool);
             case "getname": return R(c.Args.Count > 0 ? $"{Arg(c, 0).Text}.GetName()" : $"{self()}.GetDisplayName()", T.String);
             case "setname": return R($"{self()}.GetBaseObject().SetName({Arg(c, 0).Text})", T.Void);
             case "getbaseobject": return R($"{self()}.GetBaseObject()", T.Form);
             case "getparentcell": return R($"{self()}.GetParentCell()", T.Form);
             case "getnumitems": return R($"{self()}.GetNumItems()", T.Int);
-            case "getinventoryobject": return R($"{self()}.GetNthForm({ArgNum(c, 0)})", T.Form);
+            case "getinventoryobject": return R($"{self()}.GetNthForm({ArgInt(c, 0)})", T.Form);
             case "getweight": return R($"{Arg(c, 0).Text}.GetWeight()", T.Float);
             case "getgoldvalue": return R($"{Arg(c, 0).Text}.GetGoldValue()", T.Int);
             case "getequippedobject": return EquippedObject(c);
             case "isplayable": return R($"{Arg(c, 0).Text}.IsPlayable()", T.Bool);
-            case "getgameloaded" or "getgamerestarted": return R("False   ; handled by an OnPlayerLoadGame event in Skyrim", T.Bool);
+            // True the first time the script asks after a save was loaded or a game begun (TMObState.ClockLoads), or after
+            // the game was started up (TMObState.Launches).
+            case "getgameloaded": usesLoaded = true; return R("OB_GameLoaded()", T.Bool);
+            case "getgamerestarted": usesRestarted = true; return R("OB_GameRestarted()", T.Bool);
             case "getcrosshairref": return R("Game.GetCurrentCrosshairRef()", T.Ref);
             case "getactivemenumode" or "menumode":
                 if (c.Args.Count > 0 && ArgNum(c, 0) is { } mcode && mcode is not ("0" or "1"))
                     return R("(" + string.Join(" || ", MenuNames(mcode).Select(m => $"UI.IsMenuOpen(\"{m}\")")) + ")", T.Bool);
                 return R("Utility.IsInMenuMode()", T.Bool);
-            case "con_tfc" or "con_tgm" or "con_tcl" or "con_save" or "con_setcamerafov" or "con_toggleai": return R($"; console {c.Function}: not available to Papyrus", T.Void);
+            case "con_tfc" or "con_tgm" or "con_tcl" or "con_save" or "con_setcamerafov" or "con_toggleai": return Nothing($"; console {c.Function}: not available to Papyrus");
             case "setfunctionvalue":
                 if (kind == "Function") { var v = Arg(c, 0); return R($"__result = {Convert(v, T.Float)}", T.Void); }
-                return R("; SetFunctionValue outside a function", T.Void);
+                return R("; SetFunctionValue outside a function: Oblivion ignores it too", T.Void);
             case "call":
                 return UserCall(c);
             case "messageboxex" or "messageex":
@@ -1180,18 +1526,20 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "sv_compare" or "stringcompare": return R($"({Arg(c, 0).Text} == {Arg(c, 1).Text}) as Int", T.Int);
             case "sv_destruct": return R("; sv_Destruct: Papyrus strings need no freeing", T.Void);
             // ---- what Oblivion's engine kept track of (TMObState) ----
-            case "isanimplaying": return R($"{St()}.IsAnimPlaying({self()})", T.Bool);
-            case "playgroup" or "loopgroup":
+            // Timed by the model's own sequence of that name (TMObState.AnimKeys: its length, or a loop until another).
+            case "isanimplaying": return R(c.Args.Count > 0 ? $"{St()}.IsAnimPlaying({self()}, \"{AnimGroup(Word(c, 0))}\")" : $"{St()}.IsAnimPlaying({self()})", T.Bool);
+            case "loopgroup": return R($"{St()}.LoopGroup({self()}, \"{AnimGroup(Word(c, 0))}\", {(c.Args.Count > 1 ? ArgInt(c, 1) : "1")})", T.Void);
+            case "playgroup":
                 return R($"{St()}.PlayGroup({self()}, \"{AnimGroup(Word(c, 0))}\", {(c.Args.Count > 1 ? Convert(Arg(c, 1), T.Int) : "0")})", T.Void);
             case "addscriptpackage":
                 if (Word(c, 0) is { Length: > 0 } added) scriptPackages[added] = scriptPackages.GetValueOrDefault(added) + 1;
                 return R($"{St()}.AddScriptPackage({actorSelf()}, {Pkg(c, 0)})", T.Void);
             case "removescriptpackage": return R($"{St()}.RemoveScriptPackage({actorSelf()})", T.Void);
-            case "getcurrentaipackage": return R($"{St()}.PackageType({actorSelf()})", T.Int);
-            case "getcurrentaiprocedure": return R($"{St()}.Procedure({actorSelf()})", T.Int);
-            case "setpackduration": return R($"{St()}.SetPackDuration({actorSelf()}, {Convert(Arg(c, 0), T.Float)})", T.Void);
-            case "wait": return R($"{St()}.WaitOn({actorSelf()}, {Pkg(c, 0)}, True)", T.Void);
-            case "stopwaiting": return R($"{St()}.WaitOn({actorSelf()}, {Pkg(c, 0)}, False)", T.Void);
+            case "getcurrentaipackage": return Approx("known packages, else guessed", R($"{St()}.PackageType({actorSelf()})", T.Int));
+            case "getcurrentaiprocedure": return Approx("guessed", R($"{St()}.Procedure({actorSelf()})", T.Int));
+            case "setpackduration": return Approx("one actor at a time", R($"{St()}.SetPackDuration({actorSelf()}, {Convert(Arg(c, 0), T.Float)})", T.Void));
+            case "wait": return Approx("held in place", R($"{St()}.WaitOn({actorSelf()}, {Pkg(c, 0)}, True)", T.Void));
+            case "stopwaiting": return Approx("held in place", R($"{St()}.WaitOn({actorSelf()}, {Pkg(c, 0)}, False)", T.Void));
             case "getdestroyed": return R($"{St()}.IsDestroyed({self()})", T.Bool);
             case "setdestroyed": return R($"{St()}.SetDestroyed({self()}, {ArgNum(c, 0)} != 0)", T.Void);
             case "getrestrained": return R($"{St()}.IsRestrained({actorSelf()})", T.Bool);
@@ -1230,9 +1578,9 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "showbirthsignmenu": return R($"{St()}.ShowBirthsignMenu()", T.Void);
             case "getisplayerbirthsign": return R($"{St()}.IsPlayerBirthsign({world.BirthsignIndex(Word(c, 0))})", T.Bool);
             case "showracemenu": return R("Game.ShowRaceMenu()", T.Void);
-            case "showenchantment": return R($"{St()}.ShowEnchanting()", T.Void);
-            case "showclassmenu": return R("; ShowClassMenu: Skyrim's player has no class to choose (skills level by use alone)", T.Void);
-            case "showspellmaking": return R("; ShowSpellMaking: Skyrim has no spell making; its spells come from tomes and trainers", T.Void);
+            case "showenchantment": return Approx("Skyrim's enchanting table", R($"{St()}.ShowEnchanting()", T.Void));
+            case "showclassmenu": return Nothing("; ShowClassMenu: Skyrim's player has no class to choose (skills level by use alone)");
+            case "showspellmaking": return Nothing("; ShowSpellMaking: Skyrim has no spell making; its spells come from tomes and trainers");
             case "setclass": return R($"{actorSelf()}.GetActorBase().SetClass({FormProperty(Word(c, 0), "Class")})", T.Void);
             case "getisplayablerace": return R($"{actorSelf()}.GetRace().IsPlayable()", T.Bool);
             // vampires
@@ -1253,29 +1601,26 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "setactorsai": return R($"{actorSelf()}.EnableAI({ArgNum(c, 0)} != 0)", T.Void);
             case "getgold": return R($"{self()}.GetItemCount(Game.GetForm(0xF))", T.Int);
             case "getisalerted": return R($"{actorSelf()}.IsAlerted()", T.Bool);
-            case "isidleplaying": return R($"TMObState.IsIdlePlaying({actorSelf()})", T.Bool);
+            case "isidleplaying": return Approx("an animation drives the actor", R($"TMObState.IsIdlePlaying({actorSelf()})", T.Bool));
             case "isactor": return R($"(({Paren(self())} as Form) as Actor) != None", T.Bool);
             case "getiscreature": return R($"TMObState.IsCreature({actorSelf()})", T.Bool);
             case "isguard": return R($"{actorSelf()}.IsGuard() || {actorSelf()}.IsInFaction({ModForm("OBGuards", "Faction")})", T.Bool);
-            case "essentialdeathreload": return R($"TMObState.EssentialDeathReload({Convert(Arg(c, 0), T.String)})", T.Void);
+            case "essentialdeathreload": return Approx("the player killed", R($"TMObState.EssentialDeathReload({Convert(Arg(c, 0), T.String)})", T.Void));
             case "autosave": return R("Game.RequestAutoSave()", T.Void);
             case "setdoordefaultopen": return R($"{self()}.SetOpen({ArgNum(c, 0)} != 0)", T.Void);
-            case "getknockedstate": return R($"TMObState.KnockedState({actorSelf()})", T.Int);
+            case "getknockedstate": return Approx("paralysed, unconscious or bleeding out", R($"TMObState.KnockedState({actorSelf()})", T.Int));
             case "showdialogsubtitles":
                 return R(c.Args.Count > 0 ? $"Utility.SetINIBool(\"bDialogueSubtitles:Interface\", {ArgNum(c, 0)} != 0)" : "Utility.SetINIBool(\"bDialogueSubtitles:Interface\", !Utility.GetINIBool(\"bDialogueSubtitles:Interface\"))", T.Void);
             case "createfullactorcopy": return R($"TMObState.FullActorCopy({actorSelf()})", T.Actor);
             case "deletefullactorcopy": return R($"{self()}.Disable()\n{self()}.Delete()", T.Void);
-            case "modpcskill":
-            {
-                string skill = AV(Word(c, 0));
-                return SkyrimSkills.Contains(skill)
-                    ? R($"Game.IncrementSkillBy(\"{skill}\", {Convert(Arg(c, 1), T.Int)})", T.Void)
-                    : R($"{PlayerRef()}.ModActorValue(\"{AttributeAV(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
-            }
+            // ModPCSkill: raised as by use (counting towards the level); on an attribute, the attribute changed.
+            case "modpcskill" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 8 and var ps: return R($"{St()}.RaisePlayerSkill({ps}, {ArgInt(c, 1)})", T.Void);
+            case "modpcskill" or "modpcattribute" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var pa: return R($"{St()}.ModStat({PlayerRef()}, {pa}, {ArgNum(c, 1)})", T.Void);
+            case "modpcskill" or "modpcattribute": return Fail($"{c.Function} of {Word(c, 0)}, which isn't an attribute or skill", "");
             case "getplayercontrolsdisabled": return R("TMObState.ControlsDisabled()", T.Bool);
             case "getheadingangle": return R($"{self()}.GetHeadingAngle({AsRef(Arg(c, 0))})", T.Float);
             case "isactordetected": return R($"TMObState.IsDetectedByAnyone({actorSelf()})", T.Bool);
-            case "isindangerouswater": return R($"{actorSelf()}.IsSwimming()", T.Bool);
+            case "isindangerouswater": return Approx("swimming", R($"{actorSelf()}.IsSwimming()", T.Bool));
             case "enablefasttravel": return R($"Game.EnableFastTravel({ArgNum(c, 0, "1")} != 0)", T.Void);
             case "getshouldattack": return R($"({actorSelf()}.IsHostileToActor({AsActor(Arg(c, 0))}) as Int)", T.Int);
             case "getforcesneak": return R($"{actorSelf()}.IsSneaking()", T.Bool);
@@ -1285,7 +1630,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "getarmorrating": return R($"{actorSelf()}.GetActorValue(\"DamageResist\")", T.Float);
             case "getcurrentweatherpercent": return R("Weather.GetCurrentWeatherTransition()", T.Float);
             case "isxbox": return R("False", T.Bool);
-            case "setrigidbodymass": return R($"TMObState.SetMass({self()}, {Convert(Arg(c, 0), T.Float)})", T.Void);
+            case "setrigidbodymass": return Approx("pinned or free", R($"TMObState.SetMass({self()}, {Convert(Arg(c, 0), T.Float)})", T.Void));
             case "removeme":
                 if (kind == "MagicEffect") return R("Dispel()", T.Void);
                 if (kind != "Object") return Fail("RemoveMe outside an object script", "None");
@@ -1295,9 +1640,10 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 if (kind != "Object") return Fail("GetContainer outside an object script", "None");
                 usesContainer = true;
                 return R("__container", T.Ref);
+            // The time since the effect's ScriptEffectUpdate last ran: the run's, as GetSecondsPassed.
             case "scripteffectelapsedseconds":
-                usesEffectElapsed = true;
-                return R("EffectElapsed()", T.Float);
+                usesSecondsPassed = true;
+                return R("__framePassed", T.Float);
             case "getstartingangle" or "getstartingpos":
                 if (kind != "Object") return R($"{self()}.Get{(canonical == "getstartingpos" ? "Position" : "Angle")}{Axis(c)}()", T.Float);
                 usesStart = true;
@@ -1312,14 +1658,14 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             // nothing to do in Skyrim: hints and switches for Oblivion's engine
             case "setsceneiscomplex": return R("; SetSceneIsComplex: a rendering hint for Oblivion's engine; Skyrim needs none", T.Void);
             case "purgecellbuffers": return R("; PurgeCellBuffers: freed Oblivion's cell memory; Skyrim manages its own", T.Void);
-            case "setshowquestitems": return R("; SetShowQuestItems: Skyrim always lists and announces quest items", T.Void);
-            case "setallreachable" or "setallvisible": return R($"; {info?.Name}: a pathing and visibility shortcut of Oblivion's engine; Skyrim's navmesh and occlusion need none", T.Void);
-            case "setnoavoidance": return R("; SetNoAvoidance: Skyrim's actors steer around each other on their own; there's no switch for it", T.Void);
-            case "resetfalldamagetimer": return R("; ResetFallDamageTimer: Skyrim measures a fall from where it starts, and a MoveTo isn't one", T.Void);
+            case "setshowquestitems": return Nothing("; SetShowQuestItems: Skyrim always lists and announces quest items");
+            case "setallreachable" or "setallvisible": return Nothing($"; {info?.Name}: a pathing and visibility shortcut of Oblivion's engine; Skyrim's navmesh and occlusion need none");
+            case "setnoavoidance": return Nothing("; SetNoAvoidance: Skyrim's actors steer around each other on their own; there's no switch for it");
+            case "resetfalldamagetimer": return Nothing("; ResetFallDamageTimer: Skyrim measures a fall from where it starts, and a MoveTo isn't one");
             case "refreshtopiclist": return R("; RefreshTopicList: Skyrim reads the topics again each time the list shows", T.Void);
             case "ispcsleeping": return R($"{St()}.PCSleeping", T.Bool);
             case "istimepassing": return R($"{St()}.PCSleeping || UI.IsMenuOpen(\"Sleep/Wait Menu\")", T.Bool);
-            case "wakeuppc": return R($"{St()}.WakeUpPC()", T.Void);
+            case "wakeuppc": return Approx("the rest menu closed", R($"{St()}.WakeUpPC()", T.Void));
             case "addachievement": return R("; AddAchievement: console achievements; none for a converted game", T.Void);
         }
         if (info is null) return Fail($"{c.Function} (unknown)", "None");
@@ -1333,7 +1679,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     string Pkg(Call c, int i) => c.Args.Count > i && c.Args[i] is Name n && world.Find(n.Id) is { PapyrusType: "Package" } ? FormProperty(n.Id, "Package")
         : c.Args.Count > i ? $"({Arg(c, i).Text} as Package)" : "None";
     /// <summary>The actor a call is on; in a quest script without one, the player (crime gold).</summary>
-    string ActorOrPlayer(Call c) => c.Target is null && kind == "Quest" ? PlayerRef() : AsActor(Subject(c));
+    string ActorOrPlayer(Call c) => c.Target is null && kind is "Quest" or "Stage" ? PlayerRef() : AsActor(Subject(c));
     /// <summary>A faction whose crimes against it TMObState tracks (cf_: listed in TMObState.CrimeFactions).</summary>
     string CrimeFaction(Call c, int i)
     {
@@ -1356,6 +1702,13 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         properties.TryAdd(prop, new Property(prop, "ObjectReference", "@anchor:" + cellOrWorld));
         return prop;
     }
+    /// <summary>A topic's OBTopicKnown global (ObDialogue).</summary>
+    string TopicKnown(string topic)
+    {
+        string prop = "tk_" + Clean(topic);
+        properties.TryAdd(prop, new Property(prop, "GlobalVariable", "@topic:" + topic));
+        return prop;
+    }
     /// <summary>The effect shader of an Oblivion magic effect (by its code), as converted.</summary>
     string EffectVisual(string code)
     {
@@ -1372,17 +1725,6 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     }
     /// <summary>An owner given as a reference or as a base (IsOwner): its base.</summary>
     static string OwnerBase(Code c) => c.Type is T.Actor ? $"{c.Text}.GetActorBase()" : c.Type is T.Ref ? $"{c.Text}.GetBaseObject()" : c.Text;
-    static readonly HashSet<string> SkyrimSkills = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "OneHanded", "TwoHanded", "Marksman", "Block", "Smithing", "HeavyArmor", "LightArmor", "Pickpocket", "Lockpicking", "Sneak",
-        "Alchemy", "Speechcraft", "Alteration", "Conjuration", "Destruction", "Illusion", "Restoration", "Enchanting",
-    };
-    /// <summary>An Oblivion attribute as the Skyrim actor value standing for it (as converted magic does).</summary>
-    static string AttributeAV(string attribute) => attribute.ToLowerInvariant() switch
-    {
-        "strength" => "CarryWeight", "intelligence" => "Magicka", "willpower" => "MagickaRate", "agility" => "Marksman",
-        "speed" => "SpeedMult", "endurance" => "Health", "personality" => "Speechcraft", "luck" => "CritChance", _ => AV(attribute),
-    };
 
     string Quest(Call c, int i) => c.Args.Count > i && c.Args[i] is Name n && world.Find(n.Id) is { PapyrusType: "Quest" } ? FormProperty(n.Id, "Quest") : $"({Arg(c, i).Text} as Quest)";
     string Spell(Call c, int i) => c.Args.Count > i && c.Args[i] is Name n && world.Find(n.Id) is { } f ? $"({FormProperty(n.Id, f.PapyrusType)} as Spell)" : $"({Arg(c, i).Text} as Spell)";
@@ -1390,15 +1732,9 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
 
     Code EquippedObject(Call c)
     {
-        // OBSE slots: 16 weapon (and 13/14 for others in Oblivion's numbering), otherwise an armor slot.
-        string slot = ArgNum(c, 0);
-        string a = AsActor(Subject(c));
-        return slot switch
-        {
-            "16" => new Code($"{a}.GetEquippedWeapon()", T.Form),
-            "17" => new Code($"{a}.GetEquippedWeapon(true)", T.Form),
-            _ => new Code($"{a}.GetWornForm(Armor.GetMaskForSlot({30 + int.Parse(slot, CultureInfo.InvariantCulture) % 32}))", T.Form),
-        };
+        // OBSE's slot numbers (Oblivion's biped slots, 16 the weapon, 17 the ammunition) on the Skyrim slots the
+        // converted items wear them in: TMObState.EquippedObject.
+        return new Code($"TMObState.EquippedObject({AsActor(Subject(c))}, {ArgInt(c, 0)})", T.Form);
     }
 
     Code UserCall(Call c)
@@ -1406,7 +1742,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         if (c.Args.FirstOrDefault() is not Name fnName) return Fail("Call of a function held in a variable", "0");
         string script = world.ScriptName(fnName.Id);
         var args = c.Args.Skip(1).Select(a => Expr(a).Text);
-        string self = c.Target is not null ? AsRef(Subject(c)) : kind is "Object" ? "Self" : kind == "Function" ? "akSelf" : "None";
+        string self = c.Target is not null ? AsRef(Subject(c)) : kind is "Object" ? "Self" : kind == "Function" ? "akSelf" : kind == "Result" ? "akSpeakerRef" : "None";
         string fnQuest = Generated("TMObFunctions", "Quest");
         return new Code($"({fnQuest} as {script}).Run({self}{string.Concat(args.Select(a => ", " + a))})", T.Float);
     }
@@ -1469,6 +1805,9 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         return new Code($"__button = {Generated(id, "Message")}.Show({string.Join(", ", args)}){after}", T.Void);
     }
 
+    /// <summary>A skill's nearest Skyrim actor value (TMObState.SkyrimStatAv, for actors that aren't Oblivion's).</summary>
+    public static string SkyrimAv(string skill) => AV(skill) switch { "SpeedMult" or "JumpingBonus" or "UnarmedDamage" => "", var v => v };
+
     /// <summary>Oblivion actor values by Skyrim's names (where they differ).</summary>
     static string AV(string av) => av.ToLowerInvariant() switch
     {
@@ -1502,6 +1841,18 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         "restoration" => "Restoration",
         _ => av,
     };
+
+    /// <summary>An actor value as Skyrim's (<see cref="AV"/>), a gap where Skyrim's isn't Oblivion's: a skill folded into
+    /// another (Blunt into Two-handed, Mysticism into Alteration, Mercantile into Speech), one standing for another (Athletics
+    /// as speed, Acrobatics as jumping, Hand to Hand as unarmed damage), an attribute Skyrim hasn't.</summary>
+    string AVg(string av)
+    {
+        string sk = AV(av);
+        if (av.ToLowerInvariant() is "blunt" or "mysticism" or "mercantile" or "athletics" or "acrobatics" or "handtohand"
+            or "strength" or "intelligence" or "willpower" or "agility" or "speed" or "endurance" or "personality" or "luck")
+            Gap($"actor value {av}: as Skyrim's {sk}");
+        return sk;
+    }
 
     /// <summary>Oblivion's control numbers (IsControlPressed) by Skyrim's control names.</summary>
     static string ControlName(string n) => n switch

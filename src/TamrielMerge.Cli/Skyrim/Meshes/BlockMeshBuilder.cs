@@ -795,7 +795,9 @@ public static class BlockMeshBuilder
     /// </summary>
     /// <param name="onTarget">The first body goes on <paramref name="root"/> itself (a moving part's node, as vanilla
     /// animated doors carry theirs), the rest on child nodes.</param>
-    internal static int AddCollision(NifFile nif, NiNode root, List<(Vector3[] Pts, Vector3 N, Tex Tex)> polys, bool moving, uint? materialOverride = null, bool onTarget = false)
+    /// <param name="trap">A trap's: on the trap layer (14, quality 0), as vanilla traps' striking parts are (the Falmer
+    /// claws, the battering ram, the bear trap's jaws), so what it hits gets OnTrapHit.</param>
+    internal static int AddCollision(NifFile nif, NiNode root, List<(Vector3[] Pts, Vector3 N, Tex Tex)> polys, bool moving, uint? materialOverride = null, bool onTarget = false, bool trap = false)
     {
         var hdr = nif.GetHeader();
         int total = 0, chunk = 0;
@@ -829,14 +831,14 @@ public static class BlockMeshBuilder
             body.shapeRef.index = listId;
             // Static: layer 1, fixed (vanilla Imperial halls). Moving: layer 2 animated static, keyframed (vanilla
             // animated architecture such as Nocturnal's chamber pieces), so collision follows the object.
-            body.collisionFilter.layer = (byte)(moving ? 2 : 1);
-            body.collisionFilterCopy.layer = (byte)(moving ? 2 : 1);
+            body.collisionFilter.layer = (byte)(trap ? 14 : moving ? 2 : 1);
+            body.collisionFilterCopy.layer = (byte)(trap ? 14 : moving ? 2 : 1);
             body.collisionResponse = hkResponseType.RESPONSE_SIMPLE_CONTACT;
             body.processContactCallbackDelay = 0xFFFF;
             body.motionSystem = (byte)(moving ? 4 : 5);
             body.deactivatorType = 1;
             body.solverDeactivation = (byte)(moving ? 2 : 1);
-            body.qualityType = (byte)(moving ? 1 : 0);
+            body.qualityType = (byte)(moving && !trap ? 1 : 0);
             body.mass = 0;
             body.rollingFrictionMult = 0;
             body.friction = 0.5f;

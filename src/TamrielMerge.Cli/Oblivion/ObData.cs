@@ -47,6 +47,14 @@ public sealed class ObData
 
     public bool Exists(string path) => files.ContainsKey(Normalize(path)) || File.Exists(Path.Combine(DataDir, Normalize(path))) || StandIns.ContainsKey(Normalize(path));
 
+    /// <summary>A file's size as stored (in its archive, else loose), or 0 when the game hasn't it.</summary>
+    public long Size(string path)
+    {
+        if (files.TryGetValue(Normalize(path), out var bsa)) return bsa.Size(path);
+        var loose = new FileInfo(Path.Combine(DataDir, Normalize(path)));
+        return loose.Exists ? loose.Length : 0;
+    }
+
     public byte[]? Read(string path)
     {
         if (files.TryGetValue(Normalize(path), out var bsa)) return bsa.Read(path);

@@ -38,8 +38,11 @@ public sealed partial class MwPapyrus
             sb.AppendLine("    RegisterForSingleUpdate(5.0)");
             sb.AppendLine("    Return");
             sb.AppendLine("  EndIf");
-            sb.AppendLine($"  RegisterForSingleUpdate({iv})");
+            // Asked for again once the run is over (a Return in it ends only MwTick; StopScript stops the quest).
             sb.AppendLine("  MwTick()");
+            sb.AppendLine("  If IsRunning()");
+            sb.AppendLine($"    RegisterForSingleUpdate({iv})");
+            sb.AppendLine("  EndIf");
             sb.AppendLine("EndEvent");
             sb.AppendLine();
             if (sleep) WriteSleepEvents(sb, global: true);
@@ -50,7 +53,10 @@ public sealed partial class MwPapyrus
         var mirrored = locals.Keys.Where(v => world.IsDialogueLocal(v) && ctx.OnActor).ToList();
         bool startPos = uses.Contains("startpos");
         bool items = ctx.IsItem;
-        if (activate || polls || mirrored.Count > 0 || startPos || sleep)
+        // DontSaveObject: Morrowind keeps nothing of the script in a save, so its locals start again from 0 after each load
+        // (TMMwPlayerState sends TMMwGameLoaded): the disease carriers give their disease again.
+        bool dontSave = uses.Contains("dontsave");
+        if (activate || polls || mirrored.Count > 0 || startPos || sleep || dontSave)
         {
             sb.AppendLine("Event OnInit()");
             sb.AppendLine("  MwInit()");
@@ -89,8 +95,16 @@ public sealed partial class MwPapyrus
                 sb.AppendLine("  EndIf");
             }
             if (sleep) sb.AppendLine("  RegisterForSleep()");
+            if (dontSave) sb.AppendLine("  RegisterForModEvent(\"TMMwGameLoaded\", \"OnMwGameLoaded\")");
             if (polls) sb.AppendLine("  RegisterForSingleUpdate(0.1)");
             sb.AppendLine("EndFunction");
+            sb.AppendLine();
+        }
+        if (dontSave)
+        {
+            sb.AppendLine("Event OnMwGameLoaded(String asEventName, String asArg, Float afNum, Form akSender)");
+            foreach (var (v, t) in locals) sb.AppendLine($"  {Var(v)} = {(t == T.Float ? "0.0" : "0")}");
+            sb.AppendLine("EndEvent");
             sb.AppendLine();
         }
         if (polls)
@@ -107,8 +121,10 @@ public sealed partial class MwPapyrus
             sb.AppendLine();
             sb.AppendLine("Event OnUpdate()");
             sb.AppendLine(items ? "  If Is3DLoaded() || __carried" : "  If Is3DLoaded()");
-            sb.AppendLine($"    RegisterForSingleUpdate({iv})");
             sb.AppendLine("    MwTick()");
+            sb.AppendLine(items ? "    If Is3DLoaded() || __carried" : "    If Is3DLoaded()");
+            sb.AppendLine($"      RegisterForSingleUpdate({iv})");
+            sb.AppendLine("    EndIf");
             sb.AppendLine("  EndIf");
             sb.AppendLine("EndEvent");
             sb.AppendLine();
@@ -269,19 +285,28 @@ public sealed partial class MwPapyrus
 
     static void WriteSleepEvents(StringBuilder sb, bool global = false)
     {
-        // GetPCSleep: Morrowind's scripts act while the player rests (an ambush wakes them); Skyrim's run when the
-        // sleep starts, and whatever they place is there on waking.
+        // GetPCSleep: Morrowind's scripts run on through the rest (its scripts run in menus, every frame), so here they
+        // run twice a second while the rest menu is open, an ambush's WakeUpPC ending it there.
         sb.AppendLine("Event OnSleepStart(Float afSleepStartTime, Float afDesiredSleepEndTime)");
         sb.AppendLine("  __pcSleep = True");
         sb.AppendLine("  __sleepStart = afSleepStartTime");
         sb.AppendLine("  __sleepEnd = afDesiredSleepEndTime");
+        sb.AppendLine("  Int ticks = 0");
+        sb.AppendLine("  While __pcSleep && ticks < 1200");
         if (global)
         {
-            sb.AppendLine("  If TMMwScript.InMorrowind() && IsRunning()");
-            sb.AppendLine("    MwTick()");
-            sb.AppendLine("  EndIf");
+            sb.AppendLine("    If TMMwScript.InMorrowind() && IsRunning()");
+            sb.AppendLine("      MwTick()");
+            sb.AppendLine("    EndIf");
         }
-        else sb.AppendLine("  MwTick()");
+        else sb.AppendLine("    MwTick()");
+        sb.AppendLine("    ticks += 1");
+        sb.AppendLine("    If !UI.IsMenuOpen(\"Sleep/Wait Menu\")");
+        sb.AppendLine("      __pcSleep = False");
+        sb.AppendLine("    Else");
+        sb.AppendLine("      Utility.WaitMenuMode(0.5)");
+        sb.AppendLine("    EndIf");
+        sb.AppendLine("  EndWhile");
         sb.AppendLine("EndEvent");
         sb.AppendLine();
         sb.AppendLine("Event OnSleepStop(Bool abInterrupted)");
@@ -293,7 +318,7 @@ public sealed partial class MwPapyrus
     void WriteHelpers(StringBuilder sb)
     {
         void Lines(params string[] lines) { foreach (var l in lines) sb.AppendLine(l); }
-        if (uses.Contains("dt")) Lines("Float __dt", "Float __last = -1.0");
+        if (uses.Contains("dt")) Lines("Float __dt", "Float __last = -1.0", "Int __lastLoads = -1");
         if (uses.Contains("cellchanged")) Lines("Cell __lastCell", "Bool __cellSeen", "Bool __cellChanged");
         if (uses.Contains("onactivate")) Lines("Bool __activated", "Bool __blocking", "Bool __blockSet");
         if (uses.Contains("onactivate") || uses.Contains("actionref")) Lines("ObjectReference __actionRef");
@@ -320,7 +345,7 @@ public sealed partial class MwPapyrus
         if (uses.Contains("startpos")) Lines("Bool __startSet", "Float __sx", "Float __sy", "Float __sz", "Float __sax", "Float __say", "Float __saz");
         foreach (var s in loopSounds.Order(StringComparer.Ordinal)) Lines($"Int __loop_{s}");
         if (uses.Contains("say")) Lines("Float __sayUntil");
-        if (uses.Contains("sound")) Lines("Float[] __soundUntil", "Form[] __soundOf");
+        if (uses.Contains("sound")) Lines("Float[] __soundUntil", "Form[] __soundOf", "Int[] __soundInstance");
         if (uses.Contains("button"))
         {
             Lines("Int __button = -1", "",
@@ -343,11 +368,17 @@ public sealed partial class MwPapyrus
             Lines("", "; Say: Skyrim doesn't report when a line ends: SayDone after the recording's length.",
                 "Function MwSaid(Float afSeconds)", "  __sayUntil = Utility.GetCurrentRealTime() + afSeconds", "EndFunction");
         if (uses.Contains("sound"))
-            Lines("", "; GetSoundPlaying: a sound plays for its file's length after PlaySound.",
-                "Function MwPlayed(Form akSound, Float afSeconds)",
+            Lines("", "; GetSoundPlaying: a sound plays for its file's length after PlaySound; StopSound stops it (its instance).",
+                "Function MwPlayed(Form akSound, Float afSeconds, Int aiInstance = 0, Float afVolume = -1.0)",
+                "  If aiInstance && afVolume >= 0.0", "    Sound.SetInstanceVolume(aiInstance, afVolume)", "  EndIf",
                 "  If !__soundOf", "    __soundOf = new Form[8]", "    __soundUntil = new Float[8]", "  EndIf",
+                "  If !__soundInstance", "    __soundInstance = new Int[8]", "  EndIf",
                 "  Int i = __soundOf.Find(akSound)", "  If i < 0", "    i = __soundOf.Find(None)", "  EndIf", "  If i < 0", "    i = 0", "  EndIf",
-                "  __soundOf[i] = akSound", "  __soundUntil[i] = Utility.GetCurrentRealTime() + afSeconds", "EndFunction", "",
+                "  __soundOf[i] = akSound", "  __soundUntil[i] = Utility.GetCurrentRealTime() + afSeconds", "  __soundInstance[i] = aiInstance", "EndFunction", "",
+                "Function MwStopSound(Form akSound)",
+                "  If !__soundOf || !__soundInstance", "    Return", "  EndIf",
+                "  Int i = __soundOf.Find(akSound)", "  If i >= 0", "    If __soundInstance[i]", "      Sound.StopInstance(__soundInstance[i])", "    EndIf",
+                "    __soundUntil[i] = 0.0", "    __soundInstance[i] = 0", "  EndIf", "EndFunction", "",
                 "Bool Function MwSoundPlaying(Form akSound)",
                 "  If !__soundOf", "    Return False", "  EndIf",
                 "  Int i = __soundOf.Find(akSound)", "  Return i >= 0 && Utility.GetCurrentRealTime() < __soundUntil[i]", "EndFunction");

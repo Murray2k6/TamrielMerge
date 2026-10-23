@@ -226,12 +226,16 @@ public sealed class RgScene
     /// <summary>Arrival points (MPMK: the count, then x/y/z (i32) of each marker, then a type byte for each), which
     /// LoadWorld names by index.</summary>
     public List<Vector3> Markers { get; } = [];
-    /// <summary>Raw MPOB fields the builders use: object type (1 actor/prop, 2 sound, 3 effect, 4 light, 6 marker), by object.</summary>
+    /// <summary>Raw MPOB fields the builders use: object type (1 actor/prop, 2 sound, 3 effect, 4 torch or lamp, 6 local light: ObjectLights), by object.</summary>
     public List<int> ObjectTypes { get; } = [];
     /// <summary>Lights (MPSL: 42-byte records; position as 3 x i32 at 8, range (i32) at 0x14, colour as 3 x i16 at 0x18 —
-    /// mostly stored negative, the magnitude is the colour — and the light channel map at 0x1E, all zero for unused
+    /// signed strengths, a negative channel subtracting light (Redguard Preservation, formats/RGM.html; 760 of the
+    /// 1,441 active lights are all negative, darkening) — and the light channel map at 0x1E, all zero for unused
     /// records, which are skipped).</summary>
-    public List<(uint Rgb, Vector3 Position, int Range)> Lights { get; } = [];
+    public List<(int R, int G, int B, Vector3 Position, int Range)> Lights { get; } = [];
+    /// <summary>Each object's light fields (MPOB at 0x34 intensity, 0x36 radius, 0x3C/0x3E/0x40 signed red, green,
+    /// blue as i16): a type-6 object is a local light of that radius and colour (formats/RGM.html).</summary>
+    public List<(int Intensity, int Radius, int R, int G, int B)> ObjectLights { get; } = [];
     /// <summary>Flat textured quads (MPSF: 24-byte records): position and texture (bank, image).</summary>
     public List<(Vector3 Position, int Bank, int Image)> Flats { get; } = [];
     /// <summary>A rope or chain (MPRP: 80-byte records — its top as 3 x i32 in 256ths at 4, the number of links (i16) at
@@ -287,6 +291,7 @@ public sealed class RgScene
                 var rot = Matrix4x4.CreateRotationZ(-A(0x2E)) * Matrix4x4.CreateRotationX(-A(0x26)) * Matrix4x4.CreateRotationY(-A(0x2A));
                 scene.Objects.Add(new Placed(model, script, pos, rot, b[o + 0x18] != 0));
                 scene.ObjectTypes.Add(b[o + 4]);
+                scene.ObjectLights.Add((BitConverter.ToInt16(b, o + 0x34), BitConverter.ToInt16(b, o + 0x36), BitConverter.ToInt16(b, o + 0x3C), BitConverter.ToInt16(b, o + 0x3E), BitConverter.ToInt16(b, o + 0x40)));
             }
         }
         if (scene.Sections.TryGetValue("MPMK", out var mpmk))
@@ -306,8 +311,8 @@ public sealed class RgScene
             {
                 int o = mpsl.Offset + 4 + i * 42;
                 if (b[o + 0x1F] != 1 || b[o + 0x25] != 7) continue;   // channel map 0..7: an active light
-                uint C(int at) => (uint)Math.Min(255, Math.Abs((int)BitConverter.ToInt16(b, o + at)));
-                scene.Lights.Add((C(0x18) << 16 | C(0x1A) << 8 | C(0x1C), new Vector3(BitConverter.ToInt32(b, o + 8), BitConverter.ToInt32(b, o + 12), BitConverter.ToInt32(b, o + 16)), BitConverter.ToInt32(b, o + 0x14)));
+                int C(int at) => Math.Clamp((int)BitConverter.ToInt16(b, o + at), -255, 255);
+                scene.Lights.Add((C(0x18), C(0x1A), C(0x1C), new Vector3(BitConverter.ToInt32(b, o + 8), BitConverter.ToInt32(b, o + 12), BitConverter.ToInt32(b, o + 16)), BitConverter.ToInt32(b, o + 0x14)));
             }
         }
         if (scene.Sections.TryGetValue("MPRP", out var mprp))

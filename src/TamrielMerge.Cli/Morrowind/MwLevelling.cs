@@ -22,6 +22,14 @@ public sealed partial class MwPluginBuilder
         "OneHanded", "Archery", "Mercantile", "Speech", "HandToHand",
     ];
 
+    /// <summary>Morrowind's weapon skills Skyrim folds into One- and Two-handed, also kept as the progression's hidden
+    /// skills (ProgressionSkills.WeaponSkills): a class or race naming one names both.</summary>
+    static readonly Dictionary<int, string> MwHiddenSkills = new() { [4] = "BluntWeapon", [5] = "LongBlade", [6] = "Axe", [22] = "ShortBlade" };
+
+    /// <summary>The progression's skills a Morrowind skill is: Skyrim's or the progression's, and its hidden one.</summary>
+    static IEnumerable<string> MwSkillTargets(int index) =>
+        MwHiddenSkills.TryGetValue(index, out var hidden) ? [MwSkillIds[index], hidden] : [MwSkillIds[index]];
+
     /// <summary>Morrowind's races (RACE ids) as Skyrim's.</summary>
     static readonly (string Mw, string Skyrim)[] LevellingRaces =
     [
@@ -57,15 +65,18 @@ public sealed partial class MwPluginBuilder
                 {
                     skillSpec[index] = d.Int(4);
                     // The first Morrowind skill a shared one stands for decides (Long Blade before Short Blade for One-Handed).
-                    governing.TryAdd(MwSkillIds[index], d.Int(0));
-                    specialization.TryAdd(MwSkillIds[index], d.Int(4));
+                    foreach (var id in MwSkillTargets(index))
+                    {
+                        governing.TryAdd(id, d.Int(0));
+                        specialization.TryAdd(id, d.Int(4));
+                    }
                 }
         var classes = new List<GameClass>();
         foreach (var rec in OwnRecords("CLAS").Values.OrderBy(o => o.Str("FNAM") ?? o.Id, StringComparer.OrdinalIgnoreCase))
         {
             if (rec.Get("CLDT") is not { Data.Length: >= 56 } d || (d.Int(52) & 1) == 0) continue;   // playable classes only
-            var major = Enumerable.Range(0, 5).Select(k => d.Int(16 + k * 8)).Where(s => s is >= 0 and < 27).Select(s => MwSkillIds[s]).Distinct().ToArray();
-            var minor = Enumerable.Range(0, 5).Select(k => d.Int(12 + k * 8)).Where(s => s is >= 0 and < 27).Select(s => MwSkillIds[s]).Distinct().Except(major).ToArray();
+            var major = Enumerable.Range(0, 5).Select(k => d.Int(16 + k * 8)).Where(s => s is >= 0 and < 27).SelectMany(MwSkillTargets).Distinct().ToArray();
+            var minor = Enumerable.Range(0, 5).Select(k => d.Int(12 + k * 8)).Where(s => s is >= 0 and < 27).SelectMany(MwSkillTargets).Distinct().Except(major).ToArray();
             classes.Add(new GameClass(rec.Id, rec.Str("FNAM") ?? rec.Id, rec.Str("DESC") ?? "", d.Int(8), [d.Int(0), d.Int(4)], major, minor));
         }
         var races = new Dictionary<string, int[][]>();
@@ -82,7 +93,7 @@ public sealed partial class MwPluginBuilder
                 var bonus = new Dictionary<string, int>();
                 for (int i = 0; i < 7; i++)
                     if (r.Int(i * 8) is >= 0 and < 27 and var s && r.Int(i * 8 + 4) is > 0 and var b)
-                        bonus[MwSkillIds[s]] = Math.Max(bonus.GetValueOrDefault(MwSkillIds[s]), b);
+                        foreach (var id in MwSkillTargets(s)) bonus[id] = Math.Max(bonus.GetValueOrDefault(id), b);
                 raceSkills[skyrim] = bonus;
             }
             // Its spells (NPCS): the racial abilities (resistances, the Dunmer's and Nords' powers...).

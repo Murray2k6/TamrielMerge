@@ -363,8 +363,21 @@ Bool Function InCells(Actor akWho, FormList akCells) Global
 EndFunction
 
 ; GetWaterLevel: Morrowind's sea is at 0 outdoors; indoors the cell's own water, which Papyrus can't read.
+; GetWaterLevel: the water height of the reference's cell (the converter keeps Morrowind's; an exterior's is the
+; worldspace's, 0), 0 where there is none.
 Float Function WaterLevel(ObjectReference r) Global
-  Return 0.0
+  If !r
+    Return 0.0
+  EndIf
+  Cell c = r.GetParentCell()
+  If !c
+    Return 0.0
+  EndIf
+  Float level = c.GetActualWaterLevel()
+  If level < -1000000.0
+    Return 0.0
+  EndIf
+  Return level
 EndFunction
 
 ; ---- actors ----
@@ -377,6 +390,8 @@ Function ForceGreeting(Actor a, Actor akPlayer) Global
 EndFunction
 
 ; Disposition towards the player: Variable09 holds it minus 50 (Skyrim's Disposition, TMMwInfo), kept within 0-100.
+; GetDisposition: what the actor feels for the player (a Morrowind person's OpenMW's derived disposition, which
+; TMMwActorAI keeps in Variable09, Charm on top).
 Int Function GetDisposition(Actor a) Global
   If !a
     Return 0
@@ -384,8 +399,15 @@ Int Function GetDisposition(Actor a) Global
   Return (50.0 + a.GetActorValue("Variable09")) as Int
 EndFunction
 
+; SetDisposition / ModDisposition: a Morrowind person's base disposition, from which its derived one follows; anyone
+; else's Variable09 as it is.
 Function SetDisposition(Actor a, Float afValue) Global
   If !a
+    Return
+  EndIf
+  TMMwActorAI mw = a as TMMwActorAI
+  If mw && mw.IsPerson
+    mw.SetBaseDisposition(afValue)
     Return
   EndIf
   If afValue < 0.0
@@ -397,17 +419,27 @@ Function SetDisposition(Actor a, Float afValue) Global
 EndFunction
 
 Function ModDisposition(Actor a, Float afBy) Global
-  If a
-    SetDisposition(a, GetDisposition(a) + afBy)
+  If !a
+    Return
   EndIf
+  TMMwActorAI mw = a as TMMwActorAI
+  If mw && mw.IsPerson
+    mw.SetBaseDisposition(mw.GetBaseDisposition() + afBy)
+    Return
+  EndIf
+  SetDisposition(a, GetDisposition(a) + afBy)
 EndFunction
 
-; Hello, Fight, Flee and Alarm (0-100): kept in Variable05-08 as Morrowind's numbers, and set on Skyrim's nearest
-; values - Fight on Aggression (80 and more attacks on sight, as the converter sets it), Flee on Confidence, Alarm on
-; Assistance. Until a script sets one, it reads from the Skyrim value.
+; Hello, Fight, Flee and Alarm (0-100): Morrowind's own on its people and creatures (TMMwActorAI, from their records,
+; which also does what Morrowind's engine does with them). Anyone else (a Skyrim actor): kept in Variable05-08, set on
+; Skyrim's nearest values - Fight on Aggression, Flee on Confidence, Alarm on Morality.
 Int Function GetAi(Actor a, String asWhich) Global
   If !a
     Return 0
+  EndIf
+  TMMwActorAI mw = a as TMMwActorAI
+  If mw
+    Return mw.GetSetting(asWhich)
   EndIf
   Float stored = a.GetActorValue(AiVariable(asWhich))
   If stored != 0.0
@@ -425,13 +457,19 @@ Int Function GetAi(Actor a, String asWhich) Global
     Float confidence = a.GetActorValue("Confidence")
     Return (100.0 - confidence * 25.0) as Int
   ElseIf asWhich == "alarm"
-    Return (a.GetActorValue("Assistance") * 50.0) as Int
+    Return (a.GetActorValue("Morality") >= 3.0) as Int * 100
   EndIf
   Return 30
 EndFunction
 
 Function SetAi(Actor a, String asWhich, Float afValue) Global
   If !a
+    Return
+  EndIf
+  TMMwActorAI mw = a as TMMwActorAI
+  If mw
+    mw.SetSetting(asWhich, afValue)
+    a.EvaluatePackage()
     Return
   EndIf
   If afValue < 0.0
@@ -456,9 +494,65 @@ Function SetAi(Actor a, String asWhich, Float afValue) Global
   ElseIf asWhich == "flee"
     a.SetActorValue("Confidence", ((100.0 - afValue) / 25.0) as Int)
   ElseIf asWhich == "alarm"
-    a.SetActorValue("Assistance", (afValue / 50.0) as Int)
+    If afValue >= 100.0
+      a.SetActorValue("Morality", 3.0)
+    Else
+      a.SetActorValue("Morality", 0.0)
+    EndIf
   EndIf
   a.EvaluatePackage()
+EndFunction
+
+; SayDone: a Morrowind person has said its line (TMMwSayLine marks it from its first word to its last); anyone else (a
+; line played as a sound) by the recording's length, the script's timer (afUntil).
+Bool Function SayDone(ObjectReference r, Float afUntil) Global
+  TMMwActorAI mw = r as TMMwActorAI
+  If mw
+    Return !mw.Saying || Utility.GetCurrentRealTime() - mw.SaidAt > 60.0
+  EndIf
+  Return Utility.GetCurrentRealTime() >= afUntil
+EndFunction
+
+; GetAttacked: Morrowind's people and creatures keep it (TMMwActorAI, Variable03: struck by the player, until the
+; crime is dealt with); anyone else: in combat.
+Bool Function GetAttacked(Actor a) Global
+  If !a
+    Return False
+  EndIf
+  If a as TMMwActorAI
+    Return a.GetActorValue("Variable03") > 0.0
+  EndIf
+  Return a.IsInCombat()
+EndFunction
+
+; Reputation: the player's in a global (MWReputation, which the dialogue's PC Reputation reads), another's on its
+; TMMwActorAI (from its record's NPDT).
+Float Function GetReputation(Actor a, GlobalVariable akPlayerReputation) Global
+  If !a
+    Return 0.0
+  EndIf
+  If a == Game.GetPlayer()
+    Return akPlayerReputation.GetValue()
+  EndIf
+  TMMwActorAI mw = a as TMMwActorAI
+  If mw
+    Return mw.Reputation
+  EndIf
+  Return 0.0
+EndFunction
+
+Function SetReputation(Actor a, GlobalVariable akPlayerReputation, Float afValue) Global
+  If !a
+    Return
+  EndIf
+  If a == Game.GetPlayer()
+    akPlayerReputation.SetValue(afValue)
+    Return
+  EndIf
+  TMMwActorAI mw = a as TMMwActorAI
+  If mw
+    mw.SetReputationValue(afValue as Int)
+  EndIf
 EndFunction
 
 String Function AiVariable(String asWhich) Global
@@ -494,29 +588,8 @@ Bool Function IsRace(Actor a, Race akRace) Global
 EndFunction
 
 ; SameFaction: the actor and the player share a faction (Morrowind: the actor's own faction).
-Bool Function SameFaction(Actor a, Actor akPlayer) Global
-  Faction f = FactionOf(a)
-  Return f && akPlayer.IsInFaction(f)
-EndFunction
-
-; The actor's Morrowind faction: the first of its factions converted from Morrowind (MWFaction...), else its first.
-Faction Function FactionOf(Actor a) Global
-  If !a
-    Return None
-  EndIf
-  Faction[] all = a.GetFactions(-128, 127)
-  Int i = 0
-  While all && i < all.Length
-    ; A faction the player can see (Morrowind's guilds and houses), not the converter's hidden ones.
-    If !all[i].IsFactionFlagSet(0x1)
-      Return all[i]
-    EndIf
-    i += 1
-  EndWhile
-  If all && all.Length > 0
-    Return all[0]
-  EndIf
-  Return None
+Bool Function SameFaction(Faction akFaction, Actor akPlayer) Global
+  Return akFaction && akPlayer && akPlayer.IsInFaction(akFaction)
 EndFunction
 
 ; PCRaiseRank / PCLowerRank / RaiseRank: one rank up or down (joining at the lowest).
@@ -604,6 +677,38 @@ Int Function ArmorType(Actor a, Int aiPart) Global
 EndFunction
 
 ; HasSoulGem: Skyrim's soul gems hold a size of soul, not a creature's: the filled soul gems the actor carries.
+; HasSoulGem: the gems holding that creature's soul (its list, every size).
+Int Function CountIn(ObjectReference a, FormList akList) Global
+  If !a || !akList
+    Return 0
+  EndIf
+  Return a.GetItemCount(akList)
+EndFunction
+
+; RemoveSoulGem / DropSoulGem: that many of them taken away, or dropped at the actor's feet.
+Function RemoveIn(ObjectReference a, FormList akList, Int aiCount, Bool abDrop) Global
+  If !a || !akList
+    Return
+  EndIf
+  Int i = 0
+  While i < akList.GetSize() && aiCount > 0
+    Form f = akList.GetAt(i)
+    Int have = a.GetItemCount(f)
+    If have > aiCount
+      have = aiCount
+    EndIf
+    If have > 0
+      If abDrop
+        a.DropObject(f, have)
+      Else
+        a.RemoveItem(f, have)
+      EndIf
+      aiCount -= have
+    EndIf
+    i += 1
+  EndWhile
+EndFunction
+
 Int Function SoulGems(Actor a, Form akCreature) Global
   If !a
     Return 0
@@ -848,18 +953,8 @@ EndFunction
 ; WakeUpPC: the player's rest ends. Morrowind's scripts look at each hour of a rest and wake the player in one of them;
 ; here the script runs as the sleep starts, so the wake comes a random part of the way through (afStart and afEnd are
 ; the sleep's game times), and the sleep menu is closed as its Cancel does (SKSE).
+; WakeUpPC: the rest ends at once, the hours so far passed (OpenMW wakeUpPlayer stops the waiting there).
 Function WakeUpPC(Float afStart, Float afEnd) Global
-  If !UI.IsMenuOpen("Sleep/Wait Menu")
-    Return
-  EndIf
-  If afEnd - afStart > 1.0 / 24.0
-    Float wake = afStart + Utility.RandomFloat(1.0 / 24.0, afEnd - afStart)
-    Int waited = 0
-    While waited < 600 && UI.IsMenuOpen("Sleep/Wait Menu") && Utility.GetCurrentGameTime() < wake
-      Utility.WaitMenuMode(0.05)
-      waited += 1
-    EndWhile
-  EndIf
   If UI.IsMenuOpen("Sleep/Wait Menu")
     UI.Invoke("Sleep/Wait Menu", "_root.SleepWaitMenu_mc.onCancelPress")
   EndIf

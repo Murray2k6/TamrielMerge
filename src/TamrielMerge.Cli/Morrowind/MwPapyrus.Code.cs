@@ -18,8 +18,9 @@ public sealed partial class MwPapyrus
         string Cond(Expr cond)
         {
             lineOk = true;
+            lineGaps.Clear();
             string c = Condition(cond);
-            if (lineOk) { translated++; return c; }
+            if (lineOk) { translated++; CountFaithful(); return c; }
             return $"False   ; TODO(Morrowind) [{lastFailure}]: " + c.Replace("\n", " ");
         }
         foreach (var s in body)
@@ -27,6 +28,7 @@ public sealed partial class MwPapyrus
             if (s is Return { Line: < 0 }) continue;   // a stray endif, which Morrowind ignores
             statements++;
             lineOk = true;
+            lineGaps.Clear();
             switch (s)
             {
                 case Set set:
@@ -66,8 +68,25 @@ public sealed partial class MwPapyrus
                     lineOk = false;
                     break;
             }
-            if (lineOk) translated++;
+            if (lineOk) { translated++; CountFaithful(); }
         }
+    }
+
+    /// <summary>
+    /// A statement (or condition) translated but not as Morrowind does it: what it falls short in (a function that does
+    /// nothing here, a constant result, an approximation). Counted apart from the faithful ones (<see cref="Output.Faithful"/>,
+    /// <see cref="Output.Gaps"/>), so the coverage says what isn't yet Morrowind's (2026-10-22: every such line had counted
+    /// as translated, and the build said 100%).
+    /// </summary>
+    void Gap(string what) => lineGaps.Add(what);
+    readonly List<string> lineGaps = [];
+    readonly Dictionary<string, int> gaps = new(StringComparer.OrdinalIgnoreCase);
+    int faithful;
+
+    void CountFaithful()
+    {
+        if (lineGaps.Count == 0) { faithful++; return; }
+        foreach (var g in lineGaps.Distinct()) gaps[g] = gaps.GetValueOrDefault(g) + 1;
     }
 
     string Assignment(Set set)

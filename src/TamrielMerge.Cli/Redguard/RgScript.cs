@@ -42,7 +42,13 @@ public sealed class RgScript
     }
     /// <summary>if (lhs cmp rhs [and/or ...]) { body }; cmp: 0 =, 1 !=, 2 &lt;, 3 &gt;, 4 &lt;=, 5 &gt;=.</summary>
     public sealed record IfStmt(int Address, List<(Value Lhs, int Cmp, Value Rhs, int Conj)> Conditions, List<Stmt> Body) : Stmt(Address);
-    /// <summary>target = values combined with operators (1 +, 2 -, 3 /, 4 *, ...; 10 ++, 11 --).</summary>
+    /// <summary>
+    /// target = values combined left to right with operators (1 +, 2 -, 3 *, 4 /, 5 shl, 6 shr, 7 and, 8 or, 9 xor;
+    /// 10 ++, 11 --). 3 multiplies: CV_A1's pillar (the caverns, 34 copies) falls by v = v + a op3 t and
+    /// s = v op3 t + a op3 t op3 t op4 2, half a t squared only so (2026-10-22; the comment and rg-script had them
+    /// the other way). The game's only formula mixing + with op 3 or 4 is that one, with t set to 1 just before it, so
+    /// left to right and the usual precedence give the same.
+    /// </summary>
     public sealed record AssignStmt(int Address, Value Target, List<(Value Value, int Op)> Formula) : Stmt(Address);
     public sealed record JumpStmt(int Address, string Kind, int Target) : Stmt(Address);
     public sealed record OtherStmt(int Address, string What) : Stmt(Address);

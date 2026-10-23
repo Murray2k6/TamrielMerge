@@ -40,6 +40,8 @@ public sealed partial class MwPluginBuilder
     public int ScriptCount => scriptSet is null ? 0 : scriptSet.Objects.Count + scriptSet.Globals.Count + scriptSet.Results.Count;
     public int ScriptStatements => scriptSet?.Statements ?? 0;
     public int ScriptStatementsTranslated => scriptSet?.TranslatedStatements ?? 0;
+    public int ScriptStatementsFaithful => scriptSet?.FaithfulStatements ?? 0;
+    public IReadOnlyDictionary<string, int> ScriptGaps => scriptSet?.Gaps ?? new Dictionary<string, int>();
     public int ScriptsAttached { get; private set; }
     public int ResultScriptsAttached { get; private set; }
     public int PropertiesFilled { get; private set; }
@@ -147,6 +149,10 @@ public sealed partial class MwPluginBuilder
     readonly Dictionary<string, FormKey?> generated = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, Quest> globalScriptQuests = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>What the Papyrus compiler said of the translated scripts (scripts-compile.txt).</summary>
+    public int CompileErrors { get; private set; }
+    public int CompileWarnings { get; private set; }
+
     /// <summary>Writes, compiles and attaches the scripts; returns how many compiled.</summary>
     /// <param name="precompiled">A folder of these scripts compiled already (mw-script-translate's Scripts): used instead
     /// of compiling (a test aid).</param>
@@ -165,7 +171,13 @@ public sealed partial class MwPluginBuilder
         var (compiled, log) = precompiled is null ? CompilePapyrus(SkyrimData!, sourceDir, Path.Combine(modOutDir, "Scripts"), progress)
             : (scriptSet.All.Select(o => o.ScriptName).Where(n => File.Exists(Path.Combine(precompiled, n + ".pex"))).ToHashSet(StringComparer.OrdinalIgnoreCase), "");
         if (compiled is null) { Problems.Add("scripts: " + log); FallBackResults(new(StringComparer.OrdinalIgnoreCase)); return 0; }
-        foreach (var line in log.Split('\n').Where(l => l.Contains("): ")).Take(50)) Problems.Add("script compile: " + line.Trim());
+        // Every error and warning the compiler and the assembler gave (scripts-compile.txt), counted (PapyrusRun.Tally);
+        // the errors as problems too.
+        var (errors, warnings, said) = Skyrim.PapyrusRun.Tally(log);
+        File.WriteAllLines(Path.Combine(modOutDir, "scripts-compile.txt"), said);
+        CompileWarnings = warnings;
+        CompileErrors = errors;
+        foreach (var line in said.Where(l => !l.Contains("warning", StringComparison.OrdinalIgnoreCase))) Problems.Add("script compile: " + line);
         // The sources beside the other scripts' (Data\Source\Scripts), for anyone reading them.
         string sources = Path.Combine(modOutDir, "Source", "Scripts");
         Directory.CreateDirectory(sources);
@@ -216,6 +228,7 @@ public sealed partial class MwPluginBuilder
         foreach (var q in journals.Values) q.Stages.Sort((a, b) => a.Index.CompareTo(b.Index));
 
         CopyBinks();
+        FinishTopicLearning();
         // Morrowind's engine sets CharGenState to 1 on a new game, which starts Main's character generation (the
         // prison ship, the census office): here it starts so, and Main runs it when the player reaches Morrowind.
         if (globalScriptQuests.ContainsKey("Main") && MwGlobal("CharGenState") is GlobalFloat chargen && chargen.Data == 0) chargen.Data = 1;
@@ -360,14 +373,21 @@ public sealed partial class MwPluginBuilder
                 return g.FormKey;
             }
             case "gen" when id == "MWCrimeFaction": return MwCrime.FormKey;
+            case "gen" when id == "MWWerewolfKills": return WerewolfKillsGlobal().FormKey;
+            case "gen" when id == "MWLoadCount": return LoadCountGlobal().FormKey;
             case "law": return LawQuest().FormKey;
             case "ai": return AiQuest().FormKey;
             case "state": return StateQuest().FormKey;
             case "jindex": return journals.ContainsKey(id) ? JournalIndexGlobal(id).FormKey : null;
+            case "topic": return IsTopic(id) ? TopicKnown(id).FormKey : null;
             case "music": return StreamedMusic(id);
             case "diseases": return SpellList(id == "blight" ? 2 : 3).FormKey;
             case "effects": return EffectList(id)?.FormKey;
             case "soulgem": return SoulGemFor(id);
+            // A gem holding one creature's soul (Morrowind's gems know whose soul they hold): "creature|gem", and all six
+            // of a creature's (HasSoulGem, RemoveSoulGem count them).
+            case "creaturegem" when id.Split('|') is [var creature, var gem]: return CreatureGem(creature, GemIndex(gem)).FormKey;
+            case "creaturegems": return CreatureGemList(id).FormKey;
             case "cells": return CellList(id)?.FormKey;
             case "mapmarkers": return MapMarkerList(id)?.FormKey;
         }
@@ -512,6 +532,18 @@ public sealed partial class MwPluginBuilder
                 Conditions = [new ConditionFloat { Data = said, CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1 }],
                 Flags = new DialogResponseFlags(),
                 Responses = [new DialogResponse { Text = line.Text, ResponseNumber = 1, Emotion = Emotion.Neutral, EmotionValue = 50, ScriptNotes = RecordingNote + file }],
+                // The speaker is saying it until its last word (TMMwSayLine), which SayDone reads.
+                VirtualMachineAdapter = new DialogResponsesAdapter
+                {
+                    Scripts = [new ScriptEntry { Name = "TMMwSayLine" }],
+                    ScriptFragments = new ScriptFragments
+                    {
+                        ExtraBindDataVersion = 2,
+                        FileName = "TMMwSayLine",
+                        OnBegin = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMMwSayLine", FragmentName = "Fragment_Begin" },
+                        OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMMwSayLine", FragmentName = "Fragment_End" },
+                    },
+                },
             });
         }
         if (topic.Responses.Count == 0) return null;
@@ -572,6 +604,18 @@ public sealed partial class MwPluginBuilder
     /// Skyrim's race of each, and its vampire form) and birthsigns (by Skyrim's standing stones, which are Morrowind's
     /// signs) for reckoning the player's.
     /// </summary>
+    /// <summary>
+    /// Where each of the player's Morrowind skills (SKIL order) lives: a Skyrim skill that is the same skill (actor value
+    /// name), else the progression's skill (its own, or the hidden weapon skills Skyrim folds into One- and Two-handed).
+    /// </summary>
+    static readonly (string Av, string Id)[] PlayerSkillSources =
+    [
+        ("Block", ""), ("Smithing", ""), ("", "MediumArmor"), ("HeavyArmor", ""), ("", "BluntWeapon"), ("", "LongBlade"), ("", "Axe"), ("", "Spear"),
+        ("", "Athletics"), ("Enchanting", ""), ("Destruction", ""), ("Alteration", ""), ("Illusion", ""), ("Conjuration", ""), ("", "Mysticism"),
+        ("Restoration", ""), ("Alchemy", ""), ("", "Unarmored"), ("Lockpicking", ""), ("Sneak", ""), ("", "Acrobatics"), ("LightArmor", ""),
+        ("", "ShortBlade"), ("Marksman", ""), ("", "Mercantile"), ("Speechcraft", ""), ("", "HandToHand"),
+    ];
+
     Quest StateQuest()
     {
         if (stateQuest is not null) return stateQuest;
@@ -626,11 +670,81 @@ public sealed partial class MwPluginBuilder
         }
         entry.Properties.Add(signs);
         entry.Properties.Add(new ScriptIntListProperty { Name = "SignStats", Data = [.. signStats] });
+        // Morrowind's factions for RankRequirement and the faction reactions (OpenMW filter.cpp, dialoguemanagerimp.cpp):
+        // each one's FADT (its two attributes; per rank the two attribute levels, the primary and favoured skill levels and
+        // the reputation; its seven skills) and its reactions to the others (ANAM/INTV), as text TMMwState reads once
+        // (Papyrus arrays from a plugin can't pass 128), its reputation global and the dialogue's globals.
+        var factionIds = MwFactionIds();
+        var ranks = new System.Text.StringBuilder();
+        var reactions = new System.Text.StringBuilder();
+        var factionList = new ScriptObjectListProperty { Name = "MwFactions" };
+        var repList = new ScriptObjectListProperty { Name = "FactionRep" };
+        var reqList = new ScriptObjectListProperty { Name = "RankReq" };
+        var lowList = new ScriptObjectListProperty { Name = "ReactLow" };
+        var highList = new ScriptObjectListProperty { Name = "ReactHigh" };
+        var fact = OwnRecords("FACT");
+        for (int i = 0; i < factionIds.Count; i++)
+        {
+            var rec = fact[factionIds[i]];
+            var fadt = rec.Get("FADT")?.Data ?? [];
+            int Fadt(int offset) => fadt.Length >= offset + 4 ? BitConverter.ToInt32(fadt, offset) : -1;
+            var values = new List<int> { Fadt(0), Fadt(4) };
+            for (int r = 0; r < 10; r++) for (int k = 0; k < 5; k++) values.Add(fadt.Length >= 208 ? Fadt(8 + r * 20 + k * 4) : 0);
+            for (int k = 0; k < 7; k++) values.Add(Fadt(208 + k * 4));
+            ranks.Append(string.Join(",", values)).Append(";");
+            // Its reactions: each ANAM (the other faction) followed by its INTV.
+            string? other = null;
+            foreach (var field in rec.Fields)
+            {
+                if (field.Type == "ANAM") other = field.Text;
+                else if (field.Type == "INTV" && other is not null && factionIds.FindIndex(x => x.Equals(other, StringComparison.OrdinalIgnoreCase)) is >= 0 and var j)
+                {
+                    reactions.Append($"{i},{j},{BitConverter.ToInt32(field.Data, 0)};");
+                    other = null;
+                }
+            }
+            factionList.Objects.Add(new ScriptObjectProperty { Object = MwFaction(factionIds[i])!.ToLink<ISkyrimMajorRecordGetter>() });
+            repList.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(Fill(new MwPapyrus.Property("", "GlobalVariable", "facrep:" + factionIds[i]))!.Value) });
+            var g = FactionGlobals(factionIds[i]);
+            reqList.Objects.Add(new ScriptObjectProperty { Object = g.Req.ToLink<ISkyrimMajorRecordGetter>() });
+            lowList.Objects.Add(new ScriptObjectProperty { Object = g.Low.ToLink<ISkyrimMajorRecordGetter>() });
+            highList.Objects.Add(new ScriptObjectProperty { Object = g.High.ToLink<ISkyrimMajorRecordGetter>() });
+        }
+        entry.Properties.Add(factionList);
+        entry.Properties.Add(repList);
+        entry.Properties.Add(reqList);
+        entry.Properties.Add(lowList);
+        entry.Properties.Add(highList);
+        entry.Properties.Add(new ScriptStringProperty { Name = "FactionRanks", Data = ranks.ToString() });
+        entry.Properties.Add(new ScriptStringProperty { Name = "FactionReactions", Data = reactions.ToString() });
+        // Where the player's Morrowind skills live (TMMwState.PlayerSkill): Skyrim's own skill, or the progression's.
+        entry.Properties.Add(new ScriptStringListProperty { Name = "PlayerSkillAv", Data = [.. PlayerSkillSources.Select(s => s.Av)] });
+        entry.Properties.Add(new ScriptStringListProperty { Name = "PlayerSkillId", Data = [.. PlayerSkillSources.Select(s => s.Id)] });
         // The player's values for the dialogue's filters on them.
         var playerStats = new ScriptObjectListProperty { Name = "PlayerStats" };
         for (int i = 0; i < MwStats.Count; i++) playerStats.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(PlayerStatGlobal(i).FormKey) });
         entry.Properties.Add(playerStats);
-        stateQuest.VirtualMachineAdapter = new QuestAdapter { Scripts = [entry] };
+        // The player (TMMwPlayerState): what they wear, for the dialogue's PCClothingModifier.
+        stateQuest.Aliases.Add(new QuestAlias { ID = 0, Name = "Player", ForcedReference = new FormLinkNullable<IPlacedGetter>(PlayerRefKey) });
+        stateQuest.NextAliasID = 1;
+        stateQuest.VirtualMachineAdapter = new QuestAdapter
+        {
+            Scripts = [entry],
+            Aliases =
+            [
+                new QuestFragmentAlias
+                {
+                    Property = new ScriptObjectProperty { Object = stateQuest.ToLink<ISkyrimMajorRecordGetter>(), Alias = 0 },
+                    Scripts = [new ScriptEntry { Name = "TMMwPlayerState", Properties =
+                    [
+                        new ScriptObjectProperty { Name = "ClothingValue", Object = ClothingValueGlobal().ToLink<ISkyrimMajorRecordGetter>() },
+                        new ScriptObjectProperty { Name = "LoadCount", Object = LoadCountGlobal().ToLink<ISkyrimMajorRecordGetter>() },
+                        new ScriptObjectProperty { Name = "Crime", Object = MwCrime.ToLink<ISkyrimMajorRecordGetter>() },
+                        new ScriptFloatProperty { Name = "AlarmRadius", Data = world.Settings.TryGetValue("fAlarmRadius", out var ar) && ar.Get("FLTV") is { } arv ? arv.Float() : 2000f },
+                    ] }],
+                },
+            ],
+        };
         return stateQuest;
     }
 
@@ -710,6 +824,62 @@ public sealed partial class MwPluginBuilder
         mod.FormLists.Add(list);
         return list;
     }
+
+    /// <summary>Skyrim's filled gems in Morrowind's order of sizes (petty, lesser, common, greater, grand) and Azura's Star.</summary>
+    static readonly uint[] FilledGems = [0x02E4E3, 0x02E4E5, 0x02E4F3, 0x02E4FB, 0x02E4FF, 0x063B27];
+
+    /// <summary>A Morrowind gem's size (misc_soulgem_petty ... misc_soulgem_azura) by <see cref="FilledGems"/>.</summary>
+    static int GemIndex(string gem)
+    {
+        string g = gem.ToLowerInvariant();
+        return g.Contains("azura") ? 5 : g.Contains("grand") ? 4 : g.Contains("greater") ? 3 : g.Contains("common") ? 2 : g.Contains("lesser") ? 1 : 0;
+    }
+
+    readonly Dictionary<(string, int), SoulGem> creatureGems = [];
+    readonly Dictionary<string, FormList> creatureGemLists = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A soul gem of one size holding one creature's soul (Morrowind's gems keep whose soul is in them, and its scripts ask:
+    /// HasSoulGem "golden saint"): Skyrim's filled gem of that size named for the creature, Azura's Star returning to
+    /// Skyrim's own when used.
+    /// </summary>
+    SoulGem CreatureGem(string creature, int size)
+    {
+        if (creatureGems.TryGetValue((creature.ToLowerInvariant(), size), out var hit)) return hit;
+        var template = skyrimEsm!.SoulGems.First(g => g.FormKey == Sk(FilledGems[size]));
+        var gem = mod.SoulGems.DuplicateInAsNewRecord(template);
+        gem.EditorID = $"MWSoulGem{size}{Sanitize(creature)}";
+        string who = world.Objects.TryGetValue(creature, out var rec) ? rec.Str("FNAM") ?? creature : creature;
+        gem.Name = $"{template.Name?.String} ({who})";
+        if (size == 5)
+        {
+            gem.ContainedSoul = SoulGem.Level.Grand;
+            gem.LinkedTo.SetTo(template.FormKey);
+        }
+        return creatureGems[(creature.ToLowerInvariant(), size)] = gem;
+    }
+
+    /// <summary>A creature's six gems (<see cref="CreatureGem"/>), in <see cref="FilledGems"/>' order.</summary>
+    FormList CreatureGemList(string creature)
+    {
+        if (creatureGemLists.TryGetValue(creature, out var hit)) return hit;
+        var list = new FormList(mod) { EditorID = "MWSoulGems" + Sanitize(creature) };
+        for (int s = 0; s < FilledGems.Length; s++) list.Items.Add(CreatureGem(creature, s).ToLink<ISkyrimMajorRecordGetter>());
+        mod.FormLists.Add(list);
+        return creatureGemLists[creature] = list;
+    }
+
+    /// <summary>Skyrim's filled gems in <see cref="FilledGems"/>' order (what soul trapping fills, swapped for a tracked
+    /// creature's own by TMMwActorAI).</summary>
+    FormList GenericGemList()
+    {
+        if (genericGems is not null) return genericGems;
+        genericGems = new FormList(mod) { EditorID = "MWFilledSoulGems" };
+        foreach (var id in FilledGems) genericGems.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(Sk(id)));
+        mod.FormLists.Add(genericGems);
+        return genericGems;
+    }
+    FormList? genericGems;
 
     /// <summary>A Morrowind soul gem (misc_soulgem_petty…) as Skyrim's filled gem of that size.</summary>
     static FormKey? SoulGemFor(string gem)

@@ -222,6 +222,7 @@ public sealed class DfItems
                 if (tinted && Tint(m) is { } tint) recolour.Weapon(w, tpl, m.ToString(), tint, mod);
                 Items[name] = w.FormKey;
                 list.Add(w.FormKey);
+                if (DfWeaponKind(t.Name) is >= 0 and var kind) weaponKinds[kind].Add(w.FormKey);
             }
             WeaponsOf[m] = List($"DFWeapons{m}", list, 1);
             allWeapons.AddRange(list);
@@ -288,6 +289,31 @@ public sealed class DfItems
         foreach (var (a, l) in ArmorOf) AllArmor.Entries.Add(Entry(l.FormKey, (short)armorLevels[a]));
         mod.LeveledItems.Add(AllArmor);
         Console.WriteLine($"Daggerfall items: {Items.Count} weapons and armor pieces{(Missing.Count > 0 ? "; no Skyrim model for " + string.Join(", ", Missing.Take(8)) : "")}");
+    }
+
+    /// <summary>Daggerfall's weapon skill of a weapon type: 0 Short Blade, 1 Long Blade, 2 Axe, 3 Blunt Weapon (the
+    /// progression's hidden skills, ProgressionSkills.WeaponSkills); -1 for bows.</summary>
+    static int DfWeaponKind(string type) => type switch
+    {
+        "Dagger" or "Tanto" or "Shortsword" or "Wakizashi" => 0,
+        "Broadsword" or "Saber" or "Longsword" or "Katana" or "Claymore" or "Dai-katana" => 1,
+        "Battle Axe" or "War Axe" => 2,
+        "Staff" or "Mace" or "Flail" or "Warhammer" => 3,
+        _ => -1,
+    };
+    readonly List<FormKey>[] weaponKinds = [[], [], [], []];
+
+    /// <summary>Daggerfall's weapons by weapon skill (DFWeaponsShortBlade...), for the progression; made last, so the
+    /// other records keep their form IDs.</summary>
+    public void WeaponKindLists()
+    {
+        string[] names = ["ShortBlade", "LongBlade", "Axe", "BluntWeapon"];
+        for (int k = 0; k < names.Length; k++)
+        {
+            var l = new FormList(NextKey(), SkyrimRelease.SkyrimSE) { EditorID = "DFWeapons" + names[k] };
+            foreach (var w in weaponKinds[k]) l.Items.Add(w.ToLink<ISkyrimMajorRecordGetter>());
+            mod.FormLists.Add(l);
+        }
     }
 
     LeveledItem List(string edid, List<FormKey> items, short level)

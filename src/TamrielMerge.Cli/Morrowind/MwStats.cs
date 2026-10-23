@@ -1,7 +1,8 @@
 namespace TamrielMerge.Morrowind;
 
 /// <summary>
-/// Morrowind's attributes and the skills Skyrim has no actor value for, as Morrowind reckons them from the records:
+/// Morrowind's attributes and its 27 skills, as Morrowind reckons them from the records (kept per character for the
+/// scripts and dialogue, beside Skyrim's own: user, 2026-10-23, "Keep original stats"):
 /// an NPC's own (NPDT), or for an auto-calculated NPC its race's base values (RADT), its class's two favoured
 /// attributes (+10) and its level's growth by its class's major and minor skills (Morrowind's, as OpenMW reimplements
 /// it); a creature's own (NPDT). The races' and birthsigns' tables are for the player, whose values the game reckons
@@ -9,11 +10,16 @@ namespace TamrielMerge.Morrowind;
 /// </summary>
 public sealed class MwStats
 {
-    /// <summary>The stats kept: Morrowind's eight attributes, then the skills Skyrim has no actor value for.</summary>
-    public static readonly string[] Names = ["strength", "intelligence", "willpower", "agility", "speed", "endurance", "personality", "luck", "athletics", "acrobatics", "unarmored"];
-    /// <summary>Morrowind's skill indexes of the kept skills (Athletics, Acrobatics, Unarmored).</summary>
-    static readonly int[] KeptSkills = [8, 20, 17];
-    public const int Count = 11;
+    /// <summary>The skills in Morrowind's order (SKIL INDX).</summary>
+    public static readonly string[] SkillNames =
+    [
+        "block", "armorer", "mediumarmor", "heavyarmor", "bluntweapon", "longblade", "axe", "spear", "athletics", "enchant", "destruction",
+        "alteration", "illusion", "conjuration", "mysticism", "restoration", "alchemy", "unarmored", "security", "sneak", "acrobatics", "lightarmor",
+        "shortblade", "marksman", "mercantile", "speechcraft", "handtohand",
+    ];
+    /// <summary>The stats kept: Morrowind's eight attributes, then its 27 skills (stat 8 + the skill's index).</summary>
+    public static readonly string[] Names = ["strength", "intelligence", "willpower", "agility", "speed", "endurance", "personality", "luck", .. SkillNames];
+    public const int Count = 35;
 
     readonly MwWorld world;
     /// <summary>Morrowind's skills (SKIL by INDX): governing attribute and specialization (0 combat, 1 magic, 2 stealth).</summary>
@@ -44,8 +50,8 @@ public sealed class MwStats
         var v = new int[Count];
         for (int i = 0; i < 8; i++) v[i] = d.Int(8 + i * 4);
         // A creature's skills are its combat, magic or stealth value, by the skill's specialization.
-        for (int k = 0; k < KeptSkills.Length; k++)
-            v[8 + k] = d.Int(56 + 4 * (skills.TryGetValue(KeptSkills[k], out var s) ? Math.Clamp(s.Specialization, 0, 2) : 0));
+        for (int k = 0; k < 27; k++)
+            v[8 + k] = d.Int(56 + 4 * (skills.TryGetValue(k, out var s) ? Math.Clamp(s.Specialization, 0, 2) : 0));
         return v;
     }
 
@@ -56,7 +62,7 @@ public sealed class MwStats
         if (d.Data.Length >= 52)
         {
             for (int i = 0; i < 8; i++) v[i] = d.Data[2 + i];
-            for (int k = 0; k < KeptSkills.Length; k++) v[8 + k] = d.Data[10 + KeptSkills[k]];
+            for (int k = 0; k < 27; k++) v[8 + k] = d.Data[10 + k];
             return v;
         }
         if (d.Data.Length < 2) return null;
@@ -80,20 +86,9 @@ public sealed class MwStats
             }
             v[a] = Math.Min((int)MathF.Round(v[a] + (level - 1) * sum, MidpointRounding.ToEven), 100);
         }
-        // The kept skills, as Morrowind auto-calculates skills.
-        for (int k = 0; k < KeptSkills.Length; k++)
-        {
-            int skill = KeptSkills[k];
-            int major = Major(cldt, skill);
-            float value = major switch { 1 => 25, 0 => 10, _ => 0 };
-            float multiplier = major switch { 1 => 1f, 0 => 0.5f, _ => 0.1f };
-            int raceBonus = 0;
-            if (radt is { Data.Length: >= 56 } rd)
-                for (int i = 0; i < 7; i++) if (rd.Int(i * 8) == skill) raceBonus = rd.Int(i * 8 + 4);
-            int specBonus = 0;
-            if (cldt is { Data.Length: >= 12 } sd && skills.TryGetValue(skill, out var s) && s.Specialization == sd.Int(8)) { specBonus = 5; multiplier += 0.5f; }
-            v[8 + k] = Math.Min((int)MathF.Round(value + 5 + raceBonus + specBonus + (level - 1) * multiplier, MidpointRounding.ToEven), 100);
-        }
+        // The skills, as Morrowind auto-calculates them (SkillsOf).
+        if (SkillsOf(rec.Id) is { } all)
+            for (int k = 0; k < 27; k++) v[8 + k] = all[k];
         return v;
     }
 

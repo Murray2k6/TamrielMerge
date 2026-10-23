@@ -121,6 +121,8 @@ public sealed class MwScriptWorld : MwPapyrus.IWorld
     public string? ScriptOf(string objectId) => world.Objects.TryGetValue(objectId, out var r) && r.Str("SCRI") is { Length: > 0 } s ? s : null;
     public IReadOnlyDictionary<string, string>? Variables(string scriptId) => variables.GetValueOrDefault(scriptId);
     public bool IsJournal(string id) => journals.Contains(id);
+    /// <summary>A dialogue topic (type 0) of that name.</summary>
+    public bool IsTopic(string id) => Dialogue?.Topics.TryGetValue(id, out var t) == true && t.Type == MwDialogue.TopicType.Topic;
     public bool IsScript(string id) => Scripts.ContainsKey(id);
     public bool IsGlobalVariable(string id) => Globals.ContainsKey(id);
     public string? FactionId(string idOrName)

@@ -646,24 +646,50 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// million spans to 70, for five more actors near it). Load doors don't choose: a trapdoor is in the ceiling.
     /// </summary>
     public Result BuildInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> asWound, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> turnedUp,
-        IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IReadOnlyList<P3Float> actors, Hazards? hazards = null, Func<P3Float, bool>? underwater = null)
+        IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IReadOnlyList<P3Float> actors, Hazards? hazards = null, Func<P3Float, bool>? underwater = null) =>
+        BeginInterior(cell, asWound, turnedUp, loadDoors, keepAround, actors, hazards, underwater, background: false).Finish();
+
+    /// <summary>
+    /// <see cref="BuildInterior(Cell, IReadOnlyList{ValueTuple{Vector3[], Vector3}}, IReadOnlyList{ValueTuple{Vector3[], Vector3}}, IEnumerable{IPlacedObjectGetter}, P3Float?, IReadOnlyList{P3Float}, Hazards?, Func{P3Float, bool}?)"/>
+    /// begun: with <paramref name="background"/> both meshes are made on a worker thread (the record reserved now, in
+    /// the cell's order; the inputs and the cell left alone until <see cref="PendingInterior.Finish"/>), so a game's
+    /// interiors are made on every core (2026-10-22: Oblivion's 1,916 one at a time took 46 minutes on one of eight).
+    /// </summary>
+    public PendingInterior BeginInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> asWound, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> turnedUp,
+        IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IReadOnlyList<P3Float> actors, Hazards? hazards, Func<P3Float, bool>? underwater, bool background)
     {
         var doors = loadDoors.ToList();
         NoteDoors(doors);
-        var made = Generate(cell, asWound, doors, keepAround, actors, underwater, hazards);
-        int On(Generated g) => actors.Count(a => Distance(g.Data, a) <= 64);
-        int on = On(made);
-        if (on < actors.Count)
-        {
-            Generated? alt = null;
-            try { alt = Generate(cell, turnedUp, doors, keepAround, actors, underwater, hazards); }
-            catch (Exception) { }
-            if (alt is not null && On(alt) > on) { made = alt; Interlocked.Increment(ref turnedUpChosen); }
-        }
-        var chosen = made;
+        var actorList = actors.ToList();
         // Actors off it moved onto it (SnapToMesh: Morrowind's Prelude Shipwreck has a skeleton and a rat 85 under its
         // deck, and Mortrag Glacier's werewolves stand 90-170 over their floor); those in water stay, as they swim.
-        return new PendingInterior { Owner = this, Cell = cell, Run = () => chosen, SnapActors = true, StaysPut = underwater }.Finish();
+        var pending = new PendingInterior { Owner = this, Cell = cell, SnapActors = true, StaysPut = underwater };
+        pending.Run = () =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var made = Generate(cell, asWound, doors, keepAround, actorList, underwater, hazards);
+            pending.Timing = "as wound: " + made.Timing;
+            int On(Generated g) => actorList.Count(a => Distance(g.Data, a) <= 64);
+            int on = On(made);
+            if (on < actorList.Count)
+            {
+                Generated? alt = null;
+                var altWatch = System.Diagnostics.Stopwatch.StartNew();
+                try { alt = Generate(cell, turnedUp, doors, keepAround, actorList, underwater, hazards); }
+                catch (Exception) { }
+                pending.Timing += $"; turned up ({on} of {actorList.Count} actors on it as wound): {(alt is null ? $"failed after {altWatch.Elapsed.TotalSeconds:F1} s" : alt.Timing)}";
+                if (alt is not null && On(alt) > on) { made = alt; Interlocked.Increment(ref turnedUpChosen); }
+            }
+            pending.Seconds = sw.Elapsed.TotalSeconds;
+            return made;
+        };
+        if (background)
+        {
+            pending.Navm = new NavigationMesh(mod);
+            cell.NavigationMeshes.Add(pending.Navm);
+            pending.Work = Task.Run(pending.Run);
+        }
+        return pending;
     }
 
     /// <summary>Interiors whose navmesh was made from every face turned up (the choice above).</summary>
@@ -689,6 +715,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         Result? result;
         /// <summary>Seconds the mesh took to make (on whichever thread made it).</summary>
         public double Seconds { get; internal set; }
+        /// <summary>Where that time went (each mesh tried: as wound, then turned up).</summary>
+        public string Timing { get; internal set; } = "";
 
         /// <summary>Move the cell's actors that don't stand on the finished mesh onto it (<see cref="SnapToMesh"/>).</summary>
         public bool SnapActors { get; init; }
@@ -826,7 +854,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         return a + ab * (vb * denom) + ac * (vc * denom);
     }
 
-    internal sealed record Generated(NavigationMeshData Data, List<P3Float> Verts, List<IPlacedObjectGetter> Linked, int Triangles);
+    internal sealed record Generated(NavigationMeshData Data, List<P3Float> Verts, List<IPlacedObjectGetter> Linked, int Triangles)
+    {
+        /// <summary>Where its time went (seconds): Recast, the islands pruned, the rest; and its input's triangles.</summary>
+        public string Timing { get; init; } = "";
+    }
 
     /// <summary>
     /// <see cref="BuildInterior"/> begun: with <paramref name="background"/> the mesh is made on a worker thread (the
@@ -861,8 +893,12 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         // Recast's mesh, or the same input's from another part (SharedExteriors: a town part's building interiors are
         // the same buildings as other parts', 2026-10-15: a fifth of a town part's work).
         // (Not shared with hazards: the shared files are keyed by the polygons alone.)
+        var stage = System.Diagnostics.Stopwatch.StartNew();
         var (outVerts, tris) = SharedExteriors is { } dir && hazards is null ? SharedInterior(dir, polygons) : RecastInterior(polygons, hazards);
+        double recastSeconds = stage.Elapsed.TotalSeconds; stage.Restart();
+        int recastTris = tris.Count;
         (outVerts, tris) = PruneIslands(outVerts, tris, doorList.Select(d => d.Placement!.Position).Append(keepAround ?? default).Concat(keepAlso ?? []).ToList());
+        double pruneSeconds = stage.Elapsed.TotalSeconds; stage.Restart();
         // Nothing walkable (an Oblivion test cell, a room of models the converter can't read): said plainly, not as the
         // grid's "Sequence contains no elements" (2026-10-17).
         if (tris.Count == 0) throw new InvalidOperationException("no floor to walk on (nothing for a navmesh)");
@@ -901,7 +937,10 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         }
 
         WriteGrid(data, outVerts, tris);
-        return new Generated(data, outVerts, linked, tris.Count);
+        return new Generated(data, outVerts, linked, tris.Count)
+        {
+            Timing = $"Recast {recastSeconds:F1} s ({polygons.Count:N0} input polygons, {recastTris:N0} triangles), islands pruned {pruneSeconds:F1} s ({tris.Count:N0} kept), the rest {stage.Elapsed.TotalSeconds:F1} s",
+        };
     }
 
     /// <summary>Interiors whose mesh another process had left in <see cref="SharedExteriors"/>.</summary>
@@ -1787,6 +1826,56 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         bool open = false, Func<int, int, bool>? only = null, bool reuse = false, bool asWound = false,
         Func<int, int, IEnumerable<Vector3[]>>? hazardsOf = null, Func<Cell, float?>? hazardLevelOf = null)
     {
+        var job = BeginExteriorCells(ws, cells, solidsOf, waterOf, doors, problems, open, only, reuse, asWound, hazardsOf, hazardLevelOf);
+        GenerateExteriorCells([job]);
+        return job.Finish();
+    }
+
+    /// <summary>A worldspace's exterior navmeshes to make (<see cref="BeginExteriorCells"/>): its cells, how to make
+    /// one, and how to write them all once made.</summary>
+    public sealed class ExteriorJob
+    {
+        public required string Name { get; init; }
+        public required IReadOnlyList<(int X, int Y)> Keys { get; init; }
+        public required Action<int> Make { get; init; }
+        public required Func<int, int> Busy { get; init; }
+        /// <summary>Writes the meshes made, in cell order; returns (navmeshes, triangles).</summary>
+        public required Func<(int Meshes, int Triangles)> Finish { get; init; }
+    }
+
+    /// <summary>
+    /// Makes the navmeshes of several worldspaces' jobs in one parallel loop, the busiest cells (what stands in and
+    /// around each) first, handed out one at a time. Worldspace by worldspace, in cell order, the last long cells of
+    /// each ran alone at its end (2026-10-22, Oblivion: 32 of its 99 minutes of exterior navmeshes on 3.6 cores, the
+    /// small worldspaces after Tamriel each waiting on its slowest cell). Prints the slowest cells (over 30 s).
+    /// </summary>
+    public static void GenerateExteriorCells(IReadOnlyList<ExteriorJob> jobs)
+    {
+        var work = jobs.SelectMany(j => Enumerable.Range(0, j.Keys.Count).Select(i => (Job: j, Index: i, Busy: j.Busy(i))))
+            .OrderByDescending(w => w.Busy).ToList();
+        var slow = new System.Collections.Concurrent.ConcurrentBag<(double Seconds, string Where)>();
+        Parallel.ForEach(System.Collections.Concurrent.Partitioner.Create(work, System.Collections.Concurrent.EnumerablePartitionerOptions.NoBuffering),
+            new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, w =>
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            try { w.Job.Make(w.Index); }
+            finally
+            {
+                if (watch.Elapsed.TotalSeconds > 30)
+                    slow.Add((watch.Elapsed.TotalSeconds, $"{w.Job.Name} {w.Job.Keys[w.Index].X},{w.Job.Keys[w.Index].Y}: {watch.Elapsed.TotalSeconds:F0} s ({w.Busy} references around)"));
+            }
+        });
+        foreach (var s in slow.OrderByDescending(s => s.Seconds).Take(10)) Console.WriteLine($"    slow navmesh cell {s.Where}");
+    }
+
+    /// <summary>The job of <see cref="BuildExteriorCells"/> (the same parameters), made by
+    /// <see cref="GenerateExteriorCells"/> and written by its <see cref="ExteriorJob.Finish"/>: several worldspaces'
+    /// cells made together.</summary>
+    public ExteriorJob BeginExteriorCells(Worldspace ws, IReadOnlyDictionary<(int X, int Y), Cell> cells,
+        Func<int, int, IEnumerable<Vector3[]>> solidsOf, Func<Cell, float?> waterOf, IReadOnlyList<IPlacedObjectGetter> doors, List<string> problems,
+        bool open = false, Func<int, int, bool>? only = null, bool reuse = false, bool asWound = false,
+        Func<int, int, IEnumerable<Vector3[]>>? hazardsOf = null, Func<Cell, float?>? hazardLevelOf = null)
+    {
         reuse &= !open;
         const float margin = 160f;
         var keys = cells.Keys.Where(k => only is null || only(k.X, k.Y)).OrderBy(k => k.Y).ThenBy(k => k.X).ToList();
@@ -1797,7 +1886,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         // One cell a core: unbounded, the thread pool kept adding threads to the long iterations (2026-10-19: 26 to 152 in two
         // minutes of Morrowind's exteriors), each a whole Recast build at once with its own pooled buffers, and memory
         // rose with them to 16 GB.
-        Parallel.For(0, keys.Count, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, i =>
+        // (GenerateExteriorCells: the busiest first, by what stands in and around each cell; the results stay in index
+        // order, as written.)
+        int Busy(int i) { var (cx, cy) = keys[i]; int n = 0; for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) if (cells.TryGetValue((cx + dx, cy + dy), out var c)) n += c.Temporary.Count + (c.Landscape is null ? 0 : 1); return n; }
+        return new ExteriorJob { Name = ws.EditorID ?? "", Keys = keys, Make = ExteriorCell, Busy = Busy, Finish = Finish };
+        void ExteriorCell(int i)
         {
             // TM_MEM=1 (dev aid): the memory in use every 500 cells: allocated, live (after a full collection), private,
             // and the meshes made so far.
@@ -1893,19 +1986,22 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 if (ExteriorSurface.On && results[i] is { } made) ExteriorSurface.Check(ws.EditorID ?? "", x, y, around, made.Verts, made.Tris, LandAt);
             }
             catch (Exception e) { errors.Add($"navmesh {ws.EditorID} {x},{y}: {e.Message}"); }
-        });
-        problems.AddRange(errors);
-        int meshes = 0, triangles = 0;
-        for (int i = 0; i < keys.Count; i++)
-        {
-            if (results[i] is not { } r) continue;
-            var (x, y) = keys[i];
-            WriteExterior(ws, cells[keys[i]], x, y, r.Verts, r.Tris, doors.Where(d => InCell(d.Placement!.Position, x, y)), waterOf(cells[keys[i]]));
-            meshes++;
-            triangles += r.Tris.Count;
-            results[i] = null;   // in the record now
         }
-        return (meshes, triangles);
+        (int, int) Finish()
+        {
+            problems.AddRange(errors.OrderBy(e => e, StringComparer.Ordinal));
+            int meshes = 0, triangles = 0;
+            for (int i = 0; i < keys.Count; i++)
+            {
+                if (results[i] is not { } r) continue;
+                var (x, y) = keys[i];
+                WriteExterior(ws, cells[keys[i]], x, y, r.Verts, r.Tris, doors.Where(d => InCell(d.Placement!.Position, x, y)), waterOf(cells[keys[i]]));
+                meshes++;
+                triangles += r.Tris.Count;
+                results[i] = null;   // in the record now
+            }
+            return (meshes, triangles);
+        }
     }
 
     /// <summary>

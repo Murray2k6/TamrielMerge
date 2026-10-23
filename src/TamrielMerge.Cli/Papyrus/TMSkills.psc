@@ -56,6 +56,11 @@ FormList Property BooksRead Auto
 {The skill books already read (TMSkillBook): each teaches once.}
 Float Property BreathMult = 0.2 Auto
 {Skyrim's fActorSwimBreathMult; Swimming raises it up to twice this.}
+Keyword[] Property WeaponTypes Auto
+{Skyrim's weapon types (WeapTypeDagger, Sword, Greatsword, WarAxe, Battleaxe, Mace, Warhammer), for the hidden weapon
+skills of weapons no game's list holds.}
+Bool[] Property HiddenSkills Auto
+{The skills kept only for the games' scripts and dialogue (the weapon skills Skyrim folds into One- and Two-handed).}
 
 String Property MenuName = "CustomMenu" AutoReadOnly
 Float Property Tick = 2.0 AutoReadOnly
@@ -75,6 +80,13 @@ Int iBackstab = -1
 Int iCritical = -1
 Int iMedical = -1
 Int iDodging = -1
+; The hidden weapon skills: Morrowind's and Daggerfall's Short Blade, Long Blade, Axe, Blunt Weapon; Oblivion's Blade, Blunt.
+Int iShortBlade = -1
+Int iLongBlade = -1
+Int iAxe = -1
+Int iBluntWeapon = -1
+Int iBlade = -1
+Int iBlunt = -1
 
 Int filledStamp = 0
 Bool filledAll = False
@@ -122,6 +134,12 @@ Function Setup()
   iCritical = Index("CriticalStrike")
   iMedical = Index("Medical")
   iDodging = Index("Dodging")
+  iShortBlade = Index("ShortBlade")
+  iLongBlade = Index("LongBlade")
+  iAxe = Index("Axe")
+  iBluntWeapon = Index("BluntWeapon")
+  iBlade = Index("Blade")
+  iBlunt = Index("Blunt")
   FillLists()
   If HitPerk && !PlayerRef.HasPerk(HitPerk)
     PlayerRef.AddPerk(HitPerk)
@@ -225,10 +243,15 @@ Function RaiseOne(Int i)
   If perRank <= 0.0
     perRank = 1.0
   EndIf
-  Game.SetPlayerExperience(Game.GetPlayerExperience() + level * perRank)
+  Bool hidden = HiddenSkills && i < HiddenSkills.Length && HiddenSkills[i]
+  If !hidden
+    Game.SetPlayerExperience(Game.GetPlayerExperience() + level * perRank)
+  EndIf
   Levels[i].SetValue(level)
   Experience[i].SetValue(0.0)
-  Debug.Notification(SkillNames[i] + " increased to " + level + ".")
+  If !hidden
+    Debug.Notification(SkillNames[i] + " increased to " + level + ".")
+  EndIf
   Apply(i)
 EndFunction
 
@@ -286,6 +309,79 @@ Int Function LevelOf(Int i)
   Return Levels[i].GetValueInt()
 EndFunction
 
+; A skill's level as its game counts it: the level plus the class's start over Skyrim's (TMMwState reads the player's
+; Morrowind skills so) and any temporary bonus; -1 for none.
+Int Function EffectiveLevel(Int i)
+  If i < 0 || i >= Levels.Length
+    Return -1
+  EndIf
+  Int level = Levels[i].GetValueInt()
+  If classBonus && i < classBonus.Length
+    level += classBonus[i]
+  EndIf
+  level += TempBonus(i)
+  If level > MaxLevel
+    level = MaxLevel
+  EndIf
+  Return level
+EndFunction
+
+; Temporary skill bonuses (Daggerfall's skill modifiers: a lycanthrope's or vampire's +30 while it lasts), counted in
+; what the skill does (Apply, LiveLevel) and in EffectiveLevel, never in the level that rises.
+Int[] tempBonus
+
+Int Function TempBonus(Int i)
+  If !tempBonus || i < 0 || i >= tempBonus.Length
+    Return 0
+  EndIf
+  Return tempBonus[i]
+EndFunction
+
+Function ModTempBonus(String id, Int aiBy)
+  Int i = Index(id)
+  If i < 0
+    Return
+  EndIf
+  If !tempBonus
+    tempBonus = Utility.CreateIntArray(Levels.Length)
+  EndIf
+  tempBonus[i] = tempBonus[i] + aiBy
+  Apply(i)
+EndFunction
+
+; The level a skill works at now: its level and its temporary bonus (at most MaxLevel); -1 for none.
+Int Function LiveLevel(Int i)
+  If i < 0 || i >= Levels.Length
+    Return -1
+  EndIf
+  Int level = Levels[i].GetValueInt() + TempBonus(i)
+  If level > MaxLevel
+    level = MaxLevel
+  EndIf
+  Return level
+EndFunction
+
+; A game's script setting the player's skill (Morrowind's SetLongBlade): the level that, with the class's start,
+; makes it so; what it does applied.
+Function SetEffectiveLevel(Int i, Int aiLevel)
+  If i < 0 || i >= Levels.Length
+    Return
+  EndIf
+  Int bonus = TempBonus(i)
+  If classBonus && i < classBonus.Length
+    bonus += classBonus[i]
+  EndIf
+  Int level = aiLevel - bonus
+  If level < 0
+    level = 0
+  ElseIf level > MaxLevel
+    level = MaxLevel
+  EndIf
+  Levels[i].SetValue(level)
+  Experience[i].SetValue(0.0)
+  Apply(i)
+EndFunction
+
 ; The class on the Mundus stones: each skill's rate and starting bonus (none: 1 and 0), applied at once.
 Function SetClass(Float[] rates, Int[] bonus)
   classRate = rates
@@ -312,13 +408,17 @@ Function AddExperience(Int i, Float xp)
   If perRank <= 0.0
     perRank = 1.0
   EndIf
+  Bool hidden = HiddenSkills && i < HiddenSkills.Length && HiddenSkills[i]
   While have >= need && level < MaxLevel
     have -= need
     level += 1
     rose = True
-    ; As a Skyrim skill rise: character experience of the new level times fXPPerSkillRank.
-    Game.SetPlayerExperience(Game.GetPlayerExperience() + level * perRank)
-    Debug.Notification(SkillNames[i] + " increased to " + level + ".")
+    ; As a Skyrim skill rise: character experience of the new level times fXPPerSkillRank. Not a hidden skill's: the
+    ; same hit raised One- or Two-handed, which counts.
+    If !hidden
+      Game.SetPlayerExperience(Game.GetPlayerExperience() + level * perRank)
+      Debug.Notification(SkillNames[i] + " increased to " + level + ".")
+    EndIf
     need = Needed(i, level)
   EndWhile
   If level >= MaxLevel
@@ -337,6 +437,7 @@ Function Apply(Int i)
   If classBonus && i < classBonus.Length
     level += classBonus[i]
   EndIf
+  level += TempBonus(i)
   If level > MaxLevel
     level = MaxLevel
   EndIf
@@ -469,12 +570,29 @@ Function PlayerHit(Actor target)
     AddUse(iHandToHand, 1.0)
   ElseIf w && iSpear >= 0 && Lists[2].HasForm(w)
     AddUse(iSpear, 1.0)
+  ElseIf w
+    ; The hidden weapon skills by the weapon's kind (Morrowind's and Daggerfall's skills; Oblivion's Blade the blades,
+    ; its Blunt the axes and blunt weapons).
+    Int wk = WeaponKind(w)
+    If wk == 0
+      AddUse(iShortBlade, 1.0)
+      AddUse(iBlade, 1.0)
+    ElseIf wk == 1
+      AddUse(iLongBlade, 1.0)
+      AddUse(iBlade, 1.0)
+    ElseIf wk == 2
+      AddUse(iAxe, 1.0)
+      AddUse(iBlunt, 1.0)
+    ElseIf wk == 3
+      AddUse(iBluntWeapon, 1.0)
+      AddUse(iBlunt, 1.0)
+    EndIf
   EndIf
   If iBackstab >= 0 && PlayerRef.IsSneaking() && (!target.IsInCombat() || !PlayerRef.IsDetectedBy(target))
     AddUse(iBackstab, 1.0)
   EndIf
   If iCritical >= 0
-    Float level = Levels[iCritical].GetValue()
+    Float level = LiveLevel(iCritical) as Float
     If Utility.RandomFloat(0.0, 100.0) < level / 4.0
       Float damage = 2.0 + PlayerRef.GetActorValue("UnarmedDamage") * 0.5
       If w
@@ -488,6 +606,31 @@ Function PlayerHit(Actor target)
       Debug.Notification("Critical strike!")
     EndIf
   EndIf
+EndFunction
+
+; A weapon's kind for the hidden weapon skills: 0 short blade, 1 long blade, 2 axe, 3 blunt, -1 none. A game's own weapons
+; by its lists (Morrowind's short swords are Skyrim swords, its staves warhammers), any other by Skyrim's weapon type.
+Int Function WeaponKind(Weapon w)
+  Int k = 0
+  While k < 4
+    If Lists.Length > 4 + k && Lists[4 + k] && Lists[4 + k].HasForm(w)
+      Return k
+    EndIf
+    k += 1
+  EndWhile
+  If !WeaponTypes || WeaponTypes.Length < 7
+    Return -1
+  EndIf
+  If w.HasKeyword(WeaponTypes[0])
+    Return 0
+  ElseIf w.HasKeyword(WeaponTypes[1]) || w.HasKeyword(WeaponTypes[2])
+    Return 1
+  ElseIf w.HasKeyword(WeaponTypes[3]) || w.HasKeyword(WeaponTypes[4])
+    Return 2
+  ElseIf w.HasKeyword(WeaponTypes[5]) || w.HasKeyword(WeaponTypes[6])
+    Return 3
+  EndIf
+  Return -1
 EndFunction
 
 ; The player was struck by a weapon (TMProgressionPlayer.OnHit): Medium Armor when wearing any, else Unarmored when

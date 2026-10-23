@@ -138,6 +138,17 @@ ObScheduledPackage): Talasma sleeps from 2:00 for 4 hours and serves the tavern 
 quest's stage. The sandbox every NPC had before stays last, for when none of its own holds. 1,070 NPCs, 4,207 packages
 (`npc-packages` lists an NPC's).
 
+**Oblivion's package kinds and radii** (2026-10-22). Mutagen reads an Oblivion package's kind with the three unused
+bytes after it (CDCDCD08 for a UseItemAt) and its place's radius, a whole number, as a float's bits (50 as 7E-44): 2,498
+of Oblivion.esm's 7,209 packages and 261 of Knights.esp's 303 had no kind it knew, so each became a "go there" package
+(sleepers, eaters and followers among them, and `GetCurrentAIPackage` said nothing true of them), and every radius was
+the 64-unit floor. The kind is the low byte and the radius the bits as an integer (ObScriptRecords.PackageKind,
+PlaceRadius). A package that casts a spell (CastMagic, and UseItemAt with a spell or a kind of spell as its target: 29 in
+Oblivion.esm, Relmyna Verenim's three "Exalted Pain" packages at her experiments' victims among them) is made from a
+vanilla UseMagic package: the spell (or any spell of the kind named), cast at the reference it names or takes place
+near, else by the caster on itself. `ob-packages` counts the packages by kind and their targets' records (`--kind N`
+lists them); `sk-packages --match` shows vanilla packages' inputs.
+
 **Floors for empty cells** (user, 2026-10-21: "the interiors have navmeshes for the test cells"). Six of Oblivion.esm's
 interiors hold their contents over nothing: TestParticles, TestGrantWarehouseUpper (167 statics, all candles, books and
 plates), TestCastleInterior (a ladder and a trapdoor), ToddDung, WeatherleahInterior02 and FortUrasek02DUPLICATE000 (its

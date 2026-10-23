@@ -61,13 +61,21 @@ public sealed class RgRtx
 
 /// <summary>
 /// Redguard's sound effects bank (sound\MAIN.SFX): "FXHD" (big-endian length: a 32-byte description and the effect
-/// count), then "FXDT" (big-endian length) holding the effects one after another, each a 27-byte header as an RTX
-/// line's audio (bits flag at 4: 1 for 16-bit, sample rate at 8, data length at 0x16) and its PCM. Scripts play them
-/// by index (Sound(n), FlatSound(n), AmbientSound(n)).
+/// count), then "FXDT" (big-endian length) holding the effects one after another, each a 27-byte header and its PCM
+/// (Redguard Preservation, formats/SFX.html): the type at 0 (0 8-bit mono, 1 16-bit mono, 2 8-bit stereo, 3 16-bit
+/// stereo), the bits flag at 4 (1 for 16-bit), the sample rate at 8, the base volume at 0x0C (Miles' 0-127; 100 in
+/// every shipped effect), the loop flag at 0x0D (0 once, 0xFF until stopped, else Miles' loop count: effect 117 plays
+/// 225 times) and the data length at 0x16. Scripts play them by index (Sound(n), FlatSound(n), AmbientSound(n)).
 /// </summary>
 public sealed class RgSfx
 {
-    public sealed record Effect(int Type, int Bits, int SampleRate, int Offset, int Length);
+    public sealed record Effect(int Type, int Bits, int SampleRate, int Offset, int Length, int BaseVolume, int Loop)
+    {
+        public int Channels => Type >= 2 ? 2 : 1;
+
+        /// <summary>One play's length in seconds at the given rate (its own when 0).</summary>
+        public double Seconds(int rate = 0) => Length / (double)(Bits / 8 * Channels) / (rate > 0 ? rate : Math.Max(1, SampleRate));
+    }
 
     public List<Effect> Effects { get; } = [];
     readonly byte[] data;
@@ -89,24 +97,44 @@ public sealed class RgSfx
         {
             int len = BitConverter.ToInt32(b, p + 0x16);
             if (len < 0 || p + 27 + len > end) break;
-            sfx.Effects.Add(new Effect(BitConverter.ToInt32(b, p), BitConverter.ToInt32(b, p + 4) == 1 ? 16 : 8, BitConverter.ToInt32(b, p + 8), p + 27, len));
+            sfx.Effects.Add(new Effect(BitConverter.ToInt32(b, p), BitConverter.ToInt32(b, p + 4) == 1 ? 16 : 8, BitConverter.ToInt32(b, p + 8), p + 27, len, b[p + 0x0C], b[p + 0x0D]));
             p += 27 + len;
         }
         return sfx;
     }
 
-    /// <summary>An effect as a .wav (its own PCM), or false for an empty one.</summary>
-    public bool WriteWav(int index, string path)
+    /// <summary>
+    /// An effect as a mono .wav (a stereo one's interleaved channels averaged, so Skyrim can place it), its samples
+    /// played at the given rate (Redguard's rate offset: the effect's rate plus the offset, 512-44000 Hz; its own when
+    /// 0), or false for an empty one.
+    /// </summary>
+    public bool WriteWav(int index, string path, int rate = 0)
     {
         if (index < 0 || index >= Effects.Count) return false;
         var e = Effects[index];
         if (e.Length <= 0 || e.SampleRate <= 0) return false;
-        using var w = new BinaryWriter(File.Create(path));
         int bytesPerSample = e.Bits / 8;
-        w.Write("RIFF"u8); w.Write(36 + e.Length); w.Write("WAVE"u8);
-        w.Write("fmt "u8); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(e.SampleRate); w.Write(e.SampleRate * bytesPerSample);
+        byte[] pcm = new byte[e.Length];
+        Buffer.BlockCopy(data, e.Offset, pcm, 0, e.Length);
+        if (e.Channels == 2)
+        {
+            int frames = e.Length / (2 * bytesPerSample);
+            var mono = new byte[frames * bytesPerSample];
+            for (int i = 0; i < frames; i++)
+                if (bytesPerSample == 2)
+                {
+                    int l = BitConverter.ToInt16(pcm, i * 4), r = BitConverter.ToInt16(pcm, i * 4 + 2);
+                    BitConverter.GetBytes((short)((l + r) / 2)).CopyTo(mono, i * 2);
+                }
+                else mono[i] = (byte)((pcm[i * 2] + pcm[i * 2 + 1]) / 2);
+            pcm = mono;
+        }
+        int hz = rate > 0 ? rate : e.SampleRate;
+        using var w = new BinaryWriter(File.Create(path));
+        w.Write("RIFF"u8); w.Write(36 + pcm.Length); w.Write("WAVE"u8);
+        w.Write("fmt "u8); w.Write(16); w.Write((short)1); w.Write((short)1); w.Write(hz); w.Write(hz * bytesPerSample);
         w.Write((short)bytesPerSample); w.Write((short)e.Bits);
-        w.Write("data"u8); w.Write(e.Length); w.Write(data, e.Offset, e.Length);
+        w.Write("data"u8); w.Write(pcm.Length); w.Write(pcm);
         return true;
     }
 }

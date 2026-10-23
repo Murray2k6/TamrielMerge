@@ -19,6 +19,18 @@ Int Property Disposition = 0 Auto
 Bool Property SetsDisposition = False Auto
 Int Property Gold = 0 Auto
 GlobalVariable Property Roll Auto
+GlobalVariable[] Property Learns Auto
+{The topics this response names (Morrowind's hyperlinks): known to the player once it is said (MWTopicKnown...).}
+
+Function Fragment_Begin(ObjectReference akSpeakerRef)
+  Int i = 0
+  While Learns && i < Learns.Length
+    If Learns[i]
+      Learns[i].SetValue(1.0)
+    EndIf
+    i += 1
+  EndWhile
+EndFunction
 
 Function Fragment_End(ObjectReference akSpeakerRef)
   Actor player = Game.GetPlayer()
@@ -56,17 +68,11 @@ Function Fragment_End(ObjectReference akSpeakerRef)
     player.RemoveItem(Game.GetFormFromFile(0x0F, "Skyrim.esm"), Gold, False, akSpeakerRef)
   EndIf
   If speaker && (Disposition != 0 || SetsDisposition)
-    Float now = speaker.GetActorValue("Variable09")
-    Float target = now + Disposition
     If SetsDisposition
-      target = Disposition - 50
+      TMMwScript.SetDisposition(speaker, Disposition)
+    Else
+      TMMwScript.ModDisposition(speaker, Disposition)
     EndIf
-    If target < -50.0
-      target = -50.0
-    ElseIf target > 50.0
-      target = 50.0
-    EndIf
-    speaker.ModActorValue("Variable09", target - now)
   EndIf
   If JoinFaction
     player.AddToFaction(JoinFaction)

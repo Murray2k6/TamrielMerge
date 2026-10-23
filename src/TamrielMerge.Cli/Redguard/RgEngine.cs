@@ -359,6 +359,8 @@ public sealed partial class RgPluginBuilder
                 book.EditorID = "RGPicture" + Sanitize(stem);
                 book.Name = stem.StartsWith("stmap") ? "Through the Telescope" : stem.StartsWith("mirror") ? "The Mirror's Vision" : stem;
                 book.BookText = $"<p align='center'><img src='img://Textures/TamrielMerge/rg/pictures/{stem}.png' width='440' height='{440 * h / Math.Max(1, w)}'></p>";
+                picturePaths.Add($"img://Textures/TamrielMerge/rg/pictures/{stem}.png");
+                pictureSizes.Add(w); pictureSizes.Add(h);
                 book.Flags |= Book.Flag.CantBeTaken;
                 book.Teaches = new BookTeachesNothing();
                 book.VirtualMachineAdapter = null;
@@ -369,10 +371,26 @@ public sealed partial class RgPluginBuilder
             {
                 Problems.Add($"picture {rel}: {e.Message}");
                 list.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(Sk(0x3B)));
+                picturePaths.Add("");
+                pictureSizes.Add(0); pictureSizes.Add(0);
             }
         }
+        // The menu ViewGXA shows them in for the task's time (Interface\rgpicture.as; the page stays for no SKSE).
+        if (pictureFiles.Count > 0)
+            try
+            {
+                string swf = Path.Combine(modOutDir, "Interface", "TamrielMerge", "rgpicture.swf");
+                Skyrim.Ui.FlashMenus.Compile(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Interface", "rgpicture.as")), swf);
+                PictureMenuBuilt = true;
+            }
+            catch (Exception e) { Problems.Add($"picture menu: {e.Message} (pictures open as pages)"); }
         return list;
     }
+
+    readonly List<string> picturePaths = [];
+    readonly List<int> pictureSizes = [];
+    /// <summary>rgpicture.swf was compiled into the output.</summary>
+    public bool PictureMenuBuilt { get; private set; }
 
     public static (uint[] Px, int W, int H) ReadGxa(byte[] b)
     {

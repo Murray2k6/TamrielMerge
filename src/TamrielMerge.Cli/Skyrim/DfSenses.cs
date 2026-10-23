@@ -13,9 +13,10 @@ namespace TamrielMerge.Skyrim;
 /// "There are enemies nearby" rule for resting, waiting and travel. Nothing global changes: Skyrim's detection settings
 /// (fDetection*, iDetection*) and every other game's actors are untouched.
 /// <list type="bullet">
-/// <item>TMDfSenses on each hostile Daggerfall actor CreatureBuilder makes (its monsters, the City Watch, and the actors
-/// standing for its enemy classes' leveled lists). Its encounter-list actors keep their template's script, so whatever
-/// the list picks brings its own.</item>
+/// <item>TMDfSenses on each Daggerfall actor CreatureBuilder makes (its monsters, the City Watch, and the actors
+/// standing for its enemy classes' leveled lists), the passive ones' (Daggerfall's non-hostile markers) marked Passive:
+/// they fight only when struck or when a trespass turns the area's enemies hostile. Its encounter-list actors keep their
+/// template's script, so whatever the list picks brings its own.</item>
 /// <item>TMDfSensesControl, the quest "TMDfSensesQuest" (start-game enabled, at a fixed number in Daggerfall.esm): the
 /// loaded enemies, the player's pace, the Sleep/Wait menu check, and EnemiesNearby for TMTravel.</item>
 /// </list>
@@ -138,11 +139,26 @@ public static class DfSenses
         props.Add(new ScriptObjectProperty { Name = "IliacBay", Object = iliacBay.ToLink<ISkyrimMajorRecordGetter>() });
     }
 
+    /// <summary>What Daggerfall's monsters' hits give the player (Daggerfall Unity FormulaHelper.OnMonsterHit), on the
+    /// control quest: its 17 diseases (and the monsters' lists of them), Paralysis (SPELLS.STD 66) for spiders and
+    /// scorpions, vampirism and lycanthropy.</summary>
+    public static void SetHitData(Quest quest, FormList diseases, Spell? paralysis, ISpellGetter? vampirism, FormList? lycanthropy)
+    {
+        var props = quest.VirtualMachineAdapter!.Scripts.First(s => s.Name == ControlScript).Properties;
+        props.RemoveAll(p => p.Name is "Diseases" or "Paralysis" or "Vampirism" or "Lycanthropy" or "DiseaseListB" or "DiseaseListC");
+        props.Add(new ScriptObjectProperty { Name = "Diseases", Object = diseases.ToLink<ISkyrimMajorRecordGetter>() });
+        if (paralysis is not null) props.Add(new ScriptObjectProperty { Name = "Paralysis", Object = paralysis.ToLink<ISkyrimMajorRecordGetter>() });
+        if (vampirism is not null) props.Add(new ScriptObjectProperty { Name = "Vampirism", Object = vampirism.FormKey.ToLink<ISkyrimMajorRecordGetter>() });
+        if (lycanthropy is not null) props.Add(new ScriptObjectProperty { Name = "Lycanthropy", Object = lycanthropy.ToLink<ISkyrimMajorRecordGetter>() });
+        props.Add(new ScriptIntListProperty { Name = "DiseaseListB", Data = [.. DfDiseases.ListB] });
+        props.Add(new ScriptIntListProperty { Name = "DiseaseListC", Data = [.. DfDiseases.ListC] });
+    }
+
     /// <summary>
     /// Gives an actor TMDfSenses (replacing an earlier one) and makes its own scripts count: a templated actor whose
     /// template supplied its scripts (Use Script) takes the template's into its own first, so nothing it had is lost.
     /// </summary>
-    public static void Attach(Npc npc, Quest quest, bool seesInvisible, Func<FormKey, INpcGetter?> resolve, int language = -1)
+    public static void Attach(Npc npc, Quest quest, bool seesInvisible, Func<FormKey, INpcGetter?> resolve, int language = -1, bool passive = false, int mobile = -1)
     {
         var flags = npc.Configuration.TemplateFlags;
         if (!npc.Template.IsNull && flags.HasFlag(NpcConfiguration.TemplateFlag.Script))
@@ -177,5 +193,10 @@ public static class DfSenses
                 new ScriptIntProperty { Name = "Language", Data = language },
             ],
         });
+        // A passive one (Daggerfall's non-hostile markers) fights only when struck or when a trespass makes the area's
+        // enemies hostile (TMDfSensesControl.MakeEnemiesHostile).
+        if (passive) npc.VirtualMachineAdapter.Scripts.First(s => s.Name == ActorScript).Properties.Add(new ScriptBoolProperty { Name = "Passive", Data = true });
+        // A monster (0-42): what its hits do to the player (TMDfSensesControl.MonsterHit).
+        if (mobile is >= 0 and < 128) npc.VirtualMachineAdapter.Scripts.First(s => s.Name == ActorScript).Properties.Add(new ScriptIntProperty { Name = "Mobile", Data = mobile });
     }
 }

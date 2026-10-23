@@ -25,6 +25,12 @@ public static class DfLevelling
         "HandToHand", "TwoHanded", "TwoHanded", "Archery", "CriticalStrike",
     ];
 
+    /// <summary>Daggerfall's weapon skills Skyrim folds into One- and Two-handed, also kept as the progression's hidden
+    /// skills (ProgressionSkills.WeaponSkills): Short Blade (28), Long Blade (29), Axe (31), Blunt Weapon (32).</summary>
+    static readonly Dictionary<int, string> HiddenSkills = new() { [28] = "ShortBlade", [29] = "LongBlade", [31] = "Axe", [32] = "BluntWeapon" };
+
+    static IEnumerable<string> Targets(int s) => HiddenSkills.TryGetValue(s, out var h) ? [Skills[s], h] : [Skills[s]];
+
     /// <summary>Each skill's governing attribute (Daggerfall Unity's DaggerfallSkills.GetPrimaryStat), as
     /// <see cref="GameLevelling.Attributes"/> indexes.</summary>
     static readonly int[] SkillAttribute =
@@ -77,7 +83,8 @@ public static class DfLevelling
         }
         var governing = new Dictionary<string, int>();
         for (int s = 0; s < Skills.Length; s++)
-            if (!Skills[s].StartsWith("DF:")) governing.TryAdd(Skills[s], SkillAttribute[s]);
+            if (!Skills[s].StartsWith("DF:"))
+                foreach (var id in Targets(s)) governing.TryAdd(id, SkillAttribute[s]);
         return new GameLevelling
         {
             Game = "DF",
@@ -125,7 +132,7 @@ public static class DfLevelling
         float advancement = MathF.Round((adv >> 16) + (adv & 0xffff) / 65536f, 2);
         var attributes = new int[8];
         for (int a = 0; a < 8; a++) attributes[AttributeOrder[a]] = U16(b, 58 + a * 2);
-        string[] Pick(int from, int count) => [.. Enumerable.Range(from, count).Select(o => b[o]).Where(s => s < Skills.Length).Select(s => Skills[s])];
+        string[] Pick(int from, int count) => [.. Enumerable.Range(from, count).Select(o => b[o]).Where(s => s < Skills.Length).SelectMany(s => Targets(s))];
         var primary = Pick(16, 3).Distinct().ToArray();
         var major = Pick(19, 3).Distinct().Except(primary).ToArray();
         var minor = Pick(22, 6).Distinct().Except(primary).Except(major).ToArray();

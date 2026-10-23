@@ -55,6 +55,7 @@ public static class DaggerfallPluginBuilder
             .Select(m => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, m), SkyrimRelease.SkyrimSE)).Prepend(skyrim).ToList();
         var items = new DfItems(mod, itemMasters, skyrimData, outDir);
         items.Build();
+        items.WeaponKindLists();
         var clutter = new ClutterPlacer(skyrim, propReplacer, mod.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey));
         clutter.UseDaggerfallItems(DfItems.Lookup(mod));
         if (clutter.Missing.Count > 0) Console.WriteLine($"Clutter: vanilla forms not found: {string.Join(", ", clutter.Missing)}");
@@ -179,6 +180,14 @@ public static class DaggerfallPluginBuilder
             Books = [.. mod.Books.Where(b => b.EditorID?.StartsWith("DF_Book") == true).Select(b => b.FormKey)],
         };
         questBuilder.Build();
+        // What Daggerfall's monsters' hits give (TMDfSensesControl.MonsterHit): its diseases (the quests made the list),
+        // Paralysis for spiders and scorpions, vampirism (Skyrim's Sanguinare Vampiris) and lycanthropy.
+        if (creatures.Senses is { } hitSenses)
+        {
+            var diseaseList = DfDiseases.List(mod, DfText.Load(arena2));
+            DfSenses.SetHitData(hitSenses, diseaseList, spells.Spells.GetValueOrDefault(66),
+                skyrim.Spells.FirstOrDefault(s => s.EditorID == "DiseaseSanguinareVampiris"), DfDiseases.Lycanthropy(mod, skyrim, diseaseList));
+        }
         guilds?.AddSummoning(questBuilder.Machine!.FormKey);
         var markerOf = markers.GroupBy(m => (m.Location.Region, m.Location.Index)).ToDictionary(g => g.Key, g => g.First().Marker.FormKey);
         questTowns.AddRange(questBuilder.ExteriorOnly.Select(l => new QuestSites.Town(l, null)));

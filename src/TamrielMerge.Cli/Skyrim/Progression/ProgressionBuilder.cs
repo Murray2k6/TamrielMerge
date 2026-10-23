@@ -361,6 +361,9 @@ public static class ProgressionBuilder
                 Obj("ArmorHeavy", Sk(0x06BBD2)),
                 Texts("DfSkillNames", dfSkills.Select(d => d.Name)),
                 Ints("DfSkillIds", dfSkills.Select(d => (int)d.Id)),
+                // Skyrim.esm's WeapTypeDagger, Sword, Greatsword, WarAxe, Battleaxe, Mace, Warhammer.
+                Objs("WeaponTypes", new uint[] { 0x01E713, 0x01E711, 0x06D931, 0x01E712, 0x06D932, 0x01E714, 0x06D930 }.Select(id => (FormKey?)Sk(id))),
+                new ScriptBoolListProperty { Name = "HiddenSkills", Data = [.. s.Select(d => d.Hidden)] },
             ],
         };
     }
@@ -552,8 +555,10 @@ public static class ProgressionBuilder
     {
         var games = new Dictionary<string, string> { ["DF"] = "Daggerfall", ["MW"] = "Morrowind", ["OB"] = "Oblivion" };
         var sb = new System.Text.StringBuilder("var built = {\n");
-        sb.Append("  skills: [").AppendJoin(", ", b.Skills.Select(s =>
-            $"{{n: {Q(s.Name)}, f: {Q(string.Join(", ", s.Games.Select(g => games[g])))}, r: {Q(s.Rises)}, e: {Q(s.Effect)}}}")).Append("],\n");
+        // The skills shown (the hidden weapon skills aren't), each with its index in TMSkills' arrays (i), which the state
+        // and the perks are numbered by.
+        sb.Append("  skills: [").AppendJoin(", ", b.Skills.Select((s, i) => (s, i)).Where(x => !x.s.Hidden).Select(x =>
+            $"{{n: {Q(x.s.Name)}, f: {Q(string.Join(", ", x.s.Games.Select(g => games[g])))}, r: {Q(x.s.Rises)}, e: {Q(x.s.Effect)}, i: {x.i}}}")).Append("],\n");
         sb.Append("  perks: [").AppendJoin(", ", b.Tree.Select(t =>
             $"[{t.Skill}, {t.Level}, {t.After}, {Q(t.Name)}, {t.Rank}, {t.Ranks}, {Q(t.Description)}]")).Append("],\n");
         sb.Append("  df: [").AppendJoin(", ", dfSkills.Select(d => Q(d.Name))).Append("],\n");

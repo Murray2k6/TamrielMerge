@@ -25,6 +25,11 @@ Bool Property SeesInvisible = False Auto
 {Daggerfall's monsters that see through invisibility (EnemyBasics.SeesThroughInvisibility).}
 Int Property Language = -1 Auto
 {The language skill that may pacify it when it first meets the player (TMDfSensesControl.SkillNames; -1 none).}
+Int Property Mobile = -1 Auto
+{Its Daggerfall monster (MonsterCareers, 0-42; -1 an enemy class): what its hits do to the player (TMDfSensesControl.MonsterHit).}
+Bool Property Passive = False Auto
+{Placed passive (Daggerfall's non-hostile markers: a castle's guards, a court; EnemyMotor.IsHostile false): it doesn't
+fight until struck by the player or until a trespass turns the area's enemies hostile (MakeHostile).}
 
 ; ---- Daggerfall Unity's numbers in Skyrim units (classic units x 2) ----
 Float SightRange = 8192.0       ; SightRadius: 4096 classic units (102.4 m)
@@ -78,13 +83,7 @@ Function Begin()
   If !Senses || IsDead()
     Return
   EndIf
-  If !begun
-    begun = True
-    aggression = GetActorValue("Aggression")
-    assistance = GetActorValue("Assistance")
-    hostile = aggression > 0.0
-    SpawnArea()
-  EndIf
+  ReadOwn()
   If pacified
     Return
   EndIf
@@ -93,6 +92,26 @@ Function Begin()
   EndIf
   Senses.Register(Self)
   RegisterForSingleUpdate(Utility.RandomFloat(0.1, 0.6))
+EndFunction
+
+; Its own Aggression and Assistance, read once (before anything changes them: a quest may restrain it as it is made).
+Function ReadOwn()
+  If begun
+    Return
+  EndIf
+  begun = True
+  aggression = GetActorValue("Aggression")
+  assistance = GetActorValue("Assistance")
+  hostile = aggression > 0.0
+  If Passive
+    ; Not hostile until made so; then it fights as an aggressive one would.
+    hostile = False
+    If aggression <= 0.0
+      aggression = 1.0
+    EndIf
+    Unaware()
+  EndIf
+  SpawnArea()
 EndFunction
 
 ; The marker's classic spawn distance type (TMDfSpawnType on the placed enemy; Daggerfall Unity EnemySenses.Start), in
@@ -336,6 +355,7 @@ EndFunction
 ; MakeEnemyHostileToAttacker: struck by the player (or the player's followers), it knows where they are.
 ; Pacified: no longer hostile to the player until struck (MakeEnemyHostileToAttacker).
 Function Pacify()
+  ReadOwn()
   pacified = True
   aware = False
   detected = False
@@ -346,7 +366,33 @@ Function Pacify()
   Senses.Unregister(Self)
 EndFunction
 
+; EnemyMotor.IsHostile set (GameManager.MakeEnemiesHostile): a passive or pacified one is hostile again, and fights once
+; its senses find the player.
+Function MakeHostile()
+  ReadOwn()
+  If IsDead() || (hostile && !pacified)
+    Return
+  EndIf
+  hostile = True
+  pacified = False
+  Senses.Register(Self)
+  RegisterForSingleUpdate(0.1)
+EndFunction
+
 Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile, Bool abPowerAttack, Bool abSneakAttack, Bool abBashAttack, Bool abHitBlocked)
+  If !hostile && Passive && !IsDead()
+    ; A passive one struck by the player (or the player's followers) turns on them (MakeEnemyHostileToAttacker).
+    Actor attacker = akAggressor as Actor
+    If attacker && (attacker == Senses.PlayerRef || attacker.IsPlayerTeammate())
+      hostile = True
+      active = True
+      Senses.Register(Self)
+      Noticed()
+      Engage(Senses.PlayerRef)
+      RegisterForSingleUpdate(0.5)
+    EndIf
+    Return
+  EndIf
   If pacified && !IsDead()
     Actor striker = akAggressor as Actor
     If striker && (striker == Senses.PlayerRef || striker.IsPlayerTeammate())

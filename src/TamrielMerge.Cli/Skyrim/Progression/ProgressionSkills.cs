@@ -19,8 +19,11 @@ public sealed record TreePerk(string Name, params TreeRank[] Ranks);
 /// <summary>A new skill (docs/progression.md "New skills"): the games it is from, how it rises and what its level does.
 /// <paramref name="Use"/> is the experience one use gives (TMSkills multiplies it by the size of the use: a spell's cost,
 /// the distance run, the gold changing hands); Skyrim's curve: a level L needs ImproveMult x L^1.95 + ImproveOffset.</summary>
+/// <paramref name="Hidden"/>: kept for the games' scripts and dialogue only (not in the menu, no effect or perks of its own):
+/// a weapon skill of a game whose weapon skills Skyrim folds into One- and Two-handed (user, 2026-10-23: "Keep original
+/// stats").
 public sealed record SkillDef(string Name, string[] Games, string Rises, string Effect, float Use, SkillAv[] Avs, SkillEntry[] Entries, TreePerk[] Tree,
-    float ImproveMult = 2, float ImproveOffset = 0)
+    float ImproveMult = 2, float ImproveOffset = 0, bool Hidden = false)
 {
     public string Id => Regex.Replace(Name, "[^A-Za-z]+([a-z]?)", m => m.Groups[1].Value.ToUpperInvariant());
 }
@@ -160,10 +163,25 @@ public static class ProgressionSkills
                                       R(50, "Another 15% stronger.", PerkFx.Times(EP.ModSpellMagnitude, 1.15f, new Cond(1, "skill", "Restoration")))),
                 new("Resilience", R(75, "+50% disease and +25% poison resistance.", PerkFx.Raise(ActorValue.ResistDisease, 50), PerkFx.Raise(ActorValue.PoisonResist, 25))),
             ]),
+        // The games' weapon skills Skyrim folds into One- and Two-handed (whose hits raise those too), kept hidden for
+        // their scripts and dialogue (GetLongBlade, a response for Long Blade 30): a hit with a weapon of the kind is a use,
+        // as a Skyrim weapon hit (30, as Spear's). Morrowind's and Daggerfall's Short Blade, Long Blade, Axe and Blunt
+        // Weapon; Oblivion's Blade (swords and daggers) and Blunt (maces, hammers and axes).
+        new("Short Blade", ["DF", "MW"], "hits with daggers and short swords", "", 30, [], [], [], Hidden: true),
+        new("Long Blade", ["DF", "MW"], "hits with swords", "", 30, [], [], [], Hidden: true),
+        new("Axe", ["DF", "MW"], "hits with axes", "", 30, [], [], [], Hidden: true),
+        new("Blunt Weapon", ["DF", "MW"], "hits with maces, hammers and staves", "", 30, [], [], [], Hidden: true),
+        new("Blade", ["OB"], "hits with swords and daggers", "", 30, [], [], [], Hidden: true),
+        new("Blunt", ["OB"], "hits with maces, hammers and axes", "", 30, [], [], [], Hidden: true),
     ];
 
+    /// <summary>The hidden weapon skills and the weapon kind (TMSkills.WeaponKind: 0 short blade, 1 long blade, 2 axe, 3
+    /// blunt) each rises with; Oblivion's Blade takes 0 and 1, its Blunt 2 and 3.</summary>
+    public static readonly (string Id, int[] Kinds)[] WeaponSkills =
+        [("ShortBlade", [0]), ("LongBlade", [1]), ("Axe", [2]), ("BluntWeapon", [3]), ("Blade", [0, 1]), ("Blunt", [2, 3])];
+
     /// <summary>The form lists TMSkills fills at run time, in its order.</summary>
-    public static readonly string[] ListNames = ["Mysticism", "Thaumaturgy", "Spears", "MediumArmor"];
+    public static readonly string[] ListNames = ["Mysticism", "Thaumaturgy", "Spears", "MediumArmor", "ShortBlades", "LongBlades", "Axes", "BluntWeapons"];
 
     static readonly Dictionary<string, string> GameOf = new() { ["Daggerfall.esm"] = "DF", ["Morrowind.esm"] = "MW", ["Oblivion.esm"] = "OB" };
 
@@ -226,6 +244,17 @@ public static class ProgressionSkills
                         if (MwPieceWeight(a.BodyTemplate!.FirstPersonFlags) is { } full && a.Weight > full * 0.6f && a.Weight <= full * 0.9f)
                             listed.Add(new(plugin, a.FormKey.ID, 3));
             }
+            // The game's weapons by its weapon skill (MWWeaponsShortBlade..., DFWeapons...), for the hidden weapon skills;
+            // Oblivion's keep its category in Skyrim's weapon type, which TMSkills reads.
+            string prefix = plugin == "Morrowind.esm" ? "MWWeapons" : plugin == "Daggerfall.esm" ? "DFWeapons" : "";
+            if (prefix.Length > 0)
+                for (int k = 0; k < 4; k++)
+                {
+                    string kind = new[] { "ShortBlade", "LongBlade", "Axe", "BluntWeapon" }[k];
+                    if (!Has(kind)) continue;
+                    if (m.FormLists.FirstOrDefault(l => l.EditorID == prefix + kind) is { } kindList)
+                        foreach (var item in kindList.Items) listed.Add(new(plugin, item.FormKey.ID, 4 + k));
+                }
             log?.Invoke($"  {plugin}: {string.Join(", ", listed.Skip(before).GroupBy(l => l.List).Select(g => $"{g.Count()} {ListNames[g.Key]}"))}");
         }
         return listed;

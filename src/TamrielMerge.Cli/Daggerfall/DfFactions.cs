@@ -11,7 +11,11 @@ public enum DfSocialGroup { None = -1, Commoners = 0, Merchants = 1, Scholars = 
 /// 0 Nord, 1 Khajiit, 2 Redguard, 3 Breton, 4 Argonian, 5 Wood Elf, 6 High Elf, 7 Dark Elf.
 /// </summary>
 public sealed record DfFaction(int Id, int Parent, DfFactionType Type, string Name, int Rep, int Region, int Race, DfSocialGroup SGroup, int GGroup,
-    int Face, int Flat, IReadOnlyList<int> Allies, IReadOnlyList<int> Enemies);
+    int Face, int Flat, IReadOnlyList<int> Allies, IReadOnlyList<int> Enemies)
+{
+    /// <summary>A province's ruler title (FACTION.TXT "ruler": 1 King .. 12 Lady; -1 none).</summary>
+    public int Ruler { get; init; } = -1;
+}
 
 /// <summary>
 /// FACTION.TXT: "#id" opens a faction, "key: value" lines fill it, and indentation (tabs) nests it under the faction
@@ -39,7 +43,7 @@ public sealed class DfFactions
             while (stack.Count > 0 && stack[^1].Depth >= depth) stack.RemoveAt(stack.Count - 1);
             int parent = stack.Count > 0 ? stack[^1].Id : 0;
             result[id] = new DfFaction(id, parent, (DfFactionType)I("type", 2), fields.GetValueOrDefault("name", ""), I("rep", 0), I("region"), I("race"),
-                (DfSocialGroup)I("sgroup"), I("ggroup"), I("face"), I("flat"), [.. allies], [.. enemies]);
+                (DfSocialGroup)I("sgroup"), I("ggroup"), I("face"), I("flat"), [.. allies], [.. enemies]) { Ruler = I("ruler") };
             stack.Add((depth, id));
         }
         foreach (var raw in File.ReadLines(Path.Combine(arena2, "FACTION.TXT"), System.Text.Encoding.Latin1))
@@ -66,6 +70,22 @@ public sealed class DfFactions
         }
         Flush();
         return new DfFactions(result);
+    }
+
+    /// <summary>Daggerfall Unity MacroHelper.GetRulerTitle: a ruler number's title (Lord for any other).</summary>
+    public static string RulerTitle(int ruler) => ruler switch
+    {
+        1 => "King", 2 => "Queen", 3 => "Duke", 4 => "Duchess", 5 => "Marquis", 6 => "Marquise", 7 => "Count", 8 => "Countess",
+        9 => "Baron", 10 => "Baroness", 11 => "Lord", 12 => "Lady", _ => "Lord",
+    };
+
+    /// <summary>A region's ruler (MacroHelper.RegentTitle / RegentName): its province's title, and the first of the
+    /// province's children that is an individual, by name (null without one).</summary>
+    public (string Title, string? Name) Ruler(int region)
+    {
+        if (RegionFaction(region, DfFactionType.Province) is not { } province) return ("Lord", null);
+        var individual = ById.Values.FirstOrDefault(f => f.Parent == province.Id && f.Type == DfFactionType.Individual);
+        return (RulerTitle(province.Ruler), individual?.Name);
     }
 
     /// <summary>The "People of &lt;region&gt;" faction, or the region's court.</summary>

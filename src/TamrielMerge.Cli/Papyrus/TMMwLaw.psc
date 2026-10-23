@@ -31,6 +31,8 @@ Int Property DaysPerGold = 100 Auto
 GlobalVariable Property GameHour Auto
 MiscObject Property Coin Auto
 Bool Property InJail = False Auto Hidden
+TMMwState Property MwState Auto
+{The player's Morrowind skills (jail's daily change).}
 
 Event OnInit()
   RegisterForSingleUpdate(2.0)
@@ -95,6 +97,15 @@ Function PayFine(Bool abTakeStolen)
   Crime.SetCrimeGold(0)
   Crime.SetCrimeGoldViolent(0)
   UpdateGlobals()
+  CrimeResolved()
+EndFunction
+
+; The crime dealt with: those the player attacked are no longer "attacked" (TMMwActorAI; OpenMW updateCrimePursuit).
+Function CrimeResolved()
+  Int handle = ModEvent.Create("TMMwCrimeResolved")
+  If handle
+    ModEvent.Send(handle)
+  EndIf
 EndFunction
 
 ; The nearest prison marker to where the player is in the world.
@@ -155,30 +166,6 @@ ObjectReference Function OutsideSpot(Cell here)
   Return None
 EndFunction
 
-; Skyrim's skills in Morrowind's order, for the day's skill change.
-String Function SkillName(Int i)
-  String[] names = new String[18]
-  names[0] = "OneHanded"
-  names[1] = "TwoHanded"
-  names[2] = "Marksman"
-  names[3] = "Block"
-  names[4] = "Smithing"
-  names[5] = "HeavyArmor"
-  names[6] = "LightArmor"
-  names[7] = "Pickpocket"
-  names[8] = "Lockpicking"
-  names[9] = "Sneak"
-  names[10] = "Alchemy"
-  names[11] = "Speechcraft"
-  names[12] = "Alteration"
-  names[13] = "Conjuration"
-  names[14] = "Destruction"
-  names[15] = "Illusion"
-  names[16] = "Restoration"
-  names[17] = "Enchanting"
-  Return names[i]
-EndFunction
-
 Function GoToJail()
   If !Crime
     Return
@@ -206,20 +193,24 @@ Function GoToJail()
     GameHour.Mod(24.0 * days)
   EndIf
   Game.IncrementStat("Days Jailed", days)
-  ; Each day, a skill at random: Sneak and Security (Lockpicking) rise, the rest fall.
+  ; Each day, one of Morrowind's 27 skills at random (OpenMW JailScreen): Security and Sneak one up (at most 100), any
+  ; other one down (at least 0), through the player's Morrowind skills (TMMwState: Skyrim's or the progression's).
   Int d = 0
   While d < days
-    String skill = SkillName(Utility.RandomInt(0, 17))
-    If skill == "Sneak" || skill == "Lockpicking"
-      Game.IncrementSkillBy(skill, 1)
-    Else
-      Float base = PlayerRef.GetBaseActorValue(skill)
-      If base > 1.0
-        PlayerRef.SetActorValue(skill, base - 1.0)
+    Int skill = Utility.RandomInt(0, 26)
+    If MwState
+      Float v = MwState.GetStat(PlayerRef, 8 + skill, -1)
+      If skill == 18 || skill == 19
+        If v < 100.0
+          MwState.SetStat(PlayerRef, 8 + skill, -1, v + 1.0)
+        EndIf
+      ElseIf v > 0.0
+        MwState.SetStat(PlayerRef, 8 + skill, -1, v - 1.0)
       EndIf
     EndIf
     d += 1
   EndWhile
+  CrimeResolved()
   Debug.Notification("You served " + days + " days of hard labour.")
   Utility.Wait(1.0)
   Game.FadeOutGame(False, True, 0.5, 2.0)

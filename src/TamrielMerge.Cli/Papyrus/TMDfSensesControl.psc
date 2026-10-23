@@ -29,6 +29,21 @@ FormList Property Encounters Auto
 {The dungeon types' random encounter actors: what may come while the player rests in a dungeon.}
 Float Property AlertHours = 8.0 Auto
 {An enemy that saw the player keeps the dungeon alert this long (Daggerfall Unity EnemyAlertActive).}
+FormList Property Diseases Auto
+{Daggerfall's 17 diseases in its order (DfDiseases), which its monsters' hits give.}
+Spell Property Paralysis Auto
+{SPELLS.STD 66, Paralysis: what spiders and giant scorpions cast on a hit.}
+Spell Property Vampirism Auto
+{The vampirism a vampire's hit may give (Skyrim's Sanguinare Vampiris: a vampire after three days, as Daggerfall's).}
+FormList Property Lycanthropy Auto
+{The lycanthropy a werewolf's (0) or wereboar's (1) hit may give.}
+Float Property SpecialInfectionChance = 0.6 Auto
+{FormulaHelper.specialInfectionChance: percent.}
+Int[] Property DiseaseListB Auto
+{Rats and giant bats: Plague, Stomach Rot, Brain Fever.}
+Int[] Property DiseaseListC Auto
+{Zombies and mummies: Plague, Yellow Fever, Stomach Rot, Consumption, Brain Fever, Swamp Rot, Cholera, Leprosy, Red Death,
+Typhoid Fever, Dementia.}
 
 Int[] skillUses
 Float lastAlert = -100.0
@@ -163,6 +178,7 @@ Function Refresh()
   lastX = x
   lastY = y
   lastClock = now
+  lastHealth = PlayerRef.GetActorValue("Health")
   slow = speed < SlowSpeed || (PlayerRef.IsSneaking() && !PlayerRef.IsRunning() && !PlayerRef.IsSprinting())
 EndFunction
 
@@ -212,6 +228,132 @@ Bool Function EnemiesNearby(Bool resting)
     i += 1
   EndWhile
   Return False
+EndFunction
+
+; ---- a monster's hit (Daggerfall Unity FormulaHelper.OnMonsterHit, MIT) ----
+
+; How much the hit took: the player's health a moment before (Refresh keeps it) less now. Daggerfall acts only on a hit
+; that did damage.
+Float lastHealth = -1.0
+
+Function MonsterHit(Actor attacker, Int mobile)
+  Float health = PlayerRef.GetActorValue("Health")
+  Int damage = 0
+  If lastHealth > health
+    damage = (lastHealth - health) as Int
+  EndIf
+  lastHealth = health
+  If damage <= 0
+    Return
+  EndIf
+  If mobile == 0
+    ; Rat: plague, stomach rot or brain fever, 5% (Daggerfall Unity takes DF Chronicles' list).
+    If Utility.RandomInt(1, 100) <= 5
+      InflictDisease(DiseaseListB)
+    EndIf
+  ElseIf mobile == 3
+    ; Giant bat: the same, 2% (classic's chance).
+    If Utility.RandomInt(1, 100) <= 2
+      InflictDisease(DiseaseListB)
+    EndIf
+  ElseIf mobile == 6 || mobile == 20
+    ; Spider, giant scorpion: unless the player is already paralysed, it casts Paralysis (SPELLS.STD 66) on them.
+    If Paralysis && PlayerRef.GetActorValue("Paralysis") <= 0.0
+      Paralysis.Cast(attacker, PlayerRef)
+    EndIf
+  ElseIf mobile == 9 || mobile == 14
+    ; Werewolf, wereboar: lycanthropy, 0.6% (specialInfectionChance).
+    If Utility.RandomFloat(0.0, 100.0) <= SpecialInfectionChance && Lycanthropy
+      Int k = 0
+      If mobile == 14 && Lycanthropy.GetSize() > 1
+        k = 1
+      EndIf
+      Spell infection = Lycanthropy.GetAt(k) as Spell
+      If infection && !PlayerRef.HasSpell(infection)
+        PlayerRef.AddSpell(infection, False)
+      EndIf
+    EndIf
+  ElseIf mobile == 10 || mobile == 42
+    ; Nymph, lamia: two points of fatigue for each point of health the hit took.
+    PlayerRef.DamageActorValue("Stamina", (damage * 2) as Float)
+  ElseIf mobile == 17
+    ; Zombie: 2% (DF Chronicles), the mummy's list.
+    If Utility.RandomInt(1, 100) <= 2
+      InflictDisease(DiseaseListC)
+    EndIf
+  ElseIf mobile == 19
+    If Utility.RandomInt(1, 100) <= 5
+      InflictDisease(DiseaseListC)
+    EndIf
+  ElseIf mobile == 28 || mobile == 30
+    ; Vampire, vampire ancient: vampirism 0.6%, else plague 2%.
+    Float roll = Utility.RandomFloat(0.0, 100.0)
+    If roll <= SpecialInfectionChance && Vampirism
+      If !PlayerRef.HasSpell(Vampirism)
+        PlayerRef.AddSpell(Vampirism, False)
+      EndIf
+    ElseIf roll <= 2.0
+      Int[] plague = new Int[1]
+      plague[0] = 1
+      InflictDisease(plague)
+    EndIf
+  EndIf
+EndFunction
+
+; FormulaHelper.InflictDisease: not at level 1; resisted by a saving throw against disease; else one of the list at random.
+Function InflictDisease(Int[] list)
+  If !list || list.Length == 0 || PlayerRef.GetLevel() == 1 || !Diseases
+    Return
+  EndIf
+  If DiseaseSave()
+    Return
+  EndIf
+  Spell s = Diseases.GetAt(list[Utility.RandomInt(0, list.Length - 1)]) as Spell
+  If s && !PlayerRef.HasSpell(s)
+    PlayerRef.AddSpell(s, False)
+  EndIf
+EndFunction
+
+; FormulaHelper.SavingThrow(DiseaseOrPoison, Disease) == 0: a resistance from magic (Skyrim's Disease Resistance) may stop it
+; outright; else 50 + Willpower / 10 (MagicResist), clamped to 5-95, and a d100 at or under that less 20 resists it whole.
+; (Daggerfall's racial and class tolerances: the player is a Skyrim race and has no Daggerfall career.)
+Bool Function DiseaseSave()
+  Int resist = PlayerRef.GetActorValue("DiseaseResist") as Int
+  If resist > 0 && Utility.RandomInt(1, 100) <= resist
+    Return True
+  EndIf
+  Int willpower = 50
+  Quest q = Quest.GetQuest("TMProgression")
+  If q && (q as TMPassives)
+    willpower = (q as TMPassives).AttributeValue(2)
+  EndIf
+  Int saving = 50 + willpower / 10
+  If saving < 5
+    saving = 5
+  ElseIf saving > 95
+    saving = 95
+  EndIf
+  ; At or under the saving throw the payload is 100 - 5 x (saving - roll) percent within 20 of it, nothing further down:
+  ; nothing gets through at a roll of saving - 20 or less.
+  Return Utility.RandomInt(1, 100) <= saving - 20
+EndFunction
+
+; GameManager.MakeEnemiesHostile: every one of Daggerfall's enemies where the player is (monsters and enemy classes,
+; passive or pacified ones too) is hostile again. The actors of the player's cell (SKSE: Cell.GetNthRef).
+Function MakeEnemiesHostile()
+  Cell c = PlayerRef.GetParentCell()
+  If !c
+    Return
+  EndIf
+  Int n = c.GetNumRefs(62)
+  Int i = 0
+  While i < n
+    TMDfSenses s = c.GetNthRef(i, 62) as TMDfSenses
+    If s
+      s.MakeHostile()
+    EndIf
+    i += 1
+  EndWhile
 EndFunction
 
 ; ---- language skills (Daggerfall Unity FormulaHelper, EnemySenses; MIT) ----

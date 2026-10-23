@@ -74,7 +74,7 @@ EndFunction
 ; A grip check from its base: towards 100% with the skill (5-95), plus a tenth of Luck; each is a use of the skill.
 Bool Function Check(Int base)
   TMSkills skills = Skills()
-  Int level = skills.LevelOf(skill)
+  Int level = skills.LiveLevel(skill)
   Int i = BonusRaces.Find(PlayerRef.GetRace())
   If i >= 0
     level += BonusAmount[i]
@@ -194,7 +194,7 @@ Function ClimbTick()
       Return
     EndIf
   EndIf
-  Float speed = ClimbSpeed * (0.75 + skills.LevelOf(skill) / 400.0)
+  Float speed = ClimbSpeed * (0.75 + skills.LiveLevel(skill) / 400.0)
   If skills.TreeTaken(skill, 2)
     speed *= 1.3
   EndIf

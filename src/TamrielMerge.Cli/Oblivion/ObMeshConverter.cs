@@ -22,15 +22,19 @@ public sealed class ObTextures(ObData data, string modOutDir)
     {
         string source = ObData.Normalize(texture);
         if (!source.StartsWith(@"textures\")) source = @"textures\" + source;
-        if (done.TryGetValue(source, out var hit)) return hit;
-        var bytes = data.Read(source);
-        if (bytes is null) { Missing.Add(texture); return done[source] = null; }
-        string rel = $@"{OutFolder}\{source[9..]}";
-        string full = Path.Combine(modOutDir, rel);
-        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        File.WriteAllBytes(full, bytes);
-        Copied++;
-        return done[source] = rel;
+        // Models are converted on many threads (ObPluginBuilder.PrepareModels): one copy of each texture.
+        lock (done)
+        {
+            if (done.TryGetValue(source, out var hit)) return hit;
+            var bytes = data.Read(source);
+            if (bytes is null) { Missing.Add(texture); return done[source] = null; }
+            string rel = $@"{OutFolder}\{source[9..]}";
+            string full = Path.Combine(modOutDir, rel);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllBytes(full, bytes);
+            Copied++;
+            return done[source] = rel;
+        }
     }
 
     /// <summary>The texture's normal map (name_n.dds), or a flat one without specular.</summary>
@@ -39,11 +43,12 @@ public sealed class ObTextures(ObData data, string modOutDir)
         string n = Path.ChangeExtension(diffuse, null) + "_n.dds";
         if (data.Exists(n.StartsWith("textures", StringComparison.OrdinalIgnoreCase) ? n : @"textures\" + n) && Ensure(n) is { } path) return path;
         string flat = Path.Combine(modOutDir, FlatNormal);
-        if (!File.Exists(flat))
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(flat)!);
-            Morrowind.MwTextures.WriteBcDds(flat, Enumerable.Repeat(0x008080FFu, 16).ToArray(), 4, 4, true);
-        }
+        lock (done)
+            if (!File.Exists(flat))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(flat)!);
+                Morrowind.MwTextures.WriteBcDds(flat, Enumerable.Repeat(0x008080FFu, 16).ToArray(), 4, 4, true);
+            }
         return FlatNormal;
     }
 
@@ -72,14 +77,44 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
     public ObTextures Textures => textures;
     public const string OutFolder = @"meshes\tamrielmerge\ob";
 
+    /// <summary>Every converted model whose Oblivion model has animation groups, by its Skyrim model path (a record's,
+    /// as the scripts' GetWorldModelPath gives it): each group's length and whether it loops, for PlayGroup and
+    /// IsAnimPlaying (TMObState). All of Oblivion's groups, those that only showed, hid or emitted too (which play
+    /// for their length in Oblivion whatever the converted model shows of them).</summary>
+    public readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<(string Name, float Length, bool Loop)>> Animated = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The models of Oblivion's traps (bases whose scripts call TrapUpdate): their collision on the trap layer.
+    /// Set before the models are made.</summary>
+    public HashSet<string> TrapModels { get; } = new(StringComparer.OrdinalIgnoreCase);
+    bool IsTrap(string model) => TrapModels.Contains(ObData.Normalize(model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model));
+
+    Result Played(Result r, List<(string Name, float Length, bool Loop)> groups)
+    {
+        if (groups.Count > 0) Animated[r.Path.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? r.Path[7..] : r.Path] = groups;
+        return r;
+    }
+
+    /// <summary>The animation groups of an Oblivion model: its root's controller manager's sequences.</summary>
+    static List<(string Name, float Length, bool Loop)> Groups(NifFile nif)
+    {
+        var hdr = nif.GetHeader();
+        var root = nif.GetRootNode();
+        var groups = new List<(string Name, float Length, bool Loop)>();
+        if (root is null || root.controllerRef.index >= hdr.GetNumBlocks() || hdr.GetBlockById(root.controllerRef.index) is not NiControllerManager manager) return groups;
+        for (uint k = 0; k < manager.controllerSequenceRefs.GetSize(); k++)
+            if (manager.controllerSequenceRefs.GetBlockRef(k) is var id && id < hdr.GetNumBlocks() && hdr.GetBlockById(id) is NiControllerSequence seq && seq.name.get() is { Length: > 0 } name)
+                groups.Add((name, Seconds(seq), seq.cycleType != CycleType.CYCLE_CLAMP));
+        return groups;
+    }
+
     /// <summary>A converted model: path, counts, bounds, and its collision triangles in model space.</summary>
     public sealed record Result(string Path, int Shapes, int CollisionPolys, V3 Min, V3 Max, bool Animated, List<V3[]> Solid)
     {
         /// <summary>The model's particle emitters (flames, smoke, mist), which Skyrim gets as vanilla effects placed there.</summary>
         public List<Skyrim.EffectStandIns.Emitter> Emitters { get; init; } = [];
         /// <summary>The animations the converted model plays by name (PlayGamebryoAnimation; a door's Open and
-        /// Close), with their lengths in seconds.</summary>
-        public List<(string Name, float Length)> Sequences { get; init; } = [];
+        /// Close), with their lengths in seconds and whether they loop (IsAnimPlaying: a loop plays until another starts).</summary>
+        public List<(string Name, float Length, bool Loop)> Sequences { get; init; } = [];
         /// <summary>Whether parts of the model move (its own controllers or sequences).</summary>
         public bool Moves { get; init; }
         public bool Plays(string sequence) => Sequences.Any(s => s.Name.Equals(sequence, StringComparison.OrdinalIgnoreCase));
@@ -146,8 +181,9 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         var emitters = new List<Skyrim.EffectStandIns.Emitter>();
         string rel = OutputPath(model, moving, itemMass);
         var solid = new List<(V3[] Pts, V3 N)>();
-        List<(string Name, float Length)>? sequences = null;
+        List<(string Name, float Length, bool Loop)>? sequences = null;
         var triggers = new List<(V3 Min, V3 Max)>();
+        List<(string Name, float Length, bool Loop)> groups = [];
         try
         {
             using var nif = new NifFile();
@@ -160,6 +196,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             animated = types.Any(t => t.EndsWith("Controller"));
             // Moving parts (secret walls, gates, levers, drawbridges): the node tree is kept with the animation.
             var anim = itemMass is null ? ReadAnimation(nif, bytes) : null;
+            groups = Groups(nif);
             try { emitters = Emitters(nif); }
             catch (Exception) { /* particle data nifly can't follow: no stand-ins */ }
             foreach (var shape in nif.GetShapes())
@@ -234,16 +271,16 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
                         if (anim is not null && Face([p.Verts[a], p.Verts[b], p.Verts[c]], 1e-6f) is { } lf) (byNode.TryGetValue(p.Parent, out var l) ? l : byNode[p.Parent] = []).Add(lf);
                     }
 
-            if (anim is not null) { WriteAnimated(nif, anim, pieces, byNode, Path.Combine(modOutDir, rel), moving); sequences = anim.Played; }
+            if (anim is not null) { WriteAnimated(nif, anim, pieces, byNode, Path.Combine(modOutDir, rel), moving, IsTrap(model)); sequences = anim.Played; }
         }
         finally { File.Delete(tmp); }
 
-        if (sequences is null) Write(pieces, solid, Path.Combine(modOutDir, rel), moving, itemMass);
+        if (sequences is null) Write(pieces, solid, Path.Combine(modOutDir, rel), moving, itemMass, trap: IsTrap(model));
         var all = pieces.SelectMany(p => p.ModelVerts ?? p.Verts).ToList();
-        return new Result(rel, pieces.Count, solid.Count,
+        return Played(new Result(rel, pieces.Count, solid.Count,
             all.Count > 0 ? all.Aggregate(new V3(float.MaxValue), V3.Min) : V3.Zero,
             all.Count > 0 ? all.Aggregate(new V3(float.MinValue), V3.Max) : V3.Zero, animated, solid.Select(t => t.Pts).ToList())
-        { Emitters = emitters, Sequences = sequences ?? [], Moves = sequences is not null, Triggers = triggers };
+        { Emitters = emitters, Sequences = sequences ?? [], Moves = sequences is not null, Triggers = triggers }, groups);
     }
 
     /// <summary>
@@ -515,7 +552,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
 
     /// <param name="more">Adds to the model before it is saved (an effect's particle systems).</param>
     /// <param name="bsxAdd">BSX flags added to the usual (0x1 when the model has controllers that must run).</param>
-    void Write(List<Piece> pieces, List<(V3[] Pts, V3 N)> solid, string outPath, bool moving, float? itemMass = null, Action<NifFile>? more = null, int bsxAdd = 0)
+    void Write(List<Piece> pieces, List<(V3[] Pts, V3 N)> solid, string outPath, bool moving, float? itemMass = null, Action<NifFile>? more = null, int bsxAdd = 0, bool trap = false)
     {
         using var nif = new NifFile();
         nif.Create(NiVersion.getSSE());
@@ -538,7 +575,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         else
         {
             if (solid.Count > 0)
-                BlockMeshBuilder.AddCollision(nif, root, Stairs(solid.Select(s => (s.Pts, s.N, new BlockMeshBuilder.Tex("", "", false))).ToList(), moving), moving);
+                BlockMeshBuilder.AddCollision(nif, root, trap ? solid.Select(s => (s.Pts, s.N, new BlockMeshBuilder.Tex("", "", false))).ToList() : Stairs(solid.Select(s => (s.Pts, s.N, new BlockMeshBuilder.Tex("", "", false))).ToList(), moving), moving, trap: trap);
             BlockMeshBuilder.AddBsxFlags(nif, root, 10 | bsxAdd);
         }
         more?.Invoke(nif);

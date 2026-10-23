@@ -29,6 +29,11 @@ public sealed partial class ObPluginBuilder
         ["Speechraft"] = "Speech",
     };
 
+    /// <summary>The progression's skills an Oblivion skill is: Skyrim's or the progression's, and for Blade and Blunt (which
+    /// Skyrim folds into One- and Two-handed) also its hidden skill of the same name (ProgressionSkills.WeaponSkills).</summary>
+    static IEnumerable<string> ObSkillTargets(string skill) =>
+        !ObSkillIds.TryGetValue(skill, out var id) ? [] : skill is "Blade" or "Blunt" ? [id, skill] : [id];
+
     /// <summary>Oblivion's playable races (EditorIDs) as Skyrim's.</summary>
     static readonly Dictionary<string, string> ObRaces = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -52,17 +57,18 @@ public sealed partial class ObPluginBuilder
         var governing = new Dictionary<string, int>();
         var specialization = new Dictionary<string, int>();
         foreach (var skill in plugins.SelectMany(p => p.Skills).GroupBy(s => s.FormKey).Select(g => g.Last()))
-            if (ObSkillIds.TryGetValue(skill.Skill?.ToString() ?? "", out var id) && skill.Data is { } d)
-            {
-                if (ObAttribute(d.Attribute.ToString()) is >= 0 and var a) governing.TryAdd(id, a);
-                specialization.TryAdd(id, (int)d.Specialization);
-            }
+            if (skill.Data is { } d)
+                foreach (var id in ObSkillTargets(skill.Skill?.ToString() ?? ""))
+                {
+                    if (ObAttribute(d.Attribute.ToString()) is >= 0 and var a) governing.TryAdd(id, a);
+                    specialization.TryAdd(id, (int)d.Specialization);
+                }
         var classes = new List<GameClass>();
         foreach (var c in plugins.SelectMany(p => p.Classes).GroupBy(c => c.FormKey).Select(g => g.Last()).OrderBy(c => c.Name ?? c.EditorID, StringComparer.OrdinalIgnoreCase))
         {
             if (c.Data is not { } d || !d.Flags.ToString().Contains("Playable")) continue;
             int[] favored = [.. d.PrimaryAttributes.Select(a => ObAttribute(a.ToString())).Where(a => a >= 0)];
-            string[] major = [.. d.SecondaryAttributes.Select(s => ObSkillIds.GetValueOrDefault(s.ToString())).OfType<string>().Distinct()];
+            string[] major = [.. d.SecondaryAttributes.SelectMany(s => ObSkillTargets(s.ToString())).Distinct()];
             classes.Add(new GameClass(c.EditorID ?? c.FormKey.ToString(), c.Name ?? c.EditorID ?? "", c.Description ?? "", (int)d.Specialization, favored, major, []));
         }
         var races = new Dictionary<string, int[][]>();
@@ -79,8 +85,8 @@ public sealed partial class ObPluginBuilder
             // Its skill boosts, and its spells (the racial abilities and powers: Nords' frost resistance, Woad...).
             var bonus = new Dictionary<string, int>();
             foreach (var boost in new[] { race.Data?.SkillBoost0, race.Data?.SkillBoost1, race.Data?.SkillBoost2, race.Data?.SkillBoost3, race.Data?.SkillBoost4, race.Data?.SkillBoost5, race.Data?.SkillBoost6 }.OfType<Ob.ISkillBoostGetter>())
-                if (ObSkillIds.TryGetValue(boost.Skill.ToString(), out var id) && boost.Boost > 0)
-                    bonus[id] = Math.Max(bonus.GetValueOrDefault(id), (int)boost.Boost);
+                if (boost.Boost > 0)
+                    foreach (var id in ObSkillTargets(boost.Skill.ToString())) bonus[id] = Math.Max(bonus.GetValueOrDefault(id), (int)boost.Boost);
             raceSkills[skyrim] = bonus;
             var list = new FormList(mod) { EditorID = "TMObRace" + Sanitize(e) };
             foreach (var spell in race.Spells)

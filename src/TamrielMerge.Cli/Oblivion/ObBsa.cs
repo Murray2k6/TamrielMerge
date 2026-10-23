@@ -56,6 +56,9 @@ public sealed class ObBsa
         }
     }
 
+    /// <summary>A file's stored size (compressed as stored), or 0 when it isn't here.</summary>
+    public long Size(string name) => files.TryGetValue(ObData.Normalize(name), out var f) ? f.Size : 0;
+
     public byte[]? Read(string name)
     {
         if (!files.TryGetValue(ObData.Normalize(name), out var f)) return null;

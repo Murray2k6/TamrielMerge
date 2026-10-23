@@ -17,9 +17,18 @@ namespace TamrielMerge.Skyrim.Navmesh;
 /// </summary>
 public static class InvisibleFloors
 {
+    /// <param name="wide">Under the pathgrid's points as places stood at (each level 512 each way at least) rather than along
+    /// its walks: for a pathgrid whose pads and walks were too small for a navmesh to be kept on them (2026-10-22: Oblivion's
+    /// "Dummy cell"s, four points each).</param>
     public static List<(Vector3[] Points, Vector3 Normal)> Plan(IReadOnlyList<Vector3> gridPoints, IReadOnlyList<(int A, int B)> gridLinks,
-        IReadOnlyList<Vector3> stands, IReadOnlyList<Vector3> rests, out string how)
+        IReadOnlyList<Vector3> stands, IReadOnlyList<Vector3> rests, out string how, bool wide = false)
     {
+        if (wide && gridPoints.Count > 0)
+        {
+            var plan = Plan([], [], gridPoints.Concat(stands).ToList(), rests, out string under);
+            how = $"under its pathgrid's {gridPoints.Count} points, wide ({under})";
+            return plan;
+        }
         var floor = new List<(Vector3[] Points, Vector3 Normal)>();
         void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d)
         {
@@ -91,12 +100,16 @@ public static class InvisibleFloors
         var lo = pts.Aggregate(new Vector3(float.MaxValue), Vector3.Min);
         var hi = pts.Aggregate(new Vector3(float.MinValue), Vector3.Max);
         static short C(float v) => (short)Math.Clamp(MathF.Round(v), short.MinValue, short.MaxValue);
-        var stat = new Static(mod)
+        // A cell's floor planned again (a wider one when the first kept no navmesh) replaces its first: one static, one
+        // reference (2026-10-22: two of each, under one EditorID, in the Oblivion dummy cells floored twice).
+        string id = prefix + "TMFloor" + cell.EditorID;
+        var bounds = new ObjectBounds { First = new P3Int16(C(lo.X), C(lo.Y), C(lo.Z - 12)), Second = new P3Int16(C(hi.X), C(hi.Y), C(hi.Z)) };
+        if (mod.Statics.FirstOrDefault(s => s.EditorID == id) is { } had)
         {
-            EditorID = prefix + "TMFloor" + cell.EditorID,
-            ObjectBounds = new ObjectBounds { First = new P3Int16(C(lo.X), C(lo.Y), C(lo.Z - 12)), Second = new P3Int16(C(hi.X), C(hi.Y), C(hi.Z)) },
-            Model = new Model { File = rel[7..] },
-        };
+            had.ObjectBounds = bounds;
+            return;
+        }
+        var stat = new Static(mod) { EditorID = id, ObjectBounds = bounds, Model = new Model { File = rel[7..] } };
         mod.Statics.Add(stat);
         cell.Temporary.Add(new PlacedObject(mod) { Base = stat.ToNullableLink<IPlaceableObjectGetter>(), Placement = new Placement { Position = new P3Float(0, 0, 0), Rotation = new P3Float(0, 0, 0) } });
     }

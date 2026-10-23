@@ -138,7 +138,90 @@ public sealed partial class MwPluginBuilder
     }
 
     static int WanderDistance(Tes3Record rec) => rec.Get("AI_W") is { } w ? BitConverter.ToUInt16(w.Data, 0) : 0;
-    static int Fight(Tes3Record rec) => rec.Get("AIDT") is { } a ? a.Data[2] : 0;
+    /// <summary>
+    /// Morrowind's AI settings as Morrowind uses them (TMMwActorAI, on every person and creature): Hello, Fight, Flee and
+    /// Alarm from the record (AIDT bytes 0, 2, 3, 4), the engine's settings from Morrowind's (GMSTs), whether it flies or
+    /// swims (CREA flags 0x20, 0x10). Skyrim's own aggression is off (the script starts combat by Morrowind's fight term:
+    /// 2026-10-22, a Fight of 80 had been "very aggressive" and under it never, whatever the distance or disposition), and
+    /// Alarm sets Morality (Skyrim's witnesses report what they wouldn't do: Morrowind's report at Alarm 100).
+    /// </summary>
+    void ActorAI(Npc npc, Tes3Record rec, bool person)
+    {
+        var aidt = rec.Get("AIDT")?.Data;
+        int At(int i) => aidt is { } d && d.Length > i ? d[i] : 0;
+        int alarm = At(4);
+        if (npc.AIData is { } ai)
+        {
+            ai.Aggression = Aggression.Unaggressive;
+            ai.Responsibility = alarm >= 100 ? Responsibility.NoCrime : Responsibility.AnyCrime;
+        }
+        int flags = rec.Get("FLAG")?.Int() ?? 0;
+        float Setting(string name, float fallback) => world.Settings.TryGetValue(name, out var g)
+            ? g.Get("FLTV") is { } fl ? fl.Float() : g.Get("INTV") is { } iv ? iv.Int() : fallback : fallback;
+        npc.VirtualMachineAdapter ??= new VirtualMachineAdapter();
+        npc.VirtualMachineAdapter.Scripts.Add(new ScriptEntry
+        {
+            Name = "TMMwActorAI",
+            Properties =
+            [
+                new ScriptIntProperty { Name = "Hello", Data = At(0) },
+                new ScriptIntProperty { Name = "Fight", Data = At(2) },
+                new ScriptIntProperty { Name = "Flee", Data = At(3) },
+                new ScriptIntProperty { Name = "Alarm", Data = alarm },
+                // NPDT's reputation: byte 45 of the full record, byte 3 of the auto-calculated one.
+                new ScriptIntProperty { Name = "Reputation", Data = person && rec.Get("NPDT")?.Data is { } nd ? nd.Length == 12 ? nd[3] : nd.Length >= 52 ? nd[45] : 0 : 0 },
+                new ScriptBoolProperty { Name = "IsPerson", Data = person },
+                new ScriptBoolProperty { Name = "Flies", Data = !person && (flags & 0x20) != 0 },
+                new ScriptBoolProperty { Name = "Swims", Data = !person && (flags & 0x10) != 0 },
+                new ScriptFloatProperty { Name = "FightDistanceBase", Data = Setting("iFightDistanceBase", 10) },
+                new ScriptFloatProperty { Name = "FightDistanceMultiplier", Data = Setting("fFightDistanceMultiplier", 0.005f) },
+                new ScriptFloatProperty { Name = "FightDispMult", Data = Setting("fFightDispMult", 0.2f) },
+                new ScriptFloatProperty { Name = "WerewolfFightMod", Data = Setting("iWerewolfFightMod", 100) },
+                new ScriptFloatProperty { Name = "FleeHealthMult", Data = Setting("fAIFleeHealthMult", 7) },
+                new ScriptFloatProperty { Name = "FleeFleeMult", Data = Setting("fAIFleeFleeMult", 0.3f) },
+                new ScriptObjectProperty { Name = "WerewolfKills", Object = WerewolfKillsGlobal().ToLink<ISkyrimMajorRecordGetter>() },
+                new ScriptObjectProperty { Name = "LoadCount", Object = LoadCountGlobal().ToLink<ISkyrimMajorRecordGetter>() },
+                // Its record's AI package (the first: Morrowind's current one): -1 none, 0 wander, 1 travel, 2 escort,
+                // 3 follow, 4 activate (TMMwAI's numbers); greeting and idle remarks go by it (OpenMW actors.cpp).
+                new ScriptIntProperty { Name = "RecordPackage", Data = rec.Fields.Select(f => f.Type).FirstOrDefault(t => t is "AI_W" or "AI_T" or "AI_E" or "AI_F" or "AI_A") switch { "AI_W" => 0, "AI_T" => 1, "AI_E" => 2, "AI_F" => 3, "AI_A" => 4, _ => -1 } },
+                new ScriptFloatProperty { Name = "GreetDistanceMultiplier", Data = Setting("iGreetDistanceMultiplier", 6) },
+                new ScriptFloatProperty { Name = "GreetDuration", Data = Setting("iGreetDuration", 4) },
+                new ScriptFloatProperty { Name = "GreetDistanceReset", Data = Setting("fGreetDistanceReset", 512) },
+                new ScriptFloatProperty { Name = "VoiceIdleOdds", Data = Setting("fVoiceIdleOdds", 10) },
+                new ScriptFloatProperty { Name = "VoiceHitOdds", Data = Setting("iVoiceHitOdds", 30) },
+                new ScriptFloatProperty { Name = "VoiceAttackOdds", Data = Setting("iVoiceAttackOdds", 10) },
+                // NPDT's disposition: byte 44 of the full record, byte 2 of the auto-calculated one.
+                new ScriptIntProperty { Name = "BaseDisposition", Data = person && rec.Get("NPDT")?.Data is { } npd ? npd.Length == 12 ? npd[2] : npd.Length >= 52 ? npd[44] : 50 : 50 },
+                new ScriptObjectProperty { Name = "CommonDiseases", Object = SpellList(3).ToLink<ISkyrimMajorRecordGetter>() },
+                new ScriptObjectProperty { Name = "BlightDiseases", Object = SpellList(2).ToLink<ISkyrimMajorRecordGetter>() },
+                new ScriptFloatProperty { Name = "DispRaceMod", Data = Setting("fDispRaceMod", 5) },
+                new ScriptFloatProperty { Name = "DispPersonalityMult", Data = Setting("fDispPersonalityMult", 0.5f) },
+                new ScriptFloatProperty { Name = "DispPersonalityBase", Data = Setting("fDispPersonalityBase", 50) },
+                new ScriptFloatProperty { Name = "DispFactionRankMult", Data = Setting("fDispFactionRankMult", 0.5f) },
+                new ScriptFloatProperty { Name = "DispFactionRankBase", Data = Setting("fDispFactionRankBase", 1) },
+                new ScriptFloatProperty { Name = "DispFactionMod", Data = Setting("fDispFactionMod", 3) },
+                new ScriptFloatProperty { Name = "DispCrimeMod", Data = Setting("fDispCrimeMod", 0) },
+                new ScriptFloatProperty { Name = "DispDiseaseMod", Data = Setting("fDispDiseaseMod", -10) },
+                new ScriptFloatProperty { Name = "DispWeaponDrawn", Data = Setting("fDispWeaponDrawn", -5) },
+            ],
+        });
+        // A creature the scripts ask a soul gem of (HasSoulGem, AddSoulGem...): its own gems, which trapping it fills.
+        if (!person && scriptSet is not null && scriptSet.All.SelectMany(o => o.Properties).Any(p => p.Fill.Equals("creaturegems:" + rec.Id, StringComparison.OrdinalIgnoreCase)
+                || p.Fill.StartsWith("creaturegem:" + rec.Id + "|", StringComparison.OrdinalIgnoreCase)))
+        {
+            var entry = npc.VirtualMachineAdapter.Scripts.Last(s => s.Name == "TMMwActorAI");
+            entry.Properties.Add(new ScriptObjectProperty { Name = "CreatureGems", Object = CreatureGemList(rec.Id).ToLink<ISkyrimMajorRecordGetter>() });
+            entry.Properties.Add(new ScriptObjectProperty { Name = "GenericGems", Object = GenericGemList().ToLink<ISkyrimMajorRecordGetter>() });
+            SoulTracked++;
+        }
+        ActorAIs++;
+    }
+
+    /// <summary>Creatures whose soul gems are their own (the scripts ask for them).</summary>
+    public int SoulTracked { get; private set; }
+
+    /// <summary>People and creatures given Morrowind's AI settings (TMMwActorAI).</summary>
+    public int ActorAIs { get; private set; }
 
     Npc? Person(Tes3Record rec)
     {
@@ -178,7 +261,7 @@ public sealed partial class MwPluginBuilder
         int level = npdt is { } d ? BitConverter.ToInt16(d.Data, 0) : 1;
         npc.Configuration.Level = new NpcLevel { Level = Level(level) };
         npc.Packages.Add(new FormLink<IPackageGetter>(PackageFor(WanderDistance(rec))));
-        if (npc.AIData is { } ai) ai.Aggression = Fight(rec) >= 80 ? Aggression.VeryAggressive : Aggression.Unaggressive;
+        ActorAI(npc, rec, person: true);
         AddInventory(npc, rec);
         AddSpells(npc, rec);
         int gold = npdt is { } g ? (g.Data.Length == 12 ? g.Int(8) : g.Data.Length >= 52 ? g.Int(48) : 0) : 0;
@@ -267,8 +350,7 @@ public sealed partial class MwPluginBuilder
         npc.EditorID = "MW" + Sanitize(rec.Id);
         npc.Name = rec.Str("FNAM");
         npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.BaseData;   // keep Morrowind's name
-        // Morrowind's Fight decides hostility: below 80 a creature (guar, netch, Yagrum Bagarn) doesn't attack on sight.
-        if (Fight(rec) < 80 && npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
+        ActorAI(npc, rec, person: false);
         var npdt = rec.Get("NPDT");
         int level = npdt is { } d ? d.Int(4) : 1;
         // Morrowind's level, not the stand-in's (a vanilla creature's own level or multiplier).

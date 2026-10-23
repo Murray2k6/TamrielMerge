@@ -472,7 +472,7 @@ public static class AltStartBuilder
         }
         var (_, output) = PapyrusRun.Run(new ProcessStartInfo(compiler)
         {
-            ArgumentList = { sourceDir, "-all", "-q", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={scriptsOut}" },
+            ArgumentList = { sourceDir, "-all", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={scriptsOut}" },
         }, TimeSpan.FromMinutes(3)); // about 20 seconds when it works
         // Scripts the batch left (it stopped answering, or a script of its own failed) are compiled one at a time.
         var left = sources.Where(s => !Fresh(s)).ToList();
@@ -482,14 +482,15 @@ public static class AltStartBuilder
             foreach (var psc in left)
                 output += PapyrusRun.Run(new ProcessStartInfo(compiler)
                 {
-                    ArgumentList = { Path.GetFileName(psc), "-q", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={scriptsOut}" },
+                    ArgumentList = { Path.GetFileName(psc), "-f=TESV_Papyrus_Flags.flg", imports, $"-o={scriptsOut}" },
                     WorkingDirectory = sourceDir,
                 }, PapyrusRun.One).Output;
             left = sources.Where(s => !Fresh(s)).ToList();
         }
         if (left.Count > 0)
             throw new InvalidOperationException($"Papyrus compile failed for {string.Join(", ", left.Select(Path.GetFileNameWithoutExtension))}:\n{output}");
-        Console.WriteLine($"Compiled {sources.Length} scripts");
+        var (compileErrors, compileWarnings, said) = PapyrusRun.Tally(output);
+        Console.WriteLine($"Compiled {sources.Length} scripts ({compileErrors} compiler errors, {compileWarnings} warnings{(said.Count > 0 ? ": " + string.Join("; ", said.Take(5)) : "")})");
         // Keep the compiled copies beside the sources (in the source tree, when running from it) up to date. In the source
         // tree only those whose source is the tree's own: an app built earlier and run from inside the repository (out\gui)
         // compiles its own older sources, and copied back they replaced newer compiled scripts (2026-10-16: the start's

@@ -75,7 +75,9 @@ public sealed partial class MwPluginBuilder
         bool swing = b is Activator a && swingDoors.ContainsValue(a);
         if (b is not (Door or Container) && !swing) return;
         bool locked = r.LockLevel > 0, trapped = r.Trap is { Length: > 0 };
-        if (!locked && !trapped) return;
+        // Unlocked and untrapped, but a script may lock it (Lock N): TMMwLock all the same, so the lock is Morrowind's
+        // own level and picked the Morrowind way.
+        if (!locked && !trapped && !ScriptMayLock(r.BaseId)) return;
         var key = r.Key is { Length: > 0 } ? Item(r.Key) as Key : null;
         var entry = new ScriptEntry { Name = "TMMwLock" };
         entry.Properties.Add(new ScriptObjectProperty { Name = "Security", Object = SecurityQuest.ToLink<ISkyrimMajorRecordGetter>() });
@@ -96,6 +98,24 @@ public sealed partial class MwPluginBuilder
             TrapCount++;
         }
         placed.VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [entry] };
+    }
+
+    HashSet<string>? scriptLocks;
+
+    /// <summary>Whether a script may lock this object: one that locks names it (ref->Lock), or its own script locks it.</summary>
+    bool ScriptMayLock(string id)
+    {
+        if (scriptSet is null || scriptWorld is null) return false;
+        if (scriptLocks is null)
+        {
+            scriptLocks = new(StringComparer.OrdinalIgnoreCase);
+            foreach (var o in scriptSet.All.Where(o => o.Source.Contains("TMMwScript.LockMw(", StringComparison.Ordinal)))
+                foreach (var p in o.Properties.Where(p => p.Fill.StartsWith("ref:", StringComparison.Ordinal))) scriptLocks.Add(p.Fill[4..]);
+            foreach (var t in scriptSet.Objects.Where(t => t.Output.Source.Contains("TMMwScript.LockMw(Self", StringComparison.Ordinal)))
+                if (scriptWorld.Carriers.TryGetValue(t.ScriptId, out var carriers))
+                    foreach (var c in carriers) scriptLocks.Add(c.Id);
+        }
+        return scriptLocks.Contains(id);
     }
 
     /// <summary>

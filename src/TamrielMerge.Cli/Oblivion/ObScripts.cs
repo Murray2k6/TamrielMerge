@@ -28,11 +28,29 @@ public sealed partial class ObPluginBuilder
     readonly Dictionary<FormKey, IMajorRecord> placedBySource = new();
     public int ScriptStatements { get; private set; }
     public int ScriptStatementsTranslated { get; private set; }
+    /// <summary>Statements translated as Oblivion does them (ObPapyrus.Output.Faithful).</summary>
+    public int ScriptStatementsFaithful { get; private set; }
+    /// <summary>What the rest fall short in, with how many statements (ObPapyrus.Gap).</summary>
+    public Dictionary<string, int> ScriptGaps { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    void CountScript(ObPapyrus.Output output)
+    {
+        ScriptStatements += output.Statements;
+        ScriptStatementsTranslated += output.Translated;
+        ScriptStatementsFaithful += output.Faithful;
+        foreach (var (m, n) in output.Missing) ScriptMissing[m] = ScriptMissing.GetValueOrDefault(m) + n;
+        foreach (var (g, n) in output.Gaps) ScriptGaps[g] = ScriptGaps.GetValueOrDefault(g) + n;
+    }
     public int ScriptsAttached { get; private set; }
     public int PropertiesFilled { get; private set; }
+    /// <summary>Properties no converted record fills (the script reads None there: Papyrus's log warns on each use).</summary>
+    public List<string> PropertiesUnfilled { get; } = [];
     public Dictionary<string, int> ScriptMissing { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public int ScriptCount => translations.Count;
+    public int TrapModelCount { get; private set; }
+    /// <summary>Oblivion people and creatures carrying their Oblivion attributes and skills (TMObActor).</summary>
+    public int ActorsWithStats { get; private set; }
 
     /// <summary>Translates every script of the active plugins and marks the references they name.</summary>
     public void PrepareScripts()
@@ -48,9 +66,7 @@ public sealed partial class ObPluginBuilder
             {
                 var output = new ObPapyrus(scriptWorld, functions).Translate(ObScript.Parse(src), id, kind, scriptWorld.OnActor(key));
                 translations[key] = output;
-                ScriptStatements += output.Statements;
-                ScriptStatementsTranslated += output.Translated;
-                foreach (var (m, n) in output.Missing) ScriptMissing[m] = ScriptMissing.GetValueOrDefault(m) + n;
+                CountScript(output);
                 foreach (var p in output.Properties)
                 {
                     if (p.PapyrusTypeIsReference() && !p.Generated && p.QuestVariable is null && scriptWorld.KeyOf(p.EditorID) is { } refKey)
@@ -64,6 +80,15 @@ public sealed partial class ObPluginBuilder
             }
             catch (Exception e) { Problems.Add($"script {id}: {e.Message}"); }
         }
+        // The references the dialogue's and packages' conditions name are placed persistent, as the scripts' are.
+        foreach (var key in ConditionRefs()) scriptRefs.Add(key);
+        // Traps (their scripts call TrapUpdate): their models' collision on the trap layer, made after this.
+        foreach (var (key, rec) in records)
+            if (ObScriptWorld.ScriptLink(rec) is { } s && translations.TryGetValue(s, out var o) && o.Trap
+                && rec.GetType().GetProperty("Model")?.GetValue(rec) is Ob.IModelGetter { File: { Length: > 0 } file })
+                meshes.TrapModels.Add(ObData.Normalize(file.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? file : @"meshes\" + file));
+        TrapModelCount = meshes.TrapModels.Count;
+        PrepareResultScripts(functions);
     }
 
     /// <summary>A reference a script names: persistent (in the cell's persistent group), and remembered.</summary>
@@ -76,6 +101,10 @@ public sealed partial class ObPluginBuilder
         return true;
     }
 
+    /// <summary>What the Papyrus compiler said of the translated scripts (scripts-compile.txt).</summary>
+    public int CompileErrors { get; private set; }
+    public int CompileWarnings { get; private set; }
+
     /// <summary>Writes, compiles and attaches the scripts; returns how many compiled.</summary>
     public int AttachScripts()
     {
@@ -85,14 +114,22 @@ public sealed partial class ObPluginBuilder
         string sourceDir = Path.Combine(modOutDir, "Source", "Scripts", "TamrielMerge", "Oblivion");
         string scriptsDir = Path.Combine(modOutDir, "Scripts");
         Directory.CreateDirectory(sourceDir);
-        foreach (var o in translations.Values) File.WriteAllText(Path.Combine(sourceDir, o.ScriptName + ".psc"), o.Source);
+        // Unchanged sources keep their dates, so only what changed (and what names it) is compiled again.
+        foreach (var o in translations.Values) Skyrim.PapyrusRun.WriteIfChanged(Path.Combine(sourceDir, o.ScriptName + ".psc"), o.Source);
+        foreach (var (name, source) in ResultScriptSources()) Skyrim.PapyrusRun.WriteIfChanged(Path.Combine(sourceDir, name + ".psc"), source);
         var (compiled, log) = CompilePapyrus(SkyrimData!, sourceDir, scriptsDir);
         if (compiled is null) { Problems.Add("scripts: " + log); return 0; }
-        foreach (var line in log.Split('\n').Where(l => l.Contains("): ")).Take(50)) Problems.Add("script compile: " + line.Trim());
+        // Every error and warning the compiler and the assembler gave (scripts-compile.txt), counted (PapyrusRun.Tally);
+        // the errors as problems too.
+        var (errors, warnings, said) = Skyrim.PapyrusRun.Tally(log);
+        File.WriteAllLines(Path.Combine(modOutDir, "scripts-compile.txt"), said);
+        CompileWarnings = warnings;
+        CompileErrors = errors;
+        foreach (var line in said.Where(l => !l.Contains("warning", StringComparison.OrdinalIgnoreCase))) Problems.Add("script compile: " + line);
 
         // Records the scripts make for themselves: message boxes, the fame globals, the functions quest.
         var generated = new Dictionary<string, FormKey>(StringComparer.OrdinalIgnoreCase);
-        foreach (var o in translations.Values)
+        foreach (var o in translations.Values.Concat(resultTranslations.Values).Concat(stageTranslations.Values))
             foreach (var m in o.Messages)
             {
                 var msg = new Message(mod) { EditorID = m.EditorID, Description = m.Text, Flags = Message.Flag.MessageBox, MenuButtons = [] };
@@ -117,14 +154,30 @@ public sealed partial class ObPluginBuilder
         // What Oblivion's engine kept for its scripts (crimes, animations, script packages...), and every Oblivion
         // person and creature telling it of assaults and murders.
         generated["TMObState"] = StateQuest(Fill).FormKey;
-        foreach (var npc in actors.Values.OfType<Npc>().Distinct())
+        // ... with its Oblivion attributes and skills (ObStats), which the scripts read and change.
+        var withActor = new HashSet<Npc>();
+        foreach (var (source, made) in actors)
         {
-            npc.VirtualMachineAdapter ??= new VirtualMachineAdapter();
-            npc.VirtualMachineAdapter.Scripts.Add(new ScriptEntry
+            if (made is not Npc npc || !withActor.Add(npc)) continue;
+            var entry = new ScriptEntry
             {
                 Name = "TMObActor",
                 Properties = [new ScriptObjectProperty { Name = "ObState", Object = new FormLink<ISkyrimMajorRecordGetter>(generated["TMObState"]) }],
-            });
+            };
+            if (records.GetValueOrDefault(source) is Ob.IOblivionMajorRecordGetter rec && ObStats(rec) is { } stats)
+            {
+                entry.Properties.Add(new ScriptIntListProperty { Name = "StatBase", Data = [.. stats.Base] });
+                if (stats.Rate.Any(r => r != 0)) entry.Properties.Add(new ScriptFloatListProperty { Name = "StatRate", Data = [.. stats.Rate] });
+                ActorsWithStats++;
+            }
+            // A person (not a creature) talks with the others (TMObConversations on OBDialogue).
+            if (records.GetValueOrDefault(source) is Ob.INpcGetter && obDialogueQuest is not null && obDialogueQuest.VirtualMachineAdapter?.Scripts.Any(s => s.Name == "TMObConversations") == true)
+            {
+                entry.Properties.Add(new ScriptObjectProperty { Name = "Conversations", Object = obDialogueQuest.ToLink<ISkyrimMajorRecordGetter>() });
+                ConversationPeople++;
+            }
+            npc.VirtualMachineAdapter ??= new VirtualMachineAdapter();
+            npc.VirtualMachineAdapter.Scripts.Add(entry);
         }
 
         // Carriers: quests, then base objects (containers, activators, doors, lights, items, actors).
@@ -150,11 +203,12 @@ public sealed partial class ObPluginBuilder
                 Attach(m, byName[se.Name]);
             }
         }
+        AttachResultScripts(compiled, Entry);
         return compiled.Count;
 
-        void Attach(IMajorRecord carrier, ObPapyrus.Output o)
+        // The script with its properties filled (those that name nothing converted stay empty and are counted).
+        ScriptEntry Entry(ObPapyrus.Output o)
         {
-            if (!compiled.Contains(o.ScriptName)) return;
             var entry = new ScriptEntry { Name = o.ScriptName };
             foreach (var p in o.Properties)
                 if (Fill(p) is { } target)
@@ -162,6 +216,14 @@ public sealed partial class ObPluginBuilder
                     entry.Properties.Add(new ScriptObjectProperty { Name = p.Name, Object = target.ToLink<ISkyrimMajorRecordGetter>() });
                     PropertiesFilled++;
                 }
+                else PropertiesUnfilled.Add($"{o.ScriptName}.{p.Name} ({p.Type} {p.EditorID})");
+            return entry;
+        }
+
+        void Attach(IMajorRecord carrier, ObPapyrus.Output o)
+        {
+            if (!compiled.Contains(o.ScriptName)) return;
+            var entry = Entry(o);
             if (carrier is Quest quest)
             {
                 quest.VirtualMachineAdapter ??= new QuestAdapter();
@@ -247,8 +309,12 @@ public sealed partial class ObPluginBuilder
         if (!File.Exists(compiler) || !File.Exists(Path.Combine(vanilla, "ObjectReference.psc")))
             return (null, "no Papyrus compiler or Skyrim script sources (install the Creation Kit)");
         Directory.CreateDirectory(outDir);
-        bool Fresh(string n) => File.Exists(Path.Combine(outDir, n + ".pex")) && File.GetLastWriteTimeUtc(Path.Combine(outDir, n + ".pex")) >= File.GetLastWriteTimeUtc(Path.Combine(sourceDir, n + ".psc"));
         var names = Directory.GetFiles(sourceDir, "*.psc").Select(f => Path.GetFileNameWithoutExtension(f)!).Order(StringComparer.OrdinalIgnoreCase).ToList();
+        // What changed since the last build into this folder, and what names it (Skyrim.PapyrusRun.Stale); a script
+        // compiled again counts once its .pex is this run's.
+        var stale = Skyrim.PapyrusRun.Stale(sourceDir, outDir, helpers, names);
+        var started = DateTime.UtcNow.AddSeconds(-2);
+        bool Fresh(string n) => File.Exists(Path.Combine(outDir, n + ".pex")) && (!stale.Contains(n) || File.GetLastWriteTimeUtc(Path.Combine(outDir, n + ".pex")) >= started);
         // In batches of 400, up to four at once, each in a folder of its own (the whole folder in one run was one
         // compiler on one core); the folder stays an import, so the scripts still see each other.
         string imports = $"-i={Path.GetFullPath(sourceDir)};{helpers};{skse};{vanilla}";
@@ -264,7 +330,7 @@ public sealed partial class ObPluginBuilder
             foreach (var n in c.Names) File.Copy(Path.Combine(sourceDir, n + ".psc"), Path.Combine(chunkDir, n + ".psc"));
             logs.Add(Run(new ProcessStartInfo(compiler)
             {
-                ArgumentList = { chunkDir, "-all", "-q", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={Path.GetFullPath(outDir)}" },
+                ArgumentList = { chunkDir, "-all", "-f=TESV_Papyrus_Flags.flg", imports, $"-o={Path.GetFullPath(outDir)}" },
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             }));
@@ -277,12 +343,13 @@ public sealed partial class ObPluginBuilder
         {
             var one = new ProcessStartInfo(compiler)
             {
-                ArgumentList = { n + ".psc", "-q", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(sourceDir)};{helpers};{skse};{vanilla}", $"-o={Path.GetFullPath(outDir)}" },
+                ArgumentList = { n + ".psc", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(sourceDir)};{helpers};{skse};{vanilla}", $"-o={Path.GetFullPath(outDir)}" },
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
             log += Run(one);
         }
+        Skyrim.PapyrusRun.KeepHelperSignatures(outDir, helpers);
         return (names.Where(Fresh).ToHashSet(StringComparer.OrdinalIgnoreCase), log);
 
         static string Run(ProcessStartInfo info) => Skyrim.PapyrusRun.Run(info, info.ArgumentList.Contains("-all") ? Skyrim.PapyrusRun.Batch : Skyrim.PapyrusRun.One).Output;

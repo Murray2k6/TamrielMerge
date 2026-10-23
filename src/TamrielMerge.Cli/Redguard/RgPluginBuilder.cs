@@ -650,17 +650,36 @@ public sealed partial class RgPluginBuilder
                         PlaceEffect(scene, flame.Effect, flame.Scale, at);
                     objectLights[(scene.Name, i)] = PlaceLight(scene, 0xFFB060, 400, at);
                     break;
+                case 6 when i < data.ObjectLights.Count:
+                    // A local light (formats/RGM.html: MPOB kind 6), its own radius and signed colour.
+                    var ol = data.ObjectLights[i];
+                    if (PlaceSigned(scene, ol.R, ol.G, ol.B, ol.Radius, at) is { } placed) objectLights[(scene.Name, i)] = placed;
+                    ObjectLightsPlaced++;
+                    break;
             }
         }
-        // Redguard's lights reach far (often 1000+ units) at low strength; Skyrim's are bright to their edge, so the
-        // radius is kept moderate and colours rounded (each light would otherwise be its own record).
-        foreach (var l in data.Lights)
-        {
-            if (l.Rgb == 0) continue;
-            uint Round(uint c) => Math.Min(255, (c + 16) / 32 * 32);
-            uint rgb = Round(l.Rgb >> 16 & 255) << 16 | Round(l.Rgb >> 8 & 255) << 8 | Round(l.Rgb & 255);
-            PlaceLight(scene, rgb, Math.Clamp(l.Range * 2 / 3, 256, 1024), At(scene, l.Position));
-        }
+        foreach (var l in data.Lights) PlaceSigned(scene, l.R, l.G, l.B, l.Range, At(scene, l.Position));
+    }
+
+    /// <summary>Type-6 objects placed as their lights.</summary>
+    public int ObjectLightsPlaced { get; private set; }
+    /// <summary>Redguard lights (or their negative channels) that only darken, not placed.</summary>
+    public int DarkeningLights { get; private set; }
+
+    /// <summary>
+    /// A Redguard light of signed strengths (a negative channel subtracts light: formats/RGM.html; added to the
+    /// vertex's light, then clamped): its positive channels as a light. The negative ones darken, which Skyrim's lights
+    /// can't be shown to do (none of Skyrim.esm's 435 lights has the Negative flag, sk-output-models 2026-10-23), so
+    /// they are left out (before, their magnitude made them white lights where Redguard darkens). Redguard's lights
+    /// reach far (often 1000+ units) at low strength; Skyrim's are bright to their edge, so the radius is kept
+    /// moderate and colours rounded (each light would otherwise be its own record).
+    /// </summary>
+    PlacedObject? PlaceSigned(Scene scene, int r, int g, int b, int range, Vector3 at)
+    {
+        static uint Round(int c) => (uint)Math.Min(255, (c + 16) / 32 * 32);
+        uint add = Round(Math.Max(0, r)) << 16 | Round(Math.Max(0, g)) << 8 | Round(Math.Max(0, b));
+        if (r < 0 || g < 0 || b < 0) DarkeningLights++;
+        return add != 0 ? PlaceLight(scene, add, Math.Clamp(range * 2 / 3, 256, 1024), at) : null;
     }
 
     (FormKey Item, int Count)? Pickup(string script)
@@ -690,16 +709,16 @@ public sealed partial class RgPluginBuilder
         Effects++;
     }
 
-    readonly Dictionary<(uint, int), Light> lights = [];
+    readonly Dictionary<(uint, int, bool), Light> lights = [];
 
-    PlacedObject PlaceLight(Scene scene, uint rgb, int radius, Vector3 at)
+    PlacedObject PlaceLight(Scene scene, uint rgb, int radius, Vector3 at, bool negative = false)
     {
         radius = (radius + 31) / 64 * 64;
-        if (!lights.TryGetValue((rgb, radius), out var light))
+        if (!lights.TryGetValue((rgb, radius, negative), out var light))
         {
             light = new Light(mod)
             {
-                EditorID = $"RGLight{rgb:X6}R{radius}",
+                EditorID = $"RGLight{(negative ? "Dark" : "")}{rgb:X6}R{radius}",
                 ObjectBounds = new ObjectBounds(),
                 Time = -1,
                 Radius = (uint)radius,
@@ -708,13 +727,13 @@ public sealed partial class RgPluginBuilder
                 FOV = 90,
                 NearClip = 0.001f,
                 FadeValue = 1,
-                Flags = 0,
+                Flags = negative ? Light.Flag.Negative : 0,
                 FlickerPeriod = 0.5f,
                 FlickerIntensityAmplitude = 0.2f,
                 FlickerMovementAmplitude = 4,
             };
             mod.Lights.Add(light);
-            lights[(rgb, radius)] = light;
+            lights[(rgb, radius, negative)] = light;
         }
         var placed = new PlacedObject(mod)
         {
@@ -829,7 +848,10 @@ public sealed partial class RgPluginBuilder
         }
     }
 
-    void BuildNavmeshes(Scene scene)
+    /// <summary>The scene's navmeshes begun: an interior's made in the background (<paramref name="interiors"/>), a
+    /// worldspace's cells queued (<paramref name="exteriors"/>, made together by NavmeshBuilder.GenerateExteriorCells);
+    /// <see cref="BuildAllNavmeshes"/> finishes them in the scenes' order.</summary>
+    void BeginNavmeshes(Scene scene, List<(Cell Cell, Skyrim.Navmesh.NavmeshBuilder.PendingInterior Pending)> interiors, List<Skyrim.Navmesh.NavmeshBuilder.ExteriorJob> exteriors)
     {
         navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod);
         if (scene.Interior is { } cell)
@@ -850,21 +872,43 @@ public sealed partial class RgPluginBuilder
             if (solid.Count == 0) return;
             try
             {
-                var r = navmeshes.BuildInterior(cell, solid, scene.LoadDoors.Cast<IPlacedObjectGetter>(),
+                interiors.Add((cell, navmeshes.BeginInterior(cell, solid, scene.LoadDoors.Cast<IPlacedObjectGetter>(),
                     keepAround: scene.LoadDoors.FirstOrDefault()?.TeleportDestination is null ? null : scene.LoadDoors[0].Placement!.Position,
+                    keepAlso: null, underwater: null, background: true,
                     // Actors off it moved onto it (2026-10-21: 29 of Redguard's 162 interior actors stood more than 64 off).
-                    snapActors: true);
-                Navmeshes++;
-                NavmeshTriangles += r.Triangles;
+                    snapActors: true)));
             }
             catch (Exception e) { Problems.Add($"navmesh {cell.EditorID}: {e.Message}"); }
             return;
         }
-        var (count, tris) = navmeshes.BuildExteriorCells(scene.World!, scene.Cells,
+        exteriors.Add(navmeshes.BeginExteriorCells(scene.World!, scene.Cells,
             (x, y) => scene.Cells.TryGetValue((x, y), out var c) ? Solids(c.Temporary.OfType<PlacedObject>()) : [],
-            _ => 0f, scene.LoadDoors.Cast<IPlacedObjectGetter>().ToList(), Problems);
-        Navmeshes += count;
-        NavmeshTriangles += tris;
+            _ => 0f, scene.LoadDoors.Cast<IPlacedObjectGetter>().ToList(), Problems));
+    }
+
+    /// <summary>Every scene's navmeshes on every core: the interiors in the background while the worldspaces' cells are
+    /// made, then all written in the scenes' order (2026-10-22: one interior at a time, then each worldspace waiting
+    /// on its slowest cell).</summary>
+    void BuildAllNavmeshes()
+    {
+        var interiors = new List<(Cell Cell, Skyrim.Navmesh.NavmeshBuilder.PendingInterior Pending)>();
+        var exteriors = new List<Skyrim.Navmesh.NavmeshBuilder.ExteriorJob>();
+        foreach (var scene in scenes.Values) BeginNavmeshes(scene, interiors, exteriors);
+        Skyrim.Navmesh.NavmeshBuilder.GenerateExteriorCells(exteriors);
+        foreach (var (cell, pending) in interiors)
+            try
+            {
+                var r = pending.Finish();
+                Navmeshes++;
+                NavmeshTriangles += r.Triangles;
+            }
+            catch (Exception e) { Problems.Add($"navmesh {cell.EditorID}: {e.Message}"); }
+        foreach (var job in exteriors)
+        {
+            var (count, tris) = job.Finish();
+            Navmeshes += count;
+            NavmeshTriangles += tris;
+        }
     }
 
     void AddWorldCells(Scene scene)
@@ -946,7 +990,7 @@ public sealed partial class RgPluginBuilder
         BuildLaw();
         log?.Invoke($"law: no bounty; {GuardCount} guards mind drawn weapons (RGLaw)");
         foreach (var scene in scenes.Values.Where(s => s.World is not null)) AddWorldCells(scene);
-        foreach (var scene in scenes.Values) BuildNavmeshes(scene);
+        BuildAllNavmeshes();
         int links = navmeshes?.LinkExteriorEdges() ?? 0;
         log?.Invoke($"navmeshes: {Navmeshes} ({NavmeshTriangles} triangles), {links} exterior edge links");
         foreach (var scene in scenes.Values.Where(s => s.World is not null))

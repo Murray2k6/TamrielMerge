@@ -91,7 +91,7 @@ public sealed partial class ObMeshConverter
                 }
 
         var systems = nif.Blocks.OfType<N.Shape>().Where(s => s.Type == "NiParticleSystem" && !Hidden(s.Index)).ToList();
-        List<(string Name, float Length)> played = [];
+        List<(string Name, float Length, bool Loop)> played = [];
         Write(pieces, solid, Path.Combine(modOutDir, rel), moving, itemMass,
             more: out_ =>
             {
@@ -100,10 +100,11 @@ public sealed partial class ObMeshConverter
             },
             bsxAdd: systems.Count > 0 ? 1 : 0);
         var all = pieces.SelectMany(p => p.Verts).Concat(systems.Select(s => World(s.Index).Translation)).ToList();
-        return new Result(rel, pieces.Count + systems.Count, solid.Count,
+        return Played(new Result(rel, pieces.Count + systems.Count, solid.Count,
             all.Count > 0 ? all.Aggregate(new V3(float.MaxValue), V3.Min) : V3.Zero,
             all.Count > 0 ? all.Aggregate(new V3(float.MinValue), V3.Max) : V3.Zero, systems.Count > 0, solid.Select(t => t.Pts).ToList())
-        { Sequences = played, Moves = systems.Count > 0 };
+        { Sequences = played, Moves = systems.Count > 0 },
+            [.. nif.Blocks.OfType<N.Sequence>().Where(s => s.Name.Length > 0).Select(s => (s.Name, (s.Stop - s.Start) / (s.Frequency > 0 ? s.Frequency : 1), s.Cycle != 2))]);
     }
 
     static MatTransform ToMat(Matrix4x4 m)
@@ -145,7 +146,7 @@ public sealed partial class ObMeshConverter
     /// EmitterActive (named by its emitter) from a float or bool interpolator with Oblivion's keys. Skyrim's
     /// PlayGamebryoAnimation plays them by name. Sequences without emission (transforms only) aren't kept here.
     /// </summary>
-    List<(string Name, float Length)> AddEmissionSequences(NifFile nif, Ob10Nif src, List<Emitting> made)
+    List<(string Name, float Length, bool Loop)> AddEmissionSequences(NifFile nif, Ob10Nif src, List<Emitting> made)
     {
         var driven = made.Where(m => m.Driven).GroupBy(m => m.Name).ToDictionary(g => g.Key, g => g.First());
         if (driven.Count == 0) return [];
@@ -233,7 +234,7 @@ public sealed partial class ObMeshConverter
         foreach (var id in seqIds) m.controllerSequenceRefs.AddBlockRef(id);
         m.objectPaletteRef.index = paletteId;
         root.controllerRef.index = managerId;
-        return sequences.Select(x => (x.s.Name, x.s.Stop - x.s.Start)).ToList();
+        return sequences.Select(x => (x.s.Name, (x.s.Stop - x.s.Start) / (x.s.Frequency > 0 ? x.s.Frequency : 1), x.s.Cycle != 2)).ToList();
     }
     Emitting? AddParticles(NifFile nif, Ob10Nif src, N.Shape ps, Func<int, Matrix4x4> world, string model)
     {
@@ -245,7 +246,7 @@ public sealed partial class ObMeshConverter
         var ctlr = src.Get<N.Controller>(ps.Controller);
         while (ctlr is not null && ctlr.Type != "NiPSysEmitterCtlr") ctlr = src.Get<N.Controller>(ctlr.Next);
         var emitter = mods.FirstOrDefault(m => m.Type.EndsWith("Emitter"));
-        if (emitter is null || ctlr is null) { Notes.Add($"model {model}: particle system {ps.Name} has no emitter; not converted"); return null; }
+        if (emitter is null || ctlr is null) { lock (Notes) Notes.Add($"model {model}: particle system {ps.Name} has no emitter; not converted"); return null; }
         var (driven, rate, emits) = Emission(src, ctlr);
 
         // A node standing where a source node is (emitters, gravity), under the root.
@@ -439,7 +440,7 @@ public sealed partial class ObMeshConverter
             visData.data.SetInterpolationType(NiKeyType.CONST_KEY);
             NifKeys.Add(visData.data, ctlr.Start, emits);
             Add(visData);
-            if (!emits) Notes.Add($"model {model}: particles {ps.Name} never emit (Oblivion's own emitter is off)");
+            if (!emits) lock (Notes) Notes.Add($"model {model}: particles {ps.Name} never emit (Oblivion's own emitter is off)");
         }
         nif.SetParentNode(hdr.GetBlockById(psysId), root);
         return new Emitting(system.name.get(), emitCtlrId, emitterName, driven);

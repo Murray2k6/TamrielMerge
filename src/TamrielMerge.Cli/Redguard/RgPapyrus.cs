@@ -28,6 +28,12 @@ public sealed class RgPapyrus
         /// <summary>A spoken line (RTX tag) by this object (cyrus: the player's): its RGLines index (-1 for none), text
         /// and length in seconds.</summary>
         (int Index, string Text, float Seconds) Line(int tag, bool cyrus);
+        /// <summary>ENGLISH.RTX has an entry for the tag (an ACTIVATE label without one never activates: engine/hud.html).</summary>
+        bool HasRtx(int tag);
+        /// <summary>OpenShell's program of this scene as the build's shell number (RGShells), -1 when there's none.</summary>
+        int Shell(string program);
+        /// <summary>An item's description (ITEM.INI description[x], its RTX text), "" for none.</summary>
+        string ItemText(int item);
         /// <summary>Cyrus's log entry's stage on the log quest.</summary>
         int LogStage(int tag);
         /// <summary>Whether this LoadWorld is already a load door (the trigger converted by BuildDoors); setByScript:
@@ -127,7 +133,7 @@ public sealed class RgPapyrus
         ["Wander"] = (Category.NoEffect, "AI"), ["projectileAI"] = (Category.NoEffect, "AI"), ["swordAI"] = (Category.NoEffect, "AI"), ["chargeWeapon"] = (Category.NoEffect, "AI"),
         ["DisableNodeMaps"] = (Category.NoEffect, "AI"), ["EnableNodeMaps"] = (Category.NoEffect, "AI"), ["OpenShell"] = (Category.NoEffect, "AI"),
         // Debugging (developer keys and printouts).
-        ["InKey"] = (Category.NoEffect, "debug key"), ["PrintSingleParm"] = (Category.Native, "debug print"), ["PrintParms"] = (Category.NoEffect, "debug print"),
+        ["InKey"] = (Category.Native, "key held"), ["PrintSingleParm"] = (Category.Native, "debug print"), ["PrintParms"] = (Category.NoEffect, "debug print"),
         ["PrintStringParm"] = (Category.NoEffect, "debug print"), ["LogParms"] = (Category.NoEffect, "debug print"),
         // Approximations (and what used to be: group sync is a barrier on TMRgState, people walk, Cyrus hangs).
         ["SyncWithGroup"] = (Category.Native, "group sync"), ["SyncWithUser"] = (Category.Native, "group sync"), ["ResetGroupSync"] = (Category.Native, "group sync"),
@@ -145,12 +151,12 @@ public sealed class RgPapyrus
         ["MoveMarker"] = (Category.Native, "walk to marker"), ["MoveNodeMarker"] = (Category.Native, "walk to marker"), ["MoveNodeLocation"] = (Category.Native, "walk"),
         ["WalkForward"] = (Category.Native, "walk"), ["WalkBackward"] = (Category.Native, "walk"), ["MoveForward"] = (Category.Native, "walk"),
         ["FacePlayer"] = (Category.Native, "turn"), ["FacePlayerInertia"] = (Category.Native, "turn"), ["FaceObject"] = (Category.Approximate, "turn"),
-        ["PlayerFaceObj"] = (Category.Native, "turn"), ["DropAllItems"] = (Category.NoEffect, "the player keeps their things"), ["PushAllItems"] = (Category.NoEffect, "item stash"),
+        ["PlayerFaceObj"] = (Category.Native, "turn"), ["DropAllItems"] = (Category.Native, "Redguard's items taken"), ["PushAllItems"] = (Category.NoEffect, "item stash"),
         ["ItemUsed"] = (Category.NoEffect, "use count"), ["SelectItem"] = (Category.Native, "selection"),
         ["SetAttribute"] = (Category.Approximate, "attributes"), ["SetMyAttr"] = (Category.Approximate, "attributes"), ["setStrength"] = (Category.Approximate, "strength"), ["strength"] = (Category.Approximate, "strength"),
         ["setArmor"] = (Category.Approximate, "armor"), ["armor"] = (Category.Approximate, "armor"), ["InRectangle"] = (Category.Approximate, "unstretched rectangle"),
-        ["WaitNonMulti"] = (Category.Native, "wait"), ["GetFramePassed"] = (Category.Approximate, "frames"), ["EndSound"] = (Category.Approximate, "sound"),
-        ["EndMySound"] = (Category.Approximate, "sound"), ["StopAllSounds"] = (Category.Approximate, "sound"), ["KillMyTasks"] = (Category.Native, "tasks"),
+        ["WaitNonMulti"] = (Category.Native, "wait"), ["GetFramePassed"] = (Category.Native, "nominal ticks"), ["EndSound"] = (Category.Native, "sound channels"),
+        ["EndMySound"] = (Category.Native, "sound channels"), ["StopAllSounds"] = (Category.Native, "sound channels"), ["KillMyTasks"] = (Category.Native, "tasks"),
     };
 
     /// <summary>SOUP386.DEF [refs] fields TMRgSoup.GetField/SetField know (1-9); others read 0 and are not written.</summary>
@@ -162,6 +168,11 @@ public sealed class RgPapyrus
     readonly List<string> functionNames, refNames;
     readonly HashSet<string> taskFunctions;
     readonly Dictionary<string, LibFunction> lib;
+
+    /// <summary>ACTIVATE/TorchActivate calls whose label has no RTX entry: never true, as in Redguard.</summary>
+    public int ActivateWithoutPrompt;
+    /// <summary>The most items a script's menu holds (TMRgSoup's menuIndex), in pages of nine.</summary>
+    public const int MenuSlots = 63;
 
     public RgPapyrus(List<string> functionNames, HashSet<string> taskFunctions, List<string> refNames, Dictionary<string, LibFunction> lib)
     {
@@ -233,6 +244,11 @@ public sealed class RgPapyrus
         public int Temp;
         public readonly List<List<int>> Menus = [];
         public int Menu = -1;
+        /// <summary>AmbientSound calls numbered so far: each call site is one multitask (a call reissued while its task
+        /// runs doesn't run again: Redguard Preservation, engine/SOUP.html "Call Types").</summary>
+        public int AmbientSites;
+        /// <summary>The address of the call being written (a multitask's slot is named by it: TaskStop's label).</summary>
+        public int CallAddress = -1;
         /// <summary>The call being written acts on the player (Player.Fn()).</summary>
         public bool OnPlayer;
         /// <summary>Flags and variables the script last set to a number (in address order, as written).</summary>
@@ -285,7 +301,7 @@ public sealed class RgPapyrus
                 case Exec { Source: CallStmt call } when IsWait(call):
                     leaders.Add(i + 1);
                     // A task that may run again until done (TMRgSoup.Retry) is a block of its own.
-                    if (functionNames.ElementAtOrDefault(call.Function) is "SyncWithGroup" or "SyncWithUser") leaders.Add(i);
+                    if (functionNames.ElementAtOrDefault(call.Function) is "SyncWithGroup" or "SyncWithUser" or "WaitOnTasks" or "WaitNonMulti") leaders.Add(i);
                     break;
                 case Exec { Source: OtherStmt { What: "return" or "endint" } }: leaders.Add(i + 1); break;
             }
@@ -422,14 +438,15 @@ public sealed class RgPapyrus
                 return;
             }
             case Jump j:
-                // "pause a" (Redguard's task pause): holds the main thread's task at address a, for an interrupt to
-                // answer at once; here threads take turns anyway, so it goes on.
-                st.Count(j.J.Kind, st.InDialogue ? Category.Dialogue : j.J.Kind == "pause" ? Category.Approximate : Category.Native);
+                // "pause a" is opcode 0x1B, TaskStop (engine/SOUP.html's opcode table): it removes the task slot of the
+                // call at address a (85 uses: the multitask walks and ambient sounds a script ends before issuing
+                // them again).
+                st.Count(j.J.Kind, st.InDialogue ? Category.Dialogue : Category.Native);
                 switch (j.J.Kind)
                 {
                     case "goto": o.AppendLine($"  Go({Target(j.J.Target)})"); break;
                     case "end": o.AppendLine($"  EndTo({Target(j.J.Target)})"); break;
-                    case "pause": o.AppendLine($"  Go({next}) ; pause {j.J.Target}"); break;
+                    case "pause": o.AppendLine($"  TaskStop({j.J.Target})"); o.AppendLine($"  Go({next})"); break;
                     case "gosub": o.AppendLine($"  Gosub({Target(j.J.Target)}, {next})"); break;
                     default: o.AppendLine($"  Go({next})"); break;
                 }
@@ -664,20 +681,30 @@ public sealed class RgPapyrus
             return false;
         }
         st.OnPlayer = call.Target == "Player";
+        st.CallAddress = call.Address;
         var (expr, cat) = FunctionCall(st, name, call.Args, pre, isValue: false);
+        st.CallAddress = -1;
         st.OnPlayer = false;
         st.Count(name, st.InDialogue ? Category.Dialogue : cat);
         o.Append(pre);
         bool other = call.Target is { } tg && tg != "Me";
         if (other) o.AppendLine($"  {On(st, call.Target!)}");
-        bool floatResult = expr.StartsWith("Line(") || (lib.TryGetValue(name, out var lf) && lf.ReturnsFloat && expr.StartsWith($"S_{name}("));
+        bool floatResult = expr.StartsWith("Line(") || expr.StartsWith("AmbientLine(") ||(lib.TryGetValue(name, out var lf) && lf.ReturnsFloat && expr.StartsWith($"S_{name}("));
         if (IsWait(call) && floatResult)
         {
             o.AppendLine($"  Task({expr}, {next})");
             if (other) o.AppendLine("  On(None)");
             return true;
         }
-        if (call.Kind == 1 && floatResult) o.AppendLine($"  Multi({expr})");
+        if (call.Kind == 1 && floatResult)
+        {
+            // A multitask holds a slot named by its call's address: issued again while it runs, it doesn't run again
+            // (engine/SOUP.html "Call Types"); TaskStop at that address ends it.
+            o.AppendLine($"  If !TaskRunning({call.Address})");
+            o.AppendLine("    MultiBegin()");
+            o.AppendLine($"    MultiAt({call.Address}, {expr})");
+            o.AppendLine("  EndIf");
+        }
         else o.AppendLine($"  {expr}");
         if (other) o.AppendLine("  On(None)");
         if (IsWait(call)) { o.AppendLine($"  Task(0.0, {next})"); return true; }
@@ -697,7 +724,14 @@ public sealed class RgPapyrus
         var kind = Kinds.TryGetValue(name, out var k) ? k.Cat : Category.Native;
         switch (name)
         {
-            case "RTX": case "rtxAnim": case "RTXp": case "RTXpAnim": case "AmbientRtx":
+            case "AmbientRtx":
+            {
+                // The label's recording as a sound effect, centred, its text not shown (TMRgSoup.AmbientLine).
+                if (Const(0) is not int tag) return ("AmbientLine(-1, 0.0)", Category.Approximate);
+                var (index, _, seconds) = st.InDialogue ? (-1, "", 0f) : st.Ctx.Line(tag, true);
+                return ($"AmbientLine({index}, {seconds.ToString("0.0#", System.Globalization.CultureInfo.InvariantCulture)})", Category.Native);
+            }
+            case "RTX": case "rtxAnim": case "RTXp": case "RTXpAnim":
             {
                 bool cyrus = name.StartsWith("RTXp");
                 if (Const(0) is not int tag) return ("Line(-1, \"\", 0.0, False, -1)", Category.Approximate);
@@ -707,6 +741,27 @@ public sealed class RgPapyrus
                 int gesture = name.EndsWith("Anim") ? Enumerable.Range(1, Math.Max(0, args.Length - 1)).Select(Const)
                     .FirstOrDefault(a => a is int g && IdleExists(g, cyrus)) ?? -1 : -1;
                 return ($"Line({index}, \"{Escape(text)}\", {sec}, {(cyrus ? "True" : "False")}, {gesture})", Category.Native);
+            }
+            case "AmbientSound":
+                // Its call site too (TMRgSoup keeps one task per site, which TaskStop names by the call's address).
+                st.AmbientSites++;
+                return ($"S_AmbientSound({Arg(0)}, {Arg(1)}, {Arg(2)}, {st.CallAddress})", Category.Native);
+            case "ShowItem": case "ShowItemNoRtx":
+            {
+                // The item viewer after a pickup (engine/SOUP.html: ShowItem(item, text, ...) shows it with the text, its
+                // own description for 0; ShowItemNoRtx without): the text as a line; the close-up itself has no
+                // Skyrim counterpart (Skyrim's own pickup line names the item).
+                for (int i = 0; i < args.Length; i++) Arg(i);
+                if (name == "ShowItemNoRtx" || Const(0) is not int item) return ("S_None() ; " + name + ": the item's close-up", Category.NoEffect);
+                string text = Const(1) is int t && t != 0 && st.Ctx.HasRtx(t) ? st.Ctx.Line(t, true).Text : st.Ctx.ItemText(item);
+                return text.Length == 0 ? ("S_None() ; ShowItem: no text", Category.NoEffect) : ($"S_ShowText(\"{Escape(text)}\")", Category.Approximate);
+            }
+            case "OpenShell":
+            {
+                // A program of the scene run on its own (CATACOMB's PRISONER opens ITEMLIST).
+                string? program = args.Length > 0 && args[0] is Other o && o.What.StartsWith("string") && int.TryParse(o.What[6..], out int si) && si < st.Strings.Count ? st.Strings[si] : null;
+                int shell = program is null ? -1 : st.Ctx.Shell(program);
+                return shell < 0 ? ("S_None() ; OpenShell: no such program", Category.Approximate) : ($"S_OpenShell({shell})", Category.Native);
             }
             case "AddLog":
                 return Const(0) is int log ? ($"S_AddLog({st.Ctx.LogStage(log)})", Category.Native) : ("S_AddLog(0)", Category.Approximate);
@@ -753,6 +808,8 @@ public sealed class RgPapyrus
                 return ($"S_InRectangleSk({(int)MathF.Floor(pts.Min(p => p.X))}, {(int)MathF.Floor(pts.Min(p => p.Y))}, {(int)MathF.Ceiling(pts.Max(p => p.X))}, {(int)MathF.Ceiling(pts.Max(p => p.Y))})", Category.Native);
             }
             case "ACTIVATE": case "TorchActivate":
+                // The label is the prompt's RTX entry; without one the object is never activated (engine/hud.html).
+                if (Const(0) is int label && !st.Ctx.HasRtx(label)) { ActivateWithoutPrompt++; return ("0", Category.Native); }
                 return ($"S_{name}(0)", Category.Native);
             // A menu outside Skyrim's dialogue: a message box whose buttons are the items added (TMRgSoup.S_menu*).
             case "menuNew":
@@ -763,10 +820,11 @@ public sealed class RgPapyrus
             case "menuAddItem":
             {
                 if (st.InDialogue || st.Menu < 0 || Const(0) is not int tag) { for (int i = 0; i < args.Length; i++) Arg(i); return ("S_None() ; menuAddItem", Category.Approximate); }
+                // Nine items a page (RgScripts.MenuPages: the tenth button turns the page).
                 var items = st.Menus[st.Menu];
                 int slot = items.IndexOf(tag);
-                if (slot < 0 && items.Count < 9) { items.Add(tag); slot = items.Count - 1; }
-                if (slot < 0) return ("S_None() ; menuAddItem (more than nine items)", Category.Approximate);
+                if (slot < 0 && items.Count < MenuSlots) { items.Add(tag); slot = items.Count - 1; }
+                if (slot < 0) return ($"S_None() ; menuAddItem (more than {MenuSlots} items)", Category.Approximate);
                 return ($"S_menuAddItem({slot}, {Arg(2)})", Category.Native);
             }
             case "menuProc":

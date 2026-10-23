@@ -47,6 +47,8 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         /// <summary>A script's locals (name → short/long/float), or null for an unknown script.</summary>
         IReadOnlyDictionary<string, string>? Variables(string scriptId);
         bool IsJournal(string id);
+        /// <summary>A dialogue topic (type 0) of that name (AddTopic).</summary>
+        bool IsTopic(string id) => false;
         /// <summary>A script's ID (scripts and globals have their own namespaces: a global may share a script's name).</summary>
         bool IsScript(string id);
         bool IsGlobalVariable(string id);
@@ -103,7 +105,13 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
     public sealed record SayLine(string EditorID, string File, string Text, List<string> Speakers);
     public sealed record Output(string ScriptName, string Extends, Kind Kind, string Source, List<Property> Properties, int Statements, int Translated,
         Dictionary<string, int> Missing, List<MessageForm> Messages, List<SayLine> Says, List<(string Journal, int Index)> JournalIndexes,
-        List<string> Binks, bool Polls, bool Goodbye, bool UsesActivate);
+        List<string> Binks, bool Polls, bool Goodbye, bool UsesActivate)
+    {
+        /// <summary>Statements and conditions translated as Morrowind does them (no <see cref="Gap"/>).</summary>
+        public int Faithful { get; init; }
+        /// <summary>What the translated but unfaithful ones fall short in, with how many.</summary>
+        public Dictionary<string, int> Gaps { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    }
 
     // ---- types ----
 
@@ -168,7 +176,8 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         messages.Clear(); says.Clear(); journalIndexes.Clear(); binks.Clear(); loopSounds.Clear(); speakerLocals.Clear();
         ScriptReadsButtons = script.AllCalls().Any(c => c.Function.Equals("GetButtonPressed", StringComparison.OrdinalIgnoreCase));
         checksActivate = kind == Kind.Object && script.AllCalls().Any(c => c.Target is null && c.Function.Equals("OnActivate", StringComparison.OrdinalIgnoreCase));
-        statements = translated = 0;
+        statements = translated = faithful = 0;
+        gaps.Clear(); lineGaps.Clear();
         goodbye = false;
         foreach (var v in script.Variables) locals[v.Name] = v.Type.Equals("float", StringComparison.OrdinalIgnoreCase) ? T.Float : T.Int;
 
@@ -185,7 +194,9 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         WriteStatements(body, script.Body, 1);
 
         bool polls = kind == Kind.Global || kind == Kind.Object && NeedsPolling(script.Body);
-        float interval = MovesThings(script) ? 0.05f : 0.5f;
+        // Morrowind runs its scripts every frame: the next one (Papyrus sends an update no sooner than the frame after
+        // it is due), asked for once a run is over.
+        const float interval = 0.01f;
 
         // Properties the events need, before the events are written and the properties listed.
         if (kind == Kind.Object)
@@ -195,6 +206,7 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
                 || ctx.OnCreature && locals.ContainsKey("companion") || ctx.OnActor && locals.ContainsKey("minimumProfit")) PlayerRef();
         }
         if (uses.Contains("cellchanged")) PlayerRef();
+        if (uses.Contains("dt")) Generated("gen:MWLoadCount", "GlobalVariable", "MwLoadCount");
         var events = new StringBuilder();
         WriteEvents(events, polls, interval);
         var helpers = new StringBuilder();
@@ -253,16 +265,19 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
             tick.AppendLine("Function MwTick()");
             if (uses.Contains("dt"))
             {
+                // GetSecondsPassed: the real time since the script last ran. Morrowind runs its scripts in menus too
+                // (MenuMode), each frame's time counted, so a timer goes on while one is open; Skyrim holds the update
+                // back meanwhile, and the next run is given all of it. Real time starts again from 0 each time the game
+                // is loaded (MWLoadCount, TMMwPlayerState): the first run after a load is given none.
+                string loads = Generated("gen:MWLoadCount", "GlobalVariable", "MwLoadCount");
                 tick.AppendLine("  Float now = Utility.GetCurrentRealTime()");
+                tick.AppendLine($"  Int loads = {loads}.GetValueInt()");
                 tick.AppendLine("  __dt = 0.0");
-                tick.AppendLine("  If __last >= 0.0");
-                tick.AppendLine($"    __dt = now - __last");
-                tick.AppendLine("  EndIf");
-                // Time in menus, loading and sleep isn't play time; Morrowind's frames are short.
-                tick.AppendLine($"  If __dt > {F(Math.Max(1f, interval * 4))}");
-                tick.AppendLine($"    __dt = {F(interval)}");
+                tick.AppendLine("  If __last >= 0.0 && __lastLoads == loads && now > __last");
+                tick.AppendLine("    __dt = now - __last");
                 tick.AppendLine("  EndIf");
                 tick.AppendLine("  __last = now");
+                tick.AppendLine("  __lastLoads = loads");
             }
             if (uses.Contains("cellchanged"))
             {
@@ -277,7 +292,11 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
 
         var output = head.Append(helpers).Append(events).Append(tick).ToString();
         return new Output(name, extends, kind, output, properties.Values.ToList(), statements, translated, new Dictionary<string, int>(missing),
-            [.. messages], [.. says], [.. journalIndexes], [.. binks], polls, goodbye, uses.Contains("onactivate"));
+            [.. messages], [.. says], [.. journalIndexes], [.. binks], polls, goodbye, uses.Contains("onactivate"))
+        {
+            Faithful = faithful,
+            Gaps = new Dictionary<string, int>(gaps, StringComparer.OrdinalIgnoreCase),
+        };
     }
 
     static string Summary(Script s)
@@ -341,7 +360,5 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         _ => [],
     };
 
-    static readonly HashSet<string> MovingFunctions = new(StringComparer.OrdinalIgnoreCase) { "Move", "MoveWorld", "Rotate", "RotateWorld", "SetPos", "SetAngle" };
 
-    static bool MovesThings(Script s) => s.AllCalls().Any(c => MovingFunctions.Contains(c.Function));
 }

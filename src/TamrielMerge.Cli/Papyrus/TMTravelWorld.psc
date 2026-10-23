@@ -101,10 +101,16 @@ Int Property OceanPixels Auto Hidden
 
 ; Minutes on the road from one position to another (units), stepping pixel by pixel as Daggerfall does.
 Int Function Minutes(Float fromX, Float fromY, Float toX, Float toY, Bool cautious, Bool inn, Bool ship, Bool horse)
-  Int x = PixelX(fromX)
-  Int y = PixelY(fromY)
-  Int ex = PixelX(toX)
-  Int ey = PixelY(toY)
+  Int transport = 256
+  If horse
+    transport = 128
+  EndIf
+  Return PixelMinutes(PixelX(fromX), PixelY(fromY), PixelX(toX), PixelY(toY), cautious, inn, ship, transport)
+EndFunction
+
+; The same between map pixels, with Daggerfall Unity's transport modifier: 256 on foot, 192 a cart, 128 a horse
+; (TravelTimeCalculator.CalculateTravelTime; a quest's clock goes by cart, cautiously, camping: Clock.GetTravelTimeInSeconds).
+Int Function PixelMinutes(Int x, Int y, Int ex, Int ey, Bool cautious, Bool inn, Bool ship, Int transport)
   Int dx = ex - x
   Int dy = ey - y
   Int adx = dx
@@ -126,10 +132,6 @@ Int Function Minutes(Float fromX, Float fromY, Float toX, Float toY, Bool cautio
   Int furthest = adx
   If ady > adx
     furthest = ady
-  EndIf
-  Int transport = 256
-  If horse
-    transport = 128
   EndIf
   Int perLand = (102 * transport) / 256
   Int total = 0

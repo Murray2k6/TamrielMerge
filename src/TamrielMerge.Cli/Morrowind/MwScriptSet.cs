@@ -23,6 +23,10 @@ public sealed class MwScriptSet
     public int ResultInfos { get; private set; }
     public int Statements { get; private set; }
     public int TranslatedStatements { get; private set; }
+    /// <summary>Statements translated as Morrowind does them (MwPapyrus.Output.Faithful).</summary>
+    public int FaithfulStatements { get; private set; }
+    /// <summary>What the rest fall short in (MwPapyrus.Gap), with how many statements.</summary>
+    public Dictionary<string, int> Gaps { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, int> Missing { get; } = new(StringComparer.OrdinalIgnoreCase);
     public List<string> Failed { get; } = [];
     /// <summary>Per group (a plugin's scripts, or "dialogue results"): scripts, statements, translated.</summary>
@@ -88,7 +92,9 @@ public sealed class MwScriptSet
     {
         Statements += o.Statements;
         TranslatedStatements += o.Translated;
+        FaithfulStatements += o.Faithful;
         foreach (var (m, n) in o.Missing) Missing[m] = Missing.GetValueOrDefault(m) + n;
+        foreach (var (g, n) in o.Gaps) Gaps[g] = Gaps.GetValueOrDefault(g) + n;
         var t = PerGroup.GetValueOrDefault(group);
         PerGroup[group] = (t.Scripts + (newScript ? 1 : 0), t.Statements + o.Statements, t.Translated + o.Translated);
     }
@@ -108,7 +114,8 @@ public sealed class MwScriptSet
         var report = new List<string>
         {
             $"{Objects.Count} object scripts, {Globals.Count} global scripts, {Results.Count} result scripts (for {InfoScripts.Count} of {ResultInfos} responses with a result)",
-            $"{TranslatedStatements}/{Statements} statements translated ({100.0 * TranslatedStatements / Math.Max(1, Statements):F2}%)",
+            $"{TranslatedStatements}/{Statements} statements translated ({100.0 * TranslatedStatements / Math.Max(1, Statements):F2}%), " +
+            $"{FaithfulStatements} as Morrowind does them ({100.0 * FaithfulStatements / Math.Max(1, Statements):F2}%), {TranslatedStatements - FaithfulStatements} not quite",
         };
         foreach (var (group, (s, st, tr)) in PerGroup.OrderBy(kv => kv.Key))
             report.Add($"  {group}: {s} scripts, {tr}/{st} statements translated ({100.0 * tr / Math.Max(1, st):F2}%)");
@@ -116,6 +123,8 @@ public sealed class MwScriptSet
         report.AddRange(Failed.Select(f => "  " + f));
         report.Add("Missing most:");
         report.AddRange(Missing.OrderByDescending(kv => kv.Value).Take(top).Select(kv => $"  {kv.Value,6} {kv.Key}"));
+        report.Add("Not quite Morrowind's (statements):");
+        report.AddRange(Gaps.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"  {kv.Value,6} {kv.Key}"));
         report.Add("Scripts with the most untranslated statements:");
         report.AddRange(All.Where(o => o.Translated < o.Statements).OrderByDescending(o => o.Statements - o.Translated).Take(Math.Min(top, 60))
             .Select(o => $"  {o.Statements - o.Translated,5} of {o.Statements,5}  {o.ScriptName}"));

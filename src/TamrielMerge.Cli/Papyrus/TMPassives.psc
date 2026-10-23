@@ -374,6 +374,15 @@ Int Function AttributeValue(Int a)
   Return value
 EndFunction
 
+; A game's script changing the player's attribute (Oblivion's SetAV / ModAV Strength...): by that much, with what it does.
+Function ModAttribute(Int a, Int aiBy)
+  If a < 0 || a >= 8 || !gains
+    Return
+  EndIf
+  gains[a] = gains[a] + aiBy
+  ApplyAttributes()
+EndFunction
+
 ; The counted skills now: Skyrim's base values, then the progression skills' levels.
 Int[] Function Skills()
   Int n = SkyrimSkillAvs.Length + ProgressionSkillCount

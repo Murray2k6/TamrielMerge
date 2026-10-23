@@ -306,6 +306,10 @@ public sealed partial class ObPluginBuilder
     public int BuildAllInteriors()
     {
         int n = 0;
+        // Each interior's navmesh made on a worker while the next are built, finished in the order begun (as many in hand as
+        // two per core).
+        var inHand = new Queue<NavJob>();
+        int most = Math.Max(2, Environment.ProcessorCount * 2);
         foreach (var m in Merge().Where(m => m.World is null))
         {
             var cell = NewInterior(m.Header);
@@ -314,11 +318,13 @@ public sealed partial class ObPluginBuilder
                 if (r is Ob.IPlacedObjectGetter o) Place(o, cell, cell);
                 else PlaceActor(r, cell, cell);
             }
-            BuildNavmesh(cell, m.Header);
+            if (BeginNavmesh(cell, m.Header, background: true) is { } job) inHand.Enqueue(job);
+            while (inHand.Count > most) FinishNavmesh(inHand.Dequeue());
             AddInteriorCell(cell);
             interiorsBySource[m.Header.FormKey] = cell;
             n++;
         }
+        while (inHand.Count > 0) FinishNavmesh(inHand.Dequeue());
         return n;
     }
 
@@ -513,6 +519,9 @@ public sealed partial class ObPluginBuilder
                 Console.WriteLine($"  water {wsrc.EditorID}: {headers.Count} cells, {wetCells.Count} with water in Oblivion (heights {string.Join(", ", heights)}); worldspace water {wsrc.Water.FormKey}, its flags {wsrc.Flags}");
             }
         int cellCount = 0;
+        // Every worldspace's navmeshes made together once all are built (NavmeshBuilder.GenerateExteriorCells), then
+        // written in the order built.
+        var navJobs = new List<Skyrim.Navmesh.NavmeshBuilder.ExteriorJob>();
         void Build(FormKey key)
         {
             if (worldspaces.ContainsKey(key) || !sources.TryGetValue(key, out var src)) return;
@@ -620,15 +629,13 @@ public sealed partial class ObPluginBuilder
                     if (kind is not ("closed, outward" or "open, top facing up")) windingOdd.Add((meshByBase[g.Key].Path, g.Count(), $"{kind}: {Skyrim.Navmesh.NavmeshBuilder.Winding(meshByBase[g.Key].Solid)}"));
                 }
             // Faces as wound where a model's are wound one way, outward; turned up only where not (measured: TM_OB_WINDING).
-            var (navCount, navTriangles) = navmeshes.BuildExteriorCells(ws, cells,
+            navJobs.Add(navmeshes.BeginExteriorCells(ws, cells,
                 (x, y) => cells.TryGetValue((x, y), out var c) ? Solids(c.Temporary.OfType<PlacedObject>(), turnUntrusted: true) : [],
                 // Lava is swum as water is (user, 2026-10-20: "lava is swimmable though and its hazard in case you fall in"):
                 // its bed navmeshed and flagged Water, so whoever falls in can swim out; the lava itself hurts (HurtingWater).
                 c => water.TryGetValue(c, out var w) ? w : null,
                 top.Persistent.OfType<PlacedObject>().Where(loadDoorSet.Contains).Cast<IPlacedObjectGetter>().ToList(), Problems, asWound: true,
-                only: navBox is { } nb ? (x, y) => x >= nb.X0 && y >= nb.Y0 && x <= nb.X1 && y <= nb.Y1 : null);
-            ExteriorNavmeshes += navCount;
-            NavmeshTriangles += navTriangles;
+                only: navBox is { } nb ? (x, y) => x >= nb.X0 && y >= nb.Y0 && x <= nb.X1 && y <= nb.Y1 : null));
             // Distant terrain, for worldspaces that don't use their parent's.
             if (ws.Parent is null)
             {
@@ -639,6 +646,13 @@ public sealed partial class ObPluginBuilder
         }
         foreach (var key in sources.Keys)
             if (only is null || only.IsMatch(sources[key].EditorID ?? "")) Build(key);
+        Skyrim.Navmesh.NavmeshBuilder.GenerateExteriorCells(navJobs);
+        foreach (var job in navJobs)
+        {
+            var (navCount, navTriangles) = job.Finish();
+            ExteriorNavmeshes += navCount;
+            NavmeshTriangles += navTriangles;
+        }
         if (windingKinds.Count > 0)
         {
             foreach (var (kind, c) in windingKinds.OrderByDescending(k => k.Value.Refs)) Console.WriteLine($"  exterior winding: {kind}: {c.Models} models (counted a worldspace each), {c.Refs} references");
@@ -775,7 +789,7 @@ public sealed partial class ObPluginBuilder
 
     /// <summary>The floor for an interior Oblivion left with nothing to walk on (<see cref="Skyrim.Navmesh.InvisibleFloors"/>): from
     /// its pathgrid, else from what stands in it (TestGrantWarehouseUpper's 167 statics are all candles, books and plates).</summary>
-    List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)> InvisibleFloor(Cell cell, Ob.ICellGetter? source, out string how)
+    List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)> InvisibleFloor(Cell cell, Ob.ICellGetter? source, out string how, bool wide = false)
     {
         // The cell's pathgrid, if it has one.
         var grid = source?.PathGrid?.PointToPointConnections.ToList() ?? [];
@@ -793,17 +807,43 @@ public sealed partial class ObPluginBuilder
             if (o.Placement is not { } op || !meshByBase.TryGetValue(o.Base.FormKey, out var mesh)) continue;
             float s = o.Scale ?? 1;
             var bottom = new System.Numerics.Vector3(op.Position.X, op.Position.Y, op.Position.Z + mesh.Min.Z * s);
-            var rec = mod.EnumerateMajorRecords().FirstOrDefault(r => r.FormKey == o.Base.FormKey);
-            bool stand = rec is IDoorGetter or IFurnitureGetter or IContainerGetter || (mesh.Max.Z - mesh.Min.Z) * s >= 40;
+            // Its kind by the plugin's groups (each a lookup; searching every record for each object was most of a
+            // floored interior's time).
+            var bk = o.Base.FormKey;
+            bool stand = mod.Doors.ContainsKey(bk) || mod.Furniture.ContainsKey(bk) || mod.Containers.ContainsKey(bk) || (mesh.Max.Z - mesh.Min.Z) * s >= 40;
             (stand ? stands : rests).Add(bottom);
         }
-        return Skyrim.Navmesh.InvisibleFloors.Plan(points, links, stands, rests, out how);
+        return Skyrim.Navmesh.InvisibleFloors.Plan(points, links, stands, rests, out how, wide);
     }
 
     void PlaceInvisibleFloor(Cell cell, List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)> floor) =>
         Skyrim.Navmesh.InvisibleFloors.Place(mod, modOutDir, "ob", "OB", cell, floor);
 
     void BuildNavmesh(Cell cell, Ob.ICellGetter? source = null)
+    {
+        if (BeginNavmesh(cell, source, background: false) is { } job) FinishNavmesh(job);
+    }
+
+    /// <summary>An interior's navmesh begun (<see cref="BeginNavmesh"/>): what its finish needs.</summary>
+    sealed class NavJob
+    {
+        public required Cell Cell;
+        public Ob.ICellGetter? Source;
+        public required List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)> Solid, TurnedUp;
+        public int SolidOwn;
+        public bool Floored;
+        public required List<IPlacedObjectGetter> LoadDoors;
+        public required List<P3Float> Actors;
+        public Func<P3Float, bool>? Underwater;
+        public Skyrim.Navmesh.NavmeshBuilder.PendingInterior? Pending;
+    }
+
+    /// <summary>
+    /// An interior's navmesh begun from its collision (its own invisible floor first when it has none): with
+    /// <paramref name="background"/> made on a worker thread while the next interiors are built (BuildAllInteriors), the
+    /// cell left alone until <see cref="FinishNavmesh"/>. Null when there is nothing to make one on.
+    /// </summary>
+    NavJob? BeginNavmesh(Cell cell, Ob.ICellGetter? source, bool background)
     {
         var solid = new List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)>();
         var turnedUp = new List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)>();
@@ -845,43 +885,76 @@ public sealed partial class ObPluginBuilder
                 string name = rec is null ? g.Key.ToString() : $"{rec.GetType().Name} {rec.EditorID} {(rec as IModeledGetter)?.Model?.File}";
                 Console.WriteLine($"  solids {cell.EditorID}: {g.Count()} x {name}: {(meshByBase.TryGetValue(g.Key, out var mb) ? $"{tris.Count} triangles, {up} facing up; winding: {Skyrim.Navmesh.NavmeshBuilder.Winding(mb.Solid)}" : "no collision mesh")}");
             }
+        bool floored = false;
+        var solidOwn = solid.Count;
         if (solid.Count == 0)
         {
             // No collision at all in it (Oblivion's TestCastleInterior: a ladder and a trapdoor in the air): its own floor.
             var floor0 = InvisibleFloor(cell, source, out string how0);
-            if (floor0.Count == 0) return;
+            if (floor0.Count == 0) return null;
             PlaceInvisibleFloor(cell, floor0);
             solid.AddRange(floor0);
             turnedUp.AddRange(floor0);
             FlooredInteriors.Add($"{cell.EditorID} ({how0})");
+            floored = true;
         }
         navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod);
-        var loadDoors = cell.Persistent.OfType<PlacedObject>().Where(d => d != StartMarker && placedDoors.ContainsValue(d)).Cast<IPlacedObjectGetter>().ToList();
+        var job = new NavJob
+        {
+            Cell = cell, Source = source, Solid = solid, TurnedUp = turnedUp, SolidOwn = solidOwn, Floored = floored,
+            LoadDoors = cell.Persistent.OfType<PlacedObject>().Where(d => d != StartMarker && placedDoors.ContainsValue(d)).Cast<IPlacedObjectGetter>().ToList(),
+            Actors = cell.Temporary.OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList(),
+        };
+        // The cell's water, lava (HurtingWater) as any other: swum over, the ground wholly under it flagged Water, so
+        // whoever falls into lava can swim out (the lava hurts).
+        float? level = cell.Flags.HasFlag(Cell.Flag.HasWater) ? cell.WaterHeight ?? 0 : null;
+        if (level is not null && !cell.Water.IsNull && hurtingWaters.Values.Any(w => w is not null && w.FormKey == cell.Water.FormKey)) HazardCells++;
+        job.Underwater = level is { } wl ? p => p.Z < wl : null;
+        job.Pending = navmeshes.BeginInterior(cell, solid, turnedUp, job.LoadDoors, cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null,
+            job.Actors, null, job.Underwater, background);
+        return job;
+    }
+
+    /// <summary>An interior's navmesh finished (in the order begun): a floor of its own when it had nothing to walk on, and
+    /// who stands on it counted.</summary>
+    void FinishNavmesh(NavJob job)
+    {
+        var (cell, source, solid, turnedUp, solidOwn, floored, loadDoors, actors, underwater) =
+            (job.Cell, job.Source, job.Solid, job.TurnedUp, job.SolidOwn, job.Floored, job.LoadDoors, job.Actors, job.Underwater);
         try
         {
-            var actors = cell.Temporary.OfType<PlacedNpc>().Select(n => n.Placement!.Position).ToList();
-            // The cell's water, lava (HurtingWater) as any other: swum over, the ground wholly under it flagged Water, so
-            // whoever falls into lava can swim out (the lava hurts).
-            float? level = cell.Flags.HasFlag(Cell.Flag.HasWater) ? cell.WaterHeight ?? 0 : null;
-            if (level is not null && !cell.Water.IsNull && hurtingWaters.Values.Any(w => w is not null && w.FormKey == cell.Water.FormKey)) HazardCells++;
-            Func<P3Float, bool>? underwater = level is { } wl ? p => p.Z < wl : null;
             Skyrim.Navmesh.NavmeshBuilder.Result r;
             try
             {
-                r = navmeshes.BuildInterior(cell, solid, turnedUp, loadDoors,
-                    cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors, underwater: underwater);
+                r = job.Pending!.Finish();
+                // A slow one said, with where its time went (2026-10-22: one interior held the build to a core for 31 minutes).
+                if (job.Pending.Seconds > 20) Console.WriteLine($"  navmesh {cell.EditorID}: {job.Pending.Seconds:F0} s ({job.Pending.Timing})");
             }
             catch (InvalidOperationException e) when (e.Message.StartsWith("no floor to walk on"))
             {
-                // Nothing to walk on in it (Oblivion's test cells and leftovers): a floor of its own, then the navmesh on it.
-                var floor = InvisibleFloor(cell, source, out string how);
-                if (floor.Count == 0) throw;
-                PlaceInvisibleFloor(cell, floor);
-                solid.AddRange(floor);
-                turnedUp.AddRange(floor);
-                FlooredInteriors.Add($"{cell.EditorID} ({how})");
-                r = navmeshes.BuildInterior(cell, solid, turnedUp, loadDoors,
-                    cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors, underwater: underwater);
+                // Nothing to walk on in it (Oblivion's test cells and leftovers): a floor of its own (a wide one under its
+                // pathgrid when the one along it kept nothing), then the navmesh on it.
+                Skyrim.Navmesh.NavmeshBuilder.Result? made = null;
+                foreach (bool wide in floored ? new[] { true } : [false, true])
+                {
+                    var floor = InvisibleFloor(cell, source, out string how, wide);
+                    if (floor.Count == 0) continue;
+                    PlaceInvisibleFloor(cell, floor);
+                    solid.RemoveRange(solidOwn, solid.Count - solidOwn);
+                    turnedUp.RemoveRange(solidOwn, turnedUp.Count - solidOwn);
+                    solid.AddRange(floor);
+                    turnedUp.AddRange(floor);
+                    FlooredInteriors.RemoveAll(f => f.StartsWith(cell.EditorID + " ("));
+                    FlooredInteriors.Add($"{cell.EditorID} ({how})");
+                    try
+                    {
+                        made = navmeshes.BuildInterior(cell, solid, turnedUp, loadDoors,
+                            cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors, underwater: underwater);
+                        break;
+                    }
+                    catch (InvalidOperationException again) when (again.Message.StartsWith("no floor to walk on")) { }
+                }
+                r = made ?? throw e;
             }
             Navmeshes++;
             NavmeshTriangles += r.Triangles;

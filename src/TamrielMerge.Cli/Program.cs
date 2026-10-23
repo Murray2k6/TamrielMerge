@@ -908,6 +908,46 @@ static class Program
                 // Dev aid: vanilla's placed-water mesh, as Skyrim/Meshes/WaterSurface copies it.
                 Skyrim.Meshes.WaterSurface.Describe(skyrimData);
                 return 0;
+            case "ob-gmst":
+            {
+                // Dev aid: Oblivion.esm's game settings whose EditorID or text matches --match (regex), with their values.
+                using var ob = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(GameInstalls.DataDir(Game.Oblivion)!, "Oblivion.esm"), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var g in ob.GameSettings)
+                {
+                    string value = g switch { Mutagen.Bethesda.Oblivion.IGameSettingFloatGetter f => f.Data?.ToString() ?? "", Mutagen.Bethesda.Oblivion.IGameSettingIntGetter i => i.Data?.ToString() ?? "", Mutagen.Bethesda.Oblivion.IGameSettingStringGetter t => t.Data ?? "", _ => "?" };
+                    if (rx.IsMatch(g.EditorID ?? "") || rx.IsMatch(value)) Console.WriteLine($"{g.EditorID} = {value}");
+                }
+                return 0;
+            }
+            case "sk-topics":
+            {
+                // Dev aid: Skyrim.esm's dialogue topics whose EditorID matches --match (regex): category, subtype (Mutagen's
+                // reading), SNAM, and the raw DATA bytes.
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var t in sk.DialogTopics.Where(t => t.EditorID is { } e && rx.IsMatch(e)).Take(int.Parse(opts.GetValueOrDefault("max", "40"))))
+                    Console.WriteLine($"{t.EditorID}: category {t.Category} ({(int)t.Category}), subtype {t.Subtype} ({(int)t.Subtype}), SNAM {t.SubtypeName.Type}, flags {t.TopicFlags}");
+                return 0;
+            }
+            case "sk-condition-props":
+            {
+                // Dev aid: Mutagen's Skyrim condition data classes whose names match --match (regex): their own properties.
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var t in typeof(ConditionData).Assembly.GetTypes().Where(t => t.IsClass && t.Name.EndsWith("ConditionData") && rx.IsMatch(t.Name.Replace("ConditionData", ""))).OrderBy(t => t.Name))
+                    Console.WriteLine($"{t.Name.Replace("ConditionData", "")}: {string.Join("; ", t.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly).Select(p => $"{p.PropertyType.Name} {p.Name}"))}");
+                // --topics: Skyrim's dialogue topic categories and subtypes.
+                if (opts.ContainsKey("topics"))
+                {
+                    Console.WriteLine("categories: " + string.Join(", ", Enum.GetNames<DialogTopic.CategoryEnum>()));
+                    Console.WriteLine("subtypes: " + string.Join(", ", Enum.GetNames<DialogTopic.SubtypeEnum>()));
+                    // Skyrim.esm's topics: each subtype's SNAM code and category, how many topics.
+                    using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                    foreach (var g in sk.DialogTopics.GroupBy(t => (t.Subtype, t.Category, Code: t.SubtypeName.Type)).OrderBy(g => g.Key.Category).ThenBy(g => g.Key.Subtype.ToString()))
+                        Console.WriteLine($"  {g.Key.Category} {g.Key.Subtype} {g.Key.Code}: {g.Count()}");
+                }
+                return 0;
+            }
             case "sk-gmst":
             {
                 // Dev aid: Skyrim.esm's game settings whose EditorID matches --match (regex), with their values.
@@ -934,7 +974,7 @@ static class Program
                 foreach (var c in sk.SoundCategories.Where(c => (c.EditorID ?? "").Contains("VOC", StringComparison.OrdinalIgnoreCase))) Console.WriteLine($"category {c.FormKey.ID:X6} {c.EditorID}");
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "^$"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 foreach (var d in sk.SoundDescriptors.Where(d => d.EditorID is { } e && rx.IsMatch(e)).Take(15))
-                    Console.WriteLine($"sound {d.FormKey.ID:X6} {d.EditorID}: category {cats.GetValueOrDefault(d.Category.FormKey)}, files {string.Join(",", d.SoundFiles.Select(f => f.DataRelativePath.Path))}");
+                    Console.WriteLine($"sound {d.FormKey.ID:X6} {d.EditorID}: category {cats.GetValueOrDefault(d.Category.FormKey)} ({d.Category.FormKey}), output model {sk.SoundOutputModels.FirstOrDefault(o => o.FormKey == d.OutputModel.FormKey)?.EditorID} ({d.OutputModel.FormKey}), type {d.Type}, attenuation {d.StaticAttenuation}, frequency {d.PercentFrequencyShift}/{d.PercentFrequencyVariance}, priority {d.Priority}, variance {d.Variance}, loop {d.LoopAndRumble?.Loop}, conditions {d.Conditions.Count}, files {string.Join(",", d.SoundFiles.Select(f => f.DataRelativePath.Path))}");
                 return 0;
             }
             case "sk-form":
@@ -948,6 +988,95 @@ static class Program
                 if (rec is IModeledGetter { Model: { } model }) Console.WriteLine($"  model {model.File}");
                 if (rec is IActivatorGetter act) Console.WriteLine($"  water type {act.WaterType.FormKeyNullable}");
                 if (rec is IWaterGetter w) Console.WriteLine($"  water: flags {w.Flags}, opacity {w.Opacity}, material {w.Material.FormKeyNullable}");
+                return 0;
+            }
+            case "sk-records":
+            {
+                // Dev aid: Skyrim.esm's records whose type name matches --type and EditorID matches --match (regexes), with
+                // FormIDs: e.g. --type ImageSpaceAdapter --match Hit.
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var typeRx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("type", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var idRx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var r in sk.EnumerateMajorRecords().Where(r => typeRx.IsMatch(r.GetType().Name) && r.EditorID is { } e && idRx.IsMatch(e)).Take(int.Parse(opts.GetValueOrDefault("max", "60"))))
+                    Console.WriteLine($"{r.FormKey.ID:X6} {r.GetType().Name.Replace("BinaryOverlay", "")} {r.EditorID}");
+                return 0;
+            }
+            case "sk-output-models":
+            {
+                // Dev aid: Skyrim.esm's sound output models (SOPM) with their kind, flags, attenuation (distances, the
+                // curve's bytes) and speaker levels, and the descriptors --match names with their model and attenuation;
+                // --plugin reads another plugin's (a built Redguard.esm), its models named from Skyrim.esm's too.
+                using var vanillaSk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                using var other = opts.TryGetValue("plugin", out var pluginPath) ? SkyrimMod.CreateFromBinaryOverlay(pluginPath, SkyrimRelease.SkyrimSE) : null;
+                var sk = (ISkyrimModGetter?)other ?? vanillaSk;
+                var byKey = vanillaSk.SoundOutputModels.Concat(other is null ? Enumerable.Empty<ISoundOutputModelGetter>() : other.SoundOutputModels).ToDictionary(m => m.FormKey);
+                foreach (var m in sk.SoundOutputModels)
+                {
+                    var a = m.Attenuation;
+                    string ch = m.OutputChannels is { } oc ? $"ch0 [{string.Join(",", new[] { oc.Channel0.L, oc.Channel0.R, oc.Channel0.C, oc.Channel0.LFE, oc.Channel0.RL, oc.Channel0.RR, oc.Channel0.BL, oc.Channel0.BR })}]" : "no channels";
+                    Console.WriteLine($"{m.FormKey.ID:X6} {m.EditorID,-28} type {m.Type} flags {m.Data?.Flags} reverb {m.Data?.ReverbSendPercent} " +
+                        (a is null ? "no attenuation" : $"min {a.MinDistance} max {a.MaxDistance} curve [{string.Join(",", a.Curve.ToArray())}] unk {a.Unknown} unk2 [{string.Join(",", a.Unknown2.ToArray())}]") + $" {ch}");
+                }
+                var idRx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "^$"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var negative = vanillaSk.Lights.Where(l => l.Flags.HasFlag(Light.Flag.Negative)).ToList();
+                Console.WriteLine($"Skyrim.esm lights with the Negative flag: {negative.Count} of {vanillaSk.Lights.Count} ({string.Join(", ", negative.Take(8).Select(l => $"{l.EditorID} r{l.Radius}"))})");
+                foreach (var d in sk.SoundDescriptors.Where(d => d.EditorID is { } e && idRx.IsMatch(e)))
+                    Console.WriteLine($"{d.FormKey.ID:X6} {d.EditorID}: model {(byKey.TryGetValue(d.OutputModel.FormKey, out var om) ? om.EditorID : d.OutputModel.FormKey.ToString())} static {d.StaticAttenuation} loop {d.LoopAndRumble?.Loop} type {d.Type}");
+                return 0;
+            }
+            case "ob-packages":
+            {
+                // Dev aid: the AI packages of Oblivion's plugins (--plugins, default Oblivion.esm;Knights.esp) by kind as
+                // Mutagen reads it and by its low byte, each kind's targets by record type, and the places' radii as
+                // Mutagen reads them (float) and as their bits (int).
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                foreach (var pl in opts.GetValueOrDefault("plugins", "Oblivion.esm;Knights.esp").Split(';'))
+                {
+                    using var m = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, pl), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                    var kinds = m.EnumerateMajorRecords().GroupBy(r => r.FormKey.ID).ToDictionary(g => g.Key, g => g.First().Registration.Name);
+                    var all = m.AIPackages.ToList();
+                    Console.WriteLine($"{pl}: {all.Count} packages; Mutagen's kind in range (0-11): {all.Count(a => a.Data is { } d && (int)d.Type is >= 0 and <= 11)}");
+                    foreach (var g in all.GroupBy(a => a.Data is { } d ? (int)d.Type & 0xFF : -1).OrderBy(g => g.Key))
+                    {
+                        var targets = g.Where(a => a.Target is { ObjectType: not Mutagen.Bethesda.Oblivion.AIPackageTarget.ObjectTypes.ObjectType } t && t.Object != 0)
+                            .GroupBy(a => kinds.GetValueOrDefault((uint)a.Target!.Object & 0xFFFFFF, "elsewhere")).Select(t => $"{t.Key} x{t.Count()}");
+                        Console.WriteLine($"  kind {g.Key}: {g.Count()} ({string.Join(", ", g.Where(a => a.Data is not null).Select(a => $"{(int)a.Data!.Type:X8}").Distinct().Take(3))}); targets {string.Join(", ", targets)}");
+                        // --kind N: that kind's packages, each with its target and place.
+                        if (opts.TryGetValue("kind", out var listKind) && int.Parse(listKind) == g.Key)
+                            foreach (var a in g.Take(40))
+                                Console.WriteLine($"    {a.EditorID}: target {a.Target?.ObjectType} {a.Target?.Object:X} ({kinds.GetValueOrDefault((uint)(a.Target?.Object ?? 0) & 0xFFFFFF, "-")}), place {a.Location?.Type} {a.Location?.LocationReference.FormKeyNullable} ({(a.Location?.LocationReference.FormKeyNullable is { } lk ? kinds.GetValueOrDefault(lk.ID, "elsewhere") : "-")}) radius {(a.Location is { } al ? BitConverter.SingleToInt32Bits(al.Radius) : 0)}");
+                    }
+                    var radii = all.Where(a => a.Location is not null).Select(a => BitConverter.SingleToInt32Bits(a.Location!.Radius)).ToList();
+                    Console.WriteLine($"  radii as ints: {radii.Count} places, {radii.Count(r => r is >= 0 and < 100000)} from 0 to 100,000 (median {radii.Order().ElementAtOrDefault(radii.Count / 2)}); as floats over 1: {all.Count(a => a.Location is { Radius: > 1 })}");
+                }
+                return 0;
+            }
+            case "sk-packages":
+            {
+                // Dev aid: Skyrim.esm's packages whose EditorID, or whose template's, matches --match (regex): template,
+                // flags and each data input (its index, kind, name and value), at most --max (default 20).
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var byKey = sk.Packages.ToDictionary(pk => pk.FormKey);
+                string Name(FormKey k) => byKey.TryGetValue(k, out var t) ? t.EditorID ?? k.ToString() : k.ToString();
+                foreach (var pk in sk.Packages.Where(pk => rx.IsMatch(pk.EditorID ?? "") || rx.IsMatch(Name(pk.PackageTemplate.FormKey))).Take(int.Parse(opts.GetValueOrDefault("max", "20"))))
+                {
+                    Console.WriteLine($"{pk.FormKey} {pk.EditorID}: template {(pk.PackageTemplate.IsNull ? "none" : Name(pk.PackageTemplate.FormKey))}, flags {pk.Flags}, type {pk.Type}");
+                    foreach (var (index, d) in pk.Data)
+                    {
+                        string value = d switch
+                        {
+                            IPackageDataTargetGetter t => $"{t.Type} {t.Target?.GetType().Name.Replace("BinaryOverlay", "")} {t.Target switch { IPackageTargetSpecificReferenceGetter r => r.Reference.FormKey.ToString(), IPackageTargetObjectIDGetter o => o.Reference.FormKey.ToString(), IPackageTargetObjectTypeGetter ot => ot.Type.ToString(), _ => "" }}",
+                            IPackageDataLocationGetter l => $"{l.Location.Target?.GetType().Name.Replace("BinaryOverlay", "")} radius {l.Location.Radius}",
+                            IPackageDataBoolGetter b => b.Data.ToString(),
+                            IPackageDataFloatGetter f => f.Data.ToString(),
+                            IPackageDataIntGetter i => i.Data.ToString(),
+                            IPackageDataObjectListGetter ol => ol.Data.ToString(),
+                            _ => "",
+                        };
+                        Console.WriteLine($"  [{index}] {d.GetType().Name.Replace("BinaryOverlay", "")} \"{d.Name}\" {value}");
+                    }
+                }
                 return 0;
             }
             case "sk-sizes":
@@ -1191,6 +1320,7 @@ static class Program
                 foreach (var p in builder.Problems.Take(40)) Console.WriteLine($"  problem: {p}");
                 if (builder.Problems.Count > 40) Console.WriteLine($"  ... {builder.Problems.Count - 40} more problems");
                 Console.WriteLine($"  terrain LOD chunks: {builder.TerrainLodChunks}; Skyrim water surfaces: {builder.WaterSurfaces}; ships: {builder.Ships}");
+                Console.WriteLine($"  lights: {builder.LightCount} placed ({builder.ObjectLightsPlaced} local-light objects; {builder.DarkeningLights} with darkening channels, those left out: Skyrim's lights only add)");
                 Console.WriteLine($"  records: {builder.Mod.Statics.Count} statics, {builder.Mod.Lights.Count} lights, {builder.Mod.Worldspaces.Count} worldspaces, {builder.Mod.Cells.Records.Sum(b => b.SubBlocks.Sum(sb => sb.Cells.Count))} interiors, {builder.Mod.LandscapeTextures.Count} land textures");
                 Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 builder.Write();
@@ -1444,7 +1574,8 @@ static class Program
                     _ => "?",
                 };
                 string[] cmps = ["=", "!=", "<", ">", "<=", ">="];
-                string[] ops = ["", "+", "-", "/", "*", "<<", ">>", "&", "|", "^", "++", "--"];
+                // 3 multiplies, 4 divides (RgScript.AssignStmt; RgPapyrus.Apply).
+                string[] ops = ["", "+", "-", "*", "/", "<<", ">>", "&", "|", "^", "++", "--"];
                 var lines = new List<string>();
                 void Print(List<Redguard.RgScript.Stmt> body, int depth)
                 {
@@ -1552,7 +1683,7 @@ static class Program
                     Directory.CreateDirectory(pexDir);
                     string shipped = Path.Combine(AppContext.BaseDirectory, "Papyrus");
                     var psi = new System.Diagnostics.ProcessStartInfo(compiler) { WorkingDirectory = Path.GetFullPath(srcDir), RedirectStandardOutput = true, RedirectStandardError = true };
-                    foreach (var a in new[] { Path.GetFullPath(srcDir), "-all", "-q", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(srcDir)};{shipped};{Path.Combine(skyrimData, "Scripts", "Source")};{Path.Combine(skyrimData, "Source", "Scripts")}", $"-o={Path.GetFullPath(pexDir)}" })
+                    foreach (var a in new[] { Path.GetFullPath(srcDir), "-all", "-f=TESV_Papyrus_Flags.flg", $"-i={Path.GetFullPath(srcDir)};{shipped};{Path.Combine(skyrimData, "Scripts", "Source")};{Path.Combine(skyrimData, "Source", "Scripts")}", $"-o={Path.GetFullPath(pexDir)}" })
                         psi.ArgumentList.Add(a);
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     using var p = System.Diagnostics.Process.Start(psi)!;
@@ -1560,8 +1691,9 @@ static class Program
                     string log = p.StandardOutput.ReadToEnd() + err.Result;
                     p.WaitForExit();
                     int ok = written.Values.Count(n => File.Exists(Path.Combine(pexDir, n + ".pex")));
-                    Console.WriteLine($"  compiled {ok} of {written.Count} distinct scripts in {sw.Elapsed.TotalSeconds:F0}s");
-                    foreach (var line in log.Split('\n').Where(l => l.Contains("): ")).Take(int.Parse(opts.GetValueOrDefault("errors", "30")))) Console.WriteLine("    " + line.Trim());
+                    var (compileErrors, compileWarnings, said) = Skyrim.PapyrusRun.Tally(log);
+                    Console.WriteLine($"  compiled {ok} of {written.Count} distinct scripts in {sw.Elapsed.TotalSeconds:F0}s ({compileErrors} errors, {compileWarnings} warnings)");
+                    foreach (var line in said.Take(int.Parse(opts.GetValueOrDefault("errors", "30")))) Console.WriteLine("    " + line);
                 }
                 return 0;
             }
@@ -2846,6 +2978,28 @@ static class Program
                     return 0;
                 }
                 var tally = new Dictionary<string, int>();
+                // --kinds: every action object of every block by what it is (door, model, flat), its type and its trigger
+                // field, and whether its sound/index byte names a sound DAGGER.SND has (Daggerfall Unity plays it on each trigger).
+                if (opts.ContainsKey("kinds"))
+                {
+                    var snd = DfSound.Load(arena2);
+                    var sounds = new Dictionary<int, int>();
+                    foreach (var e in bsa.Entries.Where(e => e.Name.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase)))
+                        foreach (var o in DfDungeonBlock.Load(bsa, e.Name).Objects.Where(o => o.Action is not null))
+                        {
+                            string kind = o.Type == DfRdbObjectType.Flat ? "flat" : Skyrim.Meshes.BlockMeshBuilder.IsDoor(o) ? "door" : "model";
+                            bool sound = o.SoundIndex > 0 && snd?.Samples(o.SoundIndex) is { Length: > 0 };
+                            if (o.SoundIndex > 0) sounds[o.SoundIndex] = sounds.GetValueOrDefault(o.SoundIndex) + 1;
+                            string key = $"{kind} type {o.Action!.Flags} trigger {o.TriggerAndLock} axis>5 {o.Action.Axis > 5} index {(o.SoundIndex > 0 ? sound ? "a sound" : "no sound" : "0")}";
+                            tally[key] = tally.GetValueOrDefault(key) + 1;
+                            // --flatmoves: what each flat that moves is (Daggerfall Unity moves the billboard: types 1-8).
+                            if (opts.ContainsKey("flatmoves") && kind == "flat" && o.Action.Flags is >= 1 and <= 8)
+                                Console.WriteLine($"  flat {o.TextureArchive}.{o.TextureRecord} in {e.Name}: type {o.Action.Flags} magnitude {o.Action.Magnitude} trigger {o.TriggerAndLock} next {(o.Action.NextObjectIndex >= 0 ? "yes" : "no")}");
+                        }
+                    foreach (var (k, n) in tally.OrderBy(kv => kv.Key, StringComparer.Ordinal)) Console.WriteLine($"  {n,5}  {k}");
+                    Console.WriteLine($"  sound/index bytes in use: {sounds.Count} ({string.Join(",", sounds.Keys.Order())}); in DAGGER.SND: {sounds.Keys.Count(id => snd?.Samples((uint)id) is { Length: > 0 })}");
+                    return 0;
+                }
                 foreach (var e in bsa.Entries.Where(e => e.Name.EndsWith(".RDB", StringComparison.OrdinalIgnoreCase)))
                     foreach (var o in DfDungeonBlock.Load(bsa, e.Name).Objects.Where(o => o.Type == DfRdbObjectType.Model && wantModels.Contains(o.ModelId) && o.Action is not null))
                     {
@@ -3155,10 +3309,31 @@ static class Program
             case "ob-script-src":
             {
                 // Dev aid: Oblivion script sources from a plugin (--plugin file in Oblivion's Data), --id regex or --obse (only
-                // scripts using OBSE), --max N.
+                // scripts using OBSE), --max N; --grep regex: every source line matching it (scripts, dialogue results and
+                // quest stage results), "where: line", and how many.
                 string dir = GameInstalls.DataDir(Game.Oblivion)!;
                 using var plugin = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dir, opts.GetValueOrDefault("plugin", "Oblivion.esm")), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("id", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (opts.TryGetValue("grep", out var grep))
+                {
+                    var lineRx = new System.Text.RegularExpressions.Regex(grep, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    int hits = 0;
+                    void Lines(string where, string? source)
+                    {
+                        foreach (var line in (source ?? "").Split('\n'))
+                            if (lineRx.IsMatch(line)) { Console.WriteLine($"{where}: {line.Trim()}"); hits++; }
+                    }
+                    foreach (var sc in plugin.Scripts) if (rx.IsMatch(sc.EditorID ?? "")) Lines(sc.EditorID ?? sc.FormKey.ToString(), sc.Fields.SourceCode);
+                    foreach (var topic in plugin.DialogTopics)
+                        foreach (var info in topic.Items)
+                            Lines($"{topic.EditorID}/{info.FormKey.ID:X6}", info.Script?.SourceCode);
+                    foreach (var quest in plugin.Quests)
+                        foreach (var stage in quest.Stages)
+                            foreach (var entry in stage.LogEntries)
+                                Lines($"{quest.EditorID}/{stage.Stage}", entry.ResultScript?.SourceCode);
+                    Console.WriteLine($"{hits} lines");
+                    return 0;
+                }
                 int shown = 0, max = int.Parse(opts.GetValueOrDefault("max", "3"));
                 foreach (var sc in plugin.Scripts)
                 {
@@ -3511,19 +3686,26 @@ static class Program
                 if (mwScripts)
                 {
                     builder.PrepareScripts();
-                    Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%) ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%), " +
+                        $"{builder.ScriptStatementsFaithful} as Morrowind does them ({100.0 * builder.ScriptStatementsFaithful / Math.Max(1, builder.ScriptStatements):F1}%; the rest in scripts-gaps.txt) ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Directory.CreateDirectory(outDir); File.WriteAllLines(Path.Combine(outDir, "scripts-gaps.txt"), builder.ScriptGaps.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Value,6} {kv.Key}"));
                 }
                 // Worn armour and clothing meshes, all at once in parallel (the records come with the items later).
                 var (wornMade, wornFailed) = builder.PrepareWorn();
                 Console.WriteLine($"  worn meshes: {wornMade} items re-rigged to Skyrim's skeleton, {wornFailed} failed ({sw.Elapsed.TotalSeconds:F0}s)");
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cells", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 int cells = 0, refs = 0;
+                // Navmeshes on every core: each made in the background while the next interiors are built (two per core in hand).
+                builder.BackgroundNavmeshes = true;
                 foreach (var cell in world.Interiors.Values.Where(c => rx.IsMatch(c.Name)))
                 {
                     var built = builder.BuildInterior(cell);
+                    builder.FinishNavmeshes(Environment.ProcessorCount * 2);
                     cells++; refs += built.Temporary.Count + built.Persistent.Count;
                     if (opts.ContainsKey("verbose")) Console.WriteLine($"  {cell.Name}: {built.Temporary.Count + built.Persistent.Count} references of {cell.Refs.Count} ({built.EditorID})");
                 }
+                builder.FinishNavmeshes();
+                builder.BackgroundNavmeshes = false;
                 Console.WriteLine($"  {cells} interiors, {refs} references, {builder.Navmeshes} navmeshes ({builder.NavmeshTriangles} triangles) ({sw.Elapsed.TotalSeconds:F0}s)");
                 Console.WriteLine($"  on the interiors' navmeshes (within 64 units): {builder.ActorsOnNavmesh:N0} of {builder.ActorsChecked:N0} actors");
                 Console.WriteLine($"  hazards: {builder.HazardCells} interiors' navmeshes kept off what hurts to stand on ({Skyrim.Navmesh.NavmeshBuilder.HazardSpans:N0} voxel spans)");
@@ -3557,12 +3739,21 @@ static class Program
                 {
                     builder.BuildDialogue();
                     Console.WriteLine($"  dialogue: {builder.DialogueTopics} topics, {builder.DialogueResponses} responses ({builder.DialogueLines} lines), {builder.JournalQuests} journal quests ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  dialogue never said: {builder.DroppedResponses.Values.Sum()} responses (dialogue-dropped.txt): {string.Join(", ", builder.DroppedResponses.OrderByDescending(kv => kv.Value).Take(12).Select(kv => $"{kv.Value} {kv.Key}"))}");
+                    Directory.CreateDirectory(outDir);
+                    File.WriteAllLines(Path.Combine(outDir, "dialogue-dropped.txt"), builder.DroppedResponses.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Value,6} {kv.Key}"));
                 }
                 if (mwScripts)
                 {
                     int compiled = builder.AttachScripts(msg => Console.WriteLine($"  scripts: {msg} ({sw.Elapsed.TotalSeconds:F0}s)"));
-                    Console.WriteLine($"  scripts: {compiled} compiled, {builder.ScriptsAttached} attached, {builder.ResultScriptsAttached} dialogue results, {builder.PropertiesFilled} properties filled ({builder.PropertiesUnfilled} without a record) ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  scripts: {compiled} compiled ({builder.CompileErrors} compiler errors, {builder.CompileWarnings} warnings: scripts-compile.txt), {builder.ScriptsAttached} attached, {builder.ResultScriptsAttached} dialogue results, {builder.PropertiesFilled} properties filled ({builder.PropertiesUnfilled} without a record) ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
+                if (!opts.ContainsKey("no-dialogue"))
+                {
+                    var (topicCount, mentioned, added, neither) = builder.TopicSources();
+                    Console.WriteLine($"  topics known to the player: {topicCount} topics, {mentioned} named in responses, {added} added by scripts, {neither.Count} by neither{(neither.Count > 0 ? ": " + string.Join(", ", neither.Take(40)) : "")}");
+                }
+                Console.WriteLine($"  AI settings: {builder.ActorAIs} people and creatures with Morrowind's Hello, Fight, Flee and Alarm (TMMwActorAI); {builder.SoulTracked} creatures' souls kept in gems of their own");
                 Console.WriteLine(builder.Start is { } st
                     ? $"  start: {st.Cell} at {st.Position}, {st.Degrees} degrees -> {builder.StartMarker.FormKey}{(builder.StartMarker.Placement is { } placed ? $" on the floor at {placed.Position}" : " (cell not built: marker unplaced)")}"
                     : "  start: not found in the CharGen script");
@@ -3730,9 +3921,32 @@ static class Program
                 var topics = ob.DialogTopics.ToList();
                 foreach (var g in topics.GroupBy(t => t.DialogType))
                     Console.WriteLine($"{g.Key}: {g.Count()} topics, {g.Sum(t => t.Items.Count)} responses, {g.Sum(t => t.Items.Sum(i => i.Responses.Sum(r => r.ResponseText?.Length ?? 0)))} chars");
+                // --topics: every topic but the player's (type Topic), by type, with its responses and those with a result script.
+                if (opts.ContainsKey("topics"))
+                    foreach (var g in topics.Where(t => t.DialogType != Mutagen.Bethesda.Oblivion.DialogType.Topic).GroupBy(t => t.DialogType).OrderBy(g => g.Key))
+                        Console.WriteLine($"{g.Key}: " + string.Join(", ", g.OrderBy(t => t.EditorID).Select(t => $"{t.EditorID} {t.Items.Count}{(t.Items.Any(i => !string.IsNullOrWhiteSpace(i.Script?.SourceCode)) ? $"/{t.Items.Count(i => !string.IsNullOrWhiteSpace(i.Script?.SourceCode))}r" : "")}")));
                 var items = topics.SelectMany(t => t.Items).ToList();
-                foreach (var g in items.SelectMany(i => i.Conditions).GroupBy(c => c.Function).OrderByDescending(g => g.Count()).Take(45))
+                // --conversation: the conversation topics' responses: their DATA's type value as Mutagen reads it (its raw
+                // number), flags, links and Link From, and the topics most linked.
+                if (opts.ContainsKey("conversation"))
+                {
+                    var conv = topics.Where(t => t.DialogType == Mutagen.Bethesda.Oblivion.DialogType.Conversation).ToList();
+                    var convItems = conv.SelectMany(t => t.Items).ToList();
+                    Console.WriteLine("conversation response DATA type values: " + string.Join(", ", convItems.GroupBy(i => (int)(i.Data?.DialogType ?? 0)).OrderBy(g => g.Key).Select(g => $"{g.Key} {g.Count()}")));
+                    Console.WriteLine("flags: " + string.Join(", ", convItems.GroupBy(i => i.Data?.Flags.ToString() ?? "none").OrderByDescending(g => g.Count()).Select(g => $"{g.Key} {g.Count()}")));
+                    Console.WriteLine($"with Link To: {convItems.Count(i => i.Choices.Count > 0)}, with Link From: {convItems.Count(i => i.LinkFrom.Count > 0)}, with Add Topics: {convItems.Count(i => i.Topics.Count > 0)}, with a result script: {convItems.Count(i => !string.IsNullOrWhiteSpace(i.Script?.SourceCode))}");
+                    Console.WriteLine("topics: " + string.Join(", ", conv.OrderByDescending(t => t.Items.Count).Take(25).Select(t => $"{t.EditorID} {t.Items.Count}")));
+                    Console.WriteLine($"conversation topics: {conv.Count}; HELLO responses without Link From: {conv.Where(t => t.EditorID == "HELLO").SelectMany(t => t.Items).Count(i => i.LinkFrom.Count == 0)}");
+                    // The raw DATA bytes of a few responses (type, next speaker, flags), from the file itself.
+                    if (convItems.FirstOrDefault() is { } first) Console.WriteLine($"first: {first.FormKey} {first.EditorID}");
+                }
+                foreach (var g in items.SelectMany(i => i.Conditions).GroupBy(c => c.Function).OrderByDescending(g => g.Count()).Take(opts.ContainsKey("all") ? 1000 : 45))
                     Console.WriteLine($"  {g.Key}: {g.Count()}");
+                if (opts.ContainsKey("all"))
+                {
+                    Console.WriteLine("package conditions: " + string.Join(", ", ob.AIPackages.SelectMany(p => p.Conditions).GroupBy(c => c.Function).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} {g.Count()}")));
+                    Console.WriteLine("log entry conditions: " + string.Join(", ", ob.Quests.SelectMany(q => q.Stages).SelectMany(s => s.LogEntries).SelectMany(e => e.Conditions).GroupBy(c => c.Function).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} {g.Count()}")));
+                }
                 var cmds = items.Select(i => i.Script?.SourceCode ?? "").SelectMany(sc => sc.Split('\n')).Select(l => l.Trim()).Where(l => l.Length > 0 && !l.StartsWith(";"))
                     .Select(l => System.Text.RegularExpressions.Regex.Match(l, @"^(?:[A-Za-z0-9_]+\.)?(\w+)").Groups[1].Value.ToLowerInvariant());
                 Console.WriteLine("result commands: " + string.Join(", ", cmds.GroupBy(c => c).OrderByDescending(g => g.Count()).Take(30).Select(g => $"{g.Key} {g.Count()}")));
@@ -3882,6 +4096,25 @@ static class Program
                     Console.WriteLine(f);
                 return 0;
             }
+            case "plugin-cell":
+            {
+                // Dev aid: a written plugin's (--plugin path) interior cell by EditorID (--cell): its references, each with its
+                // base's type and EditorID and where.
+                using var pm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var byKey = pm.EnumerateMajorRecords().GroupBy(r => r.FormKey).ToDictionary(g => g.Key, g => g.First());
+                foreach (var c in pm.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Where(c => (c.EditorID ?? "").Equals(opts["cell"], StringComparison.OrdinalIgnoreCase)))
+                {
+                    Console.WriteLine($"{c.EditorID}: {c.Persistent.Count} persistent, {c.Temporary.Count} temporary, navmeshes {c.NavigationMeshes.Count}");
+                    foreach (var r in c.Persistent.Concat(c.Temporary))
+                    {
+                        var bk = r switch { IPlacedObjectGetter o => o.Base.FormKey, IPlacedNpcGetter n => n.Base.FormKey, _ => FormKey.Null };
+                        var at = r switch { IPlacedObjectGetter o => o.Placement?.Position, IPlacedNpcGetter n => n.Placement?.Position, _ => null };
+                        var b = byKey.GetValueOrDefault(bk);
+                        Console.WriteLine($"  {r.EditorID} -> {b?.GetType().Name} {b?.EditorID} at {at}");
+                    }
+                }
+                return 0;
+            }
             case "sk-list":
             {
                 // Dev aid: Skyrim's archived files matching --match (regex), under --folder (default meshes\actors\character\).
@@ -3939,6 +4172,19 @@ static class Program
                 }
                 foreach (var r in rows.OrderByDescending(r => r.Beasts > 0).ThenByDescending(r => r.People).Take(int.Parse(opts.GetValueOrDefault("limit", "15"))))
                     Console.WriteLine($"{r.Id} \"{r.Name}\": {r.People} NPCs, {r.Beasts} of the beast races");
+                // --refs: each matching cell's references, by their base's record type and EditorID, and where.
+                if (opts.ContainsKey("refs"))
+                {
+                    var bases = m.EnumerateMajorRecords().GroupBy(x => x.FormKey).ToDictionary(g => g.Key, g => g.First());
+                    foreach (var c in m.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Where(c => (c.EditorID ?? "").Equals(text, StringComparison.OrdinalIgnoreCase)))
+                        foreach (var r in c.Persistent.Concat(c.Temporary))
+                        {
+                            var bk = r switch { Mutagen.Bethesda.Oblivion.IPlacedObjectGetter o => o.Base.FormKey, Mutagen.Bethesda.Oblivion.IPlacedNpcGetter n => n.Base.FormKey, Mutagen.Bethesda.Oblivion.IPlacedCreatureGetter cr => cr.Base.FormKey, _ => FormKey.Null };
+                            var at = r switch { Mutagen.Bethesda.Oblivion.IPlacedObjectGetter o => o.Location?.Position, Mutagen.Bethesda.Oblivion.IPlacedNpcGetter n => n.Location?.Position, Mutagen.Bethesda.Oblivion.IPlacedCreatureGetter cr => cr.Location?.Position, _ => null };
+                            var b = bases.GetValueOrDefault(bk);
+                            Console.WriteLine($"  {r.EditorID} -> {b?.Registration.Name} {b?.EditorID} at {at}");
+                        }
+                }
                 return 0;
             }
             case "ob-form":
@@ -3951,7 +4197,13 @@ static class Program
                 {
                     using var m = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, p), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
                     foreach (var r in m.EnumerateMajorRecords().Where(r => ids.Contains(r.FormKey.ID)))
+                    {
                         Console.WriteLine($"{p}: {r.FormKey} {r.Registration.Name} {r.EditorID} \"{(r as Mutagen.Bethesda.Plugins.Aspects.INamedGetter)?.Name}\"");
+                        // A package: its kind, flags, place, schedule and target.
+                        if (r is Mutagen.Bethesda.Oblivion.IAIPackageGetter ap)
+                            Console.WriteLine($"  package: type {ap.Data?.Type}, flags {ap.Data?.Flags}; place {ap.Location?.Type} {ap.Location?.LocationReference.FormKeyNullable} radius {ap.Location?.Radius}; " +
+                                $"schedule month {ap.Schedule?.Month} day {ap.Schedule?.DayOfWeek} date {ap.Schedule?.Day} hour {ap.Schedule?.Time} for {ap.Schedule?.Duration}; target {ap.Target?.ObjectType} {ap.Target?.Object:X} count {ap.Target?.Count}; {ap.Conditions.Count} conditions");
+                    }
                     // Who places them: references in this plugin whose base is one of the ids (any plugin).
                     int shown = 0;
                     foreach (var r in m.EnumerateMajorRecords().OfType<Mutagen.Bethesda.Oblivion.IPlacedObjectGetter>().Where(r => ids.Contains(r.Base.FormKey.ID)))
@@ -4048,11 +4300,19 @@ static class Program
                 if (scripts)
                 {
                     builder.PrepareScripts();
-                    Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%) ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  scripts: {builder.ScriptCount} translated and {builder.ResultScripts + builder.StageScripts} result scripts, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%), " +
+                        $"{builder.ScriptStatementsFaithful} as Oblivion does them ({100.0 * builder.ScriptStatementsFaithful / Math.Max(1, builder.ScriptStatements):F1}%; the rest in scripts-gaps.txt) ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Directory.CreateDirectory(outDir); File.WriteAllLines(Path.Combine(outDir, "scripts-gaps.txt"), builder.ScriptGaps.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Value,6} {kv.Key}"));
                 }
                 // Worn armour and clothing meshes, all at once in parallel (the records come with the items later).
                 var (obWornMade, obWornFailed) = builder.PrepareWorn();
                 Console.WriteLine($"  worn meshes: {obWornMade} model sets re-rigged to Skyrim's skeleton, {obWornFailed} failed ({sw.Elapsed.TotalSeconds:F0}s)");
+                // Every model the world places, converted ahead on every core (a whole build only).
+                if (!opts.ContainsKey("cells"))
+                {
+                    var (modelsMade, modelsFailed) = builder.PrepareModels();
+                    Console.WriteLine($"  models: {modelsMade} converted ahead on every core, {modelsFailed} couldn't be ({sw.Elapsed.TotalSeconds:F0}s) {Util.Machine.MemoryNote()}");
+                }
                 if (opts.TryGetValue("cells", out var only))
                     foreach (var id in only.Split(','))
                     {
@@ -4090,14 +4350,16 @@ static class Program
                 if (!opts.ContainsKey("no-dialogue"))
                 {
                     builder.BuildDialogue();
-                    Console.WriteLine($"  dialogue: {builder.DialogueTopics} topics, {builder.DialogueResponses} responses ({builder.DialogueLines} lines), {builder.QuestCount} quests ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  dialogue: {builder.DialogueTopics} topics, {builder.DialogueResponses} responses ({builder.DialogueLines} lines), {builder.QuestCount} quests; barks: {builder.BarkTopicsMade} topics of Skyrim's moments, {builder.BarkResponses} responses ({sw.Elapsed.TotalSeconds:F0}s)");
                 }
                 if (scripts)
                 {
                     Console.WriteLine($"  before scripts {Util.Machine.MemoryNote()}");
                     int compiled = builder.AttachScripts();
-                    Console.WriteLine($"  scripts: {compiled} compiled, {builder.ScriptsAttached} attached, {builder.PropertiesFilled} properties filled ({sw.Elapsed.TotalSeconds:F0}s)");
+                    Console.WriteLine($"  scripts: {compiled} compiled ({builder.CompileErrors} compiler errors, {builder.CompileWarnings} warnings: scripts-compile.txt), {builder.ScriptsAttached} attached, {builder.ResultScriptsAttached} of {builder.ResultScripts} dialogue results and {builder.StageScriptsAttached} of {builder.StageScripts} quest stage results, " +
+                        $"{builder.PropertiesFilled} properties filled, {builder.PropertiesUnfilled.Count} with no record (scripts-unfilled.txt) ({sw.Elapsed.TotalSeconds:F0}s)");
                     File.WriteAllLines(Path.Combine(outDir, "scripts-missing.txt"), builder.ScriptMissing.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Value,6} {kv.Key}"));
+                    File.WriteAllLines(Path.Combine(outDir, "scripts-unfilled.txt"), builder.PropertiesUnfilled.Order(StringComparer.Ordinal));
                 }
                 var m = builder.Mod;
                 Console.WriteLine($"  records: {m.Statics.Count} statics, {m.Doors.Count} doors, {m.Activators.Count} swinging doors, {m.Lights.Count} lights, {m.LandscapeTextures.Count} landscape textures, " +
@@ -4110,6 +4372,18 @@ static class Program
                 Console.WriteLine($"  before writing {Util.Machine.MemoryNote()}");
                 builder.Write();
                 Console.WriteLine($"  written {Util.Machine.MemoryNote()}");
+                Console.WriteLine($"  topics: {builder.TopicsGated} hidden until the player learns them (AddTopic, Add Topics), {builder.ResponsesLearning} responses teaching some; "
+                    + $"Say timed: {builder.TimedResponses} responses, {builder.TimedRecorded} with Oblivion's recordings ({builder.TimedVoices} of their {builder.TimedResponses * Oblivion.ObVoices.VoiceTypes.Count} voices measured; the rest by words at {builder.SecondsPerCharacter:F4} s a character until first said); animation groups timed: {builder.AnimationGroups}");
+                Console.WriteLine($"  conversations between people: {builder.ConversationTopics} topics, {builder.ConversationResponses} responses, {builder.ConversationPeople} people taking part (TMObConversations)");
+                Console.WriteLine($"  Oblivion's engine: {builder.TrapModelCount} trap models on the trap layer (TrapUpdate), {builder.QuestItems} quest items kept with the player, {builder.ActorsWithStats} people and creatures with their Oblivion attributes and skills, {builder.ScriptLocks} references given a lock for the scripts to set");
+                Directory.CreateDirectory(outDir);
+                File.WriteAllLines(Path.Combine(outDir, "conditions-untested.txt"), builder.ConditionsUntested.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Value,6} {kv.Key}"));
+                File.WriteAllLines(Path.Combine(outDir, "results-unattached.txt"), builder.ResultsUnattached.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Value,6} {kv.Key}"));
+                if (builder.ResultsUnattached.Count > 0)
+                    Console.WriteLine($"  dialogue results not attached: {builder.ResultsUnattached.Values.Sum()} ({string.Join(", ", builder.ResultsUnattached.OrderByDescending(kv => kv.Value).Take(6).Select(kv => $"{kv.Key} {kv.Value}"))}; results-unattached.txt)");
+                if (builder.NeverHoldingBy.Count > 0)
+                    Console.WriteLine($"  conditions judged never to hold (what left a response, package or log entry out): {string.Join(", ", builder.NeverHoldingBy.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}"))}");
+                Console.WriteLine($"  conditions (dialogue, packages, journal) Skyrim can't test as Oblivion: {builder.ConditionsUntested.Values.Sum()} ({string.Join(", ", builder.ConditionsUntested.OrderByDescending(kv => kv.Value).Take(8).Select(kv => $"{kv.Key} {kv.Value}"))}; conditions-untested.txt); Skyrim moments silenced for Oblivion's people: {builder.SkyrimMomentsSilenced}");
                 Console.WriteLine($"  schedules: {builder.NpcsWithSchedules} NPCs given their Oblivion packages ({builder.ScheduledPackagesMade} packages, with Oblivion's schedules and conditions), the sandbox kept last");
                 Console.WriteLine($"  levelling (Mundus stones): {builder.LevellingSummary}");
                 foreach (var line in builder.NpcAnimationLog) Console.WriteLine("  people's animations: " + line);
@@ -4595,6 +4869,36 @@ static class Program
                     Console.WriteLine($"{model}: bounds {r.Min} - {r.Max}");
                     foreach (var e in r.Emitters) Console.WriteLine($"   at {e.Position} size {e.Size:F1} rise {e.Rise:F1} texture {e.Texture}");
                 }
+                return 0;
+            }
+            case "mw-spells":
+            {
+                // Dev aid: Morrowind's spells (SPEL) whose ID or name matches --match (regex): type (SPDT: 0 spell, 1 ability,
+                // 2 blight, 3 disease, 4 curse, 5 power) and each effect's index (ENAM).
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles);
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                foreach (var r in world.Objects.Values.Where(r => r.Type == "SPEL" && (rx.IsMatch(r.Id) || rx.IsMatch(r.Str("FNAM") ?? ""))).Take(int.Parse(opts.GetValueOrDefault("max", "40"))))
+                    Console.WriteLine($"{r.Id} \"{r.Str("FNAM")}\": type {(r.Get("SPDT") is { Data.Length: >= 4 } sd ? sd.Int(0) : -1)}, effects {string.Join(", ", r.All("ENAM").Where(e => e.Data.Length >= 2).Select(e => BitConverter.ToInt16(e.Data, 0)))}");
+                return 0;
+            }
+            case "mw-dialogue-grep":
+            {
+                // Dev aid: Morrowind's dialogue responses (every topic type) whose text or result script matches --text
+                // (regex): topic, type, response ID, and the matching text (at most --max, default 60).
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles);
+                var dialogue = Morrowind.MwDialogue.Load(world.Plugins);
+                var rx = new System.Text.RegularExpressions.Regex(opts["text"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                int shown = 0, max = int.Parse(opts.GetValueOrDefault("max", "60"));
+                foreach (var t in dialogue.Topics.Values)
+                    foreach (var i in t.Infos)
+                    {
+                        bool inText = rx.IsMatch(i.Text ?? ""), inResult = rx.IsMatch(i.Result ?? "");
+                        if (!inText && !inResult || shown++ >= max) continue;
+                        Console.WriteLine($"{t.Type} \"{t.Name}\" {i.Id}{(inResult ? " (result)" : "")}: {(inText ? i.Text : i.Result)?.Replace("\r", " ").Replace("\n", " ")}");
+                    }
+                Console.WriteLine($"{shown} matching");
                 return 0;
             }
             case "mw-dialogue-stats":
@@ -11450,6 +11754,30 @@ static class Program
                 }
                 return 0;
             }
+            case "sk-collision-layers":
+            {
+                // Dev aid: the collision bodies of Skyrim's own models matching --match (regex on the archive path): each
+                // body's layer, motion system and quality, and the node it is on.
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                string tmp = Path.Combine(Path.GetTempPath(), "tm-layers.nif");
+                foreach (var bsa in new[] { "Skyrim - Meshes0.bsa", "Skyrim - Meshes1.bsa" })
+                {
+                    var reader = Mutagen.Bethesda.Archives.Archive.CreateReader(Mutagen.Bethesda.GameRelease.SkyrimSE, Path.Combine(skyrimData, bsa));
+                    foreach (var f in reader.Files.Where(f => rx.IsMatch(f.Path)).OrderBy(f => f.Path).Take(int.Parse(opts.GetValueOrDefault("max", "40"))))
+                    {
+                        File.WriteAllBytes(tmp, f.GetBytes());
+                        using var nif = new nifly.NifFile();
+                        if (nif.Load(tmp) != 0) continue;
+                        var hdr = nif.GetHeader();
+                        var bodies = new List<string>();
+                        for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                            if (hdr.GetBlockById(i) is nifly.bhkRigidBody body)
+                                bodies.Add($"[{i}] {hdr.GetBlockTypeStringById(i)} layer {body.collisionFilter.layer} motion {body.motionSystem} quality {body.qualityType}");
+                        Console.WriteLine($"{f.Path}: {string.Join("; ", bodies)}");
+                    }
+                }
+                return 0;
+            }
             case "sk-actor-controllers":
             {
                 // Dev aid: the controllers in Skyrim's own actor models (meshes\actors, both mesh archives; --match narrows by
@@ -12072,9 +12400,11 @@ static class Program
             }
             case "type-members":
             {
-                // Dev aid: the public members of nifly's (or HKX2's) types whose name matches --name (a regex).
+                // Dev aid: the public members of nifly's, HKX2's or Mutagen's (Oblivion, Skyrim) types whose name matches --name
+                // (a regex); --asm a regex on the assembly's name to look in fewer.
                 var rx = new System.Text.RegularExpressions.Regex(opts["name"]);
-                foreach (var asm in new[] { typeof(nifly.NifFile).Assembly, typeof(HKX2.hkbClipGenerator).Assembly })
+                var asmRx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("asm", "."));
+                foreach (var asm in new[] { typeof(nifly.NifFile).Assembly, typeof(HKX2.hkbClipGenerator).Assembly, typeof(Mutagen.Bethesda.Oblivion.OblivionMod).Assembly, typeof(SkyrimMod).Assembly }.Where(a => asmRx.IsMatch(a.GetName().Name ?? "")))
                     foreach (var t in asm.GetTypes().Where(t => rx.IsMatch(t.Name)))
                     {
                         Console.WriteLine($"{t.FullName} : {t.BaseType?.Name}");

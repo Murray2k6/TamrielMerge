@@ -99,6 +99,8 @@ public sealed partial class MwPluginBuilder
         entry.Properties.Add(Obj("PlayerRef", new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x14)));
         entry.Properties.Add(Obj("GameHour", new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x38)));
         entry.Properties.Add(Obj("Coin", new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x0F)));
+        // The player's Morrowind skills (jail's daily change goes through them), when the scripts are converted.
+        if (scriptWorld is not null) entry.Properties.Add(Obj("MwState", StateQuest().FormKey));
         if (magic?.WorldSpot is { } spot) entry.Properties.Add(Obj("WorldSpot", spot.FormKey));
         var markers = new ScriptObjectListProperty { Name = "Markers" };
         var xs = new ScriptFloatListProperty { Name = "MarkerX" };

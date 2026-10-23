@@ -37,6 +37,8 @@ Float[] goalX
 Float[] goalY
 Float[] goalZ
 Bool[] hasGoal
+; AIFollowCell's cell (its anchor, TMMwScript.PositionAt's): arrived only in that cell.
+ObjectReference[] goalCell
 
 Function Setup()
   If !actors
@@ -53,6 +55,9 @@ Function Setup()
     goalY = new Float[64]
     goalZ = new Float[64]
     hasGoal = new Bool[64]
+  EndIf
+  If !goalCell
+    goalCell = new ObjectReference[64]
   EndIf
 EndFunction
 
@@ -156,9 +161,10 @@ Function Travel(Actor a, Float x, Float y, Float z)
   Go(a, None, x, y, z, PackageTravel)
 EndFunction
 
-; AIEscort target duration x y z: lead the way there (for that many hours at most).
-Function Escort(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Float z)
-  Go(a, akTarget, x, y, z, PackageEscort)
+; AIEscort target duration x y z: lead the way there (for that many hours at most); AIEscortCell: x y z in that cell
+; (akCell: its anchor).
+Function Escort(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Float z, ObjectReference akCell = None)
+  Go(a, akTarget, x, y, z, PackageEscort, akCell)
   Int i = SlotOf(a, False)
   If i >= 0
     Lasts(i, afDuration)
@@ -166,8 +172,8 @@ Function Escort(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Flo
 EndFunction
 
 ; AIFollow target duration x y z: follow the player (or keep close to another actor) for that many hours, or until the
-; follower is at x y z (when given); with neither, until told otherwise.
-Function Follow(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Float z)
+; follower is at x y z (when given; AIFollowCell: in that cell, akCell its anchor); with neither, until told otherwise.
+Function Follow(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Float z, ObjectReference akCell = None)
   If !a || !akTarget
     Return
   EndIf
@@ -181,6 +187,7 @@ Function Follow(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Flo
     goalX[i] = x
     goalY[i] = y
     goalZ[i] = z
+    goalCell[i] = akCell
     hasGoal[i] = True
     Watch()
   EndIf
@@ -206,7 +213,7 @@ Function ActivateRef(Actor a, ObjectReference akTarget)
   Queue(i)
 EndFunction
 
-Function Go(Actor a, Actor akLeader, Float x, Float y, Float z, Int aiPackage)
+Function Go(Actor a, Actor akLeader, Float x, Float y, Float z, Int aiPackage, ObjectReference akCell = None)
   If !a
     Return
   EndIf
@@ -222,7 +229,12 @@ Function Go(Actor a, Actor akLeader, Float x, Float y, Float z, Int aiPackage)
     marker = a.PlaceAtMe(XMarker, 1, True)
     destinations[i] = marker
   EndIf
-  marker.MoveTo(a)
+  ; In the named cell (its anchor), else the actor's own.
+  If akCell
+    marker.MoveTo(akCell)
+  Else
+    marker.MoveTo(a)
+  EndIf
   marker.SetPosition(x, y, z)
   Queue(i)
 EndFunction
@@ -259,7 +271,7 @@ Function CheckTimes()
         Float dx = a.GetPositionX() - goalX[i]
         Float dy = a.GetPositionY() - goalY[i]
         Float dz = a.GetPositionZ() - goalZ[i]
-        over = dx * dx + dy * dy + dz * dz < 10000.0
+        over = dx * dx + dy * dy + dz * dz < 10000.0 && (!goalCell[i] || a.GetParentCell() == goalCell[i].GetParentCell())
       EndIf
       If over
         untils[i] = 0.0

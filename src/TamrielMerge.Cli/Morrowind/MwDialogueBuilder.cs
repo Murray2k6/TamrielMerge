@@ -26,7 +26,7 @@ namespace TamrielMerge.Morrowind;
 /// faction or rising in it, combat and Goodbye run from TMMwInfo (one shared TopicInfo script, per-response properties).
 /// Conditions on the speaker's script locals read the hidden faction ranks the translated scripts mirror them in.</item>
 /// </list>
-/// Morrowind's persuasion and voice topics (barks) are not converted here.
+/// Morrowind's voice topics (barks) are MwBarks'; persuasion is the Persuasion topic below.
 /// </summary>
 public sealed partial class MwPluginBuilder
 {
@@ -147,11 +147,13 @@ public sealed partial class MwPluginBuilder
         };
         mod.Quests.Add(dialogueQuest);
 
+        topicNames = dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Topic).Select(t => t.Name).OrderByDescending(n => n.Length).ToList();
         foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Journal)) Journal(topic);
         foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Topic)) Topic(topic, greeting: false);
         foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Greeting)) Topic(topic, greeting: true);
         Persuasion();
         CompanionShare();
+        FinishTopicLearning();
         // Money changers (CoinTrade): the faction is shared with the people who join it, made now or later.
         moneyChangers ??= Skyrim.CoinTrade.Tag(mod, "MWMoneyChangers", "Money changers");
         Skyrim.CoinTrade.AddExchange(mod, dialogueQuest, moneyChangers.FormKey, story: 2, prefix: "MW", title: "Money changer", baseFee: 10);
@@ -400,9 +402,20 @@ public sealed partial class MwPluginBuilder
         // A guard's greetings for a wanted player (an alarmed speaker: "You violated the law... Pay Gold, Go to Jail,
         // Resist Arrest") are the arrest Skyrim's guards force on them (ArrestGreetings), not hellos.
         foreach (var info in topic.Infos.Where(i => ChoiceOf(i) is null && !(greeting && IsArrest(i))))
-            if (Response(info, main, children, topic, branch) is { } r) main.Responses.Add(r);
+            if (Response(info, main, children, topic, branch) is { } r)
+            {
+                // A greeting starts a conversation; in passing Morrowind's people say their Hello voice lines (MwBarks).
+                if (greeting) r.Conditions.Insert(0, Skyrim.ForeignVoices.InConversation());
+                main.Responses.Add(r);
+            }
         if (greeting) ArrestGreetings(topic);
         if (main.Responses.Count == 0) { if (branch is not null) mod.DialogBranches.Remove(branch); return; }
+        // Offered only once the player knows it (TopicKnown).
+        if (!greeting)
+        {
+            var known = new GetGlobalValueConditionData(); known.Global = new FormLinkOrIndex<IGlobalGetter>(known, TopicKnown(topic.Name).FormKey);
+            foreach (var r in main.Responses) r.Conditions.Insert(0, Cond(known, CompareOperator.EqualTo, 1));
+        }
         mod.DialogTopics.Add(main);
         DialogueTopics++;
     }
@@ -464,6 +477,7 @@ public sealed partial class MwPluginBuilder
         if (r.Responses.Count == 0) r.Responses.Add(new DialogResponse { Text = "", ResponseNumber = 1, Emotion = Emotion.Neutral, EmotionValue = 50 });
         DialogueLines += r.Responses.Count;
         DialogueResponses++;
+        if (MentionedTopics(info.Text) is { Count: > 0 } mentioned) responseLearns.Add((r, mentioned));
         var result = ParseResult(info);
         if (result.Goodbye || ResultSaysGoodbye(info)) r.Flags.Flags |= DialogResponses.Flag.Goodbye;
         // The translated result script (MWR_…), with TMMwInfo's fixed set as its fallback.
@@ -507,6 +521,89 @@ public sealed partial class MwPluginBuilder
             r.LinkTo.Add(child.ToLink<IDialogTopicGetter>());
         }
         return r;
+    }
+
+    // ---- Topics the player knows ----
+
+    /// <summary>The topics (type 0), longest first (a longer name is matched before a shorter one inside it).</summary>
+    List<string> topicNames = [];
+    readonly Dictionary<string, GlobalFloat> topicKnown = new(StringComparer.OrdinalIgnoreCase);
+    readonly List<(DialogResponses Response, List<string> Topics)> responseLearns = [];
+    /// <summary>Topics named in some response's text (learned when it is said).</summary>
+    public HashSet<string> TopicsMentioned { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether the player knows a topic (MWTopicKnown...: 0 or 1): Morrowind offers a topic only once the player has it,
+    /// from AddTopic or from a response naming it (2026-10-22: every topic was offered from the start, and AddTopic's 273
+    /// statements did nothing). Its top-level responses hold only when it is 1.
+    /// </summary>
+    public GlobalFloat TopicKnown(string topic)
+    {
+        if (topicKnown.TryGetValue(topic, out var hit)) return hit;
+        var g = new GlobalFloat(mod) { EditorID = "MWTopicKnown" + Sanitize(topic), Data = 0 };
+        mod.Globals.Add(g);
+        return topicKnown[topic] = g;
+    }
+
+    /// <summary>
+    /// Where the topics are learned from, for the build's report: named in a response, added by a script (AddTopic),
+    /// and those neither does (never offered, in Morrowind as here).
+    /// </summary>
+    public (int Topics, int Mentioned, int Added, List<string> Neither) TopicSources()
+    {
+        var added = new HashSet<string>(scriptSet?.All.SelectMany(o => o.Properties).Where(p => p.Fill.StartsWith("topic:", StringComparison.Ordinal)).Select(p => p.Fill[6..]) ?? [], StringComparer.OrdinalIgnoreCase);
+        var neither = topicNames.Where(t => !TopicsMentioned.Contains(t) && !added.Contains(t)).Order(StringComparer.OrdinalIgnoreCase).ToList();
+        return (topicNames.Count, topicNames.Count(TopicsMentioned.Contains), topicNames.Count(added.Contains), neither);
+    }
+
+    /// <summary>Whether a topic of that name exists (AddTopic of one that doesn't does nothing, as in Morrowind).</summary>
+    public bool IsTopic(string name) => dialogueData?.Topics.TryGetValue(name, out var t) == true && t.Type == MwDialogue.TopicType.Topic;
+
+    /// <summary>
+    /// The topics a response's text names, as Morrowind finds its hyperlinks (OpenMW's KeywordSearch): case aside, the
+    /// longest name first, not inside a word, no two overlapping. Morrowind links only those the speaker can speak of;
+    /// Skyrim's scripts can't ask that, so each named topic is learned (a gap counted in the build's report).
+    /// </summary>
+    List<string> MentionedTopics(string text)
+    {
+        var found = new List<string>();
+        if (string.IsNullOrEmpty(text) || topicNames.Count == 0) return found;
+        string lower = text.ToLowerInvariant();
+        var taken = new bool[lower.Length];
+        static bool Word(char ch) => char.IsLetterOrDigit(ch) || ch == '\'';
+        foreach (var name in topicNames)
+        {
+            string n = name.ToLowerInvariant();
+            for (int at = lower.IndexOf(n, StringComparison.Ordinal); at >= 0; at = lower.IndexOf(n, at + 1, StringComparison.Ordinal))
+            {
+                int end = at + n.Length;
+                if (at > 0 && Word(lower[at - 1]) || end < lower.Length && Word(lower[end])) continue;
+                if (Enumerable.Range(at, n.Length).Any(i => taken[i])) continue;
+                for (int i = at; i < end; i++) taken[i] = true;
+                if (!found.Contains(name, StringComparer.OrdinalIgnoreCase)) found.Add(name);
+            }
+        }
+        return found;
+    }
+
+    /// <summary>
+    /// Each response's named topics as its script's Learns (TMMwInfo.Fragment_Begin sets them known as the response
+    /// begins); on whatever script the response ends with (its translated result script extends TMMwInfo). Run after
+    /// the dialogue and again after the scripts are attached (they replace the responses' adapters).
+    /// </summary>
+    void FinishTopicLearning()
+    {
+        foreach (var (r, topics) in responseLearns)
+        {
+            var entry = InfoEntry(r);
+            entry.Properties.RemoveAll(p => p.Name == "Learns");
+            var learns = new ScriptObjectListProperty { Name = "Learns" };
+            foreach (var t in topics) learns.Objects.Add(new ScriptObjectProperty { Object = TopicKnown(t).ToLink<ISkyrimMajorRecordGetter>() });
+            entry.Properties.Add(learns);
+            if (r.VirtualMachineAdapter is { ScriptFragments: { } frags })
+                frags.OnBegin = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = entry.Name, FragmentName = "Fragment_Begin" };
+            foreach (var t in topics) TopicsMentioned.Add(t);
+        }
     }
 
     // ---- Text ----
@@ -583,30 +680,40 @@ public sealed partial class MwPluginBuilder
     ExtendedList<Condition>? Conditions(MwDialogue.Info info)
     {
         var list = new ExtendedList<Condition>();
+        ExtendedList<Condition>? Drop(string why) { DroppedResponses[why] = DroppedResponses.GetValueOrDefault(why) + 1; return null; }
         if (info.Actor is { } actor)
         {
-            if (Actor(actor) is not Npc npc) return null;
+            if (Actor(actor) is not Npc npc) return Drop($"speaker {actor} not converted");
             var d = new GetIsIDConditionData(); d.Object = new FormLinkOrIndex<IReferenceableObjectGetter>(d, npc.FormKey);
             list.Add(Cond(d, CompareOperator.EqualTo, 1));
         }
         if (info.Race is { } race)
         {
-            if (!MwRaces.TryGetValue(race, out var skyRace)) return null;
+            if (!MwRaces.TryGetValue(race, out var skyRace)) return Drop($"race {race}");
             VanillaNpc("EncBandit");
             var r = skyrimEsm!.Races.FirstOrDefault(x => x.EditorID == skyRace);
-            if (r is null) return null;
+            if (r is null) return Drop($"race {race}");
             var d = new GetIsRaceConditionData(); d.Race = new FormLinkOrIndex<IRaceGetter>(d, r.FormKey);
             list.Add(Cond(d, CompareOperator.EqualTo, 1));
         }
         if (info.Class is { } cls)
         {
-            if (MwClass(cls) is not { } c) return null;
+            if (MwClass(cls) is not { } c) return Drop($"class {cls}");
             var d = new GetIsClassConditionData(); d.Class = new FormLinkOrIndex<IClassGetter>(d, c.FormKey);
             list.Add(Cond(d, CompareOperator.EqualTo, 1));
         }
-        if (info.Faction is { } fac)
+        if (info.Faction is { } noFaction && noFaction.Equals("FFFF", StringComparison.OrdinalIgnoreCase))
         {
-            if (MwFaction(fac) is not { } f) return null;
+            // "FFFF": a speaker in no faction (OpenMW filter.cpp, the factionless response): in none of Morrowind's.
+            foreach (var none in world.Objects.Values.Where(r => r.Type == "FACT").Select(r => MwFaction(r.Id)).OfType<Faction>().Distinct())
+            {
+                var d = new GetInFactionConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, none.FormKey);
+                list.Add(Cond(d, CompareOperator.EqualTo, 0));
+            }
+        }
+        else if (info.Faction is { } fac)
+        {
+            if (MwFaction(fac) is not { } f) return Drop($"faction {fac}");
             var d = new GetInFactionConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, f.FormKey);
             list.Add(Cond(d, CompareOperator.EqualTo, 1));
             if (info.Rank > 0)
@@ -626,7 +733,7 @@ public sealed partial class MwPluginBuilder
         }
         if (info.PcFaction is { } pcFac)
         {
-            if (MwFaction(pcFac) is not { } f) return null;
+            if (MwFaction(pcFac) is not { } f) return Drop($"player faction {pcFac}");
             var d = new GetInFactionConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, f.FormKey);
             list.Add(Cond(d, CompareOperator.EqualTo, 1, player: true));
             if (info.PcRank > 0)
@@ -649,8 +756,9 @@ public sealed partial class MwPluginBuilder
             {
                 case '1':
                     if (c.Function == "50") break;   // choice: handled by topic placement
-                    if (FunctionCondition(c, op) is { } fc) list.Add(fc);
-                    else if (!Holds(c.Compare, 0, c.Value) && !SatisfiedWhenUnknown(c.Function)) return null;
+                    if (FunctionConditions(c, op, info) is { } many) list.AddRange(many);
+                    else if (FunctionCondition(c, op) is { } fc) list.Add(fc);
+                    else if (!Holds(c.Compare, 0, c.Value) && !SatisfiedWhenUnknown(c.Function)) return Drop($"function {c.Function} untested");
                     break;
                 case '2':
                     if (c.Name.Equals("Random100", StringComparison.OrdinalIgnoreCase)) { list.Add(Cond(new GetRandomPercentConditionData(), op, c.Value)); break; }
@@ -659,7 +767,7 @@ public sealed partial class MwPluginBuilder
                         var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, g.FormKey);
                         list.Add(Cond(d, op, c.Value));
                     }
-                    else if (!Holds(c.Compare, 0, c.Value)) return null;
+                    else if (!Holds(c.Compare, 0, c.Value)) return Drop($"global {c.Name} is 0 here");
                     break;
                 case '3':
                     // A local of the speaker's script: mirrored by the translated scripts as the rank in a hidden faction
@@ -671,7 +779,7 @@ public sealed partial class MwPluginBuilder
                         var rank = new GetFactionRankConditionData(); rank.Faction = new FormLinkOrIndex<IFactionGetter>(rank, lf);
                         list.Add(Cond(rank, op, c.Value));
                     }
-                    else if (!Holds(c.Compare, 0, c.Value)) return null;   // no scripts: the local reads 0
+                    else if (!Holds(c.Compare, 0, c.Value)) return Drop($"local {c.Name} is 0 here");   // no scripts: the local reads 0
                     break;
                 case 'C':   // the speaker's script lacks a local: not in its mirror faction
                     if (LocalFaction(c.Name) is { } nf)
@@ -687,7 +795,7 @@ public sealed partial class MwPluginBuilder
                         var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, JournalIndexGlobal(c.Name).FormKey);
                         list.Add(Cond(d, op, c.Value));
                     }
-                    else if (!Holds(c.Compare, 0, c.Value)) return null;
+                    else if (!Holds(c.Compare, 0, c.Value)) return Drop($"journal {c.Name} is 0 here");
                     break;
                 case '5':
                     if (Item(c.Name) is { } item)
@@ -695,7 +803,7 @@ public sealed partial class MwPluginBuilder
                         var d = new GetItemCountConditionData(); d.ItemOrList = new FormLinkOrIndex<IItemOrListGetter>(d, item.FormKey);
                         list.Add(Cond(d, op, c.Value, player: true));
                     }
-                    else if (!Holds(c.Compare, 0, c.Value)) return null;
+                    else if (!Holds(c.Compare, 0, c.Value)) return Drop($"item {c.Name} is 0 here");
                     break;
                 case '6':
                     if (Actor(c.Name) is Npc dead)
@@ -703,7 +811,7 @@ public sealed partial class MwPluginBuilder
                         var d = new GetDeadCountConditionData(); d.Npc = new FormLinkOrIndex<INpcGetter>(d, dead.FormKey);
                         list.Add(Cond(d, op, c.Value));
                     }
-                    else if (!Holds(c.Compare, 0, c.Value)) return null;
+                    else if (!Holds(c.Compare, 0, c.Value)) return Drop($"dead count of {c.Name} is 0 here");
                     break;
                 case '7':
                     if (Actor(c.Name) is Npc notMe)
@@ -745,23 +853,17 @@ public sealed partial class MwPluginBuilder
         return list;
     }
 
-    /// <summary>Morrowind skills (function codes 10-37) as Skyrim actor values, where Skyrim has one.</summary>
-    static readonly Dictionary<string, ActorValue> SkillFunctions = new()
-    {
-        ["11"] = ActorValue.Block, ["12"] = ActorValue.Smithing, ["13"] = ActorValue.LightArmor, ["14"] = ActorValue.HeavyArmor,
-        ["15"] = ActorValue.TwoHanded, ["16"] = ActorValue.OneHanded, ["17"] = ActorValue.TwoHanded, ["18"] = ActorValue.TwoHanded,
-        ["20"] = ActorValue.Enchanting, ["21"] = ActorValue.Destruction, ["22"] = ActorValue.Alteration, ["23"] = ActorValue.Illusion,
-        ["24"] = ActorValue.Conjuration, ["25"] = ActorValue.Alteration, ["26"] = ActorValue.Restoration, ["27"] = ActorValue.Alchemy,
-        ["29"] = ActorValue.Lockpicking, ["30"] = ActorValue.Sneak, ["32"] = ActorValue.LightArmor, ["33"] = ActorValue.OneHanded,
-        ["34"] = ActorValue.Archery, ["35"] = ActorValue.Speech, ["36"] = ActorValue.Speech,
-    };
+    /// <summary>Responses never said here, by why (a filter on something the game hasn't, a condition that fails at the
+    /// value it has): for the build's report.</summary>
+    public Dictionary<string, int> DroppedResponses { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Morrowind's filters on the player's attributes (10 Strength, 51-57 Intelligence to Luck) and on the
-    /// skills Skyrim has no counterpart for (19 Athletics, 28 Unarmored, 31 Acrobatics), by TMMwState's stat numbers.</summary>
-    static readonly Dictionary<string, int> PlayerStatFunctions = new()
+    /// <summary>Morrowind's filters on the player's attributes (10 Strength, 51-57 Intelligence to Luck) and on its 27
+    /// skills (11-37, in SKIL order), by TMMwState's stat numbers (8 + the skill's index): the globals TMMwState keeps them
+    /// in, from where they live (user, 2026-10-23: "Keep original stats").</summary>
+    static readonly Dictionary<string, int> PlayerStatFunctions = new Dictionary<string, int>
     {
-        ["10"] = 0, ["51"] = 1, ["52"] = 2, ["53"] = 3, ["54"] = 4, ["55"] = 5, ["56"] = 6, ["57"] = 7, ["19"] = 8, ["31"] = 9, ["28"] = 10,
-    };
+        ["10"] = 0, ["51"] = 1, ["52"] = 2, ["53"] = 3, ["54"] = 4, ["55"] = 5, ["56"] = 6, ["57"] = 7,
+    }.Concat(Enumerable.Range(11, 27).Select(code => new KeyValuePair<string, int>(code.ToString(), 8 + code - 11))).ToDictionary();
 
     readonly Dictionary<int, GlobalFloat> playerStatGlobals = [];
 
@@ -779,6 +881,188 @@ public sealed partial class MwPluginBuilder
     static bool SatisfiedWhenUnknown(string function) =>
         int.TryParse(function, out int f) && (f is >= 3 and <= 5 || f is >= 8 and <= 37 || f is >= 51 and <= 57);
 
+    /// <summary>A condition that never holds.</summary>
+    static ConditionFloat Never() => Cond(new GetRandomPercentConditionData(), CompareOperator.LessThan, 0);
+
+    static CompareOperator Reversed(CompareOperator op) => op switch
+    {
+        CompareOperator.GreaterThan => CompareOperator.LessThan, CompareOperator.LessThan => CompareOperator.GreaterThan,
+        CompareOperator.GreaterThanOrEqualTo => CompareOperator.LessThanOrEqualTo, CompareOperator.LessThanOrEqualTo => CompareOperator.GreaterThanOrEqualTo,
+        _ => op,
+    };
+
+    /// <summary>Morrowind's spells (SPEL) picked by their type (SPDT: 0 spell, 1 ability, 2 blight, 3 disease, 4 curse,
+    /// 5 power) or an effect they carry (ENAM's effect index).</summary>
+    IEnumerable<string> MwSpellIds(Func<Tes3Record, bool> pick) => world.Objects.Values.Where(r => r.Type == "SPEL" && pick(r)).Select(r => r.Id);
+    static int SpellType(Tes3Record r) => r.Get("SPDT") is { Data.Length: >= 4 } d ? d.Int(0) : 0;
+    static bool HasEffect(Tes3Record r, int effect) => r.All("ENAM").Any(e => e.Data.Length >= 2 && BitConverter.ToInt16(e.Data, 0) == effect);
+
+    /// <summary>Morrowind's effect indices (OpenMW ESM::MagicEffect): Corprus 132, Vampirism 133.</summary>
+    const int CorprusEffect = 132, VampirismEffect = 133;
+
+    /// <summary>
+    /// A true-or-false test of whether the player has one of these spells (a disease, Corprus, Vampirism), compared as
+    /// Morrowind compares it: an OR of HasSpell when it must hold, none of them when it mustn't.
+    /// </summary>
+    List<Condition> AnySpell(IEnumerable<string> spellIds, int compare, float value)
+    {
+        bool whenHas = Holds(compare, 1, value), whenNot = Holds(compare, 0, value);
+        if (whenHas && whenNot) return [];
+        if (!whenHas && !whenNot) return [Never()];
+        var spells = spellIds.Select(MwSpell).OfType<Spell>().Distinct().ToList();
+        if (spells.Count == 0) return whenNot ? [] : [Never()];
+        var list = new List<Condition>();
+        for (int i = 0; i < spells.Count; i++)
+        {
+            var d = new HasSpellConditionData(); d.Spell = new FormLinkOrIndex<ISpellGetter>(d, spells[i].FormKey);
+            list.Add(Cond(d, CompareOperator.EqualTo, whenHas ? 1 : 0, player: true, or: whenHas && i < spells.Count - 1));
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// A test on the speaker's faction (Morrowind's primary faction: the response's faction filter, or its one speaker's
+    /// faction): with neither, every Morrowind faction F gives (not in F, or the test on F), which with one faction a
+    /// speaker is the test on its own; and when the test fails for a speaker in no faction, one of the factions. Skyrim
+    /// ORs bind tighter than ANDs, so each pair is an OR. Null from <paramref name="test"/>: never holds.
+    /// </summary>
+    List<Condition> BySpeakerFaction(MwDialogue.Info info, Func<Faction, ConditionFloat?> test, bool noneHolds)
+    {
+        string? fid = info.Faction ?? (info.Actor is { } a && world.Objects.TryGetValue(a, out var npc) && npc.Type == "NPC_" ? npc.Str("ANAM") : null);
+        // "FFFF": the speaker is in no faction.
+        if (fid is not null && fid.Equals("FFFF", StringComparison.OrdinalIgnoreCase)) return noneHolds ? [] : [Never()];
+        if (fid is { Length: > 0 })
+            return MwFaction(fid) is { } one && test(one) is { } c ? [c] : [Never()];
+        if (info.Actor is not null) return noneHolds ? [] : [Never()];
+        var all = world.Objects.Values.Where(r => r.Type == "FACT").Select(r => MwFaction(r.Id)).OfType<Faction>().Distinct().ToList();
+        var list = new List<Condition>();
+        foreach (var f in all)
+        {
+            var notIn = new GetInFactionConditionData(); notIn.Faction = new FormLinkOrIndex<IFactionGetter>(notIn, f.FormKey);
+            list.Add(Cond(notIn, CompareOperator.EqualTo, 0, or: true));
+            list.Add(test(f) ?? Never());
+        }
+        if (!noneHolds)
+            for (int i = 0; i < all.Count; i++)
+            {
+                var inIt = new GetInFactionConditionData(); inIt.Faction = new FormLinkOrIndex<IFactionGetter>(inIt, all[i].FormKey);
+                list.Add(Cond(inIt, CompareOperator.EqualTo, 1, or: i < all.Count - 1));
+            }
+        return list;
+    }
+
+    /// <summary>
+    /// Morrowind's factions (FACT, by ID) in TMMwState's order, with the globals it keeps for each for the dialogue:
+    /// RankRequirement (the player's next rank there: 1 skills and attributes met, 2 reputation), FacReactionLowest and
+    /// FacReactionHighest (its reactions to the player's factions).
+    /// </summary>
+    internal List<string> MwFactionIds() => OwnRecords("FACT").Keys.Where(id => MwFaction(id) is not null).Order(StringComparer.OrdinalIgnoreCase).ToList();
+
+    readonly Dictionary<string, (GlobalFloat Req, GlobalFloat Low, GlobalFloat High)> factionGlobals = new(StringComparer.OrdinalIgnoreCase);
+    internal (GlobalFloat Req, GlobalFloat Low, GlobalFloat High) FactionGlobals(string factionId)
+    {
+        if (factionGlobals.TryGetValue(factionId, out var hit)) return hit;
+        GlobalFloat G(string kind) { var g = new GlobalFloat(mod) { EditorID = $"MW{kind}{Sanitize(factionId)}", Data = 0 }; mod.Globals.Add(g); return g; }
+        return factionGlobals[factionId] = (G("RankReq"), G("ReactLow"), G("ReactHigh"));
+    }
+
+    string? MwFactionIdOf(Faction f) => factions.FirstOrDefault(kv => kv.Value == f).Key;
+
+    /// <summary>The conditions a Morrowind function needs more than one Skyrim condition for (OpenMW filter.cpp), or null.</summary>
+    List<Condition>? FunctionConditions(MwDialogue.Condition c, CompareOperator op, MwDialogue.Info info)
+    {
+        switch (c.Function)
+        {
+            // 02 RankRequirement, 00 FacReactionLowest, 01 FacReactionHighest: of the speaker's faction (none: 0), the
+            // globals TMMwState keeps up to date (OpenMW filter.cpp).
+            case "00" or "01" or "02" when scriptWorld is not null:
+                StateQuest();
+                return BySpeakerFaction(info, f =>
+                {
+                    if (MwFactionIdOf(f) is not { } fid) return null;
+                    var g = FactionGlobals(fid);
+                    return GlobalCond(c.Function switch { "02" => g.Req, "00" => g.Low, _ => g.High }, op, c.Value);
+                }, Holds(c.Compare, 0, c.Value));
+            case "40": return AnySpell(MwSpellIds(r => SpellType(r) == 3), c.Compare, c.Value);   // a common disease
+            case "41": return AnySpell(MwSpellIds(r => SpellType(r) == 2), c.Compare, c.Value);   // a blight disease
+            case "58": return AnySpell(MwSpellIds(r => HasEffect(r, CorprusEffect)), c.Compare, c.Value);
+            case "60": return AnySpell(MwSpellIds(r => HasEffect(r, VampirismEffect)), c.Compare, c.Value);
+            // 39 expelled from the speaker's faction (none: not expelled).
+            case "39":
+                return BySpeakerFaction(info, f =>
+                {
+                    var d = new GetPCExpelledConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, f.FormKey);
+                    return Cond(d, op, c.Value);
+                }, Holds(c.Compare, 0, c.Value));
+            // 47 the player's rank in the speaker's faction less the speaker's (Skyrim's difference is the speaker's less
+            // the other's, so compared the other way round).
+            case "47":
+                return BySpeakerFaction(info, f =>
+                {
+                    var d = new GetFactionRankDifferenceConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, f.FormKey);
+                    d.TargetNpc = new FormLinkOrIndex<IPlacedNpcGetter>(d, PlayerRefKey);
+                    return Cond(d, Reversed(op), -c.Value);
+                }, Holds(c.Compare, 0, c.Value));
+            // 59 the weather (Morrowind's number), outdoors only.
+            case "59":
+            {
+                var weathers = MwWeathers();
+                var matching = Enumerable.Range(0, weathers.Length).Where(t => Holds(c.Compare, t, c.Value)).ToList();
+                if (matching.Count == 0) return [Never()];
+                var list = new List<Condition> { Cond(new IsInInteriorConditionData(), CompareOperator.EqualTo, 0) };
+                if (matching.Count == weathers.Length) return list;
+                for (int i = 0; i < matching.Count; i++)
+                {
+                    var d = new GetIsCurrentWeatherConditionData(); d.Weather = new FormLinkOrIndex<IWeatherGetter>(d, weathers[matching[i]].FormKey);
+                    list.Add(Cond(d, CompareOperator.EqualTo, 1, or: i < matching.Count - 1));
+                }
+                return list;
+            }
+            // 72 the speaker is a werewolf (Skyrim's werewolf race), 73 the player's kills as one, 42 the worth of what the
+            // player wears (TMMwPlayerState's globals).
+            case "72":
+            {
+                var d = new GetIsRaceConditionData(); d.Race = new FormLinkOrIndex<IRaceGetter>(d, Sk(0x0CDD84));
+                return [Cond(d, op, c.Value)];
+            }
+            case "73": return [GlobalCond(WerewolfKillsGlobal(), op, c.Value)];
+            case "42": StateQuest(); return [GlobalCond(ClothingValueGlobal(), op, c.Value)];
+        }
+        return null;
+    }
+
+    static ConditionFloat GlobalCond(IGlobalGetter g, CompareOperator op, float value)
+    {
+        var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, g.FormKey);
+        return Cond(d, op, value);
+    }
+
+    GlobalFloat? werewolfKills, clothingValue, loadCount;
+    /// <summary>Games loaded (TMMwPlayerState counts them; TMMwActorAI's friendly hits start again at each).</summary>
+    public GlobalFloat LoadCountGlobal()
+    {
+        if (loadCount is not null) return loadCount;
+        loadCount = new GlobalFloat(mod) { EditorID = "MWLoadCount", Data = 0 };
+        mod.Globals.Add(loadCount);
+        return loadCount;
+    }
+    /// <summary>The player's kills as a werewolf (TMMwActorAI counts them; GetWerewolfKills and the dialogue read it).</summary>
+    public GlobalFloat WerewolfKillsGlobal()
+    {
+        if (werewolfKills is not null) return werewolfKills;
+        werewolfKills = new GlobalFloat(mod) { EditorID = "MWWerewolfKills", Data = 0 };
+        mod.Globals.Add(werewolfKills);
+        return werewolfKills;
+    }
+    /// <summary>The worth of what the player wears (TMMwPlayerState keeps it).</summary>
+    public GlobalFloat ClothingValueGlobal()
+    {
+        if (clothingValue is not null) return clothingValue;
+        clothingValue = new GlobalFloat(mod) { EditorID = "MWPCClothingModifier", Data = 0 };
+        mod.Globals.Add(clothingValue);
+        return clothingValue;
+    }
+
     ConditionFloat? FunctionCondition(MwDialogue.Condition c, CompareOperator op)
     {
         switch (c.Function)
@@ -792,6 +1076,36 @@ public sealed partial class MwPluginBuilder
             case "43": return Cond(new GetCrimeGoldConditionData(), op, c.Value);
             // Alarmed: a guard pursuing a wanted player is, in Skyrim as in Morrowind.
             case "49": return Cond(new GetAlarmedConditionData(), op, c.Value);
+            // OpenMW filter.cpp: 44 SameSex, 45 SameRace (false for a creature, as Skyrim's are), 46 SameFaction (the player
+            // in the speaker's faction), 38 the player's sex (0 male, 1 female), 64 the player's health.
+            case "44": return Cond(new SameSexAsPCConditionData(), op, c.Value);
+            case "45": return Cond(new SameRaceAsPCConditionData(), op, c.Value);
+            case "46": return Cond(new SameFactionAsPCConditionData(), op, c.Value);
+            case "38": return Cond(new GetIsSexConditionData { MaleFemaleGender = MaleFemaleGender.Female }, op, c.Value, player: true);
+            case "64": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Health }, op, c.Value, player: true);
+            // 05 the player's reputation (MWReputation), 03 the speaker's (TMMwActorAI's mirror, Variable04); 67-70 its AI
+            // settings (Variable06 Fight, 05 Hello, 08 Alarm, 07 Flee: TMMwActorAI).
+            case "05":
+            {
+                var g = new GetGlobalValueConditionData(); g.Global = new FormLinkOrIndex<IGlobalGetter>(g, Fill(new MwPapyrus.Property("", "GlobalVariable", "gen:MWReputation"))!.Value);
+                return Cond(g, op, c.Value);
+            }
+            case "03": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable04 }, op, c.Value);
+            // TMMwActorAI's states: 66 friendly hits (Variable01), 65 its combat target (Variable02), 62 attacked (Variable03),
+            // 71 it would attack the player (Variable10); 48 it has noticed the player.
+            case "66": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable01 }, op, c.Value);
+            case "65": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable02 }, op, c.Value);
+            case "62": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable03 }, op, c.Value);
+            case "71": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable10 }, op, c.Value);
+            case "48":
+            {
+                var d = new GetDetectedConditionData(); d.TargetNpc = new FormLinkOrIndex<IPlacedNpcGetter>(d, PlayerRefKey);
+                return Cond(d, op, c.Value);
+            }
+            case "67": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable06 }, op, c.Value);
+            case "68": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable05 }, op, c.Value);
+            case "69": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable08 }, op, c.Value);
+            case "70": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Variable07 }, op, c.Value);
             case "08": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Magicka }, op, c.Value, player: true);
             case "09": return Cond(new GetActorValueConditionData { ActorValue = ActorValue.Stamina }, op, c.Value, player: true);
             default:
@@ -802,8 +1116,6 @@ public sealed partial class MwPluginBuilder
                     StateQuest();
                     return Cond(g, op, c.Value);
                 }
-                if (SkillFunctions.TryGetValue(c.Function, out var av))
-                    return Cond(new GetActorValueConditionData { ActorValue = av }, op, c.Value, player: true);
                 return null;
         }
     }

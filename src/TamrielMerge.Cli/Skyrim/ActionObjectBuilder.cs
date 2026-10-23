@@ -24,7 +24,10 @@ namespace TamrielMerge.Skyrim;
 public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint, DfModel> models, string modOutDir, SpellBuilder? spells = null)
 {
     static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
-    static readonly FormKey FallbackTrapSpell = Sk(0x7E598);   // TrapLightningBolt02, for spell indexes SPELLS.STD lacks
+    // A lever's sound settings (OBJLeverNordic01PullSD, `sk-sounds --match LeverNordic01Pull`, 2026-10-23): category
+    // AudioCategorySFX, output model SOMMono01400, standard, attenuation 1.76, priority 128.
+    static readonly FormKey SfxCategory = Sk(0x0172A1);
+    static readonly FormKey Mono3dOutput = Sk(0x05A28A);
     static readonly FormKey XMarkerHeading = Sk(0x34);
 
     readonly Dictionary<(uint Model, bool Named), Activator> activators = new();
@@ -35,42 +38,78 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
 
     /// <summary>TEXT.RSC, for the messages of text actions (11), riddles (12) and door texts (99).</summary>
     public DfText? Text { get; init; }
-    /// <summary>Riddle messages made so far (shared by the dungeons of one plugin), by TEXT.RSC record.</summary>
-    public Dictionary<int, Message> Riddles { get; init; } = new();
+    /// <summary>The riddles placed so far (shared by the dungeons of one plugin), by TEXT.RSC record.</summary>
+    public HashSet<int> Riddles { get; init; } = new();
+
+    /// <summary>DAGGER.SND: the sounds action objects play (Daggerfall Unity AddActionAudioSource: the sound/index byte
+    /// as a sound record id, played on each trigger by DaggerfallAction.Play).</summary>
+    public DfSound? Sounds { get; init; }
+    /// <summary>The sound markers made so far (shared by the dungeons of one plugin), by DAGGER.SND record id; null where
+    /// DAGGER.SND has none.</summary>
+    public Dictionary<int, SoundMarker?> SoundMarkers { get; init; } = new();
+    /// <summary>Daggerfall's enemy senses quest (DfSenses), which door notices that make enemies hostile call.</summary>
+    public FormKey? SensesQuest { get; init; }
+
+    /// <summary>The Skyrim sound for a DAGGER.SND record id: its WAV under Sound\fx\TamrielMerge\Daggerfall and a
+    /// positional sound descriptor (a lever's settings: AudioCategorySFX, Skyrim's mono 3D output model), or null.</summary>
+    SoundMarker? ActionSound(int id)
+    {
+        if (id <= 0 || Sounds is null) return null;
+        if (SoundMarkers.TryGetValue(id, out var made)) return made;
+        string rel = Path.Combine("fx", "TamrielMerge", "Daggerfall", $"dfsnd{id:D3}.wav");
+        if (!Sounds.WriteWav((uint)id, Path.Combine(modOutDir, "Sound", rel))) return SoundMarkers[id] = null;
+        var descriptor = new SoundDescriptor(mod)
+        {
+            EditorID = $"DFActionSound{id:D3}SD",
+            Category = new FormLinkNullable<ISoundCategoryGetter>(SfxCategory),
+            OutputModel = new FormLinkNullable<ISoundOutputModelGetter>(Mono3dOutput),
+            Type = SoundDescriptor.DescriptorType.Standard,
+            StaticAttenuation = 1.76f,
+            Priority = 128,
+            SoundFiles = [new Mutagen.Bethesda.Plugins.Assets.AssetLink<Mutagen.Bethesda.Skyrim.Assets.SkyrimSoundAssetType>(rel)],
+        };
+        mod.SoundDescriptors.Add(descriptor);
+        var marker = new SoundMarker(mod) { EditorID = $"DFActionSound{id:D3}", ObjectBounds = new ObjectBounds(), SoundDescriptor = descriptor.ToNullableLink<ISoundDescriptorGetter>() };
+        mod.SoundMarkers.Add(marker);
+        return SoundMarkers[id] = marker;
+    }
 
     // Daggerfall Unity DaggerfallAction: text indexes and the answers its riddles accept.
     const int ShowTextBase = 8600, RiddleBase = 5400, DoorTextBase = 7700;
-    /// <summary>Skyrim has no typed answer, so each riddle offers its answer among others (the first is right).</summary>
-    static readonly Dictionary<int, string[]> RiddleChoices = new()
+    /// <summary>The answers each riddle accepts, typed (Daggerfall Unity DaggerfallAction.actionTypeTwelveLookup: an exact
+    /// match, case ignored); a riddle without any is asked and never answered, as there.</summary>
+    public static readonly Dictionary<int, string[]> RiddleAnswers = new()
     {
-        [5404] = ["A bow", "A spear", "A mace", "A staff"],                       // the master of the blade's other weapon
-        [5406] = ["One", "Two", "Six", "None"],                                   // "how many defy me?"
-        [5423] = ["The Benefactor", "The Guardian", "The Keeper", "No one"],      // "speak only my name"
-        [5424] = ["Shut up!", "Open!", "Let me pass.", "Please."],                // "command me"
-        [5464] = ["Yes, I agree.", "No."],                                        // the court's terms
+        [5404] = ["bow", "bow arrow", "crossbow", "bows", "crossbows"],            // Sheogorath
+        [5406] = ["one", "1"],                                                      // the blind god
+        [5423] = ["benefactor", "the benefactor"],                                  // the Benefactor
+        [5424] = ["shut up", "shutup", "shaddup"],                                  // "command me"
+        [5464] = ["yes", "oK", "i agree", "y", "agreed", "done", "fine", "okay", "sure", "yep"], // Daggerfall's guard
     };
+
+    /// <summary>The menu riddles are typed into (Interface\riddle.as), opened by TMDfAction as "TamrielMerge/riddle".</summary>
+    public const string RiddleMenu = "TamrielMerge/riddle";
 
     /// <summary>Daggerfall's text with its player macros filled in for a message box.</summary>
     static string Say(string s) => System.Text.RegularExpressions.Regex.Replace(s.Replace("%pcn", "traveller").Replace("%pcf", "traveller"), @"%\w+", "").Trim();
 
     string? TextOf(int id) => Text?[id] is { Count: > 0 } lines && !lines[0].Contains("do not translate") ? Say(lines[0]) : null;
 
-    /// <summary>A riddle as a message: its question, its answers in a stable shuffled order; returns the right button.</summary>
-    (Message Message, int Answer)? Riddle(int id)
+    static readonly object riddleMenuLock = new();
+
+    /// <summary>A riddle (12): its text and the answers it accepts; the typing menu is compiled into this output (once).</summary>
+    (string Question, string[] Answers)? Riddle(int id)
     {
-        if (!RiddleChoices.TryGetValue(id, out var choices) || TextOf(id) is not { } question) return null;
-        // Shuffle by the record so the right answer isn't always first.
-        int shift = id % choices.Length;
-        var order = choices.Select((c, i) => (c, i)).OrderBy(x => (x.i + shift) % choices.Length).ToList();
-        int answer = order.FindIndex(x => x.i == 0);
-        if (!Riddles.TryGetValue(id, out var message))
+        if (TextOf(id) is not { } question) return null;
+        string swf = Path.Combine(modOutDir, "Interface", "TamrielMerge", "riddle.swf");
+        lock (riddleMenuLock)
         {
-            message = new Message(mod) { EditorID = $"DFRiddle{id}", Description = question, Flags = Message.Flag.MessageBox, MenuButtons = [] };
-            foreach (var (c, _) in order) message.MenuButtons.Add(new MessageButton { Text = c });
-            mod.Messages.Add(message);
-            Riddles[id] = message;
+            string source = Path.Combine(AppContext.BaseDirectory, "Interface", "riddle.as");
+            if (!File.Exists(swf) || File.GetLastWriteTimeUtc(swf) < File.GetLastWriteTimeUtc(source))
+                Ui.FlashMenus.Compile(File.ReadAllText(source), swf);
         }
-        return (message, answer);
+        Riddles.Add(id);
+        return (question, RiddleAnswers.GetValueOrDefault(id, []));
     }
 
     public sealed record Placed(PlacedObject Ref, DfRdbObject Source);
@@ -110,12 +149,12 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
             Placement = new Placement { Position = start, Rotation = new P3Float(startAngles.X, startAngles.Y, startAngles.Z) },
             SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400, // persistent: chained objects reference it
         };
-        r.VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [Script(o, m)] };
+        r.VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [WithSound(Script(o, m), o)] };
         cell.Persistent.Add(r);
         ByIndex[index] = r;
-        // Walk-on triggers (1, and 9: "activated by collision / walking on", Daggerfall Unity DFBlock) get a box over
-        // the top; walk-into ones (3, 8) a box around.
-        if (trigger is 1 or 3 or 8 or 9) AddTriggerBox(cell, r, model.Min, model.Max, m, walkOn: trigger is 1 or 9);
+        // Collision triggers (1 walk-on; 3, 8 and 9 walk-into, as Daggerfall Unity's Receive takes them) get a box around
+        // and over the object.
+        if (trigger is 1 or 3 or 8 or 9) AddTriggerBox(cell, r, model.Min, model.Max, m);
         return r;
     }
 
@@ -126,7 +165,7 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
     public void AttachToDoor(PlacedObject door, DfRdbObject o, int index, Vector3 blockOrigin)
     {
         door.VirtualMachineAdapter ??= new VirtualMachineAdapter();
-        door.VirtualMachineAdapter.Scripts.Add(Script(o, DfDungeon.ObjectTransform(o, blockOrigin), forDoor: true));
+        door.VirtualMachineAdapter.Scripts.Add(WithSound(Script(o, DfDungeon.ObjectTransform(o, blockOrigin), forDoor: true), o));
         if (o.Action!.Flags is 16 or 20 && !door.VirtualMachineAdapter.Scripts.Any(s => s.Name == "TMDfLock"))
         {
             var lockEntry = new ScriptEntry { Name = "TMDfLock" };
@@ -139,25 +178,47 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
 
     /// <summary>
     /// A flat with an action, as an invisible activator where the flat stands (and its trigger box), so the player
-    /// and chains can trigger it. A flat whose action does nothing here (a flat's move, poison, the unknown types) and
-    /// that passes nothing on is left out; so is a talking flat (29) that is a person already: Skyrim's own
-    /// conversation is its dialogue. Returns the activator, or null.
+    /// and chains can trigger it. A flat whose action does nothing here (poison, the unknown types) and that passes
+    /// nothing on is left out; so is a talking flat (29) that is a person already: Skyrim's own conversation is its
+    /// dialogue. A flat that moves (Daggerfall Unity moves its billboard: translation at once, the directional types over
+    /// 2.5 s) takes <paramref name="riders"/>, what stands for it (a torch, an item, a marker), with it. Returns the
+    /// activator, or null.
     /// </summary>
-    public PlacedObject? PlaceFlat(Cell cell, DfRdbObject o, int index, Vector3 blockOrigin, IPlacedNpcGetter? speaker = null)
+    public PlacedObject? PlaceFlat(Cell cell, DfRdbObject o, int index, Vector3 blockOrigin, IPlacedNpcGetter? speaker = null, IReadOnlyList<PlacedObject>? riders = null)
     {
         var a = o.Action!;
         bool chained = a.NextObjectIndex >= 0;
         var m = Matrix4x4.CreateTranslation(blockOrigin + o.Position);
         if (a.Flags == 29 && speaker is not null && !chained) return null;
         var entry = Script(o, m, speaker: speaker);
+        // Its move: Daggerfall Unity's translation of the billboard (rotation turns nothing a billboard shows).
+        bool moves = false;
+        if (a.Flags is >= 1 and <= 7 && riders is { Count: > 0 } && FlatShift(o, blockOrigin) is { } shift && shift.Delta.Length() >= 1)
+        {
+            var shiftList = new ScriptFloatListProperty { Name = "FlatShift" };
+            shiftList.Data.AddRange([shift.Delta.X, shift.Delta.Y, shift.Delta.Z]);
+            entry.Properties.Add(shiftList);
+            entry.Properties.RemoveAll(pr => pr.Name == "Duration");
+            entry.Properties.Add(new ScriptFloatProperty { Name = "Duration", Data = shift.Seconds });
+            var riderList = new ScriptObjectListProperty { Name = "Riders" };
+            foreach (var rider in riders) riderList.Objects.Add(new ScriptObjectProperty { Object = rider.ToLink<ISkyrimMajorRecordGetter>() });
+            entry.Properties.Add(riderList);
+            moves = true;
+            FlatsMoving++;
+        }
+        int trigger = TriggerOf(o);
         bool acts = a.Flags switch
         {
             9 or 14 or (>= 16 and <= 25) or 28 or 31 => true,
-            11 or 12 or 32 or 29 => entry.Properties.Any(p => p.Name is "Text" or "Riddle" or "Speaker"),
+            >= 1 and <= 7 => moves,
+            11 or 12 or 29 or 99 => entry.Properties.Any(p => p.Name is "Text" or "RiddleText" or "Speaker" or "Trespass"),
             _ => false,
         };
+        // One that only plays its sound still does something when the player can trigger it (a flat's trigger 10, a
+        // door's, never comes).
+        if (!acts && HasSound(o) && trigger is not (0 or 10)) acts = true;
         if (!acts && !chained) return null;
-        int trigger = TriggerOf(o);
+        WithSound(entry, o);
         bool direct = trigger is 2 or 6 or 8 or 9;
         var p = ToSkyrim(blockOrigin + o.Position);
         var r = new PlacedObject(mod)
@@ -179,7 +240,7 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
         if (trigger is 1 or 3 or 8 or 9)
         {
             var half = new Vector3(FlatHalf, FlatHalf * 1.5f, FlatHalf) / BlockMeshBuilder.Scale; // Daggerfall units, Y up
-            AddTriggerBox(cell, r, -half, half, m, walkOn: trigger is 1 or 9);
+            AddTriggerBox(cell, r, -half, half, m);
         }
         return r;
     }
@@ -196,6 +257,27 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
     }
 
     public void Register(int index, PlacedObject r) => ByIndex[index] = r;
+
+    bool HasSound(DfRdbObject o) => o.SoundIndex > 0 && Sounds?.Samples(o.SoundIndex) is { Length: > 0 };
+
+    /// <summary>Its sound (Daggerfall Unity: any action whose sound/index byte names a DAGGER.SND record plays it on each
+    /// trigger, whatever else the byte means for it).</summary>
+    ScriptEntry WithSound(ScriptEntry entry, DfRdbObject o)
+    {
+        if (ActionSound(o.SoundIndex) is { } sound)
+        {
+            entry.Properties.Add(new ScriptObjectProperty { Name = "ActionSound", Object = sound.ToLink<ISkyrimMajorRecordGetter>() });
+            Sounded++;
+        }
+        return entry;
+    }
+
+    /// <summary>Action objects given their sound, door notices given their text, door notices that check for trespass.</summary>
+    public int Sounded { get; private set; }
+    public int DoorNotices { get; private set; }
+    public int Trespasses { get; private set; }
+    /// <summary>Spell traps whose spell index SPELLS.STD lacks (they cast nothing, as in Daggerfall Unity).</summary>
+    public int TrapsWithoutSpell { get; private set; }
 
     /// <summary>
     /// Fill in each script's NextObject now every object in the block is placed. Chains into flats with actions reach
@@ -233,8 +315,13 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
         return links;
     }
 
-    /// <summary>Daggerfall Unity uses the trigger/lock field as a trigger only when it is a known trigger value.</summary>
-    static int TriggerOf(DfRdbObject o) => o.TriggerAndLock is 1 or 2 or 3 or 5 or 6 or 8 or 9 ? (int)o.TriggerAndLock : 0;
+    /// <summary>Daggerfall Unity uses the trigger/lock field as a trigger only when it is a known trigger value (RdbTriggerFlags;
+    /// 10, a door's opening and closing, means something only on a door).</summary>
+    static int TriggerOf(DfRdbObject o) => o.TriggerAndLock is 1 or 2 or 3 or 5 or 6 or 8 or 9 or 10 ? (int)o.TriggerAndLock : 0;
+
+    /// <summary>Door notices Daggerfall Unity doesn't show (DaggerfallAction.DoorText sets ActionEnabled for them: TEXT.RSC
+    /// lacks 7706, 7711, 7712, 7715 and 7719, and 7717 is on the wrong door): the door opens at once.</summary>
+    static readonly HashSet<int> UnshownDoorTexts = [6, 11, 12, 15, 17, 19];
 
     ScriptEntry Script(DfRdbObject o, Matrix4x4 m, bool forDoor = false, IPlacedNpcGetter? speaker = null)
     {
@@ -286,26 +373,39 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
             props.Add(new ScriptFloatProperty { Name = "Magnitude", Data = Math.Max(1, (int)a.Axis) });
         if (a.Flags == 9)
         {
-            // The sound/index byte names the SPELLS.STD spell (Daggerfall Unity CastSpell).
-            bool found = spells?.Traps.ContainsKey(o.SoundIndex) == true;
-            var trap = found ? spells!.Traps[o.SoundIndex] : default;
-            props.Add(new ScriptObjectProperty { Name = "TrapSpell", Object = (found ? trap.Spell.FormKey : FallbackTrapSpell).ToLink<ISkyrimMajorRecordGetter>() });
-            if (found && trap.OnPlayer) props.Add(new ScriptBoolProperty { Name = "TrapOnPlayer", Data = true });
+            // The sound/index byte names the SPELLS.STD spell (Daggerfall Unity CastSpell: an index SPELLS.STD lacks casts
+            // nothing, GetClassicSpellRecord failing; the trigger still passes on and plays its sound).
+            if (spells is not null && spells.Traps.TryGetValue(o.SoundIndex, out var trap))
+            {
+                props.Add(new ScriptObjectProperty { Name = "TrapSpell", Object = trap.Spell.FormKey.ToLink<ISkyrimMajorRecordGetter>() });
+                if (trap.OnPlayer) props.Add(new ScriptBoolProperty { Name = "TrapOnPlayer", Data = true });
+            }
+            else TrapsWithoutSpell++;
         }
         // Messages: a pop-up (11), a riddle whose right answer passes the trigger on (12), a door's notice (99; Daggerfall
-        // Unity's patches: 7701-7704 read as 7705, 7700 says nothing). Type 32 (unknown, on four objects) shows its
-        // index's text, should TEXT.RSC have one.
+        // Unity's patches: 7701-7704 read as 7705, 7700 and UnshownDoorTexts say nothing). Type 32 has no handler in
+        // Daggerfall Unity: it passes the trigger on and plays its sound, nothing else.
         if (a.Flags == 11 && TextOf(ShowTextBase + o.SoundIndex) is { } shown)
             props.Add(new ScriptStringProperty { Name = "Text", Data = shown });
         if (a.Flags == 12 && Riddle(RiddleBase + o.SoundIndex) is { } riddle)
         {
-            props.Add(new ScriptObjectProperty { Name = "Riddle", Object = riddle.Message.ToLink<ISkyrimMajorRecordGetter>() });
-            props.Add(new ScriptIntProperty { Name = "RiddleAnswer", Data = riddle.Answer });
+            props.Add(new ScriptStringProperty { Name = "RiddleText", Data = riddle.Question });
+            var answers = new ScriptStringListProperty { Name = "RiddleAnswers" };
+            answers.Data.AddRange(riddle.Answers);
+            props.Add(answers);
         }
-        if (a.Flags == 99 && o.SoundIndex > 0 && TextOf(DoorTextBase + (o.SoundIndex is >= 1 and <= 4 ? 5 : o.SoundIndex)) is { } notice)
+        if (a.Flags == 99 && o.SoundIndex > 0 && !UnshownDoorTexts.Contains(o.SoundIndex) && TextOf(DoorTextBase + (o.SoundIndex is >= 1 and <= 4 ? 5 : o.SoundIndex)) is { } notice)
+        {
             props.Add(new ScriptStringProperty { Name = "Text", Data = notice });
-        if (a.Flags == 32 && o.SoundIndex > 0 && (TextOf(ShowTextBase + o.SoundIndex) ?? TextOf(DoorTextBase + o.SoundIndex)) is { } said)
-            props.Add(new ScriptStringProperty { Name = "Text", Data = said });
+            DoorNotices++;
+        }
+        // A door notice's trespass check (Daggerfall Unity DoorText: classic checks only that the raw axis value is over 5).
+        if (a.Flags == 99 && a.Axis > 5 && SensesQuest is { } senses)
+        {
+            props.Add(new ScriptBoolProperty { Name = "Trespass", Data = true });
+            props.Add(new ScriptObjectProperty { Name = "Senses", Object = senses.ToLink<ISkyrimMajorRecordGetter>() });
+            Trespasses++;
+        }
         // Dialogue (29): the person it stands for talks.
         if (a.Flags == 29 && speaker is not null)
             props.Add(new ScriptObjectProperty { Name = "Speaker", Object = speaker.ToLink<ISkyrimMajorRecordGetter>() });
@@ -357,6 +457,29 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
         var (position, angles) = Pose(end);
         return (new Vector3(position.X, position.Y, position.Z), angles * (180 / MathF.PI), seconds);
     }
+
+    /// <summary>A flat's move (Daggerfall Unity AddActionFlatHelper / AddAction: the magnitude byte is both its axis and
+    /// distance; the directional types move magnitude x 8 in a fixed 2.5 s, translation in its duration, none for a
+    /// flat): the Skyrim offset and seconds, or null.</summary>
+    static (Vector3 Delta, float Seconds)? FlatShift(DfRdbObject o, Vector3 blockOrigin)
+    {
+        var a = o.Action!;
+        Vector3 translation;
+        float seconds;
+        if (a.Flags == 1) { translation = Translate(a.Axis, a.Magnitude); seconds = a.Duration / 20f; }
+        else if (a.Flags is >= 2 and <= 7)
+        {
+            translation = Translate(a.Flags switch { 2 => 2, 3 => 1, 4 => 4, 5 => 3, 6 => 6, _ => 5 }, a.Axis * 8);
+            seconds = 50 / 20f;
+        }
+        else return null;
+        var (from, _) = Pose(Matrix4x4.CreateTranslation(blockOrigin + o.Position));
+        var (to, _) = Pose(Matrix4x4.CreateTranslation(blockOrigin + o.Position + translation));
+        return (new Vector3(to.X - from.X, to.Y - from.Y, to.Z - from.Z), seconds);
+    }
+
+    /// <summary>Flats whose riders move with them.</summary>
+    public int FlatsMoving { get; private set; }
 
     /// <summary>An end pose no different from the start (under a unit, half a degree).</summary>
     static bool Still((Vector3 Position, Vector3 AnglesDegrees, float Seconds) end, Matrix4x4 m)
@@ -456,25 +579,34 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
 
     static Vector3 ToSkyrimLocal(Vector3 df) => new(df.X * BlockMeshBuilder.Scale, df.Z * BlockMeshBuilder.Scale, df.Y * BlockMeshBuilder.Scale);
 
-    /// <summary>Invisible box around (walk-into) or on top of (walk-on) the object, running TMDfTrigger.</summary>
-    void AddTriggerBox(Cell cell, PlacedObject target, Vector3 min, Vector3 max, Matrix4x4 m, bool walkOn)
+    /// <summary>Invisible box around the object and over its top (24 units out, 72 over), running TMDfTrigger, which tells
+    /// walking on it (the player's feet on its top, TopZ) from walking into it (Daggerfall Unity DaggerfallActionCollision).</summary>
+    void AddTriggerBox(Cell cell, PlacedObject target, Vector3 min, Vector3 max, Matrix4x4 m)
     {
         triggerBase ??= AddTriggerBase();
         var centreLocal = (min + max) / 2;
         var half = (max - min) / 2 * BlockMeshBuilder.Scale + new Vector3(24);
-        if (walkOn) { centreLocal.Y = max.Y; half.Y = 48; }
+        // 24 further up (Daggerfall units / Scale): the box reaches 72 over the top, where the player stands on it.
+        half.Y += 24;
+        centreLocal.Y += 24 / BlockMeshBuilder.Scale;
         var centre = Vector3.Transform(centreLocal, m);
         var (_, angles) = Pose(m);
+        // The top: the highest corner of the object as placed (Daggerfall's Y up is Skyrim's Z).
+        float top = float.MinValue;
+        foreach (var x in new[] { min.X, max.X })
+            foreach (var y in new[] { min.Y, max.Y })
+                foreach (var z in new[] { min.Z, max.Z })
+                    top = MathF.Max(top, Vector3.Transform(new Vector3(x, y, z), m).Y * BlockMeshBuilder.Scale);
         var box = new PlacedObject(mod)
         {
             Base = triggerBase.ToNullableLink<IPlaceableObjectGetter>(),
-            Placement = new Placement { Position = new P3Float(centre.X * BlockMeshBuilder.Scale, centre.Z * BlockMeshBuilder.Scale, centre.Y * BlockMeshBuilder.Scale + (walkOn ? 32 : 0)), Rotation = new P3Float(angles.X, angles.Y, angles.Z) },
+            Placement = new Placement { Position = new P3Float(centre.X * BlockMeshBuilder.Scale, centre.Z * BlockMeshBuilder.Scale, centre.Y * BlockMeshBuilder.Scale), Rotation = new P3Float(angles.X, angles.Y, angles.Z) },
             // Vanilla trigger boxes: box primitive, unknown 0.15, no collision layer set.
             Primitive = new PlacedPrimitive { Type = PlacedPrimitive.TypeEnum.Box, Bounds = new P3Float(half.X, half.Z, half.Y), Color = System.Drawing.Color.FromArgb(0, 204, 76, 51), Unknown = 0.15f },
         };
         var entry = new ScriptEntry { Name = "TMDfTrigger" };
         entry.Properties.Add(new ScriptObjectProperty { Name = "Target", Object = target.ToLink<ISkyrimMajorRecordGetter>() });
-        entry.Properties.Add(new ScriptBoolProperty { Name = "WalkOn", Data = walkOn });
+        entry.Properties.Add(new ScriptFloatProperty { Name = "TopZ", Data = top });
         box.VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [entry] };
         cell.Temporary.Add(box);
     }

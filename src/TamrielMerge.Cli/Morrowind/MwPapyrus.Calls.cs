@@ -64,7 +64,7 @@ public sealed partial class MwPapyrus
         {
             // Without a faction: the speaker's (in a result script) or the calling actor's first faction.
             if (kind == Kind.Result && ctx.SpeakerFaction is { } sf) return Prop("faction:" + sf, "Faction", "fac_" + Clean(sf));
-            if (kind == Kind.Result || kind == Kind.Object && ctx.OnActor) return $"TMMwScript.FactionOf({AsActor(Subject(c))})";
+            if (kind == Kind.Result || kind == Kind.Object && ctx.OnActor) return $"{State()}.MwFactionOf({AsActor(Subject(c))})";
             Fail("faction function without a faction outside dialogue", "None");
             return "None";
         }
@@ -86,8 +86,12 @@ public sealed partial class MwPapyrus
         Code R(string text, T type) => new(text, type);
         string self() => AsRef(Subject(c));
         string actorSelf() => AsActor(Subject(c));
-        // Nothing to do in Skyrim, said so in the script (and counted as translated).
-        Code Nothing(string why) => R(statement ? $"; {c.Function}: {why}" : "0", statement ? T.Void : T.Int);
+        // Nothing done here though Morrowind does something: said so in the script, counted as a gap (Gap).
+        Code Nothing(string why) { Gap($"{c.Function} does nothing"); return R(statement ? $"; {c.Function}: {why}" : "0", statement ? T.Void : T.Int); }
+        // Nothing done, as in Morrowind (a cell, journal or file the game hasn't): faithful.
+        Code Same(string why) => R(statement ? $"; {c.Function}: {why}" : "0", statement ? T.Void : T.Int);
+        // A translation not quite Morrowind's: counted as a gap under what it falls short in.
+        Code Approx(string what, Code code) { Gap($"{c.Function}: {what}"); return code; }
 
         // ---- attributes, skills and the like: Get/Set/Mod<stat> ----
         if (Stat(fn) is { } stat) return StatCode(c, stat, actorSelf);
@@ -113,8 +117,9 @@ public sealed partial class MwPapyrus
                 return R(fn switch { "onpcadd" => "MwOnPCAdd()", "onpcdrop" => "MwOnPCDrop()", "onpcequip" => "MwOnPCEquip()", _ => "MwOnPCHitMe()" }, T.Bool);
             case "onpcsoulgemuse" or "onrepair" or "onpcrepair":
                 // Skyrim has no event for using a soul gem on an item or repairing it.
-                return R("False", T.Bool);
-            case "menumode": return R("Utility.IsInMenuMode()", T.Bool);
+                return Approx("always false", R("False", T.Bool));
+            // Morrowind's conversation is a menu; Skyrim's goes on in the world, so it is asked about by name.
+            case "menumode": return R("(Utility.IsInMenuMode() || UI.IsMenuOpen(\"Dialogue Menu\"))", T.Bool);
             case "getsecondspassed": uses.Add("dt"); return R("__dt", T.Float);
             case "cellchanged":
                 if (kind == Kind.Result) return R("False", T.Bool);
@@ -136,6 +141,7 @@ public sealed partial class MwPapyrus
             case "disable": return R($"{self()}.Disable()", T.Void);
             case "getdisabled": return R($"{self()}.IsDisabled()", T.Bool);
             case "setdelete": return R($"TMMwScript.SetDelete({self()}, {ArgInt(c, 0)})", T.Void);
+            // Morrowind's own level on its TMMwLock (every door and container a script locks has one: MwLocks.ScriptMayLock).
             case "lock": return R($"TMMwScript.LockMw({self()}, {ArgInt(c, 0, "50")})", T.Void);
             case "unlock": return R($"TMMwScript.UnlockMw({self()})", T.Void);
             case "getlocked": return R($"TMMwScript.IsLockedMw({self()})", T.Bool);
@@ -174,19 +180,21 @@ public sealed partial class MwPapyrus
             case "equip": return R($"{actorSelf()}.EquipItem({Form(c, 0)})", T.Void);
             case "hasitemequipped": return R($"{actorSelf()}.IsEquipped({Form(c, 0)})", T.Bool);
             case "getweapontype": return R($"TMMwScript.WeaponType({actorSelf()})", T.Int);
-            case "getarmortype": return R($"TMMwScript.ArmorType({actorSelf()}, {ArgInt(c, 0)})", T.Int);
-            case "hassoulgem": return R($"TMMwScript.SoulGems({actorSelf()}, {Form(c, 0)})", T.Int);
-            case "removesoulgem": return R($"TMMwScript.RemoveSoulGem({actorSelf()}, {Form(c, 0)}, {ArgInt(c, 1, "1")})", T.Void);
-            case "dropsoulgem": return R($"TMMwScript.RemoveSoulGem({actorSelf()}, {Form(c, 0)}, 1)", T.Void);
+            case "getarmortype": return Approx("never medium", R($"TMMwScript.ArmorType({actorSelf()}, {ArgInt(c, 0)})", T.Int));
+            // Gems holding that creature's soul (each creature's six, by size: the converter's MWSoulGem..., which soul
+            // trapping the creature fills: TMMwActorAI).
+            case "hassoulgem": return R($"TMMwScript.CountIn({actorSelf()}, {CreatureGems(Word(c, 0))})", T.Int);
+            case "removesoulgem": return R($"TMMwScript.RemoveIn({actorSelf()}, {CreatureGems(Word(c, 0))}, {ArgInt(c, 1, "1")}, False)", T.Void);
+            case "dropsoulgem": return R($"TMMwScript.RemoveIn({actorSelf()}, {CreatureGems(Word(c, 0))}, 1, True)", T.Void);
             case "addsoulgem":
-                return R($"{self()}.AddItem({Prop("soulgem:" + Word(c, 1), "Form", "sg_" + Clean(Word(c, 1)))}, 1)", T.Void);
+                return R($"{self()}.AddItem({Prop("creaturegem:" + Word(c, 0) + "|" + Word(c, 1), "Form", "sg_" + Clean(Word(c, 0)) + "_" + Clean(Word(c, 1)))}, 1)", T.Void);
 
             // ---- spells and effects ----
             case "addspell": return R($"{actorSelf()}.AddSpell({Form(c, 0, "Spell")}, False)", T.Void);
             case "removespell": return R($"{actorSelf()}.RemoveSpell({Form(c, 0, "Spell")})", T.Void);
             case "getspell": return R($"{actorSelf()}.HasSpell({Form(c, 0, "Spell")})", T.Bool);
             case "cast": return R($"{Form(c, 0, "Spell")}.Cast({self()}, {AsRef(RefArg(c, 1))})", T.Void);
-            case "explodespell": return R($"{Form(c, 0, "Spell")}.Cast({self()}, {self()})", T.Void);
+            case "explodespell": return Approx("cast on itself", R($"{Form(c, 0, "Spell")}.Cast({self()}, {self()})", T.Void));
             case "getspelleffects": return R($"TMMwScript.HasSpellEffects({actorSelf()}, {Form(c, 0, "Spell")})", T.Bool);
             case "removespelleffects": return R($"{actorSelf()}.DispelSpell({Form(c, 0, "Spell")})", T.Void);
             case "geteffect": return EffectCode(c, actorSelf, remove: false);
@@ -197,7 +205,8 @@ public sealed partial class MwPapyrus
             case "becomewerewolf": return R($"TMMwScript.BecomeWerewolf({actorSelf()})", T.Void);
             case "undowerewolf": return R($"TMMwScript.UndoWerewolf({actorSelf()})", T.Void);
             case "setwerewolfacrobatics": return Nothing("Skyrim's beast form has its own movement");
-            case "getwerewolfkills": return R("Game.QueryStat(\"Werewolf Transformations\")", T.Int);
+            // Kills as a werewolf (TMMwActorAI counts them; Skyrim keeps only how often the player changed).
+            case "getwerewolfkills": return R($"{Generated("gen:MWWerewolfKills", "GlobalVariable", "MwWerewolfKills")}.GetValueInt()", T.Int);
 
             // ---- actors ----
             case "startcombat": return R($"{actorSelf()}.StartCombat({AsActor(RefArg(c, 0))})", T.Void);
@@ -206,50 +215,53 @@ public sealed partial class MwPapyrus
                 // Activated by the player, a person starts the conversation (as Morrowind's greeting does).
                 return R($"TMMwScript.ForceGreeting({actorSelf()}, {PlayerRef()})", T.Void);
             case "resurrect": return R($"{actorSelf()}.Resurrect()", T.Void);
-            case "getdisposition": return R($"TMMwScript.GetDisposition({actorSelf()})", T.Int);
+            case "getdisposition": return Approx("base 50 and changes only", R($"TMMwScript.GetDisposition({actorSelf()})", T.Int));
             case "setdisposition": return R($"TMMwScript.SetDisposition({actorSelf()}, {ArgFloat(c, 0)})", T.Void);
             case "moddisposition": return R($"TMMwScript.ModDisposition({actorSelf()}, {ArgFloat(c, 0)})", T.Void);
+            // Morrowind's own settings on its actors (TMMwActorAI), with what its engine does with them.
             case "gethello" or "getfight" or "getflee" or "getalarm": return R($"TMMwScript.GetAi({actorSelf()}, \"{fn[3..]}\")", T.Int);
-            case "sethello" or "setfight" or "setflee" or "setalarm": return R($"TMMwScript.SetAi({actorSelf()}, \"{fn[3..]}\", {ArgFloat(c, 0)})", T.Void);
-            case "modhello" or "modfight" or "modflee" or "modalarm": return R($"TMMwScript.SetAi({actorSelf()}, \"{fn[3..]}\", TMMwScript.GetAi({actorSelf()}, \"{fn[3..]}\") + {ArgFloat(c, 0)})", T.Void);
+            case "sethello" or "setfight" or "setflee" or "setalarm": return AiGap(fn, R($"TMMwScript.SetAi({actorSelf()}, \"{fn[3..]}\", {ArgFloat(c, 0)})", T.Void));
+            case "modhello" or "modfight" or "modflee" or "modalarm": return AiGap(fn, R($"TMMwScript.SetAi({actorSelf()}, \"{fn[3..]}\", TMMwScript.GetAi({actorSelf()}, \"{fn[3..]}\") + {ArgFloat(c, 0)})", T.Void));
             case "getlevel": return R($"{actorSelf()}.GetLevel()", T.Int);
-            case "setlevel": return R($"TMMwScript.SetLevel({actorSelf()}, {ArgInt(c, 0)})", T.Void);
+            case "setlevel": return Approx("does nothing", R($"TMMwScript.SetLevel({actorSelf()}, {ArgInt(c, 0)})", T.Void));
             case "getdeadcount": return R($"TMMwScript.DeadCount({Form(c, 0)})", T.Int);
             case "getdetected": return R($"{AsActor(RefArg(c, 0))}.IsDetectedBy({actorSelf()})", T.Bool);
             case "getlos" or "getlineofsight": return R($"{actorSelf()}.HasLOS({AsRef(RefArg(c, 0))})", T.Bool);
             case "gettarget": return R($"{actorSelf()}.GetCombatTarget() == {AsActor(RefArg(c, 0))}", T.Bool);
-            case "getattacked": return R($"{actorSelf()}.IsInCombat()", T.Bool);
+            // Attacked by the player, until the player's crime is dealt with (TMMwActorAI's flag, as the dialogue reads it).
+            case "getattacked": return R($"TMMwScript.GetAttacked({actorSelf()})", T.Bool);
             case "getweapondrawn": return R($"{actorSelf()}.IsWeaponDrawn()", T.Bool);
-            case "getspellreadied": return R($"TMMwScript.SpellReadied({actorSelf()})", T.Bool);
+            case "getspellreadied": return Approx("weapon drawn with a spell in hand", R($"TMMwScript.SpellReadied({actorSelf()})", T.Bool));
             case "getrace": return R($"TMMwScript.IsRace({actorSelf()}, {Prop("race:" + Word(c, 0), "Race", "race_" + Clean(Word(c, 0)))})", T.Bool);
-            case "samefaction": return R($"TMMwScript.SameFaction({actorSelf()}, {PlayerRef()})", T.Bool);
+            // The actor's Morrowind faction (a person has one: TMMwState.MwFactionOf).
+            case "samefaction": return R($"TMMwScript.SameFaction({State()}.MwFactionOf({actorSelf()}), {PlayerRef()})", T.Bool);
             case "raiserank" or "lowerrank":
-                return R($"TMMwScript.ModRank({actorSelf()}, TMMwScript.FactionOf({actorSelf()}), {(fn == "raiserank" ? 1 : -1)})", T.Void);
+                return R($"TMMwScript.ModRank({actorSelf()}, {State()}.MwFactionOf({actorSelf()}), {(fn == "raiserank" ? 1 : -1)})", T.Void);
             case "forcesneak": return R($"{actorSelf()}.StartSneaking()", T.Void);
             case "clearforcesneak": return R($"TMMwScript.StopSneaking({actorSelf()})", T.Void);
             case "forcerun" or "clearforcerun" or "forcejump" or "clearforcejump" or "forcemovejump" or "clearforcemovejump":
                 return Nothing("Skyrim's AI packages decide running and jumping");
             case "getforcesneak": return R($"{actorSelf()}.IsSneaking()", T.Bool);
             case "getforcerun": return R($"{actorSelf()}.IsRunning()", T.Bool);
-            case "getforcejump" or "getforcemovejump": return R("False", T.Bool);
+            case "getforcejump" or "getforcemovejump": return Approx("always false", R("False", T.Bool));
             case "fall": return Nothing("Skyrim's actors fall by themselves");
             case "face": return R($"TMMwScript.Face({self()}, {ArgFloat(c, 0)}, {ArgFloat(c, 1)})", T.Void);
             case "hitonme" or "hitattemptonme":
                 // Hit (or attacked: Skyrim reports hits, blocked ones too) by that weapon since the script last asked.
-                if (kind != Kind.Object || c.Target is not null) return R("False", T.Bool);
+                if (kind != Kind.Object || c.Target is not null) return Approx("always false asked of another", R("False", T.Bool));
                 uses.Add("hitonme");
                 return R($"MwHitOnMe({Form(c, 0)}, {(fn == "hitonme" ? "False" : "True")})", T.Bool);
-            case "repairedonme": return R("False", T.Bool);
+            case "repairedonme": return Approx("always false", R("False", T.Bool));
 
             // ---- AI packages ----
             // AIWander range duration time idles...: the duration in hours (0: until told otherwise).
-            case "aiwander": return R($"{AI()}.Wander({actorSelf()}, {ArgFloat(c, 0)}, {ArgFloat(c, 1)})", T.Void);
+            case "aiwander": return Approx("time and idles dropped", R($"{AI()}.Wander({actorSelf()}, {ArgFloat(c, 0)}, {ArgFloat(c, 1)})", T.Void));
             case "aitravel": return R($"{AI()}.Travel({actorSelf()}, {ArgFloat(c, 0)}, {ArgFloat(c, 1)}, {ArgFloat(c, 2)})", T.Void);
             case "aifollow" or "aiescort":
                 return R($"{AI()}.{(fn == "aifollow" ? "Follow" : "Escort")}({actorSelf()}, {AsActor(RefArg(c, 0))}, {ArgFloat(c, 1)}, {ArgFloat(c, 2)}, {ArgFloat(c, 3)}, {ArgFloat(c, 4)})", T.Void);
             case "aifollowcell" or "aiescortcell":
-                // The cell only says where the destination is; the coordinates are within it.
-                return R($"{AI()}.{(fn == "aifollowcell" ? "Follow" : "Escort")}({actorSelf()}, {AsActor(RefArg(c, 0))}, {ArgFloat(c, 2)}, {ArgFloat(c, 3)}, {ArgFloat(c, 4)}, {ArgFloat(c, 5)})", T.Void);
+                // The coordinates are within the named cell (its anchor, as PositionCell's).
+                return R($"{AI()}.{(fn == "aifollowcell" ? "Follow" : "Escort")}({actorSelf()}, {AsActor(RefArg(c, 0))}, {ArgFloat(c, 2)}, {ArgFloat(c, 3)}, {ArgFloat(c, 4)}, {ArgFloat(c, 5)}, {Anchor(Word(c, 1))})", T.Void);
             case "aiactivate": return R($"{AI()}.ActivateRef({actorSelf()}, {AsRef(RefArg(c, 0))})", T.Void);
             case "getaipackagedone": return R($"{AI()}.Done({actorSelf()})", T.Bool);
             case "getcurrentaipackage": return R($"{AI()}.Current({actorSelf()})", T.Int);
@@ -261,7 +273,7 @@ public sealed partial class MwPapyrus
             case "setpos": return R($"TMMwScript.SetPos({self()}, \"{Axis(c)}\", {ArgFloat(c, 1)})", T.Void);
             case "setangle": return R($"TMMwScript.SetAngle({self()}, \"{Axis(c)}\", {ArgFloat(c, 1)})", T.Void);
             case "getstartingpos" or "getstartingangle":
-                if (kind != Kind.Object || c.Target is not null) return R($"{self()}.Get{(fn == "getstartingpos" ? "Position" : "Angle")}{Axis(c)}()", T.Float);
+                if (kind != Kind.Object || c.Target is not null) return Approx("the current position asked of another", R($"{self()}.Get{(fn == "getstartingpos" ? "Position" : "Angle")}{Axis(c)}()", T.Float));
                 uses.Add("startpos");
                 return R((fn == "getstartingpos" ? "__s" : "__sa") + Axis(c).ToLowerInvariant(), T.Float);
             case "setatstart":
@@ -286,11 +298,11 @@ public sealed partial class MwPapyrus
                 if (args.Count > 0 && args[0] is Str) args = [.. args.Skip(1), args[0]];
                 var cc = c with { Args = args };
                 string cell = Word(cc, 4);
-                if (!KnownCell(cell)) return Nothing($"there is no cell \"{cell}\" in the game");
+                if (!KnownCell(cell)) return Same($"there is no cell \"{cell}\" in the game");
                 return R($"TMMwScript.PositionAt({self()}, {Anchor(cell)}, {ArgFloat(cc, 0)}, {ArgFloat(cc, 1)}, {ArgFloat(cc, 2)}, {ArgFloat(cc, 3)})", T.Void);
             }
             case "placeitemcell":
-                if (!KnownCell(Word(c, 1))) return Nothing($"there is no cell \"{Word(c, 1)}\" in the game");
+                if (!KnownCell(Word(c, 1))) return Same($"there is no cell \"{Word(c, 1)}\" in the game");
                 return R($"TMMwScript.PlaceItem({Anchor(Word(c, 1))}, {Form(c, 0)}, {ArgFloat(c, 2)}, {ArgFloat(c, 3)}, {ArgFloat(c, 4)}, {ArgFloat(c, 5)})", T.Void);
             case "placeitem":
                 return R($"TMMwScript.PlaceItem({PlacementAnchor(c)}, {Form(c, 0)}, {ArgFloat(c, 1)}, {ArgFloat(c, 2)}, {ArgFloat(c, 3)}, {ArgFloat(c, 4)})", T.Void);
@@ -299,12 +311,12 @@ public sealed partial class MwPapyrus
             case "placeatme":
                 return R($"TMMwScript.PlaceNear({self()}, {Form(c, 0)}, {ArgInt(c, 1, "1")}, {ArgFloat(c, 2)}, {ArgInt(c, 3)})", T.Void);
             case "getstandingpc": return R($"TMMwScript.StandingOn({self()}, {PlayerRef()})", T.Bool);
-            case "getstandingactor": return R($"TMMwScript.StandingOn({self()}, {PlayerRef()})", T.Bool);
+            case "getstandingactor": return Approx("the player only", R($"TMMwScript.StandingOn({self()}, {PlayerRef()})", T.Bool));
             case "getcollidingpc": return R($"TMMwScript.Touching({self()}, {PlayerRef()})", T.Bool);
-            case "getcollidingactor": return R($"TMMwScript.Touching({self()}, {PlayerRef()})", T.Bool);
+            case "getcollidingactor": return Approx("the player only", R($"TMMwScript.Touching({self()}, {PlayerRef()})", T.Bool));
             case "hurtstandingactor" or "hurtcollidingactor":
                 uses.Add("dt");
-                return R($"TMMwScript.HurtTouching({self()}, {PlayerRef()}, {ArgFloat(c, 0)} * __dt, {(fn == "hurtstandingactor" ? "True" : "False")})", T.Void);
+                return Approx("the player only", R($"TMMwScript.HurtTouching({self()}, {PlayerRef()}, {ArgFloat(c, 0)} * __dt, {(fn == "hurtstandingactor" ? "True" : "False")})", T.Void));
             case "getpccell":
                 // A name no cell has (a misspelling in the original) is never the player's cell.
                 if (!KnownCell(Word(c, 0)) || Word(c, 0).Length == 0) return R("False", T.Bool);
@@ -313,7 +325,7 @@ public sealed partial class MwPapyrus
             case "getwaterlevel": return R($"TMMwScript.WaterLevel({self()})", T.Float);
             case "setwaterlevel" or "modwaterlevel": return Nothing("Skyrim's water height is fixed per cell");
             case "centeroncell" or "coc":
-                if (!KnownCell(Word(c, 0))) return Nothing($"there is no cell \"{Word(c, 0)}\" in the game");
+                if (!KnownCell(Word(c, 0))) return Same($"there is no cell \"{Word(c, 0)}\" in the game");
                 return R($"TMMwScript.PositionAt({PlayerRef()}, {Anchor(Word(c, 0))}, 0.0, 0.0, 0.0, 0.0)", T.Void);
             case "centeronexterior" or "coe":
                 return R($"TMMwScript.PositionAt({PlayerRef()}, {Anchor("")}, ({ArgFloat(c, 0)} + 0.5) * 8192.0, ({ArgFloat(c, 1)} + 0.5) * 8192.0, 0.0, 0.0)", T.Void);
@@ -322,7 +334,7 @@ public sealed partial class MwPapyrus
             case "journal" or "setjournalindex":
             {
                 // A journal the game doesn't have (left over from development): Morrowind does nothing either.
-                if (Journal(c, 0) is not { } q) return Nothing($"there is no journal {Word(c, 0)} in the game");
+                if (Journal(c, 0) is not { } q) return Same($"there is no journal {Word(c, 0)} in the game");
                 // The index is the journal's global (which can go back, as Morrowind's can); Journal also adds the entry
                 // (the quest's stage, or its objective when the journal returns to an entry it had).
                 bool entry = fn == "journal";
@@ -331,7 +343,10 @@ public sealed partial class MwPapyrus
             }
             case "getjournalindex":
                 return Journal(c, 0) is not null ? R($"{JournalIndex(Word(c, 0))}.GetValueInt()", T.Int) : R("0", T.Int);   // no such journal: index 0, as in Morrowind
-            case "addtopic": return Nothing("Skyrim's converted topics need no unlocking");
+            // The topic known from now on (its global, which its responses' conditions read); one the game hasn't: nothing.
+            case "addtopic":
+                if (!world.IsTopic(Word(c, 0))) return Same($"there is no topic \"{Word(c, 0)}\" in the game");
+                return R($"{Prop("topic:" + Word(c, 0), "GlobalVariable", "tk_" + Clean(Word(c, 0)))}.SetValue(1.0)", T.Void);
             case "clearinfoactor": return Nothing("Skyrim keeps no list of topics heard");
             case "startscript":
             {
@@ -355,9 +370,9 @@ public sealed partial class MwPapyrus
             }
             case "goodbye":
                 goodbye = true;   // the response's Goodbye flag
-                return Nothing("the response ends the conversation (its Goodbye flag)");
+                return Same("the response ends the conversation (its Goodbye flag)");
             case "choice":
-                return Nothing("the choices are the response's linked topics");
+                return Same("the choices are the response's linked topics");
 
             // ---- factions and reputation ----
             case "getpcrank": return R($"{PlayerRef()}.GetFactionRank({Faction(c, 0)})", T.Int);
@@ -370,17 +385,19 @@ public sealed partial class MwPapyrus
             case "getpcfacrep": return R($"{FactionRep(c, 0)}.GetValue()", T.Float);
             case "modpcfacrep": return R($"{FactionRep(c, 1)}.Mod({ArgFloat(c, 0)})", T.Void);
             case "setpcfacrep": return R($"{FactionRep(c, 1)}.SetValue({ArgFloat(c, 0)})", T.Void);
-            case "getreputation": return R($"{Generated("gen:MWReputation", "GlobalVariable", "MwReputation")}.GetValue()", T.Float);
-            case "modreputation": return R($"{Generated("gen:MWReputation", "GlobalVariable", "MwReputation")}.Mod({ArgFloat(c, 0)})", T.Void);
-            case "setreputation": return R($"{Generated("gen:MWReputation", "GlobalVariable", "MwReputation")}.SetValue({ArgFloat(c, 0)})", T.Void);
+            // The player's (a global, which the dialogue's PC Reputation reads) or an actor's own (TMMwActorAI, from its record).
+            case "getreputation": return R($"TMMwScript.GetReputation({actorSelf()}, {Generated("gen:MWReputation", "GlobalVariable", "MwReputation")})", T.Float);
+            case "modreputation": return R($"TMMwScript.SetReputation({actorSelf()}, {Generated("gen:MWReputation", "GlobalVariable", "MwReputation")}, TMMwScript.GetReputation({actorSelf()}, {Generated("gen:MWReputation", "GlobalVariable", "MwReputation")}) + {ArgFloat(c, 0)})", T.Void);
+            case "setreputation": return R($"TMMwScript.SetReputation({actorSelf()}, {Generated("gen:MWReputation", "GlobalVariable", "MwReputation")}, {ArgFloat(c, 0)})", T.Void);
+            // Morrowind's numeric reactions (TMMwState: a script's change replaces the record's; Skyrim's relation follows).
             case "getfactionreaction":
-                return R($"{Prop("faction:" + Word(c, 0), "Faction", "fac_" + Clean(Word(c, 0)))}.GetReaction({Prop("faction:" + Word(c, 1), "Faction", "fac_" + Clean(Word(c, 1)))})", T.Int);
+                return R($"{State()}.Reaction({Prop("faction:" + Word(c, 0), "Faction", "fac_" + Clean(Word(c, 0)))}, {Prop("faction:" + Word(c, 1), "Faction", "fac_" + Clean(Word(c, 1)))})", T.Int);
             case "setfactionreaction" or "modfactionreaction":
             {
                 string a = Prop("faction:" + Word(c, 0), "Faction", "fac_" + Clean(Word(c, 0)));
                 string b = Prop("faction:" + Word(c, 1), "Faction", "fac_" + Clean(Word(c, 1)));
                 // Skyrim's reactions are neutral, enemy, ally or friend (0-3): Morrowind's numbers by their sign.
-                return R($"TMMwScript.SetReaction({a}, {b}, {(fn == "modfactionreaction" ? $"TMMwScript.ReactionValue({a}, {b}) + " : "")}{ArgFloat(c, 2)})", T.Void);
+                return R($"{State()}.SetReaction({a}, {b}, {(fn == "modfactionreaction" ? $"{State()}.Reaction({a}, {b}) + " : "")}{ArgInt(c, 2)})", T.Void);
             }
 
             // ---- crime ----
@@ -391,13 +408,15 @@ public sealed partial class MwPapyrus
             case "payfine" or "payfinethief": return R($"{Law()}.PayFine({(fn == "payfine" ? "True" : "False")})", T.Void);
             case "gotojail": return R($"{Law()}.GoToJail()", T.Void);
             case "getpcinjail": return R($"{Law()}.InJail", T.Bool);
-            case "getpctraveling": return R("False", T.Bool);
+            case "getpctraveling": return Approx("always false", R("False", T.Bool));
 
             // ---- the player and the interface ----
             case "disableplayercontrols": return R("Game.DisablePlayerControls(True, False, False, False, True, False, True)", T.Void);
             case "enableplayercontrols": return R("Game.EnablePlayerControls(True, False, False, False, True, False, True)", T.Void);
-            case "disableplayerfighting" or "disableplayermagic": return R("Game.DisablePlayerControls(False, True, False, False, False, False, False)", T.Void);
-            case "enableplayerfighting" or "enableplayermagic": return R("Game.EnablePlayerControls(False, True, False, False, False, False, False)", T.Void);
+            case "disableplayerfighting": return R("Game.DisablePlayerControls(False, True, False, False, False, False, False)", T.Void);
+            case "enableplayerfighting": return R("Game.EnablePlayerControls(False, True, False, False, False, False, False)", T.Void);
+            case "disableplayermagic": return Approx("fighting's switch", R("Game.DisablePlayerControls(False, True, False, False, False, False, False)", T.Void));
+            case "enableplayermagic": return Approx("fighting's switch", R("Game.EnablePlayerControls(False, True, False, False, False, False, False)", T.Void));
             case "disableplayerviewswitch": return R("Game.DisablePlayerControls(False, False, True, False, False, False, False)", T.Void);
             case "enableplayerviewswitch": return R("Game.EnablePlayerControls(False, False, True, False, False, False, False)", T.Void);
             case "disableplayerlooking": return R("Game.DisablePlayerControls(False, False, False, True, False, False, False)", T.Void);
@@ -411,41 +430,46 @@ public sealed partial class MwPapyrus
             case "getplayerfightingdisabled" or "getplayermagicdisabled": return R("!Game.IsFightingControlsEnabled()", T.Bool);
             case "getplayerlookingdisabled": return R("!Game.IsLookingControlsEnabled()", T.Bool);
             case "getplayerviewswitch": return R("!Game.IsCamSwitchControlsEnabled()", T.Bool);
-            case "getplayerjumpingdisabled" or "getvanitymodedisabled": return R("False", T.Bool);
+            case "getplayerjumpingdisabled" or "getvanitymodedisabled": return Approx("always false", R("False", T.Bool));
             case "enableracemenu" or "enablenamemenu" or "enableclassmenu" or "enablebirthmenu" or "enablestatreviewmenu":
                 return Nothing("the player made their character at the start of the journey (TMStoryOrder)");
             case "enableinventorymenu" or "enablemagicmenu" or "enablemapmenu" or "enablestatsmenu" or "enablelevelupmenu" or "enablerest":
                 return Nothing("Skyrim's menus are always available");
-            case "showrestmenu": return R("TMMwScript.ShowRestMenu()", T.Void);
+            case "showrestmenu": return Approx("the wait menu", R("TMMwScript.ShowRestMenu()", T.Void));
             case "showmap":
                 return R($"TMMwScript.ShowMap({Prop("mapmarkers:" + Word(c, 0), "FormList", "mm_" + Clean(Word(c, 0)))})", T.Void);
             case "fadeout": return R($"TMMwScript.FadeOut({ArgFloat(c, 0)})", T.Void);
             case "fadein": return R($"TMMwScript.FadeIn({ArgFloat(c, 0)})", T.Void);
-            case "fadeto": return R($"TMMwScript.FadeTo({ArgFloat(c, 0)}, {ArgFloat(c, 1)})", T.Void);
+            case "fadeto": return Approx("all or nothing", R($"TMMwScript.FadeTo({ArgFloat(c, 0)}, {ArgFloat(c, 1)})", T.Void));
             case "pcforce1stperson": return R("Game.ForceFirstPerson()", T.Void);
             case "pcforce3rdperson": return R("Game.ForceThirdPerson()", T.Void);
             case "pcget3rdperson": return R("TMMwScript.InThirdPerson()", T.Bool);
             case "getpcrunning": return R($"{PlayerRef()}.IsRunning()", T.Bool);
             case "getpcsneaking": return R($"{PlayerRef()}.IsSneaking()", T.Bool);
             case "getpcjumping": return R($"{PlayerRef()}.GetAnimationVariableBool(\"bInJumpState\")", T.Bool);
-            case "getpcvisionbonus": return R("0", T.Int);
-            case "xbox": return R("0", T.Int);   // never the Xbox
+            case "getpcvisionbonus": return Approx("always 0", R("0", T.Int));
+            case "xbox": return R("0", T.Int);   // never the Xbox: Morrowind on the PC says 0 too
             case "menutest" or "togglemenus" or "tm" or "toggleai" or "tai" or "togglecollision" or "tcl" or "togglegodmode" or "tgm" or "fixme" or "outputobjcounts" or "resetactors":
                 return Nothing("a console command; nothing a quest needs");
-            case "dontsaveobject": return Nothing("Skyrim saves what it needs");
+            // Its locals start again from 0 after each load (Events: OnMwGameLoaded), as Morrowind saves nothing of it.
+            case "dontsaveobject":
+                if (kind != Kind.Object) return Same("only an object's script can keep itself out of a save");
+                uses.Add("dontsave");
+                return R("; DontSaveObject: the locals start again after each load (OnMwGameLoaded)", T.Void);
             case "skipanim": return Nothing("Skyrim's animations are driven by its behaviours");
 
             // ---- messages and speech ----
             case "messagebox": return MessageBoxCode(c);
+            // The last button chosen, once, whichever script asks (TMMwState: the box was shown without waiting).
             case "getbuttonpressed":
-                if (kind == Kind.Result) return R("-1", T.Int);
-                uses.Add("button");
-                return R("MwTakeButton()", T.Int);
+                return R($"{State()}.TakeButton()", T.Int);
             case "say": return SayCode(c, statement);
             case "saydone":
-                if (kind == Kind.Result) return R("True", T.Bool);
+                // A Morrowind person: whether it has said its line (TMMwSayLine's mark); one heard as a sound: its length.
+                if (kind == Kind.Result) return R($"TMMwScript.SayDone({self()}, 0.0)", T.Bool);
                 uses.Add("say");
-                return R("Utility.GetCurrentRealTime() >= __sayUntil", T.Bool);
+                if (!PersonSubject(c)) Gap("SayDone: by the recording's length (a line played as a sound)");
+                return R($"TMMwScript.SayDone({self()}, __sayUntil)", T.Bool);
 
             // ---- sound, music, visuals ----
             case "playsound" or "playsoundvp":
@@ -456,10 +480,14 @@ public sealed partial class MwPapyrus
             {
                 string id = Word(c, 0);
                 string loop = Prop("loopsound:" + id, "Sound", "ls_" + Clean(id));
-                if (kind == Kind.Result) return R($"{loop}.Play({self()})", T.Void);
+                // PlayLoopSound3DVP id volume pitch: its volume (Skyrim's Papyrus sets an instance's volume, not its pitch).
+                bool vp = fn == "playloopsound3dvp";
+                if (vp) Gap("PlayLoopSound3DVP: pitch dropped");
+                if (kind == Kind.Result)
+                    return R(vp ? $"Sound.SetInstanceVolume({loop}.Play({self()}), {ArgFloat(c, 1)})" : $"{loop}.Play({self()})", T.Void);
                 loopSounds.Add(Clean(id));
-                // Started once; Morrowind's scripts call it every frame to keep it going.
-                return R($"If !__loop_{Clean(id)}\n  __loop_{Clean(id)} = {loop}.Play({self()})\nEndIf", T.Void);
+                // Started once; Morrowind's scripts call it every frame to keep it going (and the volume with it).
+                return R($"If !__loop_{Clean(id)}\n  __loop_{Clean(id)} = {loop}.Play({self()})\nEndIf" + (vp ? $"\nSound.SetInstanceVolume(__loop_{Clean(id)}, {ArgFloat(c, 1)})" : ""), T.Void);
             }
             case "stopsound":
             {
@@ -469,21 +497,28 @@ public sealed partial class MwPapyrus
                     loopSounds.Add(Clean(id));
                     return R($"If __loop_{Clean(id)}\n  Sound.StopInstance(__loop_{Clean(id)})\n  __loop_{Clean(id)} = 0\nEndIf", T.Void);
                 }
+                // One played by this script: stopped at once (its instance); one the script didn't start can't be reached.
+                if (kind != Kind.Result && world.TypeOf(id) == "SOUN")
+                {
+                    uses.Add("sound");
+                    return R($"MwStopSound({Prop("sound:" + id, "Sound", "snd_" + Clean(id))})", T.Void);
+                }
                 return Nothing("the sound plays once and ends by itself");
             }
             case "getsoundplaying":
             {
                 string id = Word(c, 0);
-                if (kind == Kind.Result) return R("False", T.Bool);
+                if (kind == Kind.Result) return Approx("always false in a result script", R("False", T.Bool));
                 if (world.TypeOf(id) != "SOUN") return Fail("unknown sound", "False");
                 uses.Add("sound");
+                Gap("GetSoundPlaying: by the sound's length");
                 if (loopSounds.Contains(Clean(id))) return R($"__loop_{Clean(id)} != 0", T.Bool);
                 return R($"MwSoundPlaying({Prop("sound:" + id, "Sound", "snd_" + Clean(id))})", T.Bool);
             }
             case "streammusic":
             {
                 // The track, as a music type of its own played over the music of the place (and done when it ends).
-                if (world.MusicFile(Word(c, 0)) is not { } music) return Nothing($"there is no music file {Word(c, 0)} in the game");
+                if (world.MusicFile(Word(c, 0)) is not { } music) return Same($"there is no music file {Word(c, 0)} in the game");
                 return R($"TMMwScript.StreamMusic({Prop("music:" + music, "MusicType", "mu_" + Clean(Path.GetFileNameWithoutExtension(music)))})", T.Void);
             }
             case "playbink":
@@ -495,16 +530,18 @@ public sealed partial class MwPapyrus
             // PlayGroup group [mode]: its loop part on and on; LoopGroup group count [mode]: that many more times (OpenMW's
             // animationextensions: PlayGroup's count is the most there is, LoopGroup's its count + 1 passes).
             case "playgroup":
+                if (PersonSubject(c)) Gap($"{c.Function}: on a person, knockout, death and idle only");
                 return R($"TMMwScript.PlayGroup({self()}, \"{Word(c, 0)}\", {ArgInt(c, 1)}, -1)", T.Void);
             case "loopgroup":
+                if (PersonSubject(c)) Gap($"{c.Function}: on a person, knockout, death and idle only");
                 return R($"TMMwScript.PlayGroup({self()}, \"{Word(c, 0)}\", {ArgInt(c, 2)}, {ArgInt(c, 1)})", T.Void);
             case "changeweather":
                 return R($"TMMwScript.ChangeWeather({Prop("weather:" + Word(c, 0) + ":" + Word(c, 1), "Weather", "w_" + Clean(Word(c, 0)) + "_" + Clean(Word(c, 1)))})", T.Void);
             case "modregion":
                 return Nothing("Skyrim's regions keep their weather chances (ChangeWeather sets the weather)");
             case "getcurrentweather": return R($"TMMwScript.CurrentWeatherIn({Prop("weathers:all", "FormList", "MWWeathers")})", T.Int);
-            case "getwindspeed": return R("Weather.GetCurrentWeather().GetWindDirection() / 360.0", T.Float);
-            case "getmasserphase" or "getsecundaphase": return R("((Utility.GetCurrentGameTime() as Int) / 3) % 8", T.Int);
+            case "getwindspeed": return Approx("the wind's direction", R("Weather.GetCurrentWeather().GetWindDirection() / 360.0", T.Float));
+            case "getmasserphase" or "getsecundaphase": return Approx("one formula for both moons", R("((Utility.GetCurrentGameTime() as Int) / 3) % 8", T.Int));
             case "turnmoonred" or "turnmoonwhite": return Nothing("Skyrim's moons can't be recoloured by script");
             case "getcurrenttime": return R($"{GlobalProperty("GameHour")}.GetValue()", T.Float);
 
@@ -522,6 +559,20 @@ public sealed partial class MwPapyrus
     }
 
     bool PropertyExists(string fill) => propertyByFill.ContainsKey(fill);
+
+    string CreatureGems(string creature) => Prop("creaturegems:" + creature, "FormList", "sgs_" + Clean(creature));
+
+    /// <summary>What TMMwActorAI doesn't yet do as Morrowind does with a setting: Hello's greeting (Morrowind's voice
+    /// topics aren't converted), Flee weighed against the actor's attack ratings.</summary>
+    Code AiGap(string fn, Code code)
+    {
+        if (fn.EndsWith("hello", StringComparison.Ordinal)) Gap("Hello: no greeting by distance (voice topics)");
+        else if (fn.EndsWith("flee", StringComparison.Ordinal)) Gap("Flee: not weighed against the actor's weapon and spell ratings");
+        return code;
+    }
+
+    /// <summary>A call acting on a person (an NPC): its target is one, or it is an NPC's own script.</summary>
+    bool PersonSubject(Call c) => c.Target is { } t ? world.TypeOf(t) == "NPC_" : kind == Kind.Object && ctx.OnActor && !ctx.OnCreature;
 
     string AI() => $"({Prop("ai", "Quest", "MwAI")} as TMMwAI)";
     /// <summary>The state Morrowind keeps and Skyrim doesn't (attributes...): TMMwState on the quest MWScriptState.</summary>
@@ -588,17 +639,21 @@ public sealed partial class MwPapyrus
         return null;
     }
 
-    /// <summary>Morrowind's stats by Skyrim's actor values; "" where Skyrim has none (attributes, some effects).</summary>
+    /// <summary>
+    /// Morrowind's stats by Skyrim's actor values; "" for those kept as Morrowind's own (TMMwState): the eight attributes
+    /// and all 27 skills (each character's own, from its record, the player's from where it lives: Skyrim's skill, the
+    /// progression's, or its hidden weapon skills; user, 2026-10-23: "Keep original stats"), and effects Skyrim has none of.
+    /// </summary>
     static readonly Dictionary<string, string> StatNames = new(StringComparer.OrdinalIgnoreCase)
     {
         ["health"] = "Health", ["magicka"] = "Magicka", ["fatigue"] = "Stamina",
         ["strength"] = "", ["intelligence"] = "", ["willpower"] = "", ["agility"] = "", ["speed"] = "", ["endurance"] = "", ["personality"] = "", ["luck"] = "",
-        ["block"] = "Block", ["armorer"] = "Smithing", ["mediumarmor"] = "LightArmor", ["heavyarmor"] = "HeavyArmor", ["bluntweapon"] = "TwoHanded",
-        ["longblade"] = "OneHanded", ["axe"] = "TwoHanded", ["spear"] = "TwoHanded", ["athletics"] = "", ["enchant"] = "Enchanting",
-        ["destruction"] = "Destruction", ["alteration"] = "Alteration", ["illusion"] = "Illusion", ["conjuration"] = "Conjuration",
-        ["mysticism"] = "Alteration", ["restoration"] = "Restoration", ["alchemy"] = "Alchemy", ["unarmored"] = "", ["security"] = "Lockpicking",
-        ["sneak"] = "Sneak", ["acrobatics"] = "", ["lightarmor"] = "LightArmor", ["shortblade"] = "OneHanded", ["marksman"] = "Marksman",
-        ["mercantile"] = "Speechcraft", ["speechcraft"] = "Speechcraft", ["handtohand"] = "UnarmedDamage",
+        ["block"] = "", ["armorer"] = "", ["mediumarmor"] = "", ["heavyarmor"] = "", ["bluntweapon"] = "",
+        ["longblade"] = "", ["axe"] = "", ["spear"] = "", ["athletics"] = "", ["enchant"] = "",
+        ["destruction"] = "", ["alteration"] = "", ["illusion"] = "", ["conjuration"] = "",
+        ["mysticism"] = "", ["restoration"] = "", ["alchemy"] = "", ["unarmored"] = "", ["security"] = "",
+        ["sneak"] = "", ["acrobatics"] = "", ["lightarmor"] = "", ["shortblade"] = "", ["marksman"] = "",
+        ["mercantile"] = "", ["speechcraft"] = "", ["handtohand"] = "",
         ["resistfire"] = "FireResist", ["resistfrost"] = "FrostResist", ["resistshock"] = "ElectricResist", ["resistmagicka"] = "MagicResist",
         ["resistpoison"] = "PoisonResist", ["resistdisease"] = "DiseaseResist", ["resistparalysis"] = "", ["resistnormalweapons"] = "",
         ["resistblight"] = "", ["resistcorprus"] = "",
@@ -645,7 +700,7 @@ public sealed partial class MwPapyrus
             return s.Verb switch
             {
                 "get" or "getcurrent" => new Code($"{st}.GetStat({a}, {index}, {b})", T.Float),
-                "ratio" => new Code("1.0", T.Float),
+                "ratio" => new Code($"{st}.GetRatio({a}, {index}, {b})", T.Float),
                 "set" => new Code($"{st}.SetStat({a}, {index}, {b}, {ArgFloat(c, 0)})", T.Void),
                 _ => new Code($"{st}.ModStat({a}, {index}, {b}, {ArgFloat(c, 0)})", T.Void),
             };
@@ -663,6 +718,8 @@ public sealed partial class MwPapyrus
         };
     }
 
+    Code GapCode(string what, Code code) { Gap(what); return code; }
+
     // ---- sound ----
 
     Code SoundCode(Call c, string at, int volumeArg)
@@ -670,12 +727,16 @@ public sealed partial class MwPapyrus
         string id = Word(c, 0);
         if (world.TypeOf(id) != "SOUN") return new Code($"; there is no sound {id} in the game", T.Void);
         string snd = Prop("sound:" + id, "Sound", "snd_" + Clean(id));
+        if (volumeArg > 0) Gap($"{c.Function}: pitch dropped");
         string play = volumeArg > 0
             ? $"Sound.SetInstanceVolume({snd}.Play({at}), {ArgFloat(c, volumeArg)})"
             : $"{snd}.Play({at})";
         if (kind == Kind.Result) return new Code(play, T.Void);
         uses.Add("sound");
-        return new Code($"{play}\nMwPlayed({snd}, {F(world.SoundSeconds(id))})", T.Void);
+        // Its instance kept, so StopSound can stop it.
+        return volumeArg > 0
+            ? new Code($"MwPlayed({snd}, {F(world.SoundSeconds(id))}, {snd}.Play({at}), {ArgFloat(c, volumeArg)})", T.Void)
+            : new Code($"MwPlayed({snd}, {F(world.SoundSeconds(id))}, {play})", T.Void);
     }
 
     // ---- messages ----
@@ -744,21 +805,20 @@ public sealed partial class MwPapyrus
         int firstButton = rest.FindIndex(a => a is Str);
         var values = firstButton < 0 ? rest : rest.Take(firstButton).ToList();
         var buttons = firstButton < 0 ? [] : rest.Skip(firstButton).Select(a => a is Str s ? s.Value : a is Name n ? n.Id : "").ToList();
-        bool readsButtons = kind != Kind.Result && buttons.Count > 0 && ScriptReadsButtons;
-        if (!readsButtons) return new Code($"Debug.MessageBox({Format(text.Value, values)})", T.Void);
+        // Buttons, read by any script's GetButtonPressed (Morrowind keeps the last button pressed, not a script).
+        if (buttons.Count == 0) return new Code($"Debug.MessageBox({Format(text.Value, values)})", T.Void);
         if (values.Count > 9 || text.Value.Contains("%s", StringComparison.OrdinalIgnoreCase))
         {
+            Gap("MessageBox: the text and the buttons in two boxes");
             // Skyrim's message records format numbers only; a name in the text goes through a plain box first.
-            uses.Add("button");
             string idx = $"TMMW_{Clean(scriptId)}_Msg{messages.Count}";
             messages.Add(new MessageForm(idx, "", buttons.Select(Controls).ToList()));
-            return new Code($"Debug.MessageBox({Format(text.Value, values)})\n__button = {Generated("message:" + idx, "Message", "m_" + messages.Count)}.Show()", T.Void);
+            return new Code($"Debug.MessageBox({Format(text.Value, values)})\n{State()}.ShowMessage({Generated("message:" + idx, "Message", "m_" + messages.Count)})", T.Void);
         }
         string id = $"TMMW_{Clean(scriptId)}_Msg{messages.Count}";
         messages.Add(new MessageForm(id, Controls(text.Value), buttons.Select(Controls).ToList()));
-        uses.Add("button");
         var args = values.Select(v => Convert(Expr(v), T.Float));
-        return new Code($"__button = {Generated("message:" + id, "Message", "m_" + messages.Count)}.Show({string.Join(", ", args)})", T.Void);
+        return new Code($"{State()}.ShowMessage({string.Join(", ", args.Prepend(Generated("message:" + id, "Message", "m_" + messages.Count)))})", T.Void);
     }
 
     public bool ScriptReadsButtons { get; set; } = true;
