@@ -641,7 +641,7 @@ static class Program
                 Console.WriteLine($"Converted into {outDir}. Enable these plugins, in this order, after Skyrim's own:");
                 foreach (var p in plugins) Console.WriteLine($"  {p}");
                 if (failed.Count > 0) Console.WriteLine($"Failed: {string.Join(", ", failed)} (the others work without them)");
-                Console.WriteLine("Needed: SKSE and Address Library for SKSE Plugins. They run the Tamriel menu, the guide, Daggerfall's seamless overland (SKSE/Plugins/TamrielMergeSeamless.dll: physics past 64 cells) and the era in the date (TamrielMergeEra.dll).");
+                Console.WriteLine("Needed: SKSE and Address Library for SKSE Plugins. They run the Tamriel menu, the guide, Daggerfall's seamless overland (SKSE/Plugins/TamrielMergeSeamless.dll: physics past 64 cells), the era in the date (TamrielMergeEra.dll) and the classic script functions the converted scripts call (TamrielMergeNative.dll).");
                 if (plugins.Contains("Daggerfall.esm"))
                     Console.WriteLine("For the climbing animation (Daggerfall's Climbing skill): Open Animation Replacer by Ershin (without it you climb in the falling pose).");
                 if (opts.ContainsKey("install"))

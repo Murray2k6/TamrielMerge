@@ -154,7 +154,7 @@ public sealed partial class DungeonCellBuilder
     /// <paramref name="origin"/> is where the surface's frame starts (Daggerfall units). Returns the door and the point in
     /// front of it where someone arriving through it should stand (Skyrim units) with the heading to face away.
     /// </summary>
-    internal (PlacedObject Door, P3Float Arrival, float ArrivalHeading) SurfaceDoor(DfTownLayout.DoorSurface s, Vector3 origin, FormKey doorBase, FormKey? placeAs = null)
+    internal (PlacedObject Door, P3Float Arrival, float ArrivalHeading) SurfaceDoor(DfTownLayout.DoorSurface s, Vector3 origin, FormKey doorBase, FormKey? placeAs = null, bool persistent = true)
     {
         var (min, max, _) = props.SkyrimShape(doorBase);
         float height = MathF.Max(max.Z - min.Z, 1);
@@ -173,7 +173,7 @@ public sealed partial class DungeonCellBuilder
         {
             Base = (placeAs ?? doorBase).ToNullableLink<IPlaceableObjectGetter>(),
             Placement = new Placement { Position = new P3Float(wall.X - offset.X, wall.Y - offset.Y, bottom - min.Z * scale), Rotation = new P3Float(0, 0, heading) },
-            SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)PersistentFlag,
+            SkyrimMajorRecordFlags = persistent ? (SkyrimMajorRecord.SkyrimMajorRecordFlag)PersistentFlag : 0,
         };
         if (MathF.Abs(scale - 1) > 0.01f) door.Scale = scale;
         var arrival = new P3Float(wall.X + facing.X * 110, wall.Y + facing.Y * 110, bottom + 8);
@@ -297,13 +297,14 @@ public sealed partial class DungeonCellBuilder
             else if (o.Type == DfRdbObjectType.Model && !models.ContainsKey(o.ModelId)) Count($"missing model {o.ModelId}");
         }
 
-        // The way out: a load door in each of Daggerfall's door surfaces.
+        // The way out: a door in each of Daggerfall's door surfaces. Temporary: nothing points at them (the exits are
+        // scripted activators, TMDfExitDoor), and every persistent reference stays in memory from the game's start.
         var exits = new List<(PlacedObject, DfTownLayout.DoorSurface)>();
         P3Float? keep = null;
         foreach (var s in DfTownLayout.Doors(block, models))
         {
-            var (door, arrival, _) = SurfaceDoor(s, Vector3.Zero, exitDoor, exitPlaceAs);
-            cell.Persistent.Add(door);
+            var (door, arrival, _) = SurfaceDoor(s, Vector3.Zero, exitDoor, exitPlaceAs, persistent: false);
+            cell.Temporary.Add(door);
             exits.Add((door, s));
             keep ??= arrival;
         }

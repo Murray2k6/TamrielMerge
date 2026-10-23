@@ -56,6 +56,9 @@ TamrielMerge.mods.json
 /tools/skse/**/*.pdb
 /tools/skse/**/gen/
 /tools/skse/**/test/*.exe
+/tools/skse/**/test/*.dll
+/tools/skse/**/test/*.log
+/tools/skse/**/build/
 
 # Upscaling and voices: their scripts only
 /tools/upscale/*

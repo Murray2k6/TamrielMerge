@@ -1,16 +1,22 @@
 ScriptName TMDfStreetDoor extends ObjectReference
 {A Daggerfall town's building door. Buildings with the same layout share one interior, so the door remembers that the
-player came in through it (and in which town) for the way back out (TMDfExitDoor), gives the people inside this
-town's names for them (SKSE SetDisplayName; without SKSE they keep the first town's), and takes the player in.
+player came in through it (and in which town) for the way back out (TMDfExitDoor), leaves this town's names for the
+people inside (they take them when they load, TMDfOccupant; SKSE SetDisplayName), and takes the player in.
 Buildings keep Daggerfall's hours (Daggerfall Unity PlayerActivate.openHours/closeHours, by building type); outside
 them the door is locked (lock = quality / 2): sneaking tries to pick it with Daggerfall's exterior chance,
 Lockpicking - 5 x lock (5-95%), once per skill level, and hitting it may bash it open (25 - lock in %).}
 
 TMDfTalk Property Talk Auto
+TMDfTalk Property Way Auto
+{The conversation quest every shared interior reads the way back and its people's names from (Daggerfall.esm's, for
+a plugin built in parts); the same as Talk in Daggerfall.esm itself.}
 ObjectReference Property Arrival Auto
+{The interior's anchor (its one persistent reference); the player is then set at ArrivalAt.}
+Float[] Property ArrivalAt Auto
+{Where this door's way in arrives inside: x, y, z and the heading in degrees.}
 Int Property Town = -1 Auto
-Actor[] Property Occupants Auto
 String[] Property Names Auto
+{This town's names for the people inside, by their Index (they take them when they load: TMDfOccupant).}
 Int Property BuildingType = 17 Auto
 Int Property LockValue = 0 Auto
 String Property BuildingName = "" Auto
@@ -134,15 +140,20 @@ Event OnActivate(ObjectReference akActionRef)
   EndIf
   Talk.LastDoor = Self
   Talk.LastTown = Town
-  Int i = 0
-  While Occupants && Names && i < Occupants.Length && i < Names.Length
-    If Occupants[i] && SKSE.GetVersion() > 0
-      Occupants[i].SetDisplayName(Names[i], True)
+  If Way
+    Way.LastDoor = Self
+    Way.LastTown = Town
+    Way.CurrentNames = Names
+    If Arrival
+      Way.CurrentCell = Arrival.GetParentCell()
     EndIf
-    i += 1
-  EndWhile
+  EndIf
   If Arrival
     player.MoveTo(Arrival)
+    If ArrivalAt && ArrivalAt.Length >= 4
+      player.SetPosition(ArrivalAt[0], ArrivalAt[1], ArrivalAt[2])
+      player.SetAngle(0.0, 0.0, ArrivalAt[3])
+    EndIf
   EndIf
 EndEvent
 

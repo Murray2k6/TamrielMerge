@@ -5,6 +5,9 @@ of this building (no remembered door after coc or in an older save, or one whose
 falls back to Fallback: the street door of the first town with this building that leads to this exit.}
 
 TMDfTalk Property Talk Auto
+TMDfTalk Property Way Auto
+{Where the street door the player came in by is remembered: the conversation quest every shared interior reads
+(Daggerfall.esm's, for a plugin built in parts); Talk when it isn't set.}
 ObjectReference Property Fallback Auto
 {A street door of this building (the converter's choice: the first town's, nearest this exit).}
 
@@ -14,7 +17,9 @@ Event OnActivate(ObjectReference akActionRef)
     Return
   EndIf
   ObjectReference streetDoor = None
-  If Talk
+  If Way
+    streetDoor = Way.LastDoor
+  ElseIf Talk
     streetDoor = Talk.LastDoor
   EndIf
   ; The remembered door must lead into this interior.

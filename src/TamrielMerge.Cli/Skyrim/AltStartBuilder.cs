@@ -384,8 +384,11 @@ public static class AltStartBuilder
     /// The converter's SKSE plugins (tools/skse) into outDir\SKSE\Plugins: TamrielMergeEra.dll makes the game's dates
     /// show the era of the time travelled to (Skyrim prints "4E" whatever the year); TamrielMergeSeamless.dll widens
     /// Skyrim's physics box to 512 cells from a worldspace's centre, which Daggerfall's overland (one worldspace of
-    /// 1000 x 500 cells) needs: without it physics ends 64 cells out (actors sink, doors stick). SKSE is needed anyway
-    /// (the Tamriel menu). The graphics plugin (DLSS, ray tracing) was removed from the tool on 2026-10-15 (user).
+    /// 1000 x 500 cells) needs: without it physics ends 64 cells out (actors sink, doors stick); TamrielMergeNative.dll
+    /// gives the converted scripts Skyrim's own classic script functions Papyrus can't call (TMNative: conditions such
+    /// as GetKnockedState, commands such as SetForceRun); TamrielMergeCrashLog.dll writes down what the game was doing when it
+    /// crashes (TamrielMergeCrashLog.log beside it: the fault, the stack, the classes and FormIDs in hand). SKSE is needed anyway (the Tamriel menu). The graphics plugin
+    /// (DLSS, ray tracing) was removed from the tool on 2026-10-15 (user).
     /// </summary>
     public static void CopyEraPlugin(string outDir)
     {
@@ -394,6 +397,8 @@ public static class AltStartBuilder
         [
             ("TamrielMergeEra", ["TamrielMergeEra.dll"]),
             ("TamrielMergeSeamless", ["TamrielMergeSeamless.dll"]),
+            ("TamrielMergeNative", ["TamrielMergeNative.dll"]),
+            ("TamrielMergeCrashLog", ["TamrielMergeCrashLog.dll"]),
         ];
         string target = Path.Combine(outDir, "SKSE", "Plugins");
         foreach (var (folder, files) in plugins)

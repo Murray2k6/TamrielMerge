@@ -14,6 +14,10 @@ Int Property KindCount Auto
 Actor Property PlayerRef Auto
 ObjectReference Property LastDoor Auto Hidden
 Int Property LastTown = -1 Auto Hidden
+String[] Property CurrentNames Auto Hidden
+{The names the street door last entered gives the people of its interior, by their Index (TMDfOccupant).}
+Cell Property CurrentCell Auto Hidden
+{The interior those names are for.}
 
 Int Function TownIndex()
   If PlayerRef.IsInInterior()

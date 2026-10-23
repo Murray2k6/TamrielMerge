@@ -21,7 +21,10 @@ public static class QuestSites
     /// location but no plugin builds: on the map, nothing to enter).</summary>
     public sealed record Town(DfLocation Location, TownBuilder.Built? Built);
 
-    const int MaxBuildingsPerQuest = 900, MaxDungeonsPerQuest = 500, PerType = 3, PerHouseType = 2;
+    const int MaxBuildingsPerQuest = 900, MaxDungeonsPerQuest = 500;
+    /// <summary>Buildings of a type listed per town (the first in the town's list; houses fewer): TownBuilder keeps
+    /// those doors persistent, as the quests point at them.</summary>
+    internal const int PerType = 3, PerHouseType = 2;
 
     static ScriptObjectProperty Obj(string name, FormKey key) => new() { Name = name, Object = key.ToLink<ISkyrimMajorRecordGetter>() };
     static ScriptObjectListProperty Objs(string name, IEnumerable<FormKey> keys)
@@ -52,15 +55,29 @@ public static class QuestSites
         return l => ids.TryGetValue((l.Region, l.Index), out var e) && byEdid.TryGetValue(e, out var k) ? k : null;
     }
 
-    /// <summary>The named individuals placed in <paramref name="mod"/>'s interiors: (faction, reference).</summary>
+    /// <summary>
+    /// The named individuals placed in <paramref name="mod"/>'s interiors: (faction, reference). The quests point at
+    /// their references, so the one chosen per individual is made persistent here (townsfolk are placed temporary:
+    /// TownBuilder).
+    /// </summary>
     public static List<(int Faction, FormKey Ref)> Individuals(SkyrimMod mod, IEnumerable<TownPeople.Person> people)
     {
         var byNpc = people.Where(p => p.Faction is { Type: DfFactionType.Individual }).GroupBy(p => p.Npc.FormKey).ToDictionary(g => g.Key, g => g.First().Faction!.Id);
         var found = new List<(int, FormKey)>();
         var seen = new HashSet<int>();
         foreach (var cell in mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(s => s.Cells))
+        {
             foreach (var r in cell.Persistent.OfType<PlacedNpc>())
                 if (byNpc.TryGetValue(r.Base.FormKey, out var f) && seen.Add(f)) found.Add((f, r.FormKey));
+            foreach (var r in cell.Temporary.OfType<PlacedNpc>().ToList())
+                if (byNpc.TryGetValue(r.Base.FormKey, out var f) && seen.Add(f))
+                {
+                    cell.Temporary.Remove(r);
+                    r.SkyrimMajorRecordFlags |= (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
+                    cell.Persistent.Add(r);
+                    found.Add((f, r.FormKey));
+                }
+        }
         return found;
     }
 

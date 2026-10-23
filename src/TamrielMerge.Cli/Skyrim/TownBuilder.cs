@@ -198,6 +198,7 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                 Properties =
                 [
                     new ScriptObjectProperty { Name = "Talk", Object = TalkQuest.ToLink<ISkyrimMajorRecordGetter>() },
+                    new ScriptObjectProperty { Name = "Way", Object = Way },
                     new ScriptObjectProperty { Name = "Fallback", Object = fallback.ToLink<ISkyrimMajorRecordGetter>() },
                 ],
             },
@@ -232,12 +233,28 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
         return q;
     }
 
-    /// <summary>A building interior shared by every town with that block, style and region race.</summary>
-    sealed record Shared(DungeonCellBuilder.BuiltInterior Built, List<(PlacedObject Exit, PlacedObject Arrival)> Arrivals, List<(PlacedNpc Ref, DfRdbObject Flat)> Occupants);
+    /// <summary>
+    /// A building interior shared by every town with that block, style and region race. Only its anchor is persistent
+    /// (the one reference a street door moves the player to; Skyrim keeps every persistent reference in memory from the
+    /// start, and 3.4 million of them in Daggerfall Towns.esm ended the game while its data loaded, 2026-10-23): each
+    /// exit's arrival is a place in the cell the street door sets the player at after the move. Its people are
+    /// temporary too, named for the town entered when they load (TMDfOccupant).
+    /// </summary>
+    sealed record Shared(DungeonCellBuilder.BuiltInterior Built, PlacedObject? Anchor, List<(PlacedObject Exit, P3Float At, float Heading)> Arrivals, List<(PlacedNpc Ref, DfRdbObject Flat)> Occupants);
     readonly Dictionary<string, Shared> sharedInteriors = new();
     int townCount;
 
     public int SharedInteriors => sharedInteriors.Count;
+
+    /// <summary>The quest whose LastDoor and occupant names every shared interior reads (TMDfTalk): the plugin's own
+    /// conversation quest, or, for a part of a plugin built in parts whose interiors may come from any part, the
+    /// master's (Daggerfall.esm's DFTalk). Unset: <see cref="TalkQuest"/>.</summary>
+    public FormKey? WayQuest { get; set; }
+    FormLink<ISkyrimMajorRecordGetter> Way => new(WayQuest ?? TalkQuest.FormKey);
+
+    /// <summary>Added to shared interiors' EditorIDs: a part of a plugin built in parts builds its own copies, and
+    /// Skyrim indexes interior cells by EditorID ("_P3" for part 3).</summary>
+    public string InteriorSuffix { get; set; } = "";
 
     DfText? dfText;
     /// <summary>TEXT.RSC (the castles' names).</summary>
@@ -389,27 +406,29 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                     string key = $@"{style}\{interiorBlock.Name}\{(redguard ? "R" : "B")}";
                     if (!sharedInteriors.TryGetValue(key, out var shared))
                     {
-                        var built = cells.BuildBuildingInterior($"DFI{LocationPlacer.Sanitize(key)}", BuildingName(b.Data.Type), interiorBlock, $@"{style}\{interiorBlock.Name}", interiorPicker, doorBase, exitDoorBase);
+                        var built = cells.BuildBuildingInterior($"DFI{LocationPlacer.Sanitize(key)}{InteriorSuffix}", BuildingName(b.Data.Type), interiorBlock, $@"{style}\{interiorBlock.Name}", interiorPicker, doorBase, exitDoorBase);
                         built.Cell.Location = new FormLinkNullable<ILocationGetter>(overland.Location.FormKeyNullable ?? FormKey.Null);
                         // Houses and shops are private property (Daggerfall Unity: a house's things, a shop's wares): owned by
                         // the region's law, so taking them is theft (TMDfLaw counts it in the region the player is in).
                         if (IsPrivate(b.Data.Type)) built.Cell.Owner.SetTo(DfLaw.Region(mod, loc.Region));
                         interiors++;
                         foreach (var (k, v) in built.Fixtures) fixtures[k] = fixtures.GetValueOrDefault(k) + v;
-                        // Where each way in arrives: in front of the exit nearest the street door.
-                        var arrivals = new List<(PlacedObject, PlacedObject)>();
+                        // Where each way in arrives: in front of the exit nearest the street door. One persistent anchor
+                        // (at the first exit's arrival) to move to; each exit's arrival a place the door sets.
+                        var arrivals = new List<(PlacedObject, P3Float, float)>();
+                        PlacedObject? anchor = null;
                         foreach (var (exit, surface) in built.Exits)
                         {
-                            var (_, insideArrival, insideHeading) = cells.SurfaceDoor(surface, Vector3.Zero, doorBase);
-                            var marker = new PlacedObject(mod)
+                            var (_, insideArrival, insideHeading) = cells.SurfaceDoor(surface, Vector3.Zero, doorBase, persistent: false);
+                            anchor ??= new PlacedObject(mod)
                             {
                                 Base = XMarkerHeading.ToNullableLink<IPlaceableObjectGetter>(),
                                 Placement = new Placement { Position = insideArrival, Rotation = new P3Float(0, 0, insideHeading) },
                                 SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)Persistent,
                             };
-                            built.Cell.Persistent.Add(marker);
-                            arrivals.Add((exit, marker));
+                            arrivals.Add((exit, insideArrival, insideHeading));
                         }
+                        if (anchor is not null) built.Cell.Persistent.Add(anchor);
                         var occupants = new List<(PlacedNpc, DfRdbObject)>();
                         var persons = new List<TownPeople.Person>();
                         if (People is { } people)
@@ -418,13 +437,29 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                                 int recordOffset = -1 - flat.RecordOffset;
                                 if (people.Make(loc, bx, by, b.Index, b.Data.Type, flat, recordOffset) is not { } person) continue;
                                 var at = ToSkyrim(flat.Position);
+                                // Temporary: named for the town the player came in from when it loads (TMDfOccupant reads
+                                // the names the street door left on the way quest).
                                 var npcRef = new PlacedNpc(mod)
                                 {
                                     Base = person.Npc.ToNullableLink<INpcGetter>(),
                                     Placement = new Placement { Position = new P3Float(at.X, at.Y, at.Z + 4), Rotation = new P3Float(0, 0, (recordOffset % 360) * MathF.PI / 180) },
-                                    SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)Persistent,
+                                    VirtualMachineAdapter = new VirtualMachineAdapter
+                                    {
+                                        Scripts =
+                                        [
+                                            new ScriptEntry
+                                            {
+                                                Name = "TMDfOccupant",
+                                                Properties =
+                                                [
+                                                    new ScriptObjectProperty { Name = "Way", Object = Way },
+                                                    new ScriptIntProperty { Name = "Index", Data = occupants.Count },
+                                                ],
+                                            },
+                                        ],
+                                    },
                                 };
-                                built.Cell.Persistent.Add(npcRef);
+                                built.Cell.Temporary.Add(npcRef);
                                 occupants.Add((npcRef, flat));
                                 persons.Add(person);
                                 Placed.Add(person);
@@ -432,25 +467,36 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                             }
                         if (Shops?.Equip(built.Cell, LocationPlacer.Sanitize(key), b.Data.Type, persons, b.Data.FactionId) is not null)
                             fixtures["shop: " + b.Data.Type] = fixtures.GetValueOrDefault("shop: " + b.Data.Type) + 1;
-                        sharedInteriors[key] = shared = new Shared(built, arrivals, occupants);
+                        sharedInteriors[key] = shared = new Shared(built, anchor, arrivals, occupants);
                     }
-                    if (shared.Arrivals.Count == 0) { unlinked += outside.Count; continue; }
+                    if (shared.Arrivals.Count == 0 || shared.Anchor is null) { unlinked += outside.Count; continue; }
                     // This town's names for the people inside.
                     var names = People is { } pp ? shared.Occupants.Select(o => pp.NameIn(loc, bx, by, b.Index, b.Data.Type, o.Flat, -1 - o.Flat.RecordOffset)).ToList() : [];
                     // Street doors are in block space; the rooms are in the building's own (unrotated) space.
                     var bOrigin = DfTownLayout.BuildingOrigin(b);
                     var unturn = DfDungeon.UnityRotY(DfTownLayout.BuildingYaw(b) * MathF.PI / 180f);
                     PlacedObject? firstStreet = null;
+                    // Persistent only where something points at the door: "Where is" (TMDfTalk's lists hold the doors of
+                    // the kinds people ask for), the first doors of each type (QuestSites takes them), and the doors of
+                    // the first town with this interior (its exits fall back to them). Every persistent reference stays
+                    // in memory from the game's start; most street doors are houses' and need none.
+                    bool fallbackTown = shared.Arrivals.Any(a => a.Exit.VirtualMachineAdapter is null);
+                    bool house = (int)b.Data.Type is >= 17 and <= 22;
+                    bool asked = TownTalk.Kinds.Any(k => k.Type == b.Data.Type);
                     foreach (var s in outside)
                     {
-                        var (street, _, _) = cells.SurfaceDoor(s, origin, doorBase, streetDoorBase);
+                        int sameType = doorsByType.TryGetValue(b.Data.Type, out var listed) ? listed.Count : 0;
+                        bool keep = fallbackTown || asked || sameType < (house ? QuestSites.PerHouseType : QuestSites.PerType);
+                        var (street, _, _) = cells.SurfaceDoor(s, origin, doorBase, streetDoorBase, persistent: keep);
                         street.Placement!.Position = new P3Float(street.Placement.Position.X + offset.X, street.Placement.Position.Y + offset.Y, street.Placement.Position.Z);
                         var local = Vector3.Transform(s.Centre - bOrigin, unturn);
-                        var (exit, arrival) = shared.Arrivals.OrderBy(e => Vector2.DistanceSquared(
+                        var (exit, arrivalAt, arrivalHeading) = shared.Arrivals.OrderBy(e => Vector2.DistanceSquared(
                             new(e.Exit.Placement!.Position.X, e.Exit.Placement.Position.Y), new(local.X * BlockMeshBuilder.Scale, local.Z * BlockMeshBuilder.Scale))).First();
                         var entry = new ScriptEntry { Name = "TMDfStreetDoor" };
                         entry.Properties.Add(new ScriptObjectProperty { Name = "Talk", Object = TalkQuest.ToLink<ISkyrimMajorRecordGetter>() });
-                        entry.Properties.Add(new ScriptObjectProperty { Name = "Arrival", Object = arrival.ToLink<ISkyrimMajorRecordGetter>() });
+                        entry.Properties.Add(new ScriptObjectProperty { Name = "Way", Object = Way });
+                        entry.Properties.Add(new ScriptObjectProperty { Name = "Arrival", Object = shared.Anchor.ToLink<ISkyrimMajorRecordGetter>() });
+                        entry.Properties.Add(new ScriptFloatListProperty { Name = "ArrivalAt", Data = [arrivalAt.X, arrivalAt.Y, arrivalAt.Z, arrivalHeading * 180f / MathF.PI] });
                         entry.Properties.Add(new ScriptIntProperty { Name = "Town", Data = townIndex });
                         // Daggerfall's hours and lock (Daggerfall Unity GetBuildingLockValue: quality / 2).
                         entry.Properties.Add(new ScriptIntProperty { Name = "BuildingType", Data = (int)b.Data.Type });
@@ -460,15 +506,11 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                         if (People is { } namer && namedBuildings.TryGetValue((bx, by, b.Index), out var nb)
                             && DfBuildingNames.Name(nb.Seed, b.Data.Type, nb.Faction, loc.Name, loc.Region, namer.Factions, namer.Names, DfTextFile) is { } buildingName)
                             entry.Properties.Add(new ScriptStringProperty { Name = "BuildingName", Data = buildingName });
-                        if (names.Count > 0)
-                        {
-                            var occ = new ScriptObjectListProperty { Name = "Occupants" };
-                            foreach (var (npcRef, _) in shared.Occupants) occ.Objects.Add(new ScriptObjectProperty { Object = npcRef.ToLink<ISkyrimMajorRecordGetter>() });
-                            entry.Properties.Add(occ);
-                            entry.Properties.Add(new ScriptStringListProperty { Name = "Names", Data = [.. names] });
-                        }
+                        // The people inside are named from these when they load (TMDfOccupant, by their Index).
+                        if (names.Count > 0) entry.Properties.Add(new ScriptStringListProperty { Name = "Names", Data = [.. names] });
                         street.VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [entry] };
-                        CellAt(cellsByGrid, street.Placement.Position).Persistent.Add(street);
+                        if (keep) CellAt(cellsByGrid, street.Placement.Position).Persistent.Add(street);
+                        else CellAt(cellsByGrid, street.Placement.Position).Temporary.Add(street);
                         // The exit's way out when the player didn't come in by a street door (coc, older saves): the first
                         // town's street door nearest it.
                         exit.VirtualMachineAdapter ??= ExitScript(street);
@@ -478,7 +520,7 @@ public sealed class TownBuilder(SkyrimMod mod, string arena2, IReadOnlyDictionar
                         typed.Add(street);
                     }
                     if (firstStreet is not null)
-                        foreach (var (exit, _) in shared.Arrivals) exit.VirtualMachineAdapter ??= ExitScript(firstStreet);
+                        foreach (var (exit, _, _) in shared.Arrivals) exit.VirtualMachineAdapter ??= ExitScript(firstStreet);
                 }
             }
 

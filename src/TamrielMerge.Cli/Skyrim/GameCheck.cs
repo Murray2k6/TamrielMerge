@@ -135,12 +135,12 @@ public static class GameCheck
 
         // TamrielMerge's own SKSE plugins. They write their logs beside themselves (Data\SKSE\Plugins, or Mod Organizer
         // 2's overwrite folder when the game runs through it), not in Documents.
-        foreach (var name in new[] { "TamrielMergeEra.log", "TamrielMergeSeamless.log" })
+        foreach (var name in new[] { "TamrielMergeEra.log", "TamrielMergeSeamless.log", "TamrielMergeNative.log", "TamrielMergeCrashLog.log" })
         {
             string? f = PluginLog(name, skyrimData);
             if (f is null || File.GetLastWriteTime(f) < since.AddMinutes(-1)) continue;
             var lines = File.ReadAllLines(f);
-            var bad = lines.Where(l => Regex.IsMatch(l, "error|fail|not found|unsupported|OFF:|doesn't line up|took over", RegexOptions.IgnoreCase)).ToList();
+            var bad = lines.Where(l => Regex.IsMatch(l, "error|fail|not found|missing|refused|unsupported|OFF:|doesn't line up|took over|^====|UNHANDLED", RegexOptions.IgnoreCase)).ToList();
             if (bad.Count > 0) { r.AppendLine($"{name}:"); foreach (var l in bad.Take(20)) r.AppendLine($"  {l.Trim()}"); }
         }
 

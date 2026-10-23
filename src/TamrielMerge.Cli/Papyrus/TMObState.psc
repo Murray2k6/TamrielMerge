@@ -1712,10 +1712,38 @@ Bool Function IsCreature(Actor akActor) Global
   Return akActor && !akActor.GetRace().IsPlayable()
 EndFunction
 
-; 1 knocked down (paralysed, unconscious or bleeding out), else 0.
+; GetKnockedState (CS wiki): 1 knocked out (unconscious, paralysed, or out of fatigue), 2 knocked down, else 0. Down is
+; Skyrim's knock state (its classic GetKnockStateEnum, through TamrielMergeNative: 0 normal, else ragdolled or
+; getting up).
 Int Function KnockedState(Actor akActor) Global
-  If akActor && (akActor.IsUnconscious() || akActor.IsBleedingOut() || akActor.GetActorValue("Paralysis") > 0)
+  If !akActor
+    Return 0
+  EndIf
+  If akActor.IsUnconscious() || akActor.IsBleedingOut() || akActor.GetActorValue("Paralysis") > 0 || akActor.GetActorValue("Stamina") <= 0
     Return 1
+  EndIf
+  If TMNative.Condition("GetKnockStateEnum", akActor) != 0.0
+    Return 2
+  EndIf
+  Return 0
+EndFunction
+
+; GetWeaponAnimType (Oblivion: 0 hand to hand, 1 one hand, 2 two hand, 3 staff, 4 bow) from Skyrim's own (its classic
+; GetWeaponAnimType: the equipped weapon's animation type, 0 hand to hand, 1-4 one-handed, 5-6 two-handed, 7 bow,
+; 8 staff, 12 crossbow; SkyrimSE.exe 1.7.104).
+Int Function WeaponAnimType(Actor akActor) Global
+  If !akActor
+    Return 0
+  EndIf
+  Int t = TMNative.Condition("GetWeaponAnimType", akActor) as Int
+  If t >= 1 && t <= 4
+    Return 1
+  ElseIf t == 5 || t == 6
+    Return 2
+  ElseIf t == 8
+    Return 3
+  ElseIf t == 7 || t == 12
+    Return 4
   EndIf
   Return 0
 EndFunction

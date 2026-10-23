@@ -102,6 +102,10 @@ public static class DaggerfallTowns
                 int t = tiles.TileAt(spot);
                 return (tileWorlds[tiles.EditorId(t)], tiles.ToLocal(spot, t));
             },
+            // The way back out and the occupants' names on Daggerfall.esm's conversation quest, which every part's
+            // street doors and interiors share; and this part's copies of the shared interiors named its own.
+            WayQuest = master.Quests.FirstOrDefault(q => q.EditorID == "DFTalk")?.FormKey,
+            InteriorSuffix = $"P{batch}",
         };
 
         var towns = Slice(All(arena2, master), batch, batches);

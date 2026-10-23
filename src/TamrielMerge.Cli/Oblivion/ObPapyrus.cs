@@ -1308,7 +1308,8 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "addspell": return R($"{actorSelf()}.AddSpell({Spell(c, 0)})", T.Bool);
             case "removespell": return R($"{actorSelf()}.RemoveSpell({Spell(c, 0)})", T.Bool);
             case "cast": return R($"{Spell(c, 0)}.Cast({self()}, {AsRef(Arg(c, 1))})", T.Void);
-            case "isspelltarget": return Approx("the spell's effects on the actor, from it or another spell", R($"TMObState.IsSpellTarget({actorSelf()}, {Spell(c, 0)})", T.Bool));
+            // Skyrim's own IsSpellTarget (TamrielMergeNative: its classic script functions by name).
+            case "isspelltarget": return R($"(TMNative.Condition(\"IsSpellTarget\", {actorSelf()}, {Spell(c, 0)}) != 0.0)", T.Bool);
             case "dispel": return R($"{actorSelf()}.DispelSpell({Spell(c, 0)})", T.Bool);
             // actors
             case "getdead": return R($"{actorSelf()}.IsDead()", T.Bool);
@@ -1322,8 +1323,10 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 if (locals.Keys.Any(k => k.Equals("fTrapDeathPushBack", StringComparison.OrdinalIgnoreCase)))
                     Gap("TrapUpdate: fTrapDeathPushBack in place of the push back on a killing hit (the CS wiki's guess)");
                 return R("__trapAt = Utility.GetCurrentRealTime()", T.Void);
+            // Skyrim's own Enable/DisableLinkedPathPoints only return (SkyrimSE.exe 1.7.104: "mov al, 1; ret"): it has no path
+            // grid for them to act on.
             case "disablelinkedpathpoints" or "enablelinkedpathpoints":
-                return Nothing($"; {info?.Name ?? c.Function}: nothing to do in Skyrim");
+                return Nothing($"; {info?.Name ?? c.Function}: Skyrim's own does nothing (no path grid)");
             case "setownership":
                 if (c.Args.Count == 0) return R($"{self()}.SetActorOwner({PlayerRef()}.GetActorBase())", T.Void);
                 return R(c.Args[0] is Name on && world.Find(on.Id)?.PapyrusType == "Faction" ? $"{self()}.SetFactionOwner({FormProperty(on.Id, "Faction")})" : $"{self()}.SetActorOwner({Paren(Arg(c, 0).Text)} as ActorBase)", T.Void);
@@ -1341,7 +1344,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "modpcinfamy": return R($"{Generated("TMOB_PCInfamy", "GlobalVariable")}.Mod({Convert(Arg(c, 0), T.Float)})", T.Float);
             case "setpcfame": return R($"{Generated("TMOB_PCFame", "GlobalVariable")}.SetValue({Convert(Arg(c, 0), T.Float)})", T.Void);
             case "setpcinfamy": return R($"{Generated("TMOB_PCInfamy", "GlobalVariable")}.SetValue({Convert(Arg(c, 0), T.Float)})", T.Void);
-            case "triggerhitshader": return Approx("screen blood", R($"Game.TriggerScreenBlood({(c.Args.Count > 0 ? Convert(Arg(c, 0), T.Int) : "1")})", T.Void));
+            case "triggerhitshader": return R(c.Args.Count > 0 ? $"TMNative.Command(\"TriggerHitShader\", None, {Convert(Arg(c, 0), T.Float)})" : "TMNative.Command(\"TriggerHitShader\", None, 0.0, 0.0, 0)", T.Void);
             case "setfactionreaction": return R($"{FormProperty(Word(c, 0), "Faction")}.SetReaction({FormProperty(Word(c, 1), "Faction")}, {Convert(Arg(c, 2), T.Int)})", T.Void);
             case "setactoralpha": return R($"{actorSelf()}.SetAlpha({Convert(Arg(c, 0), T.Float)})", T.Void);
             case "isswimming": return R($"{actorSelf()}.IsSwimming()", T.Bool);
@@ -1366,14 +1369,14 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "setunconscious": return R($"{actorSelf()}.SetUnconscious({ArgNum(c, 0)} != 0)", T.Void);
             case "setalert": return R($"{actorSelf()}.SetAlert({ArgNum(c, 0)} != 0)", T.Void);
             case "setghost": return R($"{actorSelf()}.SetGhost({ArgNum(c, 0)} != 0)", T.Void);
-            case "setforcerun": return Nothing($"; SetForceRun {ArgNum(c, 0)}: the package decides in Skyrim");
-            case "setforcesneak": return Approx("starts sneaking whatever its argument", R($"{actorSelf()}.StartSneaking()", T.Void));
+            case "setforcerun": return R($"TMNative.Command(\"SetForceRun\", {actorSelf()}, {Convert(Arg(c, 0), T.Float)})", T.Void);
+            case "setforcesneak": return R($"TMNative.Command(\"SetForceSneak\", {actorSelf()}, {Convert(Arg(c, 0), T.Float)})", T.Void);
             case "getsitting": return R($"{actorSelf()}.GetSitState()", T.Int);
             case "getsleeping": return R($"{actorSelf()}.GetSleepState()", T.Int);
             case "getdetected": return R($"{AsActor(Arg(c, 0))}.IsDetectedBy({actorSelf()})", T.Bool);
             case "getlos" or "getlineofsight": return R($"{actorSelf()}.HasLOS({AsRef(Arg(c, 0))})", T.Bool);
             case "getunconscious": return R($"{actorSelf()}.IsUnconscious()", T.Bool);
-            case "getweaponanimtype": return Approx("weapon drawn", R($"{actorSelf()}.IsWeaponDrawn()", T.Bool));
+            case "getweaponanimtype": return R($"TMObState.WeaponAnimType({actorSelf()})", T.Int);
             case "isweaponout": return R($"{actorSelf()}.IsWeaponDrawn()", T.Bool);
             case "getisrace": return R($"{actorSelf()}.GetRace() == {FormProperty(Word(c, 0), "Race")}", T.Bool);
             case "getissex": return R($"{actorSelf()}.GetActorBase().GetSex() == {(Word(c, 0).StartsWith("F", StringComparison.OrdinalIgnoreCase) ? 1 : 0)}", T.Bool);
@@ -1460,12 +1463,9 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "playsound" or "playsound3d": return R($"{FormProperty(Word(c, 0), "Sound")}.Play({self()})", T.Int);
             case "playmagicshadervisuals" or "pms": return R($"{FormProperty(Word(c, 0), "EffectShader")}.Play({self()}, {ArgNum(c, 1, "-1.0")})", T.Void);
             case "stopmagicshadervisuals" or "sms": return R($"{FormProperty(Word(c, 0), "EffectShader")}.Stop({self()})", T.Void);
-            // PickIdle: the actor picks a new idle now (after a script changed what idles test). Its package evaluated
-            // again, Skyrim picks its idles anew (forcing the default state would stand a sitting one up); Oblivion's own
-            // idle tree isn't converted.
-            case "pickidle":
-                Gap("PickIdle: Skyrim's idles picked again, not Oblivion's idle tree");
-                return R($"{actorSelf()}.EvaluatePackage()", T.Void);
+            // PickIdle: the actor picks a new idle now (after a script changed what idles test): Skyrim's own PickIdle, from
+            // the classic script table (TamrielMergeNative), on Skyrim's idle tree, which plays Oblivion's people's idles.
+            case "pickidle": return R($"TMNative.Command(\"PickIdle\", {actorSelf()})", T.Void);
             case "playbink": return R($"Game.PlayBink(\"{Word(c, 0)}\")", T.Void);
             case "fadetoblack" or "imod": return Approx("a fixed fade", R("Game.FadeOutGame(true, true, 0.5, 1.0)", T.Void));
             // messages
@@ -1537,7 +1537,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "removescriptpackage": return R($"{St()}.RemoveScriptPackage({actorSelf()})", T.Void);
             case "getcurrentaipackage": return Approx("known packages, else guessed", R($"{St()}.PackageType({actorSelf()})", T.Int));
             case "getcurrentaiprocedure": return Approx("guessed", R($"{St()}.Procedure({actorSelf()})", T.Int));
-            case "setpackduration": return Approx("one actor at a time", R($"{St()}.SetPackDuration({actorSelf()}, {Convert(Arg(c, 0), T.Float)})", T.Void));
+            case "setpackduration": return R($"TMNative.Command(\"SetPackDuration\", {actorSelf()}, {Convert(Arg(c, 0), T.Float)})", T.Void);
             case "wait": return Approx("held in place", R($"{St()}.WaitOn({actorSelf()}, {Pkg(c, 0)}, True)", T.Void));
             case "stopwaiting": return Approx("held in place", R($"{St()}.WaitOn({actorSelf()}, {Pkg(c, 0)}, False)", T.Void));
             case "getdestroyed": return R($"{St()}.IsDestroyed({self()})", T.Bool);
@@ -1601,14 +1601,14 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "setactorsai": return R($"{actorSelf()}.EnableAI({ArgNum(c, 0)} != 0)", T.Void);
             case "getgold": return R($"{self()}.GetItemCount(Game.GetForm(0xF))", T.Int);
             case "getisalerted": return R($"{actorSelf()}.IsAlerted()", T.Bool);
-            case "isidleplaying": return Approx("an animation drives the actor", R($"TMObState.IsIdlePlaying({actorSelf()})", T.Bool));
+            case "isidleplaying": return R($"(TMNative.Condition(\"IsIdlePlaying\", {actorSelf()}) != 0.0)", T.Bool);
             case "isactor": return R($"(({Paren(self())} as Form) as Actor) != None", T.Bool);
             case "getiscreature": return R($"TMObState.IsCreature({actorSelf()})", T.Bool);
             case "isguard": return R($"{actorSelf()}.IsGuard() || {actorSelf()}.IsInFaction({ModForm("OBGuards", "Faction")})", T.Bool);
             case "essentialdeathreload": return Approx("the player killed", R($"TMObState.EssentialDeathReload({Convert(Arg(c, 0), T.String)})", T.Void));
             case "autosave": return R("Game.RequestAutoSave()", T.Void);
             case "setdoordefaultopen": return R($"{self()}.SetOpen({ArgNum(c, 0)} != 0)", T.Void);
-            case "getknockedstate": return Approx("paralysed, unconscious or bleeding out", R($"TMObState.KnockedState({actorSelf()})", T.Int));
+            case "getknockedstate": return R($"TMObState.KnockedState({actorSelf()})", T.Int);
             case "showdialogsubtitles":
                 return R(c.Args.Count > 0 ? $"Utility.SetINIBool(\"bDialogueSubtitles:Interface\", {ArgNum(c, 0)} != 0)" : "Utility.SetINIBool(\"bDialogueSubtitles:Interface\", !Utility.GetINIBool(\"bDialogueSubtitles:Interface\"))", T.Void);
             case "createfullactorcopy": return R($"TMObState.FullActorCopy({actorSelf()})", T.Actor);
@@ -1630,7 +1630,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "getarmorrating": return R($"{actorSelf()}.GetActorValue(\"DamageResist\")", T.Float);
             case "getcurrentweatherpercent": return R("Weather.GetCurrentWeatherTransition()", T.Float);
             case "isxbox": return R("False", T.Bool);
-            case "setrigidbodymass": return Approx("pinned or free", R($"TMObState.SetMass({self()}, {Convert(Arg(c, 0), T.Float)})", T.Void));
+            case "setrigidbodymass": return R($"TMNative.Command(\"SetRigidBodyMass\", {self()}, {Convert(Arg(c, 0), T.Float)})", T.Void);
             case "removeme":
                 if (kind == "MagicEffect") return R("Dispel()", T.Void);
                 if (kind != "Object") return Fail("RemoveMe outside an object script", "None");
@@ -1656,12 +1656,12 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "stopmagiceffectvisuals" or "sme": return R($"{EffectVisual(Word(c, 0))}.Stop({self()})", T.Void);
             case "hasmagiceffect": return R($"TMObState.HasEffectIn({actorSelf()}, {EffectList(Word(c, 0))})", T.Bool);
             // nothing to do in Skyrim: hints and switches for Oblivion's engine
-            case "setsceneiscomplex": return R("; SetSceneIsComplex: a rendering hint for Oblivion's engine; Skyrim needs none", T.Void);
+            case "setsceneiscomplex": return R($"TMNative.Command(\"SetSceneIsComplex\", None, {Convert(Arg(c, 0), T.Float)})", T.Void);
             case "purgecellbuffers": return R("; PurgeCellBuffers: freed Oblivion's cell memory; Skyrim manages its own", T.Void);
             case "setshowquestitems": return Nothing("; SetShowQuestItems: Skyrim always lists and announces quest items");
-            case "setallreachable" or "setallvisible": return Nothing($"; {info?.Name}: a pathing and visibility shortcut of Oblivion's engine; Skyrim's navmesh and occlusion need none");
-            case "setnoavoidance": return Nothing("; SetNoAvoidance: Skyrim's actors steer around each other on their own; there's no switch for it");
-            case "resetfalldamagetimer": return Nothing("; ResetFallDamageTimer: Skyrim measures a fall from where it starts, and a MoveTo isn't one");
+            case "setallreachable" or "setallvisible": return R($"TMNative.Command(\"{info?.Name}\", None, {Convert(Arg(c, 0), T.Float)})", T.Void);
+            case "setnoavoidance": return R($"TMNative.Command(\"SetNoAvoidance\", None, {Convert(Arg(c, 0), T.Float)})", T.Void);
+            case "resetfalldamagetimer": return R($"TMNative.Command(\"ResetFallDamageTimer\", {actorSelf()})", T.Void);
             case "refreshtopiclist": return R("; RefreshTopicList: Skyrim reads the topics again each time the list shows", T.Void);
             case "ispcsleeping": return R($"{St()}.PCSleeping", T.Bool);
             case "istimepassing": return R($"{St()}.PCSleeping || UI.IsMenuOpen(\"Sleep/Wait Menu\")", T.Bool);

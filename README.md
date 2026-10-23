@@ -148,8 +148,12 @@ out\gui\TamrielMerge.exe
 The repository holds the source, scripts and documents. What the tool downloads (`setup`) and what it makes from your
 games aren't in it. The models made from Daggerfall's sprites come with the release; from source, the conversion's
 *Missing models* step makes them (AI, on the graphics card). The SKSE plugins' sources are in `tools/skse`, built
-already, and rebuilt with their `build.ps1` (Visual Studio's C++ tools): TamrielMergeEra (the era in the game's dates)
-and TamrielMergeSeamless (Skyrim's physics area widened for Daggerfall's one-worldspace overland).
+already, and rebuilt with their `build.ps1` (Visual Studio's C++ tools): TamrielMergeEra (the era in the game's dates),
+TamrielMergeSeamless (Skyrim's physics area widened for Daggerfall's one-worldspace overland), TamrielMergeNative
+(Skyrim's own classic script functions for the converted scripts: conditions such as GetKnockedState, commands such as
+SetForceRun; built with CMake and Ninja against SKSE 2.3.1's source, from the game folder's `src\skse64-2.3.1.tar.gz`,
+and ianpatt's common library, both in `tools/skse/third_party`) and TamrielMergeCrashLog (what the game was doing when
+it crashes: TamrielMergeCrashLog.log beside it, with the fault, the stack, and the classes and FormIDs in hand).
 
 ## Documentation
 
@@ -200,6 +204,8 @@ Built with:
 - Creature models: see [tools/creatures/CREDITS.md](tools/creatures/CREDITS.md) (CC0, CC-BY 3.0/4.0, CC-BY-SA 3.0).
 - The ship: a free model from [CGTrader](https://www.cgtrader.com/free-3d-models/watercraft/historic-watercraft/ship-8d79bbda-ccc3-45f9-8b38-ec81c5a4d0cd).
 - [SKSE](https://skse.silverlock.org/) runs the plugins; they read [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444).
+- SKSE64's source (2.3.1, shipped with SKSE in the game folder; a plugin built on it publishes its own source, as this
+  one does) and ianpatt's [common](https://github.com/ianpatt/common) (zlib): TamrielMergeNative is built against them.
 - [Open Animation Replacer](https://www.nexusmods.com/skyrimspecialedition/mods/92109) by Ershin
   ([source](https://github.com/ersh1/OpenAnimationReplacer), GPL-3.0 with its modding exceptions): plays TamrielMerge's
   own climbing animation while you climb (Daggerfall's Climbing skill), and Morrowind's and Oblivion's people's
