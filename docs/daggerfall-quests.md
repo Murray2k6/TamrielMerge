@@ -47,7 +47,10 @@ the place on the map as reveal does. `df-quest-check --places` lists where every
   `==x_`) and macros (%pcf, %g pronouns of the last person named, %ra, %reg, %god, %qdt, %cn ...) become alias text
   replacement: each distinct name is a name-tag alias (T<k>) whose reference the script renames (SKSE SetDisplayName)
   before a message shows. Prompts and the offer get Yes/No buttons.
-- The log: one objective per log message; "log N step S" shows it in step S, replacing the step's last.
+- The log: one objective per log message; "log N step S" shows it in step S, replacing the step's last. The objective
+  is the message's first sentence (Skyrim.QuestText.Headline, at most 70 characters: the HUD shows an objective on one
+  line, and 308 of 310 messages were longer, median 218); the whole message is the log entry of its own stage
+  (1000 + its index, TMDfQuest.LogStage), set when it is first shown, which the journal shows wrapped.
 - "Tell me about <name>." topics for people, places and items with an answer (anyInfo), opened by "add dialog"/"dialog
   link" (stages 100+), answered by any Daggerfall townsperson (asking about a place marks it on the map); "Have you heard
   any rumors?" for "rumor mill" (stages 200+).

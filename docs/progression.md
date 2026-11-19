@@ -92,8 +92,25 @@ chosen", "and player owned games equivelant" (TMStoryOrder, TamrielMerge Start.e
 - **After the opening** (Skyrim/AltStarts.cs finds each in the converted plugins; TMStoryOrder.BeginAfterOpening):
   Daggerfall outside Privateer's Hold; Redguard on Stros M'Kai's docks (where its opening at sea ends); Morrowind out
   of Seyda Neen's Census and Excise Office with "Report to Caius Cosades" begun and his package; Oblivion out of the
-  sewers' South East Tunnel with "Deliver the Amulet" begun (stage 10) and the Amulet of Kings. A door's spot is the
+  sewers' South East Tunnel with "Deliver the Amulet" (MQ02) begun and the Amulet of Kings. A door's spot is the
   outside door with the offset to where the game sets the player down coming out of it.
+- **Each game's own start-up** (AltStarts.Steps; TMStoryOrder.RunSteps, logged as "start-up of story N" in Papyrus's
+  log), as its engine does it (2026-11-04, user: "make sure the quest initizlize on starting morrwind, oblivion and
+  redguard"):
+  - Oblivion's opening starts **CharacterGen**, which Oblivion's engine starts on a new game (it isn't start-game
+    enabled and nothing in the data starts it); its stage 5 starts the MQ01 tutorial and the Emperor's scene. Before,
+    nothing started it. A new game's first story waits until its start is chosen, so a prison isn't running behind
+    another start. After the opening: CharacterGen's stage 88 (Deliver the Amulet at 10 and 20, the Blades' topics,
+    Baurus's charge over) and MQ01's 100 (the tutorial over, both stopped), as the sewers' exit leaves them. MQ01 is
+    the tutorial, not Deliver the Amulet: the old start set its stage 10, which starts the prison's CharacterGen at 6.
+  - Morrowind after its opening: CharGenState -1 (set before the move, as the census office's exit door sets it; Main
+    would otherwise run CharGen on arrival); what Sellus Gravius's "duties" answer gives (topics Caius Cosades, South
+    Wall, specific place, someone in particular, services, my trade, little secret, latest rumors, little advice: the
+    only place Morrowind gives the general topics, so without them no one had anything to talk about), A1_1's journal
+    index at 1, the directions and 87 gold; and Main's Startup (its run-once disables of quest people) and VampireCheck,
+    which Main starts only while CharGenState is 1. Its opening needs none (CharGenState starts at 1).
+  - Redguard needs none: its scripts, dialogue, movement and law are start-game quests, its flags start at the game's
+    own values, and Cyrus's log begins with its first entry, as in the game.
 - **Skyrim after Helgen** (EscapedHelgen) is what vanilla's own quickstart (QF_MQ101 Fragment_27) leaves: the side's
   Before the Storm begun (MQ102A Hadvar / MQ102B Ralof, stage 1), Helgen's gates shut (25, 26) and its escape over
   (1000), its music and attack sounds gone; then that quest on past the escape (10 allied, 20 Riverwood ahead, 25
@@ -213,7 +230,7 @@ other thirteen, for the games converted (Athletics and Acrobatics also stand for
   (JumpUp, JumpFall, JumpDown: a jump, and the height of a fall past 150 units), the player alias's OnSpellCast,
   OnHit (struck by a weapon, at most every half second), OnObjectEquipped (what is worn) and OnItemAdded/Removed filtered
   to gold (counted while the barter menu is open), sleep (as 8 health an hour), and a combat hit spell (TMSkillHitPerk's
-  Apply Combat Hit Spell, TMSkillHitEffect) on whoever the player strikes. Only one combat hit spell applies to a hit,
+  Apply Combat Hit Spell, TMSkillHitEffect, which also sends the mod event TMPlayerHit for TMWear's weapon wear) on whoever the player strikes. Only one combat hit spell applies to a hit,
   the highest priority's: ours is below Skyrim's own bleeding perks, except for spears (priority 11).
 - **Lists** (`TM<List>List`, filled at run time from the plugin and FormID the build found, again when a build lists
   others): Mysticism spells (MW and OB spells with an effect their converters give Alteration that was Mysticism:

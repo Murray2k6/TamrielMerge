@@ -10,16 +10,29 @@ $ninja = (Get-Command ninja -ErrorAction SilentlyContinue).Source
 if (-not $ninja) { throw "Ninja not found on PATH" }
 $here = $PSScriptRoot
 $tp = (Resolve-Path (Join-Path $here "..\third_party")).Path
+# A build folder made with a compiler Visual Studio has since updated away is started afresh (2026-11-02: its cache named
+# MSVC 14.51.36231, gone, and CMake stopped at "is not a full path to an existing compiler tool").
+# The newest Windows SDK manifest tool that runs: SDK 10.0.28000's mt.exe stopped with 0xC0000135 (a DLL of its own
+# missing, 2026-11-02), and CMake can't build without one.
+$mt = Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\*\x64\mt.exe") -ErrorAction SilentlyContinue |
+    Sort-Object { [version]($_.Directory.Parent.Name) } -Descending |
+    Where-Object { & $_.FullName "/?" *> $null; $LASTEXITCODE -eq 0 } | Select-Object -First 1
+$mtArg = if ($mt) { "-DCMAKE_MT=`"$($mt.FullName)`"" } else { "" }
+$cache = Join-Path $here "build\CMakeCache.txt"
+if (Test-Path $cache) {
+    $cl = (Select-String -Path $cache -Pattern '^CMAKE_CXX_COMPILER:[A-Z]+=(.+)$' | Select-Object -First 1).Matches.Groups[1].Value
+    if ($cl -and -not (Test-Path $cl)) { Remove-Item (Join-Path $here "build") -Recurse -Force }
+}
 $bat = @"
 @echo off
 call "$vs\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 cd /d "$tp"
 if not exist "$tp\extern\lib\cmake\common\common-config.cmake" (
-  cmake -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_BUILD_TYPE=Release -B common\build -S common -DCMAKE_INSTALL_PREFIX="$tp\extern" || exit /b 1
+  cmake -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_BUILD_TYPE=Release $mtArg -B common\build -S common -DCMAKE_INSTALL_PREFIX="$tp\extern" || exit /b 1
   cmake --build common\build --target install || exit /b 1
 )
 cd /d "$here"
-cmake -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_BUILD_TYPE=Release -B build -S . || exit /b 1
+cmake -G Ninja -DCMAKE_MAKE_PROGRAM="$ninja" -DCMAKE_BUILD_TYPE=Release $mtArg -B build -S . || exit /b 1
 cmake --build build || exit /b 1
 "@
 $batFile = Join-Path $here "build.bat"

@@ -12,7 +12,8 @@ namespace HKX2
     public partial class hkRootLevelContainer : IHavokObject, IEquatable<hkRootLevelContainer?>
     {
 
-        public IList<hkRootLevelContainerNamedVariant?> m_namedVariants { get; set; } = Array.Empty<hkRootLevelContainerNamedVariant?>();
+        // a struct array (TYPE_STRUCT): every entry is an object, ReadClassArray builds them and WriteClassArray writes each one
+        public IList<hkRootLevelContainerNamedVariant> m_namedVariants { get; set; } = Array.Empty<hkRootLevelContainerNamedVariant>();
 
         public uint Signature { set; get; } = 0x2772c11e;
 

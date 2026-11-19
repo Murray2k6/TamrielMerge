@@ -29,6 +29,37 @@ Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile,
   EndIf
 EndEvent
 
+; Where and when the actor took up its current package (TMObDoor: someone sent on and held where it started, at a shut
+; door, wants through it), and when its 3D last loaded (the package it begins a cell with is no sending on).
+Float packageStartTime
+Float packageStartX
+Float packageStartY
+Float loadedTime
+
+; For the log (when Papyrus logging is on): the packages an Oblivion person takes up, so a scene can be followed
+; without the console (which package a guard is on when he stands at a gate, 2026-11-14).
+Event OnPackageStart(Package akNewPackage)
+  packageStartTime = Utility.GetCurrentRealTime()
+  packageStartX = GetPositionX()
+  packageStartY = GetPositionY()
+  Debug.Trace("TMOb package " + Self + " starts " + akNewPackage + " at " + packageStartX + " " + packageStartY)
+EndEvent
+
+; Sent on by a new package and held where it took it up: the package began afMin to afMax seconds ago, at least 2 s
+; after the actor's 3D loaded, and the actor is still within afMove of where it was then.
+Bool Function HeldSinceNewPackage(Float afMin, Float afMax, Float afMove)
+  If packageStartTime <= 0.0 || packageStartTime < loadedTime + 2.0
+    Return False
+  EndIf
+  Float since = Utility.GetCurrentRealTime() - packageStartTime
+  If since < afMin || since > afMax
+    Return False
+  EndIf
+  Float dx = GetPositionX() - packageStartX
+  Float dy = GetPositionY() - packageStartY
+  Return dx * dx + dy * dy < afMove * afMove
+EndFunction
+
 Event OnUnload()
   If Conversations
     (Conversations as TMObConversations).Unregister(Self)
@@ -46,6 +77,7 @@ Event OnDeath(Actor akKiller)
 EndEvent
 
 Event OnLoad()
+  loadedTime = Utility.GetCurrentRealTime()
   assaulted = False
   peaceful = True
   ObState.MirrorActor(Self)

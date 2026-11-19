@@ -11,6 +11,8 @@ Int[] Property Kind Auto
 {FACTION.TXT type: 1 god, 4 individual, 6 vampire clan, 8 coven, 9 temple, 15 people ...}
 Int[] Property GGroup Auto
 Int[] Property Region Auto
+Int[] Property Power Auto
+{FACTION.TXT power: a guild quest's gold reward scales with it.}
 Int[] Property Allies Auto
 {Three per faction (0 none).}
 Int[] Property Enemies Auto
@@ -32,6 +34,15 @@ Int Function IndexOf(Int id)
     Return -1
   EndIf
   Return Ids.Find(id)
+EndFunction
+
+; A faction's power (0 unknown).
+Int Function PowerOf(Int id)
+  Int k = IndexOf(id)
+  If k < 0 || !Power || k >= Power.Length
+    Return 0
+  EndIf
+  Return Power[k]
 EndFunction
 
 Int Function RaceOf(Int id)
@@ -65,6 +76,22 @@ Function SetRep(Int k, Float value)
     value = -100.0
   EndIf
   React[k].SetValue(value)
+EndFunction
+
+; Every faction's regard one step toward 0 (Daggerfall Unity NormalizeReputations, every 112 days; no propagation).
+Function Normalize()
+  Int k = 0
+  While k < React.Length
+    If React[k]
+      Float v = React[k].GetValue()
+      If v > 0.0
+        SetRep(k, v - 1.0)
+      ElseIf v < 0.0
+        SetRep(k, v + 1.0)
+      EndIf
+    EndIf
+    k += 1
+  EndWhile
 EndFunction
 
 Function ChangeRep(Int id, Int amount, Bool propagate)

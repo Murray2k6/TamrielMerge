@@ -149,7 +149,7 @@ Bool Function Used(ObjectReference akActionRef)
       Trigger()
       Return True
     EndIf
-    Int openState = GetOpenState()
+    Int openState = TMDfDoor.DoorState(Self)
     Bool shutAndLocked = (openState == 3 || openState == 4) && IsLocked()
     If TriggerType == TriggerDoor && !shutAndLocked
       Trigger()
@@ -231,7 +231,7 @@ EndFunction
 ; The typing menu has loaded: the riddle's text.
 Event OnRiddleReady(String eventName, String strArg, Float numArg, Form sender)
   If asking
-    UI.InvokeString("CustomMenu", "_root.Ask", RiddleText)
+    UI.InvokeString("CustomMenu", "_root.Ask", Said(RiddleText))
   EndIf
 EndEvent
 
@@ -318,12 +318,12 @@ Function Perform()
     Lock(False)
   ElseIf ActionType == ActionOpenDoor
     Lock(False)
-    SetOpen(True)
+    TMDfDoor.SetDoor(Self, True)
   ElseIf ActionType == ActionCloseDoor
     ; Closing puts the door's starting lock back (Daggerfall Unity CloseDoor).
-    Int openState = GetOpenState()
+    Int openState = TMDfDoor.DoorState(Self)
     If openState == 1 || openState == 2
-      SetOpen(False)
+      TMDfDoor.SetDoor(Self, False)
       If DoorLock > 0
         Lock(True)
         SetLockLevel(SkyrimLockLevel(DoorLock))
@@ -355,12 +355,12 @@ Function Perform()
   ElseIf ActionType == ActionDrainMagicka
     player.DamageActorValue("Magicka", Magnitude)
   ElseIf ActionType == ActionShowText && Text != ""
-    Debug.MessageBox(Text)
+    Debug.MessageBox(Said(Text))
   ElseIf ActionType == ActionDialogue
     If Speaker && !Speaker.IsDead()
       Speaker.Activate(player)
     ElseIf Text != ""
-      Debug.MessageBox(Text)
+      Debug.MessageBox(Said(Text))
     EndIf
   ElseIf ActionType == ActionSetGlobal && QuestGlobal
     QuestGlobal.SetValue(1.0)
@@ -368,7 +368,7 @@ Function Perform()
     ; Daggerfall Unity DoorText: the notice at the top of the screen on the first trigger; after it (or from the first,
     ; with none to show) a door whose raw axis value is over 5 turns the area's enemies hostile.
     If activations == 1 && Text != ""
-      Debug.Notification(Text)
+      Debug.Notification(Said(Text))
     ElseIf Trespass
       TMDfSensesControl control = Senses as TMDfSensesControl
       If control
@@ -417,13 +417,13 @@ Function MoveRiders()
   While i < Riders.Length
     ObjectReference r = Riders[i]
     If r
-      Float x = riderStart[i * 3] + FlatShift[0] * k
-      Float y = riderStart[i * 3 + 1] + FlatShift[1] * k
-      Float z = riderStart[i * 3 + 2] + FlatShift[2] * k
+      Float ox = riderStart[i * 3] + FlatShift[0] * k
+      Float oy = riderStart[i * 3 + 1] + FlatShift[1] * k
+      Float oz = riderStart[i * 3 + 2] + FlatShift[2] * k
       If Duration <= 0.0 || !r.Is3DLoaded()
-        r.SetPosition(x, y, z)
+        r.SetPosition(ox, oy, oz)
       Else
-        r.TranslateTo(x, y, z, r.GetAngleX(), r.GetAngleY(), r.GetAngleZ(), distance / Duration, 0.0)
+        r.TranslateTo(ox, oy, oz, r.GetAngleX(), r.GetAngleY(), r.GetAngleZ(), distance / Duration, 0.0)
       EndIf
     EndIf
     i += 1
@@ -568,4 +568,27 @@ Float Function MaxTurn(Float[] target)
     i += 1
   EndWhile
   Return best
+EndFunction
+
+; Daggerfall's player macros in a text: %pcn the player's name, %pcf their first name (MacroHelper PlayerName /
+; PlayerFirstName); the rest were dropped when the plugin was built.
+String Function Said(String s)
+  String name = Game.GetPlayer().GetDisplayName()
+  String first = name
+  Int space = StringUtil.Find(name, " ")
+  If space > 0
+    first = StringUtil.Substring(name, 0, space)
+  EndIf
+  Return Fill(Fill(s, "%pcn", name), "%pcf", first)
+EndFunction
+
+String Function Fill(String s, String macro, String value)
+  Int at = StringUtil.Find(s, macro)
+  Int guard = 0
+  While at >= 0 && guard < 16
+    s = StringUtil.Substring(s, 0, at) + value + StringUtil.Substring(s, at + StringUtil.GetLength(macro))
+    at = StringUtil.Find(s, macro)
+    guard += 1
+  EndWhile
+  Return s
 EndFunction

@@ -79,11 +79,42 @@ public sealed partial class MwPluginBuilder
 
     internal static string Sanitize(string s) => new(s.Where(char.IsLetterOrDigit).ToArray());
 
+    /// <summary>
+    /// The textures of every model the world places, converted ahead on every core (MwTextures.Prepare). The models
+    /// themselves are still written one at a time as they are first placed (the model library isn't safe on several
+    /// threads); their textures were most of that time.
+    /// </summary>
+    public (int Models, int Textures) PrepareTextures()
+    {
+        var models = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var cell in world.Interiors.Values.Concat(world.Exteriors.Values))
+            foreach (var r in cell.Refs)
+                if (world.Objects.TryGetValue(r.BaseId, out var rec) && rec.Str("MODL") is { Length: > 0 } model) models.Add(model);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var model in models)
+        {
+            string path = model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
+            try
+            {
+                if (data.Read(path) is not { } bytes) continue;
+                foreach (var tex in Nif4.Read(bytes, path).Blocks.OfType<NiSourceTexture>())
+                    if (tex.FileName is { Length: > 0 } file) names.Add(file);
+            }
+            catch (Exception e) when (e is IOException or InvalidDataException or EndOfStreamException or IndexOutOfRangeException or ArgumentException) { }
+        }
+        return (models.Count, textures.Prepare(names));
+    }
+
+    /// <summary>Seconds spent converting models on their first use (for the build's time line).</summary>
+    public double ModelSeconds { get; private set; }
+
     MwMeshConverter.Result? Mesh(string model)
     {
         if (converted.TryGetValue(model, out var hit)) return hit;
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         try { hit = meshes.Convert(model, modOutDir); }
         catch (Exception e) { Problems.Add($"model {model}: {e.Message}"); hit = null; }
+        ModelSeconds += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) / (double)System.Diagnostics.Stopwatch.Frequency;
         return converted[model] = hit;
     }
 
@@ -464,6 +495,7 @@ public sealed partial class MwPluginBuilder
                 ItemCount = b is IItemGetter && StackOf(r.BaseId, r.Count) is > 1 and var n ? n : null,
             };
             ApplyLock(r, placed, b);
+            ApplyOwnership(r, placed);
             if (b is Door)
             {
                 // Load doors are persistent, as Skyrim requires.
@@ -475,6 +507,7 @@ public sealed partial class MwPluginBuilder
             else if (!PlaceForScripts(r, placed, cell)) cell.Temporary.Add(placed);
         }
         AddAnchor(source.Name, cell);
+        AddSpots(source.Name, cell, solid);
         CellSolids[source.Name] = solid;
         BuildNavmesh(cell, solid, hazard, source);
         if (Start is { } start && string.Equals(start.Cell, source.Name, StringComparison.OrdinalIgnoreCase))
@@ -521,17 +554,18 @@ public sealed partial class MwPluginBuilder
     /// in the air and lets them drop, e.g. 130 units onto the prison ship's hold) with no collision inside a standing
     /// body above it (radius 30, from knee height 30 to 130). Morrowind's own spot when it qualifies, else the nearest
     /// such spot on a spiral out to 200 units; null when there is none. Skyrim's player is wider and taller than
-    /// Morrowind's, so it can overlap a ledge or crate Morrowind's player passes.
+    /// Morrowind's, so it can overlap a ledge or crate Morrowind's player passes. <paramref name="above"/>: how far over
+    /// the spot a floor may be (Redguard's start stood 25 units under the deck of the ship put where its boat was).
     /// </summary>
-    static Vector3? ClearSpot(Vector3 at, List<Vector3[]> solid)
+    internal static Vector3? ClearSpot(Vector3 at, List<Vector3[]> solid, float above = 10)
     {
-        const float radius = 30, knee = 30, height = 130, above = 10, below = 250;
+        const float radius = 30, knee = 30, height = 130, below = 250;
         // Triangles whose bounds reach the search area (a large deck triangle can have every corner far away).
         const float area = 200 + 2 * radius;
         var near = solid.Where(t =>
             t.Max(v => v.X) > at.X - area && t.Min(v => v.X) < at.X + area &&
             t.Max(v => v.Y) > at.Y - area && t.Min(v => v.Y) < at.Y + area &&
-            t.Max(v => v.Z) > at.Z - below - 10 && t.Min(v => v.Z) < at.Z + height + 10).ToList();
+            t.Max(v => v.Z) > at.Z - below - 10 && t.Min(v => v.Z) < at.Z + above + height + 10).ToList();
         float? FloorAt(Vector3 p)
         {
             float? best = null;
@@ -554,6 +588,53 @@ public sealed partial class MwPluginBuilder
                 if (Try(at + new Vector3(d * MathF.Cos(k * MathF.PI / 16), d * MathF.Sin(k * MathF.PI / 16), 0)) is { } p) return p;
         return null;
     }
+
+    /// <summary>Collision sample points inside a standing body at those feet (<see cref="ClearSpot"/>'s body).</summary>
+    internal static int BodyHits(Vector3 feet, List<Vector3[]> solid) => solid.Sum(t => Samples(t).Count(q =>
+        q.Z > feet.Z + 30 && q.Z < feet.Z + 130 && Vector2.Distance(new Vector2(q.X, q.Y), new Vector2(feet.X, feet.Y)) < 30));
+
+    public enum ArrivalKind { Travel, Door, Middle }
+    public sealed record TownArrival(string Name, int Cells, Vector3 Middle, Vector3 Arrival, float Heading, ArrivalKind By);
+
+    /// <summary>
+    /// Morrowind's settlements (its named exterior cells: Balmora, Seyda Neen, Vivec...): the middle of their cells (at
+    /// the average height of what stands there, which can be a roof or a canal), and where a traveller is set down in
+    /// them, as Morrowind itself does it: the travel service destination (silt striders, boats, guild guides: an NPC_
+    /// DODT without a DNAM) nearest the middle, else the outside end of a door (an interior door's DODT without a
+    /// DNAM) nearest it, else the middle on the land. Morrowind made each such destination a clear place to stand.
+    /// </summary>
+    public static List<TownArrival> TownArrivals(MwWorld world)
+    {
+        var travel = world.Objects.Values.Where(r => r.Type == "NPC_")
+            .SelectMany(r => r.Fields.Select((f, i) => (f, outside: f.Type == "DODT" && f.Data.Length >= 24 && !(i + 1 < r.Fields.Count && r.Fields[i + 1].Type == "DNAM"))))
+            .Where(x => x.outside).Select(x => (Position: new Vector3(x.f.Float(0), x.f.Float(4), x.f.Float(8)), Heading: x.f.Float(20))).ToList();
+        var doors = world.Interiors.Values.SelectMany(c => c.Refs)
+            .Where(r => r.DoorDestination is not null && r.DoorDestinationCell is null)
+            .Select(r => (r.DoorDestination!.Value.Position, Heading: r.DoorDestination.Value.Rotation.Z)).ToList();
+        var result = new List<TownArrival>();
+        foreach (var town in world.Exteriors.Values.Where(c => c.Name.Length > 0).GroupBy(c => c.Name))
+        {
+            var middle = new Vector3((float)town.Average(c => (c.GridX + 0.5) * 8192), (float)town.Average(c => (c.GridY + 0.5) * 8192),
+                (float)town.SelectMany(c => c.Refs).Select(r => r.Position.Z).DefaultIfEmpty(0).Average());
+            var cells = town.Select(c => (c.GridX, c.GridY)).ToHashSet();
+            (Vector3 Position, float Heading)? Nearest(List<(Vector3 Position, float Heading)> spots) => spots
+                .Where(s => cells.Contains(((int)MathF.Floor(s.Position.X / 8192), (int)MathF.Floor(s.Position.Y / 8192))))
+                .OrderBy(s => Vector2.Distance(new Vector2(s.Position.X, s.Position.Y), new Vector2(middle.X, middle.Y)))
+                .Select(s => ((Vector3, float)?)s).FirstOrDefault();
+            var by = ArrivalKind.Travel;
+            var at = Nearest(travel);
+            if (at is null) { by = ArrivalKind.Door; at = Nearest(doors); }
+            // With neither, the middle on the land (the average height there can be far under it).
+            if (at is null) { by = ArrivalKind.Middle; at = (middle with { Z = MwTerrain.GroundAt(world, middle.X, middle.Y) ?? middle.Z }, 0f); }
+            result.Add(new TownArrival(town.Key, town.Count(), middle, at.Value.Position, at.Value.Heading, by));
+        }
+        return result;
+    }
+
+    /// <summary>Town map markers on a travel service's destination, on a door's exit, and left at the town's middle.</summary>
+    public int MapMarkersByTravel { get; private set; }
+    public int MapMarkersByDoor { get; private set; }
+    public int MapMarkersAtMiddle { get; private set; }
 
     Skyrim.Navmesh.NavmeshBuilder? navmeshes;
 
@@ -603,13 +684,18 @@ public sealed partial class MwPluginBuilder
             pending = navmeshes.BeginInterior(cell, polygons, turnedUp, loadDoors, StartMarker.Placement is { } sp0 && cell.Persistent.Contains(StartMarker) ? sp0.Position : null, actorsHere, hazards, null, BackgroundNavmeshes);
         }
         catch (Exception e) { Problems.Add($"navmesh {cell.EditorID}: {e.Message}"); return; }
-        if (BackgroundNavmeshes) navFinishes.Enqueue(Finish); else Finish();
+        if (BackgroundNavmeshes) navFinishes.Enqueue((pending, Finish)); else Finish();
         void Finish()
         {
         try
         {
             Skyrim.Navmesh.NavmeshBuilder.Result r;
-            try { r = pending.Finish(); }
+            try
+            {
+                r = pending.Finish();
+                // The slow ones by name (2026-11-10: one interior held a build over 30 minutes and no line said which).
+                if (pending.Seconds > 60) Console.WriteLine($"    slow navmesh {cell.EditorID}: {pending.Seconds:F0} s ({pending.Timing})");
+            }
             catch (InvalidOperationException e) when (e.Message.StartsWith("no floor to walk on") && source is not null)
             {
                 // Nothing to walk on in it (Bloodmoon's "Solstheim" cell: Molag Bal's statue and one actor): a floor of its
@@ -631,7 +717,9 @@ public sealed partial class MwPluginBuilder
                     }
                     catch (InvalidOperationException again) when (again.Message.StartsWith("no floor to walk on")) { }
                 }
-                r = made ?? throw e;
+                // Still nothing to walk on: the first failure, as it was thrown.
+                if (made is null) throw;
+                r = made;
             }
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
@@ -651,12 +739,29 @@ public sealed partial class MwPluginBuilder
     /// <summary>Interior navmeshes made on worker threads while the next interiors are built (<see cref="FinishNavmeshes"/>
     /// finishes them in the order begun): every core at work (2026-10-22, the user: "should be mutithread").</summary>
     public bool BackgroundNavmeshes { get; set; }
-    readonly Queue<Action> navFinishes = new();
+    readonly Queue<(Skyrim.Navmesh.NavmeshBuilder.PendingInterior Pending, Action Finish)> navFinishes = new();
 
-    /// <summary>Background navmeshes finished, oldest first, until at most <paramref name="keep"/> are left in hand.</summary>
+    /// <summary>
+    /// Background navmeshes finished, in the order begun (their records' IDs follow it), until at most
+    /// <paramref name="keep"/> are still being made. Until 2026-11-10 it was "until at most keep are in hand", the
+    /// oldest waited for: one slow interior at the head held the queue full of meshes already made, nothing new was
+    /// begun, and the interiors ran on one core (measured on a running build: 0.99 of 16 cores busy, the main thread
+    /// in PendingInterior.Finish behind a single Recast build; 85 minutes of a conversion).
+    /// </summary>
     public void FinishNavmeshes(int keep = 0)
     {
-        while (navFinishes.Count > keep) navFinishes.Dequeue()();
+        void FinishMade() { while (navFinishes.Count > 0 && navFinishes.Peek().Pending.IsMade) navFinishes.Dequeue().Finish(); }
+        FinishMade();
+        // Those still being made are what fills the cores; the made ones behind a slow head only wait their turn
+        // (a few hundred at most are let wait, for the memory their meshes take).
+        while (navFinishes.Count(n => !n.Pending.IsMade) > keep || navFinishes.Count > keep + 512)
+        {
+            if (navFinishes.Peek().Pending.IsMade) { FinishMade(); continue; }
+            if (navFinishes.Count > keep + 512) { navFinishes.Dequeue().Finish(); continue; }
+            Skyrim.Navmesh.NavmeshBuilder.PendingInterior.WaitAny(navFinishes.Select(n => n.Pending));
+            FinishMade();
+        }
+        if (keep == 0) while (navFinishes.Count > 0) navFinishes.Dequeue().Finish();
     }
 
     /// <summary>Floor and ceiling heights at a point: the highest surface at or below <paramref name="z"/> + 10 and
@@ -708,7 +813,7 @@ public sealed partial class MwPluginBuilder
     {
         using var skyrim = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
         var tamriel = skyrim.Worldspaces.First(w => w.EditorID == "Tamriel");
-        var terrain = new MwTerrain(mod, meshes.Textures);
+        var terrain = new MwTerrain(mod, meshes.Textures) { Lands = world.Lands };
         var cells = new Dictionary<(int X, int Y), Cell>();
         Cell CellAt((int X, int Y) g) => cells.TryGetValue(g, out var c) ? c : cells[g] = new Cell(mod)
         {
@@ -725,34 +830,38 @@ public sealed partial class MwPluginBuilder
                 if (min >= 0) cell.Flags &= ~Cell.Flag.HasWater;
             }
         Problems.AddRange(terrain.Problems);
+        Console.WriteLine($"  land: {terrain.CrowdedQuadrants} quadrants held more than six textures; {terrain.VerticesRestood} vertices on such a quadrant or its edge given a ground every quadrant there lays ({terrain.NothingShared} where they lay none in common)");
 
         var top = new Cell(mod) { Flags = tamriel.TopCell?.Flags ?? 0, SkyrimMajorRecordFlags = tamriel.TopCell?.SkyrimMajorRecordFlags ?? 0, Persistent = [], Temporary = [] };
         // Settlements (Morrowind's named exterior cells: Balmora, Seyda Neen, Vivec...): one marker at the middle of
         // each, for the dangers of the night in town (TMNightDanger, which finds MWTownCentres by name).
         var centres = new FormList(mod) { EditorID = Skyrim.TownNights.TownCentresId("MW") };
-        foreach (var town in world.Exteriors.Values.Where(c => c.Name.Length > 0).GroupBy(c => c.Name))
+        foreach (var town in TownArrivals(world))
         {
-            var z = town.SelectMany(c => c.Refs).Select(r => r.Position.Z).DefaultIfEmpty(0).Average();
             var marker = new PlacedObject(mod)
             {
-                EditorID = "MWTownCentre" + Sanitize(town.Key),
+                EditorID = "MWTownCentre" + Sanitize(town.Name),
                 Base = Skyrim.TownNights.XMarker.ToNullableLink<IPlaceableObjectGetter>(),
-                Placement = new Placement { Position = new P3Float((float)town.Average(c => (c.GridX + 0.5) * 8192), (float)town.Average(c => (c.GridY + 0.5) * 8192), z), Rotation = new P3Float(0, 0, 0) },
+                Placement = new Placement { Position = new P3Float(town.Middle.X, town.Middle.Y, town.Middle.Z), Rotation = new P3Float(0, 0, 0) },
                 SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400,
             };
             top.Persistent.Add(marker);
             centres.Items.Add(marker.ToLink<ISkyrimMajorRecordGetter>());
-            // A map marker for fast travel: on the map once found (Skyrim discovers markers as you come near).
+            // A map marker for fast travel: on the map once found (Skyrim discovers markers as you come near). Fast
+            // travel sets the player down on it, so it stands where Morrowind sets travellers down in the town.
+            if (town.By == ArrivalKind.Travel) MapMarkersByTravel++;
+            else if (town.By == ArrivalKind.Door) MapMarkersByDoor++;
+            else { MapMarkersAtMiddle++; Problems.Add($"map marker {town.Name}: no travel destination or door exit in its cells; at its middle"); }
             var mapMarker = new PlacedObject(mod)
             {
-                EditorID = "MWMapMarker" + Sanitize(town.Key),
+                EditorID = "MWMapMarker" + Sanitize(town.Name),
                 Base = new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x10).ToNullableLink<IPlaceableObjectGetter>(),   // MapMarker
-                Placement = new Placement { Position = marker.Placement.Position, Rotation = new P3Float(0, 0, 0) },
+                Placement = new Placement { Position = new P3Float(town.Arrival.X, town.Arrival.Y, town.Arrival.Z), Rotation = new P3Float(0, 0, town.Heading) },
                 SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400,
-                MapMarker = new MapMarker { Name = town.Key, Type = town.Count() >= 4 ? MapMarker.MarkerType.City : MapMarker.MarkerType.Settlement },
+                MapMarker = new MapMarker { Name = town.Name, Type = town.Cells >= 4 ? MapMarker.MarkerType.City : MapMarker.MarkerType.Settlement },
             };
             top.Persistent.Add(mapMarker);
-            townMapMarkers[town.Key] = mapMarker;   // ShowMap's places
+            townMapMarkers[town.Name] = mapMarker;   // ShowMap's places
         }
         AddAnchor("", top);
         if (centres.Items.Count > 0) mod.FormLists.Add(centres);
@@ -792,6 +901,7 @@ public sealed partial class MwPluginBuilder
                     ItemCount = b is IItemGetter && StackOf(r.BaseId, r.Count) is > 1 and var n ? n : null,
                 };
                 ApplyLock(r, placed, b);
+                ApplyOwnership(r, placed);
                 if (b is Door)
                 {
                     placed.SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
@@ -959,7 +1069,9 @@ public sealed partial class MwPluginBuilder
 
         // Distant terrain.
         var lod = new Skyrim.TerrainLod(mod, modOutDir, skyrimData);
-        lod.Build(ws.EditorID!, cells, c => c.Flags.HasFlag(Cell.Flag.HasWater) ? 0f : null, -2048);
+        // Vvardenfell lies in the sea: the distant view goes on as sea 32 cells past the land's records (seen
+        // 2026-11-12 from over Seyda Neen: the sea ended in straight edges short of the horizon, the sky's white past them).
+        lod.Build(ws.EditorID!, cells, c => c.Flags.HasFlag(Cell.Flag.HasWater) ? 0f : null, -2048, seaLevel: 0f, seaAround: 32);
         TerrainLodChunks = lod.Chunks;
         Problems.AddRange(lod.Problems);
         return ws;
@@ -1234,9 +1346,20 @@ public sealed partial class MwPluginBuilder
         var levelling = Levelling();
         BuildTrainers();
         FinishMagic();
+        // Vendors' shops (MwVendors): after the actors and items, before the law's jail and the barks.
+        FinishVendors();
+        // Alchemy apparatus and enchanters (MwApparatus, MwEnchanters): after the shops have asked for their items.
+        FinishApparatus();
+        FinishEnchanters();
         FinishLaw();
+        FinishAfflictions();
+        FinishRest();
         FinishLocks();
+        // Item condition and repair (MwWear): after every item.
+        FinishWear();
         SwingDoorTwinCount = Skyrim.SwingDoorTwins.AddAll(mod);
+        // The people the quests need kept alive (MwNeeded).
+        MarkNeeded();
         // Morrowind's recorded barks: after every other record, so those keep their FormIDs.
         BuildBarks();
         Directory.CreateDirectory(modOutDir);
@@ -1245,6 +1368,11 @@ public sealed partial class MwPluginBuilder
         TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
         // Every people's animation set's keyword, whoever this build placed (the animations are written for all of them).
         foreach (var set in Skyrim.Animations.NpcAnimations.Morrowind) PersonKeyword(set.Keyword);
+        // References held by scripts, quests and lists persistent, in their worldspace's persistent cell (HeldReferences).
+        Skyrim.HeldReferences.Prepare(mod, Console.WriteLine);
+        Skyrim.HavokSettle.Apply(mod, modOutDir, Console.WriteLine);
+        Skyrim.InteriorBounds.Apply(mod, Console.WriteLine);
+        if (meshes.Textures.LandMatte > 0) Console.WriteLine($"  land textures: {meshes.Textures.LandMatte} written without alpha (Skyrim's land takes it as shine)");
         mod.WriteToBinary(Path.Combine(modOutDir, PluginName), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
         {
             MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
@@ -1263,7 +1391,7 @@ public sealed partial class MwPluginBuilder
         levelling.Save(Path.Combine(modOutDir, PluginName));
         LevellingSummary = $"{levelling.Classes.Count} playable classes, {levelling.Signs.Count} birthsigns, {levelling.Races.Count} races; skill rates major x{levelling.MajorRate:0.##}, "
             + $"minor x{levelling.MinorRate:0.##}, other x{levelling.MiscRate:0.##}, specialization x{levelling.SpecialRate:0.##}; level-up multipliers {string.Join(",", levelling.LevelUp)}; "
-            + $"{trainerNpcs.Count} trainers teaching {TrainerSkills} skills; {SkillBooks} skill books";
+            + $"{trainerNpcs.Count} trainers teaching {TrainerSkills} skills; {SkillBooks} skill books; {Vendors} vendors, {SpellTomes} spell tomes";
     }
 
     /// <summary>What <see cref="Write"/> wrote of its people's animations.</summary>

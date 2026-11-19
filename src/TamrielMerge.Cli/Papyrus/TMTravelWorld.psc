@@ -2,8 +2,8 @@ ScriptName TMTravelWorld extends Quest
 {One converted world's travel (TamrielMerge Travel.esp, docs/travel.md): its towns by region and what Daggerfall's
 travel prices (Daggerfall Unity's TravelTimeCalculator). A quest that never runs; TMTravel reads it.
 
-Every world is priced as Daggerfall prices its map: one cell is one Daggerfall map pixel (the Iliac Bay is built at
-that scale), crossed in (102 x transport / 256) x (512 - terrain) / 256 minutes, transport 256 on foot, 128 on a horse;
+Every world is priced as Daggerfall prices its map: a map pixel is UnitsPerPixel units (the Iliac Bay's own scale,
+two cells; elsewhere a cell), crossed in (102 x transport / 256) x (512 - terrain) / 256 minutes, transport 256 on foot, 128 on a horse;
 terrain by the map pixel's climate where the world has Daggerfall's climate map (Climate), else the woods' (250). The sea
 costs 255 minutes a pixel, 51 by ship. Camping out instead of inns takes 300/256 as long; travelling recklessly half.}
 
@@ -11,10 +11,22 @@ String Property WorldName Auto
 Int Property Story Auto
 {The time this world belongs to: 0 Daggerfall, 1 Redguard, 2 Morrowind, 3 Oblivion, 4 Skyrim (TMStoryOrder).}
 WorldSpace[] Property Worlds Auto
-{Its exterior worldspaces: travel goes between towns in the one the traveller is in.}
+{Its exterior worldspaces: one, or the tiles of a big overland (the Iliac Bay's), travelled across as one map.}
+Float[] Property OriginX Auto
+Float[] Property OriginY Auto
+{Each of Worlds' 0,0 on the whole map (units), when it is one of several tiles; none: every position is the map's.}
+Float Property CoreMinX Auto
+Float Property CoreMaxX Auto
+Float Property CoreMinY Auto
+Float Property CoreMaxY Auto
+Float Property Hysteresis = 2048.0 Auto
+{A tile's core, in its own coordinates (every tile's the same), and how far past it the overland moves the traveller
+into the next tile (TMDfOverland).}
 String[] Property GroupNames Auto
 String[] Property GroupTowns Auto
-{Each group's towns, "|" between them, in the order of its GroupMarkers list.}
+{Each group's towns, "|" between them, in the order of its GroupMarkers list: in pieces, each group's first piece in
+GroupTownsFirst (TMStrings.Group; a save can't hold a script string of 4,096 characters).}
+Int[] Property GroupTownsFirst Auto
 FormList[] Property GroupMarkers Auto
 Float Property UnitsPerPixel = 4096.0 Auto
 Float Property MapWestX Auto
@@ -29,7 +41,7 @@ FormList Property Ports Auto
 String Property PortNames Auto
 {"|" between names, in the order of Ports.}
 String Property PortSea Auto
-{"x,y|x,y|...": each harbour's sea point (units).}
+{"x,y|x,y|...": each harbour's sea point (units, the whole map's, as every position below).}
 String Property PortHubs Auto
 {"i|j|...": each harbour's nearest hub.}
 String Property HubPoints Auto
@@ -44,8 +56,13 @@ Int Function TownCount(Int g)
   Return GroupMarkers[g].GetSize()
 EndFunction
 
+; Group g's town names, in the order of its GroupMarkers list.
+String[] Function Towns(Int g)
+  Return TMStrings.Group(GroupTowns, GroupTownsFirst, g)
+EndFunction
+
 String Function TownName(Int g, Int t)
-  String[] names = StringUtil.Split(GroupTowns[g], "|")
+  String[] names = Towns(g)
   If t < 0 || t >= names.Length
     Return ""
   EndIf
@@ -61,6 +78,70 @@ EndFunction
 
 Bool Function Has(WorldSpace w)
   Return w && Worlds.Find(w) >= 0
+EndFunction
+
+; ---- the whole map's coordinates ----
+
+; Where a worldspace's 0,0 is on the whole map (0 for a world of one worldspace).
+Float Function OffsetX(WorldSpace w)
+  Int i = Worlds.Find(w)
+  If i < 0 || !OriginX || i >= OriginX.Length
+    Return 0.0
+  EndIf
+  Return OriginX[i]
+EndFunction
+
+Float Function OffsetY(WorldSpace w)
+  Int i = Worlds.Find(w)
+  If i < 0 || !OriginY || i >= OriginY.Length
+    Return 0.0
+  EndIf
+  Return OriginY[i]
+EndFunction
+
+; A reference's position on the whole map.
+Float Function GX(ObjectReference r)
+  Return r.GetPositionX() + OffsetX(r.GetWorldSpace())
+EndFunction
+
+Float Function GY(ObjectReference r)
+  Return r.GetPositionY() + OffsetY(r.GetWorldSpace())
+EndFunction
+
+; Where a walk from (gx, gy) towards (tx, ty) (the whole map's) leaves the tile w: out of its core along the way and on
+; past the hysteresis by a quarter cell, where the overland moves the traveller into the next tile (TMDfOverland).
+; In w's own coordinates, in CrossX / CrossY.
+Float Property CrossX Auto Hidden
+Float Property CrossY Auto Hidden
+
+Function Crossing(WorldSpace w, Float gx, Float gy, Float tx, Float ty)
+  Float lx = gx - OffsetX(w)
+  Float ly = gy - OffsetY(w)
+  Float dx = tx - gx
+  Float dy = ty - gy
+  Float len = Math.Sqrt(dx * dx + dy * dy)
+  If len < 1.0
+    CrossX = lx
+    CrossY = ly
+    Return
+  EndIf
+  Float s = 1.0
+  If dx > 0.0 && (CoreMaxX - lx) / dx < s
+    s = (CoreMaxX - lx) / dx
+  ElseIf dx < 0.0 && (CoreMinX - lx) / dx < s
+    s = (CoreMinX - lx) / dx
+  EndIf
+  If dy > 0.0 && (CoreMaxY - ly) / dy < s
+    s = (CoreMaxY - ly) / dy
+  ElseIf dy < 0.0 && (CoreMinY - ly) / dy < s
+    s = (CoreMinY - ly) / dy
+  EndIf
+  If s < 0.0
+    s = 0.0
+  EndIf
+  s += (Hysteresis + 1024.0) / len
+  CrossX = lx + dx * s
+  CrossY = ly + dy * s
 EndFunction
 
 ; ---- Daggerfall's travel time ----
@@ -205,7 +286,7 @@ Int Function PortCount()
   Return Ports.GetSize()
 EndFunction
 
-; The harbour nearest a position (units), or -1.
+; The harbour nearest a position (units, the whole map's), or -1.
 Int Function NearestPort(Float x, Float y)
   Int best = -1
   Float bestD = 0.0
@@ -214,8 +295,8 @@ Int Function NearestPort(Float x, Float y)
   While i < n
     ObjectReference p = Ports.GetAt(i) as ObjectReference
     If p
-      Float ddx = p.GetPositionX() - x
-      Float ddy = p.GetPositionY() - y
+      Float ddx = GX(p) - x
+      Float ddy = GY(p) - y
       Float d = ddx * ddx + ddy * ddy
       If best < 0 || d < bestD
         best = i

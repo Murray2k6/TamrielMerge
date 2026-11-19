@@ -70,6 +70,28 @@ public sealed partial class MwPluginBuilder
     };
 
     /// <summary>Puts a reference's Morrowind lock and trap on the placed door, container or swinging door.</summary>
+    /// <summary>References given an owner (2026-11-05, user: "theres no ownership by npcs etc for objects that can be
+    /// picked up"), as Morrowind's own: ANAM the owning person, else CNAM the owning faction with INDX the rank from
+    /// which its members may take it freely. One with BNAM (a global: Morrowind's rented beds and the like, free while it
+    /// is set) is left unowned, as Skyrim's ownership has no global to free it by.</summary>
+    public int OwnedByPerson, OwnedByFaction, OwnershipByGlobalLeft;
+
+    void ApplyOwnership(Tes3Ref r, PlacedObject placed)
+    {
+        if (r.Global is { Length: > 0 }) { if (r.Owner is { Length: > 0 } || r.OwnerFaction is { Length: > 0 }) OwnershipByGlobalLeft++; return; }
+        if (r.Owner is { Length: > 0 } person && Actor(person) is Npc npc)
+        {
+            placed.Owner.SetTo(npc.FormKey);
+            OwnedByPerson++;
+        }
+        else if (r.OwnerFaction is { Length: > 0 } faction && MwFaction(faction) is { } f)
+        {
+            placed.Owner.SetTo(f.FormKey);
+            if (r.OwnerRank >= 0) placed.FactionRank = r.OwnerRank;
+            OwnedByFaction++;
+        }
+    }
+
     void ApplyLock(Tes3Ref r, PlacedObject placed, IMajorRecord b)
     {
         bool swing = b is Activator a && swingDoors.ContainsValue(a);
@@ -157,6 +179,7 @@ public sealed partial class MwPluginBuilder
         entry.Properties.Add(new ScriptObjectProperty { Name = "Probes", Object = List("MWProbes", probes.Select(p => p.Tool)).ToLink<ISkyrimMajorRecordGetter>() });
         entry.Properties.Add(new ScriptFloatListProperty { Name = "ProbeQuality", Data = [.. probes.Select(p => p.Quality)] });
         entry.Properties.Add(new ScriptIntListProperty { Name = "ProbeUses", Data = [.. probes.Select(p => p.Uses)] });
+        if (scriptWorld is not null) entry.Properties.Add(new ScriptObjectProperty { Name = "MwState", Object = new FormLink<ISkyrimMajorRecordGetter>(StateQuest().FormKey) });
         securityQuest.VirtualMachineAdapter = new QuestAdapter { Scripts = [entry] };
     }
 }

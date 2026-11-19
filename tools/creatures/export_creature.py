@@ -41,6 +41,51 @@ else:
 
 scene = bpy.context.scene
 arm = bpy.data.objects[config["armature"]] if config.get("armature") else next(o for o in scene.objects if o.type == 'ARMATURE')
+# The model is open: an export that fails from here leaves none behind (the converter would take an older one for it).
+if os.path.exists(os.path.join(out_dir, "creature.json")): os.remove(os.path.join(out_dir, "creature.json"))
+
+def make_evaluated(objs):
+    """Objects Blender evaluates: one in a collection disabled in viewports, excluded, or hidden itself keeps its rest
+    pose whatever action is set (the giant bat's armature, in a collection disabled in viewports: every clip baked as
+    one pose, 2026-11-06). Their collections, up to the scene's, are switched on."""
+    names = {o.name for o in objs}
+    root = bpy.context.view_layer.layer_collection
+    def walk(lc):
+        has = any(ob.name in names for ob in lc.collection.objects)
+        for child in lc.children:
+            has = walk(child) or has
+        if has and lc is not root:
+            if lc.exclude or lc.hide_viewport or lc.collection.hide_viewport:
+                print(f"collection {lc.collection.name} switched on (it holds {', '.join(sorted(n for n in names if n in lc.collection.all_objects))})")
+            lc.exclude = False; lc.hide_viewport = False; lc.collection.hide_viewport = False
+        return has
+    walk(root)
+    for o in objs:
+        o.hide_viewport = False
+        if o.name in bpy.context.view_layer.objects: o.hide_set(False)
+    bpy.context.view_layer.update()
+
+def action_fcurves(action):
+    """An action's curves: a layered action's (Blender 4.4+: layers, strips, channel bags) or an older one's."""
+    curves = []
+    for layer in getattr(action, "layers", []):
+        for strip in layer.strips:
+            for bag in getattr(strip, "channelbags", []):
+                curves.extend(bag.fcurves)
+    if not curves and hasattr(action, "fcurves"):
+        curves.extend(action.fcurves)
+    return curves
+
+def keyed_spread(action):
+    """How far the action's keyed values move: the largest change of any curve's keys (0 for an action that holds)."""
+    spread = 0.0
+    for c in action_fcurves(action):
+        values = [k.co[1] for k in c.keyframe_points]
+        if values: spread = max(spread, max(values) - min(values))
+    return spread
+
+make_evaluated([arm] + [o for o in scene.objects if o.type == 'MESH'
+                        and (o.parent == arm or any(m.type == 'ARMATURE' and m.object == arm for m in o.modifiers))])
 
 def select_only(*objs, active=None):
     for o in bpy.context.view_layer.objects: o.select_set(False)
@@ -243,15 +288,39 @@ def config_texture(v):
         return image_file(img) if img else None
     return os.path.join(here, v)
 
+converted_pictures = {}   # source picture -> its PNG in the tex folder ("tex/<name>.png")
+claimed_pictures = set()  # PNG paths written this run
+
 def portable(path):
     """A texture copied into the export's tex folder, named by where it is relative to the export: the tool ships the
     export and these copies (not the downloads, hundreds of megabytes), and works wherever it is installed."""
     tex_dir = os.path.join(out_dir, "tex")
     os.makedirs(tex_dir, exist_ok=True)
     rel = os.path.relpath(path, out_dir)
-    if rel.replace("\\", "/").startswith("tex/"):
+    if rel.replace("\\", "/").startswith("tex/") and rel.lower().endswith(".png"):
         return rel.replace("\\", "/")
     stem, ext = os.path.splitext(os.path.basename(path))
+    if ext.lower() != ".png":
+        # The converter reads PNG only (Util.Png): a JPEG read as one was a 0 x 0 picture, and the giant bat's and the
+        # liches' textures came out empty (2026-11-06). Other pictures are saved as PNG here, pixels as they are (no
+        # view transform: normal maps stay normal maps), once for each source.
+        key = os.path.normcase(os.path.abspath(path))
+        if key in converted_pictures: return converted_pictures[key]
+        target = os.path.join(tex_dir, bpy.path.clean_name(stem) + ".png")
+        n = 1
+        while target in converted_pictures.values() or os.path.normcase(target) in claimed_pictures:
+            n += 1; target = os.path.join(tex_dir, f"{bpy.path.clean_name(stem)}_{n}.png")
+        img = bpy.data.images.load(path, check_existing=False)
+        # Blender reads the pixels when first asked for them; a picture it can't read fails here, by name.
+        if img.size[0] == 0 or len(img.pixels) == 0:
+            raise SystemExit(f"ERROR texture {path}: Blender can't read it")
+        img.filepath_raw = target; img.file_format = 'PNG'
+        img.save()
+        bpy.data.images.remove(img)
+        print(f"texture {os.path.basename(path)} saved as {os.path.basename(target)}")
+        claimed_pictures.add(os.path.normcase(target))
+        converted_pictures[key] = "tex/" + os.path.basename(target)
+        return converted_pictures[key]
     name = bpy.path.clean_name(stem) + ext.lower()
     target = os.path.join(tex_dir, name)
     n = 1
@@ -357,6 +426,10 @@ for name, action_name in config.get("actions", {}).items():
                  max(abs(frames[f][b]["q"][i] - frames[0][b]["q"][i]) for i in range(4))
                  for f in range(len(frames)) for b in range(len(frames[0]))), default=0)
     print(f"animation {name}: {len(frames)} frames, moves {moved:.3f}{'  <-- STILL' if moved < 1e-4 else ''}")
+    # Keys that move but a clip that doesn't: the action never reached the bones (an armature Blender doesn't evaluate,
+    # an action slot for another object): an export of still poses is a failure, not a creature.
+    if moved < 1e-4 and keyed_spread(action) > 1e-3:
+        raise SystemExit(f"ERROR animation {name}: action {action_name}'s keys move ({keyed_spread(action):.3f}) but the baked clip is one pose")
 
 json.dump(out, open(os.path.join(out_dir, "creature.json"), "w"))
 print(f"EXPORTED {len(bones)} bones, {sum(len(m['triangles']) for m in out['meshes'])} triangles, "

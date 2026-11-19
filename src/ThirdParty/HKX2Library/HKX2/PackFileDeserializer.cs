@@ -7,13 +7,14 @@ namespace HKX2
 {
     public class PackFileDeserializer
     {
-        private HKXClassNames _classnames;
-        private HKXSection _classSection;
-        private HKXSection _dataSection;
+        // set by DeserializePartially (and _deserializedObjects by Deserialize) before anything reads them
+        private HKXClassNames _classnames = null!;
+        private HKXSection _classSection = null!;
+        private HKXSection _dataSection = null!;
 
-        private Dictionary<uint, IHavokObject> _deserializedObjects;
-        public HKXHeader _header;
-        private HKXSection _typeSection;
+        private Dictionary<uint, IHavokObject> _deserializedObjects = null!;
+        public HKXHeader _header = null!;
+        private HKXSection _typeSection = null!;
 
         private bool _ignoreNonFatalError;
 
@@ -27,7 +28,7 @@ namespace HKX2
             var hkClass = System.Type.GetType($@"HKX2.{hkClassName}");
             if (hkClass is null) throw new Exception($@"Havok class type '{hkClassName}' not found!");
 
-            var ret = (IHavokObject)Activator.CreateInstance(hkClass);
+            var ret = (IHavokObject?)Activator.CreateInstance(hkClass);
             if (ret is null) throw new Exception($@"Failed to Activator.CreateInstance({hkClass})");
 
             br.StepIn(offset);
@@ -96,7 +97,7 @@ namespace HKX2
             br.AssertUInt32(size | ((uint)0x80 << 24));
         }
 
-        private T ReadPointerBase<T, F>(Func<BinaryReaderEx, F, T> func, BinaryReaderEx br) where F : Fixup, new()
+        private T? ReadPointerBase<T, F>(Func<BinaryReaderEx, F, T> func, BinaryReaderEx br) where F : Fixup, new()
         {
             Dictionary<uint, F> map;
             if (typeof(F) == typeof(LocalFixup))
@@ -127,6 +128,7 @@ namespace HKX2
 
         private List<T> ReadArrayBase<T>(Func<BinaryReaderEx, T> func, BinaryReaderEx br)
         {
+            // ReadPointerBase only returns default for a non-List type; here it is List<T>, so it always calls the func
             return ReadPointerBase((BinaryReaderEx _br, LocalFixup f) =>
             {
                 var size = _br.ReadUInt32();
@@ -142,7 +144,7 @@ namespace HKX2
                 _br.StepOut();
 
                 return res;
-            }, br);
+            }, br)!;
         }
 
         public List<T> ReadClassArray<T>(BinaryReaderEx br) where T : IHavokObject, new()
@@ -155,7 +157,8 @@ namespace HKX2
             }, br);
         }
 
-        public T ReadClassPointer<T>(BinaryReaderEx br) where T : IHavokObject
+        // null when the pointer has no fixup (a null pointer in the file)
+        public T? ReadClassPointer<T>(BinaryReaderEx br) where T : IHavokObject
         {
             PadToPointerSizeIfPaddingOption(br);
 
@@ -182,7 +185,9 @@ namespace HKX2
 
         public List<T> ReadClassPointerArray<T>(BinaryReaderEx br) where T : IHavokObject
         {
-            return ReadArrayBase(ReadClassPointer<T>, br);
+            // a null entry in the file stays null in the list, as it always has; the generated classes declare these
+            // lists with non-nullable elements, and the serializers' pointer-array writers take null entries
+            return ReadArrayBase(_br => ReadClassPointer<T>(_br)!, br);
         }
 
         public string ReadStringPointer(BinaryReaderEx br)
@@ -219,14 +224,16 @@ namespace HKX2
             br.AssertUSize(0);
 
             // Do a local fixup lookup
-            if (!_dataSection._localMap.ContainsKey(key)) return null;
+            // A missing or empty cstring is returned as null, as it always has been. The generated classes keep their
+            // cstrings in non-nullable string members, and WriteCString and XmlSerializer.WriteString take null back.
+            if (!_dataSection._localMap.ContainsKey(key)) return null!;
 
             var f = _dataSection._localMap[key];
             br.StepIn(f.Dst);
             var ret = br.ReadASCII();
             br.StepOut();
             if (ret == "")
-                return null;
+                return null!;
             return ret;
         }
 
@@ -541,7 +548,7 @@ namespace HKX2
             return ReadCStyleArrayBase(ReadTransform, br, length);
         }
 
-        public T[] ReadClassPointerCStyleArray<T>(BinaryReaderEx br, short length) where T : IHavokObject, new()
+        public T?[] ReadClassPointerCStyleArray<T>(BinaryReaderEx br, short length) where T : IHavokObject, new()
         {
             return ReadCStyleArrayBase(ReadClassPointer<T>, br, length);
         }

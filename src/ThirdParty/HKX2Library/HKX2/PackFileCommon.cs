@@ -10,7 +10,8 @@ namespace HKX2
         public int ContentsClassNameSectionOffset;
         public int ContentsSectionIndex;
         public int ContentsSectionOffset;
-        public string ContentsVersionString;
+        // both constructors' users set it: HKXHeader(br) reads it, the presets give it in their initialisers
+        public string ContentsVersionString = null!;
         public byte Endian;
         public int FileVersion;
         public int Flags;
@@ -209,7 +210,7 @@ namespace HKX2
             return Src == other.Src && Dst == other.Dst;
         }
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         {
             if (ReferenceEquals(null, obj)) return false;
             if (ReferenceEquals(this, obj)) return true;
@@ -251,7 +252,7 @@ namespace HKX2
             return Src == other.Src && Dst == other.Dst;
         }
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         {
             if (ReferenceEquals(null, obj)) return false;
             if (ReferenceEquals(this, obj)) return true;
@@ -293,7 +294,7 @@ namespace HKX2
             return Src == other.Src && Dst == other.Dst;
         }
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         {
             if (ReferenceEquals(null, obj)) return false;
             if (ReferenceEquals(this, obj)) return true;
@@ -308,7 +309,8 @@ namespace HKX2
 
     public class HKXClassName
     {
-        public string ClassName;
+        // HKXClassName(br) reads it; the serializer sets it in an initialiser with the parameterless constructor
+        public string ClassName = null!;
         public uint Signature;
 
         internal HKXClassName()
@@ -333,8 +335,9 @@ namespace HKX2
     // Class names data found in the __classnames__ section of the hkx
     internal class HKXClassNames
     {
-        private List<HKXClassName> ClassNames;
-        public Dictionary<uint, HKXClassName> OffsetClassNamesMap;
+        // set by Read, which ReadClassnames calls straight after construction
+        private List<HKXClassName> ClassNames = null!;
+        public Dictionary<uint, HKXClassName> OffsetClassNamesMap = null!;
 
         public void Read(BinaryReaderEx br)
         {
@@ -374,13 +377,15 @@ namespace HKX2
 
         public List<LocalFixup> LocalFixups = new();
 
-        public byte[] SectionData;
+        // HKXSection(br, ...) reads these; the serializer sets them in initialisers with the parameterless constructor
+        public byte[] SectionData = null!;
         public int SectionID;
 
-        public string SectionTag;
+        public string SectionTag = null!;
         public List<VirtualFixup> VirtualFixups = new();
 
-        public string ContentsVersionString;
+        // only the serializer sets this; HKXSection(br, ContentsVersionString) uses its parameter and leaves the field null
+        public string? ContentsVersionString;
 
         internal HKXSection()
         {

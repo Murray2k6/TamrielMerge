@@ -17,6 +17,10 @@ public sealed class ObScriptWorld : ObPapyrus.IWorld
     readonly Dictionary<FormKey, FormKey> scriptOf = [];   // record → its script
     readonly Dictionary<FormKey, (string EditorID, string Type, FormKey? Base)> pending = [];
     readonly HashSet<FormKey> actorScripts = [];
+    readonly HashSet<FormKey> objectScripts = [];
+    /// <summary>Scripts carried by actors and by other things too.</summary>
+    public int MixedScripts => actorScripts.Count(objectScripts.Contains);
+    public IEnumerable<FormKey> MixedScriptKeys => actorScripts.Where(objectScripts.Contains);
 
     /// <summary>Every script by its FormKey, last plugin winning.</summary>
     public Dictionary<FormKey, Ob.IScriptGetter> Scripts { get; } = [];
@@ -60,6 +64,10 @@ public sealed class ObScriptWorld : ObPapyrus.IWorld
                     Carriers[se].Add(("Effect of " + r.GetType().Name.Replace("BinaryOverlay", ""), r.EditorID ?? r.FormKey.ToString()));
                 }
                 if (r is Ob.INpcGetter or Ob.ICreatureGetter && ScriptLink(r) is { } s2) actorScripts.Add(s2);
+                // ...and what else carries it (a door, a container, an activator): a script on both is an ObjectReference's,
+                // which binds to either (2026-11-09 log: OB_NoActivationScript and others, made an Actor's for the one actor
+                // carrying them, would not bind to their activators: "activators a mess").
+                else if (r is not Ob.INpcGetter and not Ob.ICreatureGetter and not Ob.IQuestGetter && ScriptLink(r) is { } s3) objectScripts.Add(s3);
                 if (r is Ob.IQuestGetter q && q.Script.FormKeyNullable is { } qs)
                 {
                     QuestScripts.Add(qs);
@@ -305,7 +313,7 @@ public sealed class ObScriptWorld : ObPapyrus.IWorld
         }
         return variables.GetValueOrDefault(papyrusScriptName);
     }
-    public bool OnActor(FormKey script) => actorScripts.Contains(script);
+    public bool OnActor(FormKey script) => actorScripts.Contains(script) && !objectScripts.Contains(script);
 
     readonly Dictionary<string, List<string>> questsByScript = new(StringComparer.OrdinalIgnoreCase);
 
@@ -338,7 +346,10 @@ public sealed class ObScriptWorld : ObPapyrus.IWorld
         Ob.IBookGetter b when b.Enchantment.FormKeyNullable is { } be && scrollEnchantments.Contains(be) => "Scroll",
         Ob.ILeveledCreatureGetter => "ActorBase",
         Ob.IPotionGetter or Ob.ISoulGemGetter when ScriptLink(r) is not null => "MiscObject",
-        Ob.IAlchemicalApparatusGetter => "MiscObject",
+        // An apparatus is built as a usable item, an ingestible (ObMasteryPerks.ApparatusItem), which is a Potion to
+        // Papyrus. Typed MiscObject, the museum of oddities' scripts could not take theirs: "Property f_SE38Item8 ...
+        // cannot be bound because (120008A9) is not the right type", 28 errors in each game log of 2026-11-10.
+        Ob.IAlchemicalApparatusGetter => "Potion",
         // Base objects whose Skyrim kind depends on what they carry (activator, flora, static): any form.
         Ob.IActivatorGetter or Ob.IFurnitureGetter or Ob.IStaticGetter or Ob.IFloraGetter or Ob.IGrassGetter or Ob.ITreeGetter => "Form",
         Ob.IQuestGetter => "Quest",
@@ -368,7 +379,9 @@ public sealed class ObScriptWorld : ObPapyrus.IWorld
         Ob.IIngredientGetter => "Ingredient",
         Ob.IAmmunitionGetter => "Ammo",
         Ob.ISoulGemGetter => "SoulGem",
-        Ob.IMiscellaneousGetter or Ob.ISigilStoneGetter => "MiscObject",
+        Ob.IMiscellaneousGetter => "MiscObject",
+        // A sigil stone is a potion, usable from the inventory (ObVampirism.SigilStoneItem); Skyrim's potions carry no scripts.
+        Ob.ISigilStoneGetter => "Potion",
         Ob.ILeveledItemGetter => "LeveledItem",
         Ob.ILeveledSpellGetter => "LeveledSpell",
         Ob.IContainerGetter => "Container",

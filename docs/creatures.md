@@ -33,8 +33,8 @@ Models, licences and credits: `tools\creatures\<creature>\`, `tools\creatures\CR
   remapped, clip triggers and the template clips' annotations retimed, animation data (animationdata, boundanims,
   animationsetdata with the plain-CRC32 file hashes, both dirlist.txt) when the template has any (Dawnguard's chaurus
   hunter has none and runs on annotations).
-- `CreatureRecords` -> one light plugin per game, "<Game> Creatures.esp" over that game's plugin only (Daggerfall
-  Creatures.esp, Morrowind Creatures.esp; user, 2026-10-11: "are they set for when a user does not have a certain game":
+- `CreatureRecords` -> one light plugin per game, "<Game> Creatures.esm" over that game's plugin only (Daggerfall
+  Creatures.esm, Morrowind Creatures.esm; user, 2026-10-11: "are they set for when a user does not have a certain game":
   the earlier single TamrielMerge Creatures.esp needed Daggerfall.esm and Morrowind.esm both, so Skyrim wouldn't load
   without either). Per creature a race copied from the template's (skeleton, behaviour), a skin (armour + addon wearing
   the body), and overrides of the game plugin's actors (config `actors`); a config's `"game"` names its game
@@ -154,6 +154,31 @@ from OpenMW 0.48, a reading reference):
   It now takes a template's data, motion and set files from the single files when it has no files of its own
   (`creature-animdata-check`: 300 of the 323 projects that have both read the same; the rest differ in content, the
   single files being the newer).
+- **Skin partitions** (2026-11-06, user: "bats and imps in daggerfall as for scorpions" invisible): no creature with a
+  body of ours could be drawn. All 100 creature bodies (Daggerfall's and Morrowind's) had skin partitions with no bones,
+  weights or triangles (`nif-partitions`: 0 bones in all 100; vanilla's 4,054 skinned actor models use 1 to 60), and the
+  game skins a body through its partitions. CreatureRig built them and then called nifly's SetDefaultPartition, which
+  puts back a bare partition; the default now comes first and the real partitions after. A shape on more than 60 bones
+  (the most any vanilla partition holds) is cut into partitions of up to 60: triangles in the order of their bones, each
+  into the partition it adds the fewest bones to (the scorpion's body into 2; the lamia's 7 shapes into 10 partitions,
+  351 when taken in file order). `CreatureBones.Partitions` checks every written body: every triangle and vertex in a
+  partition, 1 to 60 bones each, each partition vertex weighted as the skin data (weights under 0.005 aside), the
+  shared vertex data numbered by the shape's bones as vanilla's (the draugr's body: 3,470 of 3,470). A body that fails
+  it fails its build. `creature-bones` reports it; `nif-partitions [--file | --archive --match] [--detail] [--verify
+  --show N]` measures any model.
+- **Shapes on more than 256 bones** (2026-11-06): a vertex names its bones in one byte, so bone 256 came out as bone 0.
+  16 Morrowind creatures' morphing heads (a morph bone for each set of vertices moving alike: the goblin's head on 262)
+  had that. CreatureRig.SplitWideMeshes writes such a mesh as parts of up to 256 bones ("<shape> [part k]": its first
+  part where the shape was, the others after, every look on the shape on its parts too); mw-creature-check matches part
+  vertices to Morrowind's by place, creature-looks checks a part's vertex colours against Morrowind's.
+- **Textures from JPEGs** (2026-11-06): the giant bat's three textures and the liches' diffuse were empty DDS files
+  (0 x 0): the converter reads PNG only, and found no picture in a JPEG. Png.Read now refuses anything but a PNG, and
+  export_creature.py saves every picture that isn't one as PNG in the export (its pixels as they are).
+- **Hidden collections** (2026-11-06): the giant bat's armature was in a Blender collection disabled in viewports, so
+  Blender never evaluated its actions and all four clips were baked as one pose (moves 0.000). export_creature.py now
+  switches on the collections holding the armature and its meshes, and a clip that doesn't move while its action's
+  keys do fails the export (`--python-exit-code 1`, and no export is left behind). Re-exported: the bat (idle moves 8.3,
+  walk 4.5, attack 5.7, death 367) and the lich (its mesh's collection was disabled too).
 - **In the conversion** (2026-10-11): `convert` has a "Creature models" step after the main menu. Every creature in
   tools\creatures whose game was converted is built into the output (`creature-build`; Morrowind's from the user's own
   game, remastered only with `--gpu`, else `--no-remaster`), then `creature-plugin` writes one light plugin per game

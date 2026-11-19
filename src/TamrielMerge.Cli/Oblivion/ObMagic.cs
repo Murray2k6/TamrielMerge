@@ -26,7 +26,10 @@ public sealed partial class ObPluginBuilder
     public int EnchantmentCount => magic?.EnchantmentCount ?? 0;
     public IEnumerable<string> SkippedEffects => magic?.Skipped.Select(kv => $"{kv.Key} x{kv.Value}") ?? [];
 
-    /// <summary>The Skyrim actor a summon calls or the weapon a bound effect gives (the magic effect's associated item).</summary>
+    /// <summary>The Skyrim actor a summon calls, the weapon a bound effect gives, or the armour a bound armour effect
+    /// puts on (the magic effect's associated item: the Mythic Dawn assassins' robe and hood for MYTH and MYHL, which
+    /// were an armour rating until 2026-11-16, so they came out of their ambush without the robes Oblivion conjures on
+    /// them: user, "the assassins spells dont work as intended").</summary>
     FormKey? Associated(string code)
     {
         magicEffectsByCode ??= records.Values.OfType<Ob.IMagicEffectGetter>().Where(m => m.EditorID is not null)
@@ -36,6 +39,8 @@ public sealed partial class ObPluginBuilder
         if (!magicEffectsByCode.TryGetValue(code, out var mgef) || mgef.Data is not { Unused: var raw and not 0 }) return null;
         var link = new FormKey(mgef.FormKey.ModKey, (uint)raw & 0xFFFFFF);
         if (code.StartsWith('Z')) return records.GetValueOrDefault(link) is Ob.ICreatureGetter or Ob.INpcGetter && Actor(link) is Npc npc ? npc.FormKey : null;
+        if (records.GetValueOrDefault(link) is Ob.IArmorGetter or Ob.IClothingGetter)
+            return Item(link) is Armor armor ? armor.FormKey : null;
         if (records.GetValueOrDefault(link) is not Ob.IWeaponGetter || Item(link) is not Weapon weapon) return null;
         if (weapon.Data is { } wd) wd.Flags |= WeaponData.Flag.BoundWeapon;
         return weapon.FormKey;
@@ -47,12 +52,15 @@ public sealed partial class ObPluginBuilder
         {
             if (e.Data is not { } d) continue;
             string code = d.MagicEffect.EDID.Type;
+            // Vampirism and Sun Damage are the converter's own effects (ObVampirism.AddVampirism), not TesMagic's.
+            if (code is "VAMP" or "SUDG") continue;
             if (ScriptEffectOf(e) is { } scripted) { yield return scripted; continue; }
             if (TesMagic.OblivionName(code) is not { } name) { yield return new TesEffect(code, null, TesRange.Self, 0, 0, 0); continue; }
             var range = d.Type.ToString() switch { "Touch" => TesRange.Touch, "Target" => TesRange.Target, _ => TesRange.Self };
             string sub = d.ActorValue.ToString();
             yield return new TesEffect(name, sub, range, (int)d.Area, (int)d.Duration, d.Magnitude,
-                name is "Summon" or "BoundWeapon" ? Associated(code) : null);
+                name is "Summon" or "BoundWeapon" or "BoundCuirass" or "BoundHelm" or "BoundBoots" or "BoundShield" or "BoundGloves" or "BoundGreaves" or "BoundArmor"
+                    ? Associated(code) : null);
         }
     }
 
@@ -78,7 +86,10 @@ public sealed partial class ObPluginBuilder
             _ => TesCast.Spell,
         };
         string edid = "OBSpell" + Sanitize(s.EditorID ?? key.ID.ToString("X6"));
-        return obSpells[key] = Magic.Spell(edid, s.Name, cast, EffectsOf(s.Effects), (int)(s.Data?.Cost ?? 0));
+        var spell = obSpells[key] = Magic.Spell(edid, s.Name, cast, EffectsOf(s.Effects), (int)(s.Data?.Cost ?? 0));
+        // The Vampirism abilities' VAMP and SUDG effects (ObVampirism).
+        AddVampirism(spell, s.Effects);
+        return spell;
     }
 
     /// <summary>An enchantment: on strike (weapons), cast (staffs), constant (apparel); scrolls are made separately.</summary>
@@ -123,21 +134,57 @@ public sealed partial class ObPluginBuilder
         return Magic.Scroll(edid, b.Name, EffectsOf(e.Effects), mesh is null ? null : SkyrimModelPath(mesh.Path), b.Data?.Weight ?? 0, (uint)Math.Max(0, b.Data?.Value ?? 0));
     }
 
-    /// <summary>An actor's spells, abilities and powers.</summary>
+    /// <summary>An actor's spells, abilities and powers, leveled spell lists among them.</summary>
     void AddSpells(Npc npc, IEnumerable<IFormLinkGetter<Ob.ISpellRecordGetter>> source)
     {
         foreach (var link in source)
-            if (ObSpell(link.FormKey) is { } spell)
-            {
-                npc.ActorEffect ??= [];
-                npc.ActorEffect.Add(spell.ToLink<ISpellRecordGetter>());
-            }
+        {
+            ISpellRecordGetter? made = ObSpell(link.FormKey) is { } spell ? spell : ObLeveledSpell(link.FormKey);
+            if (made is null) continue;
+            npc.ActorEffect ??= [];
+            npc.ActorEffect.Add(made.ToLink());
+        }
+    }
+
+    readonly Dictionary<FormKey, LeveledSpell?> obLeveledSpells = new();
+
+    /// <summary>
+    /// An Oblivion leveled spell list as Skyrim's own (LVSP in both): its spells (and lists) at their levels. Until
+    /// 2026-11-16 an actor's lists were dropped, the spells only kept: the Mythic Dawn archer in the prison's ambush,
+    /// whose spells are all in MythicDawnRangeSpell (Spark, Shock), cast nothing (user: "the assassins spells dont work
+    /// as intended").
+    /// </summary>
+    LeveledSpell? ObLeveledSpell(FormKey key)
+    {
+        if (obLeveledSpells.TryGetValue(key, out var hit)) return hit;
+        obLeveledSpells[key] = null;
+        if (records.GetValueOrDefault(key) is not Ob.ILeveledSpellGetter l) return null;
+        var list = new LeveledSpell(mod)
+        {
+            EditorID = "OBLvsp" + Sanitize(l.EditorID ?? key.ID.ToString("X6")),
+            ObjectBounds = new ObjectBounds(),
+            ChanceNone = l.ChanceNone ?? new Percent(0),
+            Flags = (l.Flags is { } f && f.HasFlag(Ob.LeveledFlag.CalculateFromAllLevelsLessThanPlayers) ? LeveledSpell.Flag.CalculateFromAllLevelsLessThanOrEqualPlayer : 0)
+                  | (l.Flags is { } g && g.HasFlag(Ob.LeveledFlag.CalculateForEachItemInCount) ? LeveledSpell.Flag.CalculateForEachItemInCount : 0),
+            Entries = [],
+        };
+        foreach (var e in l.Entries)
+        {
+            ISpellRecordGetter? member = ObSpell(e.Reference.FormKey) is { } s ? s : ObLeveledSpell(e.Reference.FormKey);
+            if (member is null) continue;
+            list.Entries.Add(new LeveledSpellEntry { Data = new LeveledSpellEntryData { Level = e.Level, Count = 1, Reference = member.ToLink() } });
+        }
+        if (list.Entries.Count == 0) return null;
+        mod.LeveledSpells.Add(list);
+        return obLeveledSpells[key] = list;
     }
 
     /// <summary>Every spell of the active plugins (for spell merchants and the player's start).</summary>
     void FinishMagic()
     {
         foreach (var s in records.Values.OfType<Ob.ISpellGetter>().ToList()) ObSpell(s.FormKey);
+        // The planes of Oblivion, where the sun doesn't burn a vampire (ObVampirism).
+        FinishVampirism();
     }
 
     /// <summary>Converts every spell, enchantment and scroll (magic-test: no cells or items needed).</summary>

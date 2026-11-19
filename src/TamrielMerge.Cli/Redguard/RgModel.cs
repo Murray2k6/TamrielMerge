@@ -27,6 +27,13 @@ public sealed class RgModel
     public string Version { get; private init; } = "";
     public List<Vector3> Vertices { get; } = [];
     public List<Face> Faces { get; } = [];
+    /// <summary>The frames after the first of an animated v2.x model, each every vertex's place (measured 2026-11-10: 110
+    /// of the game's 3DC files are stored this way, SEAGA001 with 18 frames of 120 vertices). The header's frame offset
+    /// leads to 24 bytes: the frame directory's offset, the face data's size, the gap, flags (u16, bit 0: compressed),
+    /// the reference frame (u16), and a shift in its last byte; the directory holds 12 bytes per frame, the first its
+    /// vertices' offset. The reference frame is whole (3 x i32); the others are 3 x i16 per vertex added to it, shifted
+    /// (Redguard Preservation, formats/models/3dc.html; the seagull's largest delta is 25,175 = 98 units at shift 0).</summary>
+    public List<Vector3[]> Frames { get; } = [];
 
     public static RgModel? Load(byte[] b, int at = 0)
     {
@@ -94,6 +101,28 @@ public sealed class RgModel
             model.Vertices.Add(new Vector3(BitConverter.ToInt32(b, o), BitConverter.ToInt32(b, o + 4), BitConverter.ToInt32(b, o + 8)) / 256f);
         }
         if (model.Faces.Any(f => f.Vertices.Any(i => i < 0 || i >= numVertices))) return null;
+        if (v2 && numFrames > 1 && frameTable > 0 && at + frameTable + 24 <= b.Length)
+        {
+            int table = U32(frameTable), flags = BitConverter.ToUInt16(b, at + frameTable + 12), reference = BitConverter.ToUInt16(b, at + frameTable + 14);
+            int shift = b[at + frameTable + 0x17] & 31;
+            // Only the layout measured: compressed, the first frame the whole one, and the directory agreeing with where
+            // the first frame's vertices were found.
+            if ((flags & 1) != 0 && reference == 0 && table > 0 && at + table + numFrames * 12 <= b.Length && U32(table) == vertexOffset)
+                for (int f = 1; f < numFrames; f++)
+                {
+                    int o = at + U32(table + f * 12);
+                    if (o < at || o + numVertices * 6 > b.Length) { model.Frames.Clear(); break; }
+                    var frame = new Vector3[numVertices];
+                    for (int i = 0; i < numVertices; i++)
+                    {
+                        int q = at + vertexOffset + i * 12, d = o + i * 6;
+                        frame[i] = new Vector3(BitConverter.ToInt32(b, q) + (BitConverter.ToInt16(b, d) << shift),
+                            BitConverter.ToInt32(b, q + 4) + (BitConverter.ToInt16(b, d + 2) << shift),
+                            BitConverter.ToInt32(b, q + 8) + (BitConverter.ToInt16(b, d + 4) << shift)) / 256f;
+                    }
+                    model.Frames.Add(frame);
+                }
+        }
         foreach (var f in model.Faces) FaceUv(model, f);
         return model;
     }
@@ -118,6 +147,33 @@ public sealed class RgModel
         var e1 = m.Vertices[f.Vertices[1]] - p0; var e2 = m.Vertices[f.Vertices[2]] - p0;
         float d11 = Vector3.Dot(e1, e1), d12 = Vector3.Dot(e1, e2), d22 = Vector3.Dot(e2, e2);
         float det = d11 * d22 - d12 * d12;
+        // The first three in a line (a wall's corner run before its notch) can't give the texture's plane. The fourth
+        // value is stored absolute in larger faces as in quads (rg-uvtest 2026-11-11: in the five-corner faces it is
+        // the first three's mapping at the fourth corner to a tenth of a texel, "(0,16)" and "(27.3,4.7)" against 0,16
+        // and 27.2,4.8), so the plane is taken from the first corner, the farther of the next two and the fourth
+        // (the Draggin Tale's wall: 7 corners over 345,426 square units, drawn as a smear of a few texels).
+        if (MathF.Abs(det) < 1e-3f * MathF.Max(1, d11 * d22))
+        {
+            int mid = d11 >= d22 ? 1 : 2;
+            var f1 = m.Vertices[f.Vertices[mid]] - p0; var f2 = m.Vertices[f.Vertices[3]] - p0;
+            float g11 = Vector3.Dot(f1, f1), g12 = Vector3.Dot(f1, f2), g22 = Vector3.Dot(f2, f2);
+            float gdet = g11 * g22 - g12 * g12;
+            if (MathF.Abs(gdet) >= 1e-3f * MathF.Max(1, g11 * g22))
+            {
+                var uvMid = uv[mid]; var uv3 = f.Raw[3];
+                for (int i = 1; i < n; i++)
+                {
+                    if (i == mid) continue;
+                    if (i == 3) { uv[3] = uv3; continue; }
+                    var q = m.Vertices[f.Vertices[i]] - p0;
+                    float q1 = Vector3.Dot(q, f1), q2 = Vector3.Dot(q, f2);
+                    float a = (q1 * g22 - q2 * g12) / gdet, c = (q2 * g11 - q1 * g12) / gdet;
+                    uv[i] = uv[0] + a * (uvMid - uv[0]) + c * (uv3 - uv[0]);
+                }
+                FacesByFourth++;
+                return;
+            }
+        }
         for (int i = 3; i < n; i++)
         {
             if (MathF.Abs(det) < 1e-4f * MathF.Max(1, d11 * d22)) { uv[i] = i == 3 ? f.Raw[3] : uv[i - 1] + f.Raw[i]; continue; }
@@ -126,6 +182,74 @@ public sealed class RgModel
             float a = (q1 * d22 - q2 * d12) / det, c = (q2 * d11 - q1 * d12) / det;
             uv[i] = uv[0] + a * (uv[1] - uv[0]) + c * (uv[2] - uv[0]);
         }
+    }
+
+    /// <summary>Faces whose first three corners are in a line, mapped from the first, one of the next two and the fourth.</summary>
+    public static int FacesByFourth;
+
+    /// <summary>Faces whose second or third corner's texture place was brought back by whole textures (<see cref="Unwrap"/>).</summary>
+    public static int FacesUnwrapped;
+
+    /// <summary>The texture's stretch over a face's first three corners: texels a unit along its most stretched
+    /// direction over those along its least (1: even; 0 when the corners enclose nothing).</summary>
+    static float Stretch(RgModel m, Face f, Vector2 uv0, Vector2 uv1, Vector2 uv2)
+    {
+        var p0 = m.Vertices[f.Vertices[0]];
+        var e1 = m.Vertices[f.Vertices[1]] - p0; var e2 = m.Vertices[f.Vertices[2]] - p0;
+        var normal = Vector3.Cross(e1, e2);
+        if (normal.Length() < 1e-3f) return 0;
+        var ax = Vector3.Normalize(e1); var ay = Vector3.Normalize(Vector3.Cross(normal, e1));
+        float x1 = e1.Length(), x2 = Vector3.Dot(e2, ax), y2 = Vector3.Dot(e2, ay);
+        if (MathF.Abs(y2) < 1e-4f) return 0;
+        var d1 = uv1 - uv0; var d2 = uv2 - uv0;
+        float a11 = d1.X / x1, a21 = d1.Y / x1, a12 = (d2.X - a11 * x2) / y2, a22 = (d2.Y - a21 * x2) / y2;
+        float t = a11 * a11 + a12 * a12 + a21 * a21 + a22 * a22, det = MathF.Abs(a11 * a22 - a12 * a21);
+        float s1 = MathF.Sqrt((t + MathF.Sqrt(MathF.Max(0, t * t - 4 * det * det))) / 2);
+        return det < 1e-9f ? float.MaxValue : s1 * s1 / det;
+    }
+
+    /// <summary>
+    /// A face whose texture is stretched more than 4 to 1 over its first three corners, when moving its second and
+    /// third corners' texture places by whole textures (<paramref name="width"/>, <paramref name="height"/> texels)
+    /// makes it even (2 to 1 or less): those corners are stored a whole number of textures away, the same texel but a
+    /// run of repeats across the face when the places between are worked out (the Draggin Tale's wall triangles,
+    /// 2026-11-11: "(128,0) (0,0) (0,767)" on a 128-texel texture where (0,127) is even, "(128,23) (0,-1280) (2,-34)"
+    /// where (0,0) is; drawn as a wall of close stripes). The rest of the face follows from the three as before. A face
+    /// that stays uneven is left as stored: a wall its texture really runs along several times.
+    /// </summary>
+    public static bool Unwrap(RgModel m, Face f, int width, int height)
+    {
+        if (f.Solid || f.Vertices.Length < 3 || f.Raw.Length < 3 || width <= 0 || height <= 0) return false;
+        var uv0 = f.Raw[0]; var uv1 = uv0 + f.Raw[1]; var uv2 = uv1 + f.Raw[2];
+        float now = Stretch(m, f, uv0, uv1, uv2);
+        if (now <= 4) return false;
+        // Each corner's nearest whole-texture moves towards the first corner's place, and none.
+        static IEnumerable<float> Moves(float d, int size)
+        {
+            yield return 0;
+            int k = (int)MathF.Round(d / size);
+            if (k == 0) yield break;
+            for (int j = k - 1; j <= k + 1; j++) if (j != 0) yield return -j * size;
+        }
+        float best = now; Vector2 best1 = uv1, best2 = uv2; float bestMoved = 0;
+        foreach (float u1 in Moves(uv1.X - uv0.X, width))
+            foreach (float v1 in Moves(uv1.Y - uv0.Y, height))
+                foreach (float u2 in Moves(uv2.X - uv0.X, width))
+                    foreach (float v2 in Moves(uv2.Y - uv0.Y, height))
+                    {
+                        if (u1 == 0 && v1 == 0 && u2 == 0 && v2 == 0) continue;
+                        var c1 = uv1 + new Vector2(u1, v1); var c2 = uv2 + new Vector2(u2, v2);
+                        float s = Stretch(m, f, uv0, c1, c2);
+                        if (s <= 0) continue;
+                        float moved = MathF.Abs(u1) + MathF.Abs(v1) + MathF.Abs(u2) + MathF.Abs(v2);
+                        if (s < best - 1e-3f || (MathF.Abs(s - best) <= 1e-3f && moved < bestMoved)) { best = s; best1 = c1; best2 = c2; bestMoved = moved; }
+                    }
+        if (best > 2) return false;
+        f.Raw[1] = best1 - uv0;
+        f.Raw[2] = best2 - best1;
+        FaceUv(m, f);
+        FacesUnwrapped++;
+        return true;
     }
 
     static bool Plausible(byte[] b, int o, int n)

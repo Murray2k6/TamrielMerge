@@ -33,6 +33,8 @@ public sealed class SceneExporter
     /// <summary>Each land texture record's grass (LTEX -> GRAS).</summary>
     readonly Dictionary<FormKey, List<IGrassGetter>> landGrasses = new();
     public List<string> Missing { get; } = [];
+    /// <summary>The model being written, for a texture it names that is missing.</summary>
+    string? meshNow;
     /// <summary>Shapes whose vertex colours are dark but switched off in their shader (so drawn without them).</summary>
     public int UnusedDarkColours { get; private set; }
 
@@ -70,31 +72,33 @@ public sealed class SceneExporter
     /// <paramref name="landRadius"/> when that is larger: terrain to the horizon costs little beside its objects
     /// (the menu's Whiterun stood on an island of land otherwise, the ground beyond it sunk away).
     /// </summary>
-    /// <summary>The load door leading into <paramref name="town"/> from another worldspace (persistent references, as
-    /// teleport doors are): that worldspace, and the offset putting the town's arrival point on the door.</summary>
-    static (string World, Vector3 Offset)? TownDoor(IEnumerable<ISkyrimModDisposableGetter> mods, string town)
+    /// <summary>
+    /// Where a location (its record's EditorID, "DFLocDaggerfall17") stands on its overland: the worldspace whose cells
+    /// carry it, and the middle of those cells on its ground (the lowest of its blocks' ground statics, "DFGround..."), so
+    /// a shot can be given in the location's own frame, centred on it at ground level, as Daggerfall's towns were when
+    /// they were worldspaces of their own.
+    /// </summary>
+    static (string World, Vector3 Frame)? LocationFrame(IEnumerable<ISkyrimModDisposableGetter> mods, string location)
     {
-        var where = new Dictionary<FormKey, string>();
-        var doors = new List<(string World, IPlacedObjectGetter Door)>();
+        var key = mods.SelectMany(m => m.Locations).FirstOrDefault(l => string.Equals(l.EditorID, location, StringComparison.OrdinalIgnoreCase))?.FormKey;
+        if (key is null) return null;
+        var grounds = mods.SelectMany(m => m.Statics).Where(s => s.EditorID?.StartsWith("DFGround", StringComparison.Ordinal) == true).Select(s => s.FormKey).ToHashSet();
+        string? world = null;
+        int x0 = int.MaxValue, y0 = int.MaxValue, x1 = int.MinValue, y1 = int.MinValue;
+        float ground = float.MaxValue;
         foreach (var m in mods)
             foreach (var w in m.Worldspaces)
-            {
-                var cells = w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).ToList();
-                if (w.TopCell is { } top) cells.Add(top);
-                foreach (var r in cells.SelectMany(c => c.Persistent).OfType<IPlacedObjectGetter>())
+                foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
                 {
-                    where[r.FormKey] = w.EditorID ?? "";
-                    if (r.TeleportDestination is not null && r.Placement is not null) doors.Add((w.EditorID ?? "", r));
+                    if (c.Location.FormKeyNullable != key || c.Grid is not { } g) continue;
+                    world ??= w.EditorID;
+                    if (w.EditorID != world) continue;
+                    x0 = Math.Min(x0, g.Point.X); x1 = Math.Max(x1, g.Point.X); y0 = Math.Min(y0, g.Point.Y); y1 = Math.Max(y1, g.Point.Y);
+                    foreach (var r in c.Temporary.OfType<IPlacedObjectGetter>())
+                        if (grounds.Contains(r.Base.FormKey) && r.Placement is { } p) ground = MathF.Min(ground, p.Position.Z);
                 }
-            }
-        foreach (var (world, door) in doors)
-        {
-            var d = door.TeleportDestination!;
-            if (world == town || !where.TryGetValue(d.Door.FormKey, out var into) || into != town) continue;
-            var p = door.Placement!.Position;
-            return (world, new Vector3(p.X - d.Position.X, p.Y - d.Position.Y, p.Z - d.Position.Z));
-        }
-        return null;
+        if (world is null) return null;
+        return (world, new Vector3((x0 + x1 + 1) * 2048f, (y0 + y1 + 1) * 2048f, ground == float.MaxValue ? 0 : ground));
     }
 
     /// <summary>A model the distant view keeps: a tree (not stumps, driftwood, logs or branch piles), a mountain, or a
@@ -107,10 +111,15 @@ public sealed class SceneExporter
         if (low.Contains("\\landscape\\mountains\\") || file.StartsWith("terrain_rock")) return true;
         if (System.Text.RegularExpressions.Regex.Match(file, @"^rock(greatforest|mountain|cliff)\D*(\d+)") is { Success: true } rock)
             return int.Parse(rock.Groups[2].Value) >= 200 || rock.Groups[1].Value != "greatforest";
+        // Daggerfall's trees and rocks, made from its sprites (its overland's foliage, DfFoliage).
+        if (low.Contains("\\tamrielmerge\\df\\models\\") && FarSprites.Contains(file)) return true;
         if (file.Contains("stump") || file.Contains("driftwood") || file.Contains("branchpile") || file.Contains("log")) return false;
         return (file.Contains("tree") && (low.Contains("\\trees\\") || low.Contains("\\tamrielmerge\\")))
             || file.Contains("emp_parasol");
     }
+
+    static readonly HashSet<string> FarSprites = SpriteModels.Targets.Where(t => t.Kind is SpriteModels.Kind.Tree or SpriteModels.Kind.Prop)
+        .Select(t => t.Name.ToLowerInvariant()).ToHashSet();
 
     public void Export(string skyrimData, IReadOnlyList<string> plugins, string worldspace, Vector2 centre, float radius, float landRadius = 0)
     {
@@ -144,27 +153,27 @@ public sealed class SceneExporter
             // "need to be the games worldspace not a test area", "ground sinks/floats"): its objects moved by the offset
             // (gate onto its overland door), its own land (none for Daggerfall's towns) left out, and the overland's land
             // cells under it taken away (holes, listed in scene.json: the town's own ground covers them).
-            // "~+Town@door": found from the town's own load doors, so a conversion with other terrain settings (another
-            // overland tile, other positions) needs no new numbers: the overland is the worldspace whose door leads into
-            // the town, the offset puts the town's arrival point on that door, and centre is given in the town's own
-            // coordinates (moved with it). The offset goes into scene.json for the camera.
+            // "~+DFLocTown@location": the overland a location stands on (Daggerfall's towns are on its tiles), found
+            // from the cells carrying its location record, so a conversion with other terrain settings (another tile, other
+            // positions) needs no new numbers: '~' is that worldspace, and centre is given in the location's own frame
+            // (LocationFrame: its middle, on its ground). The frame goes into scene.json ("offset") for the camera.
             var tokens = worldspace.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            string? doorWorld = null;
-            var doorOffsets = new Dictionary<string, Vector3>();
-            foreach (var town in tokens.Where(t => t.EndsWith("@door", StringComparison.OrdinalIgnoreCase)).Select(t => t[..t.IndexOf('@')]))
+            string? frameWorld = null;
+            Vector3? frame = null;
+            foreach (var place in tokens.Where(t => t.EndsWith("@location", StringComparison.OrdinalIgnoreCase)).Select(t => t[..t.IndexOf('@')]))
             {
-                var found = TownDoor(mods, town) ?? throw new InvalidOperationException($"no load door leads into {town}");
-                doorOffsets[town] = found.Offset;
-                doorWorld ??= found.World;
-                Console.WriteLine($"  {town}: entered from {found.World}, placed at {found.Offset.X:F0}, {found.Offset.Y:F0}, {found.Offset.Z:F0}");
+                var found = LocationFrame(mods, place) ?? throw new InvalidOperationException($"no overland cells carry the location {place}");
+                frame ??= found.Frame;
+                frameWorld ??= found.World;
+                Console.WriteLine($"  {place}: on {found.World}, its middle at {found.Frame.X:F0}, {found.Frame.Y:F0}, {found.Frame.Z:F0}");
             }
-            if (doorOffsets.Count > 0) centre += new Vector2(doorOffsets.Values.First().X, doorOffsets.Values.First().Y);
+            if (frame is { } f) centre += new Vector2(f.X, f.Y);
             var worldSpecs = tokens
+                .Where(w => !w.EndsWith("@location", StringComparison.OrdinalIgnoreCase))
                 .Select(w =>
                 {
                     var at = w.Split('@');
-                    string name = at[0] == "~" ? doorWorld ?? throw new InvalidOperationException("'~' needs a world placed @door") : at[0];
-                    if (at.Length > 1 && at[1].Equals("door", StringComparison.OrdinalIgnoreCase)) return (Name: name, Offset: doorOffsets[name]);
+                    string name = at[0] == "~" ? frameWorld ?? throw new InvalidOperationException("'~' needs a location placed @location") : at[0];
                     var o = at.Length > 1 ? at[1].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray() : [0f, 0f, 0f];
                     return (Name: name, Offset: new Vector3(o[0], o[1], o[2]));
                 }).ToList();
@@ -301,6 +310,10 @@ public sealed class SceneExporter
                 instances.Add(new Instance(id, Matrix(pos, rot, scale)));
             }
             var terrain = ExportLand(lands, landTextures);
+            // Past the land: the world's own distant view (user, 2026-10-25: "why does the flyby have the test cells of
+            // oblivion and whiterun instead of the actual worldspace", "i need it to show wholy"): its LOD land and
+            // objects out to LodReach, as the game draws them past its loaded cells.
+            var lod = radius > 0 ? DistantView(worldSpecs[0].Name, centre, [.. lands.Keys, .. holes]) : [];
             var people = new List<object>();
             if (npcRefs.Count > 0)
             {
@@ -318,13 +331,15 @@ public sealed class SceneExporter
             {
                 worldspace,
                 holes = holes.Select(h => new[] { h.Item1, h.Item2 }).ToList(),
-                offset = worldSpecs.Select(w => w.Offset).Where(o => o != Vector3.Zero).Select(o => new[] { o.X, o.Y, o.Z }).FirstOrDefault(),
+                offset = frame is { } fr ? new[] { fr.X, fr.Y, fr.Z }
+                    : worldSpecs.Select(w => w.Offset).Where(o => o != Vector3.Zero).Select(o => new[] { o.X, o.Y, o.Z }).FirstOrDefault(),
                 centre = new[] { centre.X, centre.Y },
                 radius,
                 water,
                 meshes = meshNames,
                 instances = instances.Select(i => new { mesh = i.Mesh, m = i.Matrix }).ToList(),
                 terrain,
+                lod,
                 people,
             };
             File.WriteAllText(Path.Combine(outDir, "scene.json"), JsonSerializer.Serialize(scene));
@@ -345,6 +360,101 @@ public sealed class SceneExporter
             Console.WriteLine($"{worldspace}: {people.Count} people of {npcRefs.Count} placed; {instances.Count} objects, {meshIds.Count} meshes, {textures.Count} textures, {lands.Count} land cells, water {water}; missing {Missing.Count}; {UnusedDarkColours} shapes' unused dark vertex colours left out");
         }
         finally { foreach (var m in mods) m.Dispose(); }
+    }
+
+    /// <summary>How far the distant view reaches from the scene's centre (units): past it the haze has the land.</summary>
+    const float LodReach = 600000;
+    /// <summary>A chunk this many of its own widths from the centre or nearer is drawn as its four finer ones.</summary>
+    const float LodSplit = 2.5f;
+
+    /// <summary>
+    /// The world's distant view round <paramref name="centre"/> as the game draws it past its loaded cells: its LOD land
+    /// chunks (meshes\terrain\&lt;world&gt;\&lt;world&gt;.&lt;level&gt;.&lt;x&gt;.&lt;y&gt;.btr, from the converted output or Skyrim's
+    /// archives) and their objects (objects\*.bto), finer near the centre and coarser away from it (a chunk splits
+    /// within LodSplit of its widths), none over the scene's own land or a placed town (<paramref name="covered"/>:
+    /// a chunk with such a cell splits down to the finest level, whose shapes blend_scene cuts there). Each chunk's
+    /// shapes hold its local units scaled by the level, the engine placing it at its south-west cell, so each is an
+    /// instance there: {mesh, m, kind ("land" or "objects"), level}.
+    /// </summary>
+    List<object> DistantView(string world, Vector2 centre, HashSet<(int, int)> covered)
+    {
+        var land = new Dictionary<(int Level, int X, int Y), string>();
+        var objects = new Dictionary<(int Level, int X, int Y), string>();
+        void Add(string rel)
+        {
+            var parts = Path.GetFileName(rel).Split('.');
+            if (parts.Length < 5 || !parts[0].Equals(world, StringComparison.OrdinalIgnoreCase)) return;
+            if (!int.TryParse(parts[^4], out int level) || !int.TryParse(parts[^3], out int x) || !int.TryParse(parts[^2], out int y)) return;
+            string ext = parts[^1].ToLowerInvariant();
+            if (ext == "btr") land.TryAdd((level, x, y), rel);
+            else if (ext == "bto") objects.TryAdd((level, x, y), rel);
+        }
+        // Loose copies first (the conversion's own), then the archives (Skyrim's own Tamriel).
+        foreach (var dir in looseDirs)
+        {
+            string d = Path.Combine(dir, "meshes", "terrain", world);
+            if (!Directory.Exists(d)) continue;
+            foreach (var f in Directory.EnumerateFiles(d, "*.bt?", SearchOption.AllDirectories))
+                Add(Path.GetRelativePath(dir, f));
+        }
+        string prefix = $"meshes\\terrain\\{world}\\";
+        foreach (var rel in archiveFiles.Keys)
+            if (rel.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) Add(rel);
+        var result = new List<object>();
+        if (land.Count == 0) { Console.WriteLine($"  distant view: {world} has no LOD land"); return result; }
+
+        float Near(int level, int x, int y)
+        {
+            float x0 = x * 4096f, y0 = y * 4096f, x1 = (x + level) * 4096f, y1 = (y + level) * 4096f;
+            float dx = Math.Max(Math.Max(x0 - centre.X, 0), centre.X - x1), dy = Math.Max(Math.Max(y0 - centre.Y, 0), centre.Y - y1);
+            return MathF.Sqrt(dx * dx + dy * dy);
+        }
+        int Covered(int level, int x, int y)
+        {
+            int n = 0;
+            for (int i = 0; i < level; i++)
+                for (int j = 0; j < level; j++)
+                    if (covered.Contains((x + i, y + j))) n++;
+            return n;
+        }
+        int min = land.Keys.Min(k => k.Level), max = land.Keys.Max(k => k.Level);
+        var chosen = new List<(int Level, int X, int Y)>();
+        void Visit(int level, int x, int y)
+        {
+            float d = Near(level, x, y);
+            if (d > LodReach) return;
+            int cov = Covered(level, x, y);
+            if (level > min && (d < LodSplit * level * 4096 || cov > 0))
+            {
+                int h = level / 2;
+                for (int i = 0; i < 2; i++)
+                    for (int j = 0; j < 2; j++) Visit(h, x + i * h, y + j * h);
+                return;
+            }
+            if (cov < level * level && land.ContainsKey((level, x, y))) chosen.Add((level, x, y));
+        }
+        foreach (var root in land.Keys.Where(k => k.Level == max).ToList()) Visit(root.Level, root.X, root.Y);
+
+        float[] At(int x, int y) => Matrix(new P3Float(x * 4096f, y * 4096f, 0), new P3Float(0, 0, 0), 1);
+        int landShown = 0, objectsShown = 0;
+        foreach (var (level, x, y) in chosen)
+        {
+            int id = MeshId(land[(level, x, y)]);
+            if (id >= 0) { result.Add(new { mesh = id, m = At(x, y), kind = "land", level }); landShown++; }
+            // Its objects: the chunk's own, or its four finer ones where the coarsest level has none (Skyrim's and
+            // the conversion's objects stop at 16).
+            var keys = objects.ContainsKey((level, x, y)) ? [(level, x, y)]
+                : level > min ? new[] { (0, 0), (1, 0), (0, 1), (1, 1) }.Select(o => (level / 2, x + o.Item1 * level / 2, y + o.Item2 * level / 2)).Where(objects.ContainsKey).ToArray()
+                : [];
+            foreach (var k in keys)
+            {
+                int oid = MeshId(objects[k]);
+                if (oid >= 0) { result.Add(new { mesh = oid, m = At(k.Item2, k.Item3), kind = "objects", level = k.Item1 }); objectsShown++; }
+            }
+        }
+        var byLevel = chosen.GroupBy(c => c.Level).OrderBy(g => g.Key).Select(g => $"{g.Count()} at {g.Key}");
+        Console.WriteLine($"  distant view of {world}: {landShown} land chunks ({string.Join(", ", byLevel)}), {objectsShown} object chunks, out to {LodReach:F0} units; {land.Count} land and {objects.Count} object chunks there");
+        return result;
     }
 
     /// <summary>One mesh (Data-relative) as a scene of its own, at the origin, to look at a model alone.</summary>
@@ -386,7 +496,10 @@ public sealed class SceneExporter
         id = meshNames.Count;
         string file = Path.Combine(outDir, "meshes", id + ".bin");
         var bytes = Find(rel);
-        if (bytes is null || !WriteMesh(bytes, file, skeleton is null ? null : SkeletonFor(skeleton, step))) { Missing.Add(rel); meshIds[key] = -1; if (File.Exists(file)) File.Delete(file); return -1; }
+        meshNow = rel;
+        bool written = bytes is not null && WriteMesh(bytes, file, skeleton is null ? null : SkeletonFor(skeleton, step));
+        meshNow = null;
+        if (!written) { Missing.Add(rel); meshIds[key] = -1; if (File.Exists(file)) File.Delete(file); return -1; }
         meshIds[key] = id;
         meshNames.Add(rel);
         return id;
@@ -779,7 +892,8 @@ public sealed class SceneExporter
         string rel = NormaliseTexture(t);
         if (!textures.Add(rel)) return;
         var bytes = Find(rel);
-        if (bytes is null) { Missing.Add(rel); return; }
+        // Which model names it (a model's own path is named when it is missing).
+        if (bytes is null) { Missing.Add(meshNow is null ? rel : $"{rel} (named by {meshNow})"); return; }
         string dest = Path.Combine(outDir, rel);
         Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
         File.WriteAllBytes(dest, bytes);

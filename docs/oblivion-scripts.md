@@ -17,7 +17,7 @@ scripts ask **TMObState**, a quest made by the converter (always running), and t
 | `MenuMode` blocks (every frame in a menu) | `OB_MenuMode()`: run every tenth of a second while one of the menus it's for is open (SKSE `RegisterForMenu` / `OnMenuOpen`, `Utility.WaitMenuMode`), and right after a message box the script shows (its button is read there, as Oblivion's MenuMode did); `MenuMode 1001…1049` → the Skyrim menu of that kind |
 | `OnAlarm crime [criminal]` | `OnTMObAlarm`: TMObState tells every listening script of a crime (SKSE mod event); those that see it (the victim, whoever detects the criminal or sees the victim) run the block |
 | `OnSell` | `OnContainerChanged` from the player while the barter menu is open |
-| `PlayGroup` / `LoopGroup` / `IsAnimPlaying` | the model's controller sequence of that name (`PlayGamebryoAnimation`; the converted models keep Oblivion's sequences, see "Moving parts" below), and how long it plays (2 s, 1 s fast, 3 s idles) |
+| `PlayGroup` / `LoopGroup` / `IsAnimPlaying` | the model's controller sequence of that name (`PlayGamebryoAnimation`; the converted models keep Oblivion's sequences, see "Moving parts" below), and how long it plays (the sequence's own length from the model's keyframes: AnimKeys/AnimLengths, O19) |
 | `AddScriptPackage` / `RemoveScriptPackage` / `GetCurrentAIPackage` / `GetCurrentAIProcedure` / `SetPackDuration` / `Wait` | TMObState's package aliases (one per use of each script package): the actor is put in the alias running the package; Oblivion's packages are converted from vanilla packages of the same kind (Travel, Sandbox, Follow, Escort, Sleep, Eat, Flee, Hold position, Use magic) aimed where Oblivion's were; `GetCurrentAIPackage` gives the Oblivion kind |
 | Crimes: `GetCrimeKnown`, `GetPCFactionMurder/Steal/Attack` (and `Set…`), `IsPCAMurderer`, `GetAmountSoldStolen` | TMObActor on every Oblivion person and creature reports assaults and murders by the player; TMObPlayer (the player's alias) theft, pickpocketing, trespass and selling stolen goods |
 | `GetCrimeGold` / `ModCrimeGold` / `SetCrimeGold` | the player's: Skyrim's own bounty in the lands' crime factions (OBCrimeCyrodiil, OBCrimeShiveringIsles; their sum, as Oblivion has one bounty, kept in TMOB_PCCrimeGold too; setting it sets the land the player is in and clears the other); another actor's: kept by TMObState, and a bounty makes it attacked on sight |
@@ -44,11 +44,12 @@ EditorID names its one reference (`BaseID.variable`); an `else`/`elseif` without
 
 | Oblivion record | Carries its script as |
 |---|---|
-| quest, NPC, creature, leveled creature, container, door, light, activator, weapon, armour, clothing, book, key, misc item, ingredient, sigil stone | the converted record (Skyrim's kind carries scripts) |
+| quest, NPC, creature, leveled creature, container, door, light, activator, weapon, armour, clothing, book, key, misc item, ingredient | the converted record (Skyrim's kind carries scripts) |
+| sigil stone | a potion whose use effect runs TMObSigilStone (ObVampirism.SigilStoneItem); none of Oblivion's 150 carries a record script (a modded one's would be reported, as Skyrim's potions carry none) |
 | scripted magic effect (SEFF) of a spell, enchantment, scroll, potion or ingredient | a Skyrim magic effect (archetype Script) made for it, on the converted spell, enchantment, scroll, potion or ingredient |
 | flora with a script (Nirnroot, …) | Skyrim flora (harvested for its ingredient) |
 | furniture (beds, chairs, benches, thrones), with or without a script | Skyrim furniture with seat or bed markers made from Oblivion's (see "Furniture" below), carrying its script |
-| potion or soul gem with an object script (a quest's wine, a collector's soul gem), alchemy apparatus | a misc item (Skyrim's potions and soul gems carry no scripts; apparatus are Skyrim clutter) |
+| potion or soul gem with an object script (a quest's wine, a collector's soul gem) | a misc item (Skyrim's potions and soul gems carry no scripts); an alchemy apparatus is a usable item that opens an alchemy workbench (ObMasteryPerks, TMObApparatus) |
 
 Scripts no record uses in Oblivion either (253: test scripts, leftovers and old versions) are translated and compiled but carried by nothing.
 
@@ -65,12 +66,11 @@ These translate to a comment, because what they changed doesn't exist in Skyrim'
 - `AddAchievement`: console achievements.
 - `ShowClassMenu`: Skyrim's player has no class (skills level by use alone).
 - `ShowSpellMaking`: Skyrim has no spell making.
-- `PickIdle`, `Reset3DState`, `EnableLinkedPathPoints` / `DisableLinkedPathPoints`, `TrapUpdate`: Skyrim's idle system,
+- `Reset3DState`, `EnableLinkedPathPoints` / `DisableLinkedPathPoints`, `TrapUpdate`: Skyrim's idle system,
   models and navmesh do these themselves.
 
 ## Approximations
 
-- `IsAnimPlaying` times a sequence by the usual lengths (2 s, 1 s fast, 3 s idles), not the model's own.
 - `IsInDangerousWater` is "swimming"; `GetKnockedState` "paralysed, unconscious or bleeding out"; `IsIdlePlaying`
   "an animation drives the actor".
 - `GetCurrentAIProcedure` is Oblivion's number for what the actor is doing (combat, dialogue, sleep) or else its
@@ -121,6 +121,15 @@ dust clouds and plasma a script sets off with `PlayGroup Forward`, the traps' sp
 ones under a controller manager, laid out as vanilla's (Lumbermill01WaterWheel01: blend interpolators on the emitter
 controller, links setting BirthRate and EmitterActive). The shapes are baked as other models' are; these models'
 moving parts (the channel-spike trap's spikes, ScampSwitch01) stay still.
+
+## Conditions and package targets (2026-11-04)
+
+Oblivion's comparison operators are taken by name: Mutagen numbers Oblivion's otherwise (its >= is 6, its < 8), and by
+number every >= was no operator (7,042 conditions in Oblivion.esm), every != a >, every > a <, every < an ==. And a
+package whose target Oblivion names isn't made or placed aims at the actor itself, not its vanilla template's (the
+player): dogs following their owners, Ushnar's Skinned Hound, Ruma Camoran and others followed the player across
+worlds, also on fast travel (user: "3 npcs still follow you with a dead animal on fast travel"). `follow-packages`
+lists the packages aimed at the player with their conditions, and every condition by operator.
 
 ## Furniture
 

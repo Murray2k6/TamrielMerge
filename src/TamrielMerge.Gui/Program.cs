@@ -5,6 +5,8 @@ static class Program
     [STAThread]
     static void Main()
     {
+        // Where temp files and the build go (paths.json beside the app), before anything makes one.
+        TamrielMerge.Util.Paths.Apply();
         ApplicationConfiguration.Initialize();
         // Errors anywhere in the app (user, 2026-10-14: ".NET runtime errors on the tool in certain areas") are written with
         // their full stack to logs\errors.log beside the app's log, and shown, rather than lost in .NET's own dialog.

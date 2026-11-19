@@ -47,7 +47,7 @@ public static class TerrainPreview
         }
         float P(double q) => slopes[(int)(q * (slopes.Count - 1))];
         Console.WriteLine($"cells: {f.CellsX}x{f.CellsY}, land {landCells} (Skyrim's Tamriel has 11186), coastal/shallow {coastCells}");
-        Console.WriteLine($"height: max {f.Peak():F0} min {f.Heights!.Min():F0} units (Skyrim peaks ~32000)");
+        Console.WriteLine($"height: max {f.Peak():F0} min {f.Lowest():F0} units (Skyrim peaks ~32000)");
         Console.WriteLine($"land slope deg: p50 {P(0.5):F1}  p90 {P(0.9):F1}  p99 {P(0.99):F1}  max {slopes[^1]:F1}  >45deg {slopes.Count(s => s > 45) * 100.0 / slopes.Count:F2}%");
 
         // Shaded relief, one image pixel per 8 vertices (=> 1000x500 for the default scale), north up.

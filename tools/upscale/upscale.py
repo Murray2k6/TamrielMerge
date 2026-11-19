@@ -7,9 +7,10 @@ width*height pixels as little-endian 0xAARRGGBB) from --input, and writes the up
 (cut-outs, blends) is resized smoothly. Textures already done are skipped, so it can be stopped and resumed.
 
 Usage: python upscale.py --input in --output out [--model RealESRGAN_x4plus.pth] [--max 1024] [--device cuda|cpu]
-       [--threads N]
+       [--threads N] [--shard i/n]
 --device defaults to the graphics card when there is one; the converter passes cpu unless it was given --gpu (graphics
-cards run hot under sustained upscaling).
+cards run hot under sustained upscaling). --shard i/n: this process takes every n-th texture from the i-th (the converter
+runs one process a graphics card, each on its own card).
 """
 import argparse, os, struct, sys, time
 
@@ -49,7 +50,9 @@ def main():
     ap.add_argument("--max", type=int, default=1024)
     ap.add_argument("--device", choices=["cuda", "cpu"], default=None)
     ap.add_argument("--threads", type=int, default=0)
+    ap.add_argument("--shard", default="0/1")
     args = ap.parse_args()
+    shard, shards = (int(x) for x in args.shard.split("/"))
 
     from spandrel import ModelLoader
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -63,7 +66,7 @@ def main():
     print(f"device {device}, model {os.path.basename(args.model)}", flush=True)
 
     names = sorted(n for n in os.listdir(args.input) if n.endswith(".rgba"))
-    todo = [n for n in names if not os.path.exists(os.path.join(args.output, n))]
+    todo = [n for i, n in enumerate(names) if i % shards == shard and not os.path.exists(os.path.join(args.output, n))]
     print(f"{len(names)} textures, {len(todo)} to upscale", flush=True)
     start = time.time()
     for i, name in enumerate(todo, 1):

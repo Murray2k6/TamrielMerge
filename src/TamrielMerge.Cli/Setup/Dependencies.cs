@@ -22,11 +22,24 @@ namespace TamrielMerge.Setup;
 /// viewer's PBR tool (tools\textures\pbr.py);</item>
 /// </list>
 /// The Creation Kit's tools (xWMAEncode, LipGenerator, the Papyrus compiler) come only with the Creation Kit on Steam,
-/// so they are checked for, not installed.
+/// so they are checked for, not installed. xVASynth's Skyrim voice models are published only on Nexus Mods: their row
+/// carries its Nexus source (XvaSynthModels), and the app gets them with the member's Nexus login (Nexus).
 /// </summary>
 public static class Dependencies
 {
-    public static string Root => Environment.GetEnvironmentVariable("TAMRIELMERGE_TOOLS") is { Length: > 0 } t ? Path.GetFullPath(t) : Path.GetFullPath("tools");
+    /// <summary>The tools folder: TAMRIELMERGE_TOOLS when set, else "tools" under the working folder when it is there,
+    /// else "tools" beside the program when that is, else under the working folder. (Until 2026-11-14 the working
+    /// folder's alone: a run begun from another folder found none of the tools' caches, and 41,204 voice files had
+    /// their lip sync made again, 35 minutes, with the cache holding every one of them.)</summary>
+    public static string Root => FindRoot();
+    static string FindRoot()
+    {
+        if (Environment.GetEnvironmentVariable("TAMRIELMERGE_TOOLS") is { Length: > 0 } t) return Path.GetFullPath(t);
+        string here = Path.GetFullPath("tools");
+        if (Directory.Exists(here)) return here;
+        string beside = Path.Combine(AppContext.BaseDirectory, "tools");
+        return Directory.Exists(beside) ? beside : here;
+    }
 
     public static string FfmpegDir => Path.Combine(Root, "ffmpeg", "ffmpeg-master-latest-win64-gpl", "bin");
     public static string Ffmpeg => Path.Combine(FfmpegDir, "ffmpeg.exe");
@@ -34,6 +47,49 @@ public static class Dependencies
     public static string UpscaleModel => Path.Combine(Root, "upscale", "RealESRGAN_x4plus.pth");
     public static string FastUpscaleModel => Path.Combine(Root, "upscale", "realesr-general-x4v3.pth");
     static string Uv => Path.Combine(Root, "uv", "uv.exe");
+
+    // ---- xVASynth (user, 2026-11-02: "use the source on github if its free for use") ----
+    // xVASynth's inference code (Dan Ruta, GPL-3.0, https://github.com/DanRuta/xVA-Synth) and the heteronym parser it uses
+    // (h2p-parser, ionite34, Apache-2.0), at the commits measured with the converter. Only the code xva.py runs is kept
+    // (python\xvapitch, with its bundled eSpeak NG, and the arpabet\ dictionaries, with their licences): the Electron app, its server and its old pinned packages aren't used (tools\voice\xva.py).
+    public const string XvaCommit = "9c563ae5065f802cbbe39d5ce94745f2383f22a1", H2pCommit = "2f9c505d66ddd6513f6b5e28a9cbc0d8310d9ab5";
+    public static string XvaSource => Path.Combine(Root, "xvasynth", "source");
+    static string H2pSource => Path.Combine(Root, "xvasynth", "vendor", "h2p-parser");
+    /// <summary>Where the Skyrim voice models (xVASynth's packs, Nexus Mods Skyrim SE mod 44184: sk_&lt;voice type&gt;.pt with
+    /// its .json) are read from.</summary>
+    public static string XvaModelDir => Path.Combine(Root, "xvasynth", "models", "skyrim");
+    /// <summary>The voice models there (a .pt with its .json).</summary>
+    public static int XvaModels => Directory.Exists(XvaModelDir) ? Directory.GetFiles(XvaModelDir, "*.pt").Count(p => File.Exists(Path.ChangeExtension(p, ".json"))) : 0;
+    /// <summary>The engine's code and packages in place (models apart).</summary>
+    public static bool XvaReady => File.Exists(Path.Combine(XvaSource, "python", "xvapitch", "model.py")) && File.Exists(Path.Combine(XvaSource, "arpabet", "cmudict.json")) && File.Exists(Path.Combine(H2pSource, "h2p_parser", "h2p.py"))
+        && Python is { } py && XvaPackagesWork(py);
+    // Its text code downloads these at its first import otherwise (it needs the internet then): fetched by setup.
+    static readonly string[] NltkData = ["punkt", "punkt_tab", "averaged_perceptron_tagger", "averaged_perceptron_tagger_eng"];
+    static bool XvaPackagesWork(string python) => Verified(python, "xva-packages", () =>
+        RunQuiet(python, "-c \"import nltk, unidecode, pyworld, pykakasi, ffmpeg, epitran, inflect, librosa, soundfile, numba, sklearn, num2words, scipy; " +
+            "[nltk.data.find(p) for p in ('tokenizers/punkt', 'tokenizers/punkt_tab', 'taggers/averaged_perceptron_tagger', 'taggers/averaged_perceptron_tagger_eng')]\"", 120_000) == 0);
+
+    /// <summary>A GitHub repository at a commit, only the files under <paramref name="keep"/> (and its licence), into
+    /// <paramref name="into"/> (emptied first).</summary>
+    static void FromGitHub(string repo, string commit, string into, params string[] keep)
+    {
+        string zip = Download($"https://codeload.github.com/{repo}/zip/{commit}", Path.Combine(Root, "downloads", repo.Replace('/', '-') + "-" + commit[..8] + ".zip"));
+        if (Directory.Exists(into)) Directory.Delete(into, true);
+        Directory.CreateDirectory(into);
+        using var archive = ZipFile.OpenRead(zip);
+        foreach (var e in archive.Entries)
+        {
+            int slash = e.FullName.IndexOf('/');
+            if (slash < 0 || e.Name.Length == 0) continue;
+            string rel = e.FullName[(slash + 1)..];
+            bool licence = !rel.Contains('/') && rel.StartsWith("LICENSE", StringComparison.OrdinalIgnoreCase);
+            if (!licence && !keep.Any(k => rel.StartsWith(k, StringComparison.OrdinalIgnoreCase))) continue;
+            string path = Path.GetFullPath(Path.Combine(into, rel.Replace('/', Path.DirectorySeparatorChar)));
+            if (!path.StartsWith(Path.GetFullPath(into), StringComparison.OrdinalIgnoreCase)) continue;   // no path outside the folder
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            e.ExtractToFile(path, overwrite: true);
+        }
+    }
     static string Venv => Path.Combine(Root, "py", ".venv");
     /// <summary>The model maker's own environment (TripoSR), apart from the voice and video one so neither disturbs
     /// the other.</summary>
@@ -147,7 +203,9 @@ public static class Dependencies
     const string X4PlusUrl = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth";
     const string GeneralX4v3Url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth";
 
-    public sealed record Status(string Name, bool Ready, string Detail);
+    /// <summary>A requirement's row. <paramref name="Source"/>: where it comes from on Nexus Mods when it is only published
+    /// there (the app's "Get from Nexus"), else null.</summary>
+    public sealed record Status(string Name, bool Ready, string Detail, NexusSource? Source = null);
 
     /// <summary>What is present and what is missing.</summary>
     public static List<Status> Check(string skyrimData)
@@ -159,6 +217,7 @@ public static class Dependencies
             new("Real-ESRGAN models", File.Exists(UpscaleModel) && File.Exists(FastUpscaleModel), Path.GetDirectoryName(UpscaleModel)!),
             new("Python environment (PyTorch, spandrel, XTTS)", Python is { } py && PackagesWork(py), Python ?? Venv),
             new("3D model maker (TripoSR)", ModelPython is { } mp && ModelPackagesWork(mp), ModelPython ?? ModelVenv),
+            new("xVASynth speech engine (voices)", XvaReady, XvaSource),
             new("Depth model (Depth Anything V2)", DepthModelReady, ModelCache),
             new("Blender (ray-traced menu intro)", Blender is not null, Blender ?? Path.Combine(Root, "blender")),
             new("Normals model (PBR tool)", File.Exists(NormalsModel), NormalsModel),
@@ -168,7 +227,40 @@ public static class Dependencies
         };
         var missing = CreationKitMissing(skyrimData);
         list.Add(new("Creation Kit", missing.Count == 0, missing.Count == 0 ? SkyrimRoot(skyrimData) : "missing " + string.Join(", ", missing.Select(m => m.File))));
+        // What setup can't download (user, 2026-10-29: "before the tool didnt install them all"): the creatures' source
+        // models (each from its author's page, tools\creatures\CREDITS.md; the release carries them) and the models
+        // made from Daggerfall's sprites (the release carries them; else the conversion makes them, hours on a CPU).
+        var creatures = CreatureSourcesMissing();
+        list.Add(new("Creature source models", creatures.Count == 0,
+            creatures.Count == 0 ? Path.Combine(Root, "creatures") : $"missing {string.Join(", ", creatures)}: from the release, or the pages in {Path.Combine(Root, "creatures", "CREDITS.md")}"));
+        string shippedModels = Path.Combine(Root, "model3d", "work", "models");
+        int shipped = Directory.Exists(shippedModels) ? Directory.GetDirectories(shippedModels).Count(d => File.Exists(Path.Combine(d, "mesh.obj"))) : 0;
+        list.Add(new("Sprite models (Daggerfall)", shipped > 0, shipped > 0 ? $"{shipped} shipped in {shippedModels}" : "none shipped: the conversion makes them (hours on the CPU, less with the graphics card)"));
+        // Published only on Nexus Mods (user, 2026-11-02: "log you in if you are missing something"): the app gets them
+        // with the member's Nexus login.
+        list.Add(XvaSynthModels.Status());
         return list;
+    }
+
+    /// <summary>The creatures (tools\creatures\*\creature.json with a "source") whose source model file isn't there.</summary>
+    public static List<string> CreatureSourcesMissing()
+    {
+        var missing = new List<string>();
+        string root = Path.Combine(Root, "creatures");
+        if (!Directory.Exists(root)) return missing;
+        foreach (var dir in Directory.GetDirectories(root).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            string cfg = Path.Combine(dir, "creature.json");
+            if (!File.Exists(cfg)) continue;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(cfg));
+                if (doc.RootElement.TryGetProperty("source", out var s) && s.GetString() is { Length: > 0 } source && !File.Exists(Path.Combine(dir, source)))
+                    missing.Add(Path.GetFileName(dir));
+            }
+            catch (System.Text.Json.JsonException) { missing.Add(Path.GetFileName(dir) + " (creature.json unreadable)"); }
+        }
+        return missing;
     }
 
     /// <summary>Steam's app id for "Skyrim Special Edition: Creation Kit".</summary>
@@ -371,6 +463,26 @@ public static class Dependencies
             RememberFlavour(Venv, flavour);
         });
 
+        // xVASynth's speech engine (tools\voice\xva.py): its code at the pinned commits and the packages its text code
+        // reads, in the converter's own Python environment.
+        Step("xVASynth speech engine", () => XvaReady, () =>
+        {
+            string py = Python ?? throw new InvalidOperationException("needs the Python environment");
+            // Its pronunciation dictionaries (arpabet\) are read from the repository's top folder.
+            FromGitHub("DanRuta/xVA-Synth", XvaCommit, XvaSource, "python/xvapitch/", "arpabet/");
+            // h2p-parser from GitHub installs its files loose in site-packages (filter.py, dictionary.py...): kept in its
+            // own folder instead, which xva.py puts on the path.
+            FromGitHub("ionite34/h2p-parser", H2pCommit, H2pSource, "h2p_parser/");
+            string flavourFile = Path.Combine(Venv, ".tamrielmerge-torch");
+            string flavour = File.Exists(flavourFile) ? File.ReadAllText(flavourFile).Trim() : "cu128";
+            // PyTorch pinned to the environment's, so nothing here swaps it.
+            if (Run(Uv, $"pip install --python \"{py}\" torch==2.8.0+{flavour} torchaudio==2.8.0+{flavour} nltk unidecode pyworld pykakasi ffmpeg-python epitran inflect librosa soundfile numba scikit-learn num2words scipy " +
+                    $"--extra-index-url https://download.pytorch.org/whl/{flavour} --index-strategy unsafe-best-match") != 0)
+                throw new InvalidOperationException("package install failed");
+            if (Run(py, $"-c \"import nltk; [nltk.download(p, quiet=True) for p in ({string.Join(", ", NltkData.Select(n => $"'{n}'"))})]\"") != 0)
+                throw new InvalidOperationException("the language data (NLTK) could not be downloaded");
+        });
+
         Step("3D model maker", () => ModelPython is { } mp && ModelPackagesWork(mp), () =>
         {
             if (!File.Exists(Uv))
@@ -460,14 +572,17 @@ public static class Dependencies
 
         if (CreationKitMissing(skyrimData) is { Count: > 0 } ck)
             problems.Add($"Creation Kit (Steam, free): missing {string.Join(", ", ck.Select(m => m.File))}");
+        if (XvaSynthModels.Coverage().Missing is { Count: > 0 } voices)
+            problems.Add($"{XvaSynthModels.RowName}: {voices.Count} voice types without a model; they come from Nexus Mods ({XvaSynthModels.Source.FilesPage}): \"Get from Nexus\" in the app");
         return problems;
     }
 
     const string SevenZipSetupUrl = "https://www.7-zip.org/a/7z2604-x64.exe";
 
     /// <summary>A full 7-Zip (it opens NSIS installers): the installed one, else a private copy in tools\7zip, unpacked
-    /// from 7-Zip's own setup (a 7z archive) with the standalone 7zr.exe — nothing is installed system-wide.</summary>
-    static string SevenZip()
+    /// from 7-Zip's own setup (a 7z archive) with the standalone 7zr.exe — nothing is installed system-wide. Also unpacks
+    /// what is fetched from Nexus Mods (Nexus.Unpack).</summary>
+    internal static string SevenZip()
     {
         if (Environment.GetEnvironmentVariable("TAMRIELMERGE_NO_7ZIP") is null)
             foreach (var installed in new[] { @"C:\Program Files\7-Zip\7z.exe", @"C:\Program Files (x86)\7-Zip\7z.exe" })

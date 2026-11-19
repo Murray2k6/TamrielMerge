@@ -281,6 +281,7 @@ public static class ProgressionBuilder
 
         string path = System.IO.Path.Combine(outDir, PluginName);
         // A light plugin (ESL) when its records fit one's FormIDs (0x800-0xFFF), so it takes no full plugin slot.
+        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Master;
         if (mod.ModHeader.Stats.NextFormID <= 0x1000) mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
         else log?.Invoke($"progression: {mod.ModHeader.Stats.NextFormID - 0x800} records, past a light plugin's 2048: written as a full plugin");
         TopicSubtypes.Fill(mod);
@@ -406,7 +407,9 @@ public static class ProgressionBuilder
                 new ScriptIntProperty { Name = "DefaultGame", Data = g.DefaultGame },
                 Objs("RaceForms", raceForms),
                 Ints("RaceFormIndex", raceIndex),
-                Texts("SkyrimSkillAvs", GameLevelling.SkyrimSkills),
+                // Papyrus's names for the actor values (GetBaseActorValue): Mutagen's Archery and Speech are Marksman and
+                // Speechcraft there ("Actor value "Archery" does not exist", 2026-11-05).
+                Texts("SkyrimSkillAvs", GameLevelling.SkyrimSkills.Select(GameLevelling.PapyrusActorValue)),
                 new ScriptIntProperty { Name = "ProgressionSkillCount", Data = nSkills },
                 Objs("ClassPerks", g.Classes.Select(c => (FormKey?)c.Perk.FormKey)),
                 Ints("ClassGame", g.Classes.Select(c => c.Game)),

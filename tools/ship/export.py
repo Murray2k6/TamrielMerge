@@ -1,8 +1,8 @@
 """The ship (ship.fbx, from CGTrader, user-supplied 2026-10-09) as the tool's ship model parts:
 blender -b -P export.py -- <out dir>
 Writes <out>/parts/<material>.obj (one per material: triangles with positions, UVs and the model's own normals, in
-Blender's z-up frame, the ship's length along y as imported), <out>/collision.obj (the hull, wheel and decks simplified
-to a few thousand triangles; sails, ropes and windows left out) and <out>/ship.json (sizes, triangle counts)."""
+Blender's z-up frame, the ship's length along y as imported), <out>/collision.obj (the hull and wheel simplified to
+about 1500 triangles, and the decks' upward faces whole, coplanar ones merged; sails, ropes and windows left out) and <out>/ship.json (sizes, triangle counts)."""
 import bpy, bmesh, json, os, sys
 
 out = os.path.abspath(sys.argv[sys.argv.index("--") + 1]) if "--" in sys.argv else os.path.dirname(os.path.abspath(__file__))
@@ -58,13 +58,33 @@ cm.calc_loop_triangles()
 dec.ratio = min(1.0, 1500 / max(1, len(cm.loop_triangles)))
 cmesh = col.evaluated_get(bpy.context.evaluated_depsgraph_get()).to_mesh()
 cmesh.calc_loop_triangles()
+
+# The decks walked on, whole: decimated to 1500 triangles the hull kept only a tenth of the main deck's area (2026-10-25:
+# Redguard's opening stood Cyrus on the hold's floor under it, walled in by the hull, the deck unseen above). Every
+# upward-facing face of the solid parts, coplanar neighbours merged into big flat polygons (Blender's limited dissolve).
+bm = bmesh.new()
+bm.from_mesh(mesh)
+bmesh.ops.delete(bm, geom=[f for f in bm.faces if f.material_index not in solid or f.normal.z < 0.8], context="FACES")
+bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.002)
+bmesh.ops.dissolve_limit(bm, angle_limit=0.09, verts=bm.verts, edges=bm.edges)
+bmesh.ops.triangulate(bm, faces=bm.faces)
+deck = [[v.co.copy() for v in f.verts] for f in bm.faces if f.calc_area() > 1e-6]
+bm.free()
+
 with open(os.path.join(out, "collision.obj"), "w") as f:
     for v in cmesh.vertices:
         f.write(f"v {v.co.x:.6f} {v.co.y:.6f} {v.co.z:.6f}\n")
     for t in cmesh.loop_triangles:
         a, b, c = (i + 1 for i in t.vertices)
         f.write(f"f {a} {b} {c}\n")
+    base = len(cmesh.vertices)
+    for tri in deck:
+        for co in tri:
+            f.write(f"v {co.x:.6f} {co.y:.6f} {co.z:.6f}\n")
+    for k in range(len(deck)):
+        f.write(f"f {base + 3 * k + 1} {base + 3 * k + 2} {base + 3 * k + 3}\n")
 lo = [min(v.co[k] for v in mesh.vertices) for k in range(3)]
 hi = [max(v.co[k] for v in mesh.vertices) for k in range(3)]
-json.dump({"min": lo, "max": hi, "parts": counts, "collisionTriangles": len(cmesh.loop_triangles)}, open(os.path.join(out, "ship.json"), "w"), indent=1)
-print(f"SHIP parts {counts}; collision {len(cmesh.loop_triangles)} triangles; size {[h - l for l, h in zip(lo, hi)]}")
+json.dump({"min": lo, "max": hi, "parts": counts, "collisionTriangles": len(cmesh.loop_triangles), "deckTriangles": len(deck)},
+          open(os.path.join(out, "ship.json"), "w"), indent=1)
+print(f"SHIP parts {counts}; collision {len(cmesh.loop_triangles)} hull and {len(deck)} deck triangles; size {[h - l for l, h in zip(lo, hi)]}")

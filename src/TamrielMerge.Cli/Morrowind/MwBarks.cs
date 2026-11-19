@@ -37,6 +37,8 @@ public sealed partial class MwPluginBuilder
         mod.Factions.Add(people);
         foreach (var npc in mod.Npcs)
             npc.Factions.Add(new RankPlacement { Faction = people.ToLink<IFactionGetter>(), Rank = 0 });
+        // Morrowind's dialogue for Morrowind's people (the responses made so far: topics, greetings, services).
+        Skyrim.DialogueOwners.Restrict(mod, people, Console.WriteLine);
 
         var quest = new Quest(mod)
         {

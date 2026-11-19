@@ -59,10 +59,10 @@ public sealed class Ob10Nif
 
     // ---- the blocks kept ----
 
-    public class Block { public string Type = ""; public int Index; public string Name = ""; public int Controller = -1; public List<int> Extra = []; }
+    public class Block { public string Type = ""; public int Index; public string Name = ""; public int Controller = -1; public List<int> Extra = []; /** A string extra data's text ("Prn": the bone a part rides). */ public string Value = ""; }
     public class AvObject : Block { public ushort Flags; public V3 T; public Matrix4x4 R = Matrix4x4.Identity; public float Scale = 1; public List<int> Props = []; public int Collision = -1; }
     public sealed class Node : AvObject { public List<int> Children = []; }
-    public sealed class Shape : AvObject { public int Data = -1; public bool WorldSpace; public List<int> Modifiers = []; }
+    public sealed class Shape : AvObject { public int Data = -1, Skin = -1; public bool WorldSpace; public List<int> Modifiers = []; }
     public sealed class GeomData : Block
     {
         public List<V3> Verts = [], Normals = [];
@@ -71,6 +71,10 @@ public sealed class Ob10Nif
         public List<(ushort, ushort, ushort)> Tris = [];
         public int ParticleCount;
     }
+    /// <summary>NiSkinInstance: its NiSkinData and the bones by block.</summary>
+    public sealed class SkinInstance : Block { public int Data = -1; public List<int> Bones = []; }
+    /// <summary>NiSkinData: each bone's skin-to-bone transform and vertex weights, in the instance's bone order.</summary>
+    public sealed class SkinData : Block { public List<(Matrix4x4 SkinToBone, List<(ushort Vertex, float Weight)> Weights)> Bones = []; }
     public sealed class Property : Block
     {
         public ushort Flags; public byte Threshold; public int BaseTexture = -1; public string? File;
@@ -96,7 +100,8 @@ public sealed class Ob10Nif
         public int Interpolator = -1, VisInterpolator = -1; public string ModifierName = "";
         public List<int> Sequences = [];
     }
-    public sealed class Interpolator : Block { public float Value; public bool BoolValue; public int Data = -1; }
+    /// <summary>An interpolator: its float value in place of a block's string one (an interpolator has no text).</summary>
+    public sealed class Interpolator : Block { public new float Value; public bool BoolValue; public int Data = -1; }
     public sealed class KeyData : Block { public List<(float Time, Vector4 Value)> Keys = []; }
     public sealed class Sequence : Block
     {
@@ -108,6 +113,8 @@ public sealed class Ob10Nif
     }
 
     public uint Version { get; private set; }
+    /// <summary>Bethesda's stream version: morph blocks change at 10, inside one file version (10.2.0.0 files are 9 or 10).</summary>
+    public uint Stream { get; private set; }
     public List<Block?> Blocks { get; } = [];
     public List<int> Roots { get; } = [];
     /// <summary>Where each block starts (its zero word, in versions that have one) and where the blocks end.</summary>
@@ -149,6 +156,7 @@ public sealed class Ob10Nif
         var r = new Reader(bytes);
         // Past the header: the line, version, user version, block count, stream version, export info, types, index.
         r.Pos = Array.IndexOf(bytes, (byte)10) + 1 + 4 + 4 + 4 + 4;
+        nif.Stream = BitConverter.ToUInt32(bytes, r.Pos - 4);
         for (int k = 0; k < 3; k++) r.Skip(1 + bytes[r.Pos]);
         int typeCount = r.U16();
         for (int k = 0; k < typeCount; k++) r.S();
@@ -287,7 +295,7 @@ public sealed class Ob10Nif
             {
                 var s = new Shape { Type = type, Index = index };
                 Av(r, s);
-                s.Data = r.I32(); r.I32();   // data, skin
+                s.Data = r.I32(); s.Skin = r.I32();
                 if (r.Bool()) { r.S(); r.I32(); }   // shader
                 if (type == "NiParticleSystem") { s.WorldSpace = r.Bool(); s.Modifiers = r.Refs(); }
                 return s;
@@ -329,6 +337,10 @@ public sealed class Ob10Nif
                 r.Skip(4 * 3 + 1 + 1);     // pixel layout, mipmaps, alpha format; static, direct render
                 return p;
             }
+            case "NiSpecularProperty":
+            {
+                var p = new Property { Type = type, Index = index }; ObjectNet(r, p); p.Flags = r.U16(); return p;
+            }
             case "NiVertexColorProperty":
             {
                 var p = new Property { Type = type, Index = index }; ObjectNet(r, p); p.Flags = r.U16(); r.Skip(8); return p;
@@ -343,11 +355,81 @@ public sealed class Ob10Nif
             }
             case "NiStringExtraData":
             {
-                var d = new Block { Type = type, Index = index }; d.Name = r.S(); r.S(); return d;
+                var d = new Block { Type = type, Index = index }; d.Name = r.S(); d.Value = r.S(); return d;
             }
             case "BSXFlags":
             {
                 var d = new Block { Type = type, Index = index }; d.Name = r.S(); r.U32(); return d;
+            }
+            case "NiGeomMorpherController":
+            {
+                // A face's morphs (the creature parts at 10.1.0.106): nothing kept, its blocks only read past. Layouts as nif.xml;
+                // Read's check that the blocks end exactly at the file's end proves them.
+                var c = new Controller { Type = type, Index = index };
+                TimeController(r, c);
+                if (Version is >= V10_1_0_104 and <= V10_1_0_108) r.Bool();
+                r.U16(); r.I32(); r.U8();   // extra flags, data, always update
+                r.Skip(4 * r.I32());        // interpolators
+                if (V(V10_2_0_0) && Stream >= 10) r.Skip(4 * r.I32());   // unknown ints (a count, then one a morph)
+                return c;
+            }
+            case "NiMorphData":
+            {
+                uint morphs = r.U32(), verts = r.U32();
+                r.U8();                     // relative targets
+                // Frame name, legacy weight (nif.xml: below stream 10), vectors.
+                for (uint m = 0; m < morphs; m++) { r.S(); if (Stream < 10) r.F(); r.Skip((int)verts * 12); }
+                return new Block { Type = type, Index = index };
+            }
+            case "BSBound":
+            {
+                var d = new Block { Type = type, Index = index }; d.Name = r.S(); r.Skip(6 * 4); return d;
+            }
+            case "NiSkinInstance":
+            {
+                var d = new SkinInstance { Type = type, Index = index };
+                d.Data = r.I32(); r.I32(); r.I32();   // data, partition, skeleton root
+                d.Bones = r.Refs();
+                return d;
+            }
+            case "NiSkinData":
+            {
+                var d = new SkinData { Type = type, Index = index };
+                Matrix4x4 Transform()
+                {
+                    var m = new float[9];
+                    for (int i = 0; i < 9; i++) m[i] = r.F();
+                    var t = r.V(); float scale = r.F();
+                    // As Av: Gamebryo's rotation is applied to column vectors; this is the row-vector matrix.
+                    return Matrix4x4.CreateScale(scale) * Matrix4x4.Transpose(new Matrix4x4(m[0], m[1], m[2], 0, m[3], m[4], m[5], 0, m[6], m[7], m[8], 0, 0, 0, 0, 1)) * Matrix4x4.CreateTranslation(t);
+                }
+                Transform();                  // overall skin transform
+                uint bones = r.U32();
+                bool weights = r.U8() != 0;
+                for (uint b = 0; b < bones; b++)
+                {
+                    var transform = Transform();
+                    r.Skip(16);               // bounding sphere
+                    var list = new List<(ushort, float)>();
+                    int count = r.U16();
+                    if (weights) for (int i = 0; i < count; i++) list.Add((r.U16(), r.F()));
+                    d.Bones.Add((transform, list));
+                }
+                return d;
+            }
+            case "NiSkinPartition":
+            {
+                for (uint n = r.U32(); n > 0; n--)
+                {
+                    int verts = r.U16(), tris = r.U16(), bones = r.U16(), strips = r.U16(), perVertex = r.U16();
+                    r.Skip(2 * bones);
+                    if (r.Bool()) r.Skip(2 * verts);                    // vertex map
+                    if (r.Bool()) r.Skip(4 * verts * perVertex);        // weights
+                    var lengths = Enumerable.Range(0, strips).Select(_ => (int)r.U16()).ToList();
+                    if (r.Bool()) r.Skip(strips != 0 ? 2 * lengths.Sum() : 6 * tris);
+                    if (r.Bool()) r.Skip(verts * perVertex);            // bone indices
+                }
+                return new Block { Type = type, Index = index };
             }
             case "NiBinaryExtraData":
             {

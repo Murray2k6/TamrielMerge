@@ -44,7 +44,10 @@ public sealed class RgArt(string artDir, string modOutDir)
     public static string FlatName(string palette, int bank, int image) => $"rg__{palette.ToLowerInvariant()}__{bank}_{image}";
 
     /// <summary>A bank image through a palette, as Skyrim textures; null when the bank or image doesn't exist.</summary>
-    public Texture? Ensure(string palette, int bank, int image)
+    /// <param name="land">A land texture: its alpha, which Skyrim's land takes as its shine, is none. (Written without an
+    /// alpha channel the land was as shiny as it can be: Skyrim's own land textures carry an alpha of about 60 to 75
+    /// of 255, measured 2026-11-10.)</param>
+    public Texture? Ensure(string palette, int bank, int image, bool land = false)
     {
         var key = (palette.ToUpperInvariant(), bank, image);
         if (done.TryGetValue(key, out var hit)) return hit;
@@ -59,7 +62,8 @@ public sealed class RgArt(string artDir, string modOutDir)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(full)!);
             var (big, w, h) = Enlarge(px, img.Width, img.Height, FlatName(palette, bank, image), alpha);
-            MwTextures.WriteBcDds(full, big, w, h, alpha);
+            if (land) for (int i = 0; i < big.Length; i++) big[i] &= 0x00FFFFFFu;
+            MwTextures.WriteBcDds(full, big, w, h, alpha || land);
             MwTextures.WriteNormalMap(big, w, h, normal);
         }
         return done[key] = new Texture(rel, Path.ChangeExtension(rel, null) + "_n.dds", alpha, img.Width, img.Height);

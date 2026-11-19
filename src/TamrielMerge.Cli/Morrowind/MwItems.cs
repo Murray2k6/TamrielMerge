@@ -42,11 +42,27 @@ public sealed partial class MwPluginBuilder
 
     static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
 
+    /// <summary>
+    /// The skeleton node a Morrowind weapon type hangs from sheathed (Skyrim's character skeleton has WeaponDagger,
+    /// WeaponSword, WeaponMace, WeaponAxe, WeaponBack and WeaponBow, no staff or crossbow node: those as Skyrim's go on the
+    /// back and with the bow); none for thrown weapons and ammunition.
+    /// </summary>
+    static string? AttachNode(int type) => type switch
+    {
+        0 => "WeaponDagger",
+        1 => "WeaponSword",
+        3 => "WeaponMace",
+        7 => "WeaponAxe",
+        2 or 4 or 5 or 6 or 8 => "WeaponBack",
+        9 or 10 => "WeaponBow",
+        _ => null,
+    };
+
     /// <summary>The item's model converted with item physics (dynamic box of the item's weight).</summary>
-    MwMeshConverter.Result? ItemMesh(string? model, float weight)
+    MwMeshConverter.Result? ItemMesh(string? model, float weight, string? attachNode = null)
     {
         if (model is not { Length: > 0 }) return null;
-        try { return meshes.Convert(model, modOutDir, itemMass: Math.Clamp(weight, 0.3f, 40f)); }
+        try { return meshes.Convert(model, modOutDir, itemMass: Math.Clamp(weight, 0.3f, 40f), attachNode: attachNode); }
         catch (Exception e) { Problems.Add($"item model {model}: {e.Message}"); return null; }
     }
 
@@ -81,9 +97,9 @@ public sealed partial class MwPluginBuilder
             result = rec.Type switch
             {
                 "MISC" => Misc(rec, edid, name, model),
-                "APPA" => Simple(rec, edid, name, model, "AADT", weightAt: 8, valueAt: 12),
+                "APPA" => ApparatusItem(rec, edid, name, model),
                 "LOCK" or "PROB" => Tool(rec, edid, name, model, pick: rec.Type == "LOCK"),
-                "REPA" => Simple(rec, edid, name, model, "RIDT", 0, 4),
+                "REPA" => RepairTool(rec, edid, name, model),
                 "BOOK" => ScrollItem(rec, edid, name, model) ?? BookItem(rec, edid, name, model),
                 "ALCH" => Potion(rec, edid, name, model),
                 "INGR" => IngredientItem(rec, edid, name, model),
@@ -97,6 +113,10 @@ public sealed partial class MwPluginBuilder
         catch (Exception e) { Problems.Add($"item {id}: {e.Message}"); }
         items[id] = result;
         if (rec.Type is "WEAP" or "ARMO" or "CLOT") Enchant(rec, result);
+        // Its vendor keyword (MwVendors): what Morrowind's and Skyrim's vendors buy it as.
+        VendorKeywords(rec, result);
+        // Its maximum condition (MwWear).
+        WearItem(rec, result);
         return result;
     }
 
@@ -108,25 +128,13 @@ public sealed partial class MwPluginBuilder
         var mesh = ItemMesh(model, weight);
         if (isKey)
         {
-            var key = new Key(mod) { EditorID = edid, Name = name, Value = value, Weight = weight, ObjectBounds = Bounds(mesh) };
+            // (A key Morrowind left nameless stays so: Mutagen's key name isn't marked as optional, as the other items' are.)
+            var key = new Key(mod) { EditorID = edid, Name = name!, Value = value, Weight = weight, ObjectBounds = Bounds(mesh) };
             if (mesh is not null) key.Model = new Model { File = SkyrimModelPath(mesh.Path) };
             mod.Keys.Add(key);
             return key;
         }
         var misc = new MiscItem(mod) { EditorID = edid, Name = name, Value = value, Weight = weight, ObjectBounds = Bounds(mesh) };
-        if (mesh is not null) misc.Model = new Model { File = SkyrimModelPath(mesh.Path) };
-        mod.MiscItems.Add(misc);
-        return misc;
-    }
-
-    /// <summary>Apparatus and repair hammers: misc items (Skyrim has no counterpart to use). Lockpicks and probes are
-    /// tools to hold (MwLocks).</summary>
-    IMajorRecord Simple(Tes3Record rec, string edid, string? name, string? model, string data, int weightAt, int valueAt)
-    {
-        var d = rec.Get(data)!.Value;
-        float weight = d.Float(weightAt);
-        var mesh = ItemMesh(model, weight);
-        var misc = new MiscItem(mod) { EditorID = edid, Name = name, Value = (uint)Math.Max(0, d.Int(valueAt)), Weight = weight, ObjectBounds = Bounds(mesh) };
         if (mesh is not null) misc.Model = new Model { File = SkyrimModelPath(mesh.Path) };
         mod.MiscItems.Add(misc);
         return misc;
@@ -267,7 +275,7 @@ public sealed partial class MwPluginBuilder
         float speed = d.Float(12), reach = d.Float(16);
         int maxDamage = Math.Max(d.Data[23], Math.Max(d.Data[25], d.Data[27]));
         string template = WeaponTemplate(type);
-        var mesh = ItemMesh(model, weight);
+        var mesh = ItemMesh(model, weight, AttachNode(type));
         if (template.Length == 0)
         {
             // Thrown weapons (darts, stars, knives): Skyrim has no thrown weapons; kept as items.
@@ -340,6 +348,7 @@ public sealed partial class MwPluginBuilder
     {
         var d = rec.Get("AODT")!.Value;
         int type = d.Int(0); float weight = d.Float(4); int value = d.Int(8), rating = d.Int(20);
+        IMajorRecord made;
         // A set Bethesda remade for Skyrim or Dragonborn: wear that remake, looks and all (see CanonArmor).
         if (CanonArmor(rec.Id, type) is { } canon)
         {
@@ -350,11 +359,39 @@ public sealed partial class MwPluginBuilder
             a.Value = (uint)Math.Max(0, value);
             a.Weight = weight;
             a.ArmorRating = rating * 1.5f;
-            return a;
+            made = a;
         }
-        var (template, slot) = ArmorTemplate(type);
-        bool coversHead = WornParts(rec).Any(p => p.Index == 0);
-        return Wearable(Vanilla<IArmorGetter>(template), rec, edid, name, model, weight, value, rating * 1.5f, ArmorLook(type, coversHead), slot);
+        else
+        {
+            var (template, slot) = ArmorTemplate(type);
+            bool coversHead = WornParts(rec).Any(p => p.Index == 0);
+            made = Wearable(Vanilla<IArmorGetter>(template), rec, edid, name, model, weight, value, rating * 1.5f, ArmorLook(type, coversHead), slot);
+        }
+        if (IsMediumArmor(type, weight)) MediumArmorList().Items.Add(made.ToLink<ISkyrimMajorRecordGetter>());
+        return made;
+    }
+
+    /// <summary>
+    /// Morrowind's armour classes by weight (OpenMW's MWWorld::Class::getEquipmentSkill): a piece is light up to 0.6
+    /// (fLightMaxMod) of its kind's weight (iHelmWeight 5, iCuirassWeight 30, iPauldronWeight 10, iGreavesWeight 15,
+    /// iBootsWeight 20, iGauntletWeight 5 (bracers too), iShieldWeight 15), medium up to 0.9 (fMedMaxMod), heavy above.
+    /// Skyrim has no medium class, so the medium pieces are listed (MWMediumArmor) for the scripts' GetArmorType and
+    /// the progression's Medium Armor skill.
+    /// </summary>
+    static bool IsMediumArmor(int type, float weight)
+    {
+        float full = type switch { 0 => 5, 1 => 30, 2 or 3 => 10, 4 => 15, 5 => 20, 6 or 7 or 9 or 10 => 5, 8 => 15, _ => 0 };
+        return full > 0 && weight > full * 0.6f && weight <= full * 0.9f;
+    }
+
+    FormList? mediumArmorList;
+    /// <summary>The form list of Morrowind's medium armour (MWMediumArmor; see <see cref="IsMediumArmor"/>).</summary>
+    FormList MediumArmorList()
+    {
+        if (mediumArmorList is not null) return mediumArmorList;
+        mediumArmorList = new FormList(mod) { EditorID = "MWMediumArmor" };
+        mod.FormLists.Add(mediumArmorList);
+        return mediumArmorList;
     }
 
     Skyrim.VanillaActors? canonForms;

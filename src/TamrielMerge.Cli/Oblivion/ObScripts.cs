@@ -22,6 +22,7 @@ namespace TamrielMerge.Oblivion;
 public sealed partial class ObPluginBuilder
 {
     ObScriptWorld? scriptWorld;
+    public int MixedScripts => scriptWorld?.MixedScripts ?? 0;
     readonly Dictionary<FormKey, ObPapyrus.Output> translations = new();
     /// <summary>Oblivion references the scripts name: placed persistent, and remembered here once placed.</summary>
     readonly HashSet<FormKey> scriptRefs = new();
@@ -80,8 +81,17 @@ public sealed partial class ObPluginBuilder
             }
             catch (Exception e) { Problems.Add($"script {id}: {e.Message}"); }
         }
+        // The references every package names (the marker it travels to, the one it follows), not only those of the
+        // packages scripts use: left out, a package's place fell back to "near where the actor is placed" - 2026-11-13:
+        // Renote never walked into the prisoner's cell (CGRenoteWalkToMarkerB's marker was not kept), and of
+        // Oblivion.esm's 4,717 near-a-reference places most were written so.
+        foreach (var rec in records.Values)
+            if (rec is Ob.IAIPackageGetter anyPackage)
+                foreach (var r in PackageRefs(anyPackage)) scriptRefs.Add(r);
         // The references the dialogue's and packages' conditions name are placed persistent, as the scripts' are.
         foreach (var key in ConditionRefs()) scriptRefs.Add(key);
+        // And the references others are enabled by (ObEnable).
+        foreach (var key in EnableParentRefs().ToList()) scriptRefs.Add(key);
         // Traps (their scripts call TrapUpdate): their models' collision on the trap layer, made after this.
         foreach (var (key, rec) in records)
             if (ObScriptWorld.ScriptLink(rec) is { } s && translations.TryGetValue(s, out var o) && o.Trap
@@ -94,6 +104,7 @@ public sealed partial class ObPluginBuilder
     /// <summary>A reference a script names: persistent (in the cell's persistent group), and remembered.</summary>
     bool PlaceForScripts(FormKey source, IPlaced placed, Cell cell, Cell persistentCell)
     {
+        placedOf[source] = placed;
         if (!scriptRefs.Contains(source)) return false;
         placed.MajorRecordFlagsRaw |= 0x400;
         persistentCell.Persistent.Add(placed);
@@ -242,7 +253,10 @@ public sealed partial class ObPluginBuilder
         FormKey? Fill(ObPapyrus.Property p)
         {
             if (p.Generated)
-                return p.EditorID.StartsWith("TMOB_PC", StringComparison.Ordinal) ? GeneratedGlobal(p.EditorID) : generated.TryGetValue(p.EditorID, out var gk) ? gk : null;
+                return p.EditorID.StartsWith("TMOB_PC", StringComparison.Ordinal) || p.EditorID.StartsWith("TMOB_Clock", StringComparison.Ordinal) || p.EditorID == "TMOB_StageBusy" ||p.EditorID.StartsWith("TMOB_GMST_", StringComparison.Ordinal) ? GeneratedGlobal(p.EditorID)
+                    : p.EditorID.StartsWith("OBRace", StringComparison.Ordinal) ? RaceKeyword(p.EditorID).FormKey   // a stand-in race's keyword (ObRaceKeywords)
+                    : p.EditorID == "OBPathCut" ? PathCutKeyword().FormKey
+                    : generated.TryGetValue(p.EditorID, out var gk) ? gk : null;
             if (p.EditorID == "player") return PlayerRefKey;
             if (p.EditorID.StartsWith('@') && p.EditorID.Contains(':') && !p.EditorID.StartsWith("@ref:", StringComparison.Ordinal)) return Special(p);
             if (p.QuestVariable is { } variable)
@@ -273,7 +287,7 @@ public sealed partial class ObPluginBuilder
             {
                 Ob.IRaceGetter r => Vanilla.Get<IRaceGetter>(RaceStandIns.GetValueOrDefault(r.EditorID ?? "", r.EditorID ?? "") + "Race")?.FormKey,
                 Ob.IEffectShaderGetter e => ShaderStandIn(e.EditorID ?? ""),
-                Ob.IWeatherGetter w => WeatherStandIn(w.EditorID ?? ""),
+                Ob.IWeatherGetter w => ObWeather(key)?.FormKey ?? WeatherStandIn(w.EditorID ?? ""),
                 Ob.ICombatStyleGetter cs => CombatStyleStandIn(cs.EditorID ?? ""),
                 _ => null,
             };
@@ -317,12 +331,12 @@ public sealed partial class ObPluginBuilder
         bool Fresh(string n) => File.Exists(Path.Combine(outDir, n + ".pex")) && (!stale.Contains(n) || File.GetLastWriteTimeUtc(Path.Combine(outDir, n + ".pex")) >= started);
         // In batches of 400, up to four at once, each in a folder of its own (the whole folder in one run was one
         // compiler on one core); the folder stays an import, so the scripts still see each other.
-        string imports = $"-i={Path.GetFullPath(sourceDir)};{helpers};{skse};{vanilla}";
-        const int batch = 400;
+        string imports = $"-i={Path.GetFullPath(sourceDir)};{Skyrim.PapyrusRun.Stubs(helpers, Path.GetFullPath(sourceDir).TrimEnd('\\', '/') + "_helpers")};{skse};{vanilla}";
+        var (atOnce, batch) = Skyrim.PapyrusRun.Plan(names.Count);
         var chunks = Enumerable.Range(0, (names.Count + batch - 1) / batch)
             .Select(i => (Index: i, Names: names.Skip(i * batch).Take(batch).Where(n => !Fresh(n)).ToList())).Where(c => c.Names.Count > 0).ToList();
         var logs = new System.Collections.Concurrent.ConcurrentBag<string>();
-        Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 4, 1, 4) }, c =>
+        Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = atOnce }, c =>
         {
             string chunkDir = Path.GetFullPath(sourceDir).TrimEnd('\\', '/') + "_batch" + c.Index;
             if (Directory.Exists(chunkDir)) Directory.Delete(chunkDir, true);
@@ -350,6 +364,7 @@ public sealed partial class ObPluginBuilder
             log += Run(one);
         }
         Skyrim.PapyrusRun.KeepHelperSignatures(outDir, helpers);
+        Skyrim.PapyrusRun.KeepCompiled(sourceDir, outDir, helpers, names);
         return (names.Where(Fresh).ToHashSet(StringComparer.OrdinalIgnoreCase), log);
 
         static string Run(ProcessStartInfo info) => Skyrim.PapyrusRun.Run(info, info.ArgumentList.Contains("-all") ? Skyrim.PapyrusRun.Batch : Skyrim.PapyrusRun.One).Output;

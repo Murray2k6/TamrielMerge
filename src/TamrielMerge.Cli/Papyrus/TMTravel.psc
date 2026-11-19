@@ -56,7 +56,8 @@ Int pickWorld = -1
 Int pickGroup = -1
 Int pickTown = -1
 
-; ---- where the player last stood outdoors (for travel from indoors, and Skyrim's map travel) ----
+; ---- where the player last stood outdoors (for travel from indoors, and Skyrim's map travel), on the whole map of
+; the world (TMTravelWorld.GX: a tiled overland's tiles are one map) ----
 Int lastWorld = -1
 Float lastX
 Float lastY
@@ -176,8 +177,8 @@ Function Track()
   If w < 0
     Return
   EndIf
-  Float x = PlayerRef.GetPositionX()
-  Float y = PlayerRef.GetPositionY()
+  Float x = Worlds[w].GX(PlayerRef)
+  Float y = Worlds[w].GY(PlayerRef)
   If lastWorld == w && jumpSeen < 2
     Float dx = x - lastX
     Float dy = y - lastY
@@ -196,8 +197,8 @@ EndFunction
 Function FastTravelled(Float skyrimHours)
   Int w = CurrentWorld()
   If w >= 0 && lastWorld == w && !travelling
-    Float x = PlayerRef.GetPositionX()
-    Float y = PlayerRef.GetPositionY()
+    Float x = Worlds[w].GX(PlayerRef)
+    Float y = Worlds[w].GY(PlayerRef)
     Float minutes = Worlds[w].Minutes(lastX, lastY, x, y, cautious, inn, False, PlayerRef.IsOnMount()) as Float
     Float extra = minutes / 60.0 - skyrimHours
     If extra > 0.0
@@ -303,8 +304,8 @@ EndFunction
 Bool Function StartPoint(Int w)
   If CurrentWorld() == w
     lastWorld = w
-    lastX = PlayerRef.GetPositionX()
-    lastY = PlayerRef.GetPositionY()
+    lastX = Worlds[w].GX(PlayerRef)
+    lastY = Worlds[w].GY(PlayerRef)
   EndIf
   Return lastWorld == w
 EndFunction
@@ -318,7 +319,7 @@ Function ListTowns(Int w, Int g)
   Bool known = StartPoint(w)
   Invoke("ClearTravel", "")
   Int n = world.TownCount(g)
-  String[] names = StringUtil.Split(world.GroupTowns[g], "|")
+  String[] names = world.Towns(g)
   Float perPixel = 104.0
   If !inn
     perPixel = perPixel * 300.0 / 256.0
@@ -334,8 +335,8 @@ Function ListTowns(Int w, Int g)
     ObjectReference m = world.TownMarker(g, t)
     String time = ""
     If m && known && world.Story == TimeHere()
-      Float dx = (m.GetPositionX() - lastX) / world.UnitsPerPixel
-      Float dy = (m.GetPositionY() - lastY) / world.UnitsPerPixel
+      Float dx = (world.GX(m) - lastX) / world.UnitsPerPixel
+      Float dy = (world.GY(m) - lastY) / world.UnitsPerPixel
       Float pixels = Math.Sqrt(dx * dx + dy * dy)
       time = "about " + Duration(pixels * perPixel)
     EndIf
@@ -370,13 +371,15 @@ Function Plan(TMTravelWorld world, ObjectReference dest)
   jToPort = -1
   Bool horse = useHorse && HasHorse()
   Bool sameLand = True
+  Float destX = world.GX(dest)
+  Float destY = world.GY(dest)
   If world.Climate
     String a = world.Climate.LandAt(world.PixelX(lastX), world.PixelY(lastY))
-    String b = world.Climate.LandAt(world.PixelX(dest.GetPositionX()), world.PixelY(dest.GetPositionY()))
+    String b = world.Climate.LandAt(world.PixelX(destX), world.PixelY(destY))
     sameLand = a == b || a == "." || b == "."
   EndIf
   ; Priced first as Daggerfall does (straight across, the sea by ship when chosen).
-  planMinutes = world.Minutes(lastX, lastY, dest.GetPositionX(), dest.GetPositionY(), cautious, inn, useShip, horse)
+  planMinutes = world.Minutes(lastX, lastY, destX, destY, cautious, inn, useShip, horse)
   Bool crossesSea = world.OceanPixels > 0
   If (!sameLand || (useShip && crossesSea)) && world.PortCount() > 0
     If !useShip
@@ -384,7 +387,7 @@ Function Plan(TMTravelWorld world, ObjectReference dest)
       planNote = "Across the sea: only by ship."
     Else
       jFromPort = NearestPortOn(world, lastX, lastY)
-      jToPort = NearestPortOn(world, dest.GetPositionX(), dest.GetPositionY())
+      jToPort = NearestPortOn(world, destX, destY)
       If jFromPort < 0 || jToPort < 0
         planPossible = False
         planNote = "No harbour serves this crossing."
@@ -402,7 +405,7 @@ Function Plan(TMTravelWorld world, ObjectReference dest)
   planCost = world.Cost(planMinutes, inn, planShip)
 EndFunction
 
-; The harbour nearest a point on the same landmass as it.
+; The harbour nearest a point (the whole map's) on the same landmass as it.
 Int Function NearestPortOn(TMTravelWorld world, Float x, Float y)
   If !world.Climate
     Return world.NearestPort(x, y)
@@ -414,9 +417,9 @@ Int Function NearestPortOn(TMTravelWorld world, Float x, Float y)
   Int n = world.PortCount()
   While i < n
     ObjectReference p = world.Ports.GetAt(i) as ObjectReference
-    If p && world.Climate.LandAt(world.PixelX(p.GetPositionX()), world.PixelY(p.GetPositionY())) == land
-      Float dx = p.GetPositionX() - x
-      Float dy = p.GetPositionY() - y
+    If p && world.Climate.LandAt(world.PixelX(world.GX(p)), world.PixelY(world.GY(p))) == land
+      Float dx = world.GX(p) - x
+      Float dy = world.GY(p) - y
       Float d = dx * dx + dy * dy
       If best < 0 || d < bestD
         best = i
@@ -548,7 +551,7 @@ Function Resume()
   EndIf
   TMTravelWorld world = Worlds[jWorld]
   Bool horse = useHorse && HasHorse()
-  Float left = world.Minutes(PlayerRef.GetPositionX(), PlayerRef.GetPositionY(), jDestination.GetPositionX(), jDestination.GetPositionY(), cautious, inn, useShip, horse) as Float
+  Float left = world.Minutes(world.GX(PlayerRef), world.GY(PlayerRef), world.GX(jDestination), world.GY(jDestination), cautious, inn, useShip, horse) as Float
   jPassed = 0.0
   jMinutes = left
   Utility.Wait(0.1)
@@ -565,8 +568,8 @@ Function StartJourney()
     horse = Game.GetPlayersLastRiddenHorse()
   EndIf
   jSavedMult = PlayerRef.GetActorValue("SpeedMult")
-  jLastX = PlayerRef.GetPositionX()
-  jLastY = PlayerRef.GetPositionY()
+  jLastX = Worlds[jWorld].GX(PlayerRef)
+  jLastY = Worlds[jWorld].GY(PlayerRef)
   jLastClock = Utility.GetCurrentRealTime()
   jSpeed = 0.0
   jStuck = 0
@@ -615,14 +618,52 @@ Function NextLeg()
   EndIf
 EndFunction
 
+; The walk's goal (the harbour or the town), the worldspace it set out in, and the tries at crossing into the next tile.
+ObjectReference walkGoal
+WorldSpace walkWorld
+Int crossings = 0
+
 Function Walk(ObjectReference target)
-  Waypoint.MoveTo(target)
+  walkGoal = target
+  crossings = 0
+  WalkOn()
+EndFunction
+
+; Heads for the goal: straight there in the same worldspace; in another tile of a tiled overland, for where the way
+; leaves this one (TMTravelWorld.Crossing), the overland moving the traveller on into the next (TMDfOverland).
+Function WalkOn()
+  TMTravelWorld world = Worlds[jWorld]
+  walkWorld = PlayerRef.GetWorldSpace()
+  If walkGoal.GetWorldSpace() == walkWorld
+    Waypoint.MoveTo(walkGoal)
+  Else
+    world.Crossing(walkWorld, world.GX(PlayerRef), world.GY(PlayerRef), world.GX(walkGoal), world.GY(walkGoal))
+    Waypoint.MoveTo(PlayerRef)
+    Waypoint.SetPosition(world.CrossX, world.CrossY, PlayerRef.GetPositionZ())
+  EndIf
   (GetAlias(0) as TMTravelPlayer).WalkTo(Waypoint)
 EndFunction
 
-; The walk ended (TMTravelPlayer): at the harbour the ship, at the town the journey's end.
+; The walk ended (TMTravelPlayer): at the harbour the ship, at the town the journey's end; moved into the next tile on
+; the way, or at the way's crossing into it, the walk goes on.
 Function WalkEnded(Bool reached)
   If !travelling
+    Return
+  EndIf
+  If PlayerRef.GetWorldSpace() != walkWorld
+    crossings = 0
+    WalkOn()
+    Return
+  EndIf
+  If walkGoal && walkGoal.GetWorldSpace() != walkWorld
+    crossings += 1
+    If crossings > 3
+      StopJourney("You find no road on from here. (Continue the journey from the Travel tab, or walk on.)")
+      Return
+    EndIf
+    ; The overland moves the traveller on within its second (TMDfOverland checks every second).
+    Utility.Wait(2.0)
+    WalkOn()
     Return
   EndIf
   If !reached && Waypoint.GetDistance(PlayerRef) > 2048.0
@@ -642,6 +683,7 @@ EndFunction
 Int voyageStep
 Float shipHeading
 
+; The voyage's waypoints are the whole map's; the ship and the player sail in the worldspace the player is in.
 Function Sail()
   TMTravelWorld world = Worlds[jWorld]
   If !jVoyage || jVoyage.Length < 2
@@ -651,8 +693,9 @@ Function Sail()
   EndIf
   voyageStep = 0
   String[] first = StringUtil.Split(jVoyage[0], ",")
-  Float x = first[0] as Float
-  Float y = first[1] as Float
+  WorldSpace here = PlayerRef.GetWorldSpace()
+  Float x = (first[0] as Float) - world.OffsetX(here)
+  Float y = (first[1] as Float) - world.OffsetY(here)
   Ship.Disable()
   Ship.MoveTo(PlayerRef)
   Ship.SetPosition(x, y, ShipWaterZ)
@@ -669,9 +712,16 @@ Function SailOn()
     Landfall()
     Return
   EndIf
+  SailToward()
+EndFunction
+
+; Heads the ship (and the player on its deck) for the waypoint it is on now.
+Function SailToward()
+  TMTravelWorld world = Worlds[jWorld]
+  WorldSpace here = Ship.GetWorldSpace()
   String[] p = StringUtil.Split(jVoyage[voyageStep], ",")
-  Float x = p[0] as Float
-  Float y = p[1] as Float
+  Float x = (p[0] as Float) - world.OffsetX(here)
+  Float y = (p[1] as Float) - world.OffsetY(here)
   Float dx = x - Ship.GetPositionX()
   Float dy = y - Ship.GetPositionY()
   shipHeading = Math.atan(dx / (dy + 0.0001))
@@ -686,14 +736,29 @@ Function SailOn()
   PlayerRef.TranslateTo(x, y, ShipDeckZ, 0.0, 0.0, shipHeading, pace, 60.0)
 EndFunction
 
+; Sailed past a tile's edge, the overland moved the player into the next tile (TMDfOverland) and left the ship behind:
+; the ship brought under them there, and on for the waypoint.
+Function ShipFollows()
+  Float x = PlayerRef.GetPositionX()
+  Float y = PlayerRef.GetPositionY()
+  Ship.Disable()
+  Ship.MoveTo(PlayerRef)
+  Ship.SetPosition(x, y, ShipWaterZ)
+  Ship.SetAngle(0.0, 0.0, shipHeading)
+  Ship.Enable()
+  PlayerRef.SetPosition(x, y, ShipDeckZ)
+  SailToward()
+EndFunction
+
 ; The ship reached a waypoint (checked from Watch).
 Bool Function AtWaypoint()
   If voyageStep <= 0 || voyageStep >= jVoyage.Length
     Return False
   EndIf
+  TMTravelWorld world = Worlds[jWorld]
   String[] p = StringUtil.Split(jVoyage[voyageStep], ",")
-  Float dx = (p[0] as Float) - Ship.GetPositionX()
-  Float dy = (p[1] as Float) - Ship.GetPositionY()
+  Float dx = (p[0] as Float) - world.GX(Ship)
+  Float dy = (p[1] as Float) - world.GY(Ship)
   Return dx * dx + dy * dy < 256.0 * 256.0
 EndFunction
 
@@ -736,9 +801,12 @@ Function Watch()
     StopJourney("There are enemies nearby. (Continue the journey from the Travel tab when the way is clear.)")
     Return
   EndIf
+  If jLeg == 1 && Ship.GetWorldSpace() != PlayerRef.GetWorldSpace()
+    ShipFollows()
+  EndIf
   Float now = Utility.GetCurrentRealTime()
-  Float x = PlayerRef.GetPositionX()
-  Float y = PlayerRef.GetPositionY()
+  Float x = Worlds[jWorld].GX(PlayerRef)
+  Float y = Worlds[jWorld].GY(PlayerRef)
   Float dt = now - jLastClock
   If dt > 0.2
     Float dx = x - jLastX
@@ -781,24 +849,25 @@ Function Watch()
   TimeScale.SetValue(scale)
 EndFunction
 
-; Units still to go (straight, through the harbours when sailing).
+; Units still to go (straight, through the harbours when sailing; the whole map's).
 Float Function RemainingUnits()
-  Float x = PlayerRef.GetPositionX()
-  Float y = PlayerRef.GetPositionY()
+  TMTravelWorld world = Worlds[jWorld]
+  Float x = world.GX(PlayerRef)
+  Float y = world.GY(PlayerRef)
+  Float tx = world.GX(jDestination)
+  Float ty = world.GY(jDestination)
   Float d = 0.0
   If jLeg == 0
-    TMTravelWorld world = Worlds[jWorld]
     ObjectReference a = world.Ports.GetAt(jFromPort) as ObjectReference
     ObjectReference b = world.Ports.GetAt(jToPort) as ObjectReference
-    d = Dist(x, y, a.GetPositionX(), a.GetPositionY()) + Dist(a.GetPositionX(), a.GetPositionY(), b.GetPositionX(), b.GetPositionY())
-    Return d + Dist(b.GetPositionX(), b.GetPositionY(), jDestination.GetPositionX(), jDestination.GetPositionY())
+    d = Dist(x, y, world.GX(a), world.GY(a)) + Dist(world.GX(a), world.GY(a), world.GX(b), world.GY(b))
+    Return d + Dist(world.GX(b), world.GY(b), tx, ty)
   ElseIf jLeg == 1
-    TMTravelWorld world = Worlds[jWorld]
     ObjectReference b = world.Ports.GetAt(jToPort) as ObjectReference
-    d = Dist(x, y, b.GetPositionX(), b.GetPositionY())
-    Return d + Dist(b.GetPositionX(), b.GetPositionY(), jDestination.GetPositionX(), jDestination.GetPositionY())
+    d = Dist(x, y, world.GX(b), world.GY(b))
+    Return d + Dist(world.GX(b), world.GY(b), tx, ty)
   EndIf
-  Return Dist(x, y, jDestination.GetPositionX(), jDestination.GetPositionY())
+  Return Dist(x, y, tx, ty)
 EndFunction
 
 Float Function Dist(Float ax, Float ay, Float bx, Float by)

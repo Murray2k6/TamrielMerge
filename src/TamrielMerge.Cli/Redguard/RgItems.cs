@@ -153,6 +153,8 @@ public sealed partial class RgPluginBuilder
         if (ItemDefs.Count == 0) { Problems.Add("ITEM.INI not found: no items"); return; }
         itemList = new FormList(mod) { EditorID = "RGItems" };
         mod.FormLists.Add(itemList);
+        handTwinList = new FormList(mod) { EditorID = "RGHandItems" };
+        mod.FormLists.Add(handTwinList);
         for (int id = 0; id <= ItemDefs.Max(d => d.Id); id++)
         {
             var d = ItemDefs.FirstOrDefault(x => x.Id == id) ?? new ItemDef(id, []);
@@ -161,7 +163,42 @@ public sealed partial class RgPluginBuilder
             catch (Exception e) { Problems.Add($"item {id}: {e.Message}"); key = Gold001; }
             itemRecords[id] = key;
             itemList.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(key));
+            FormKey twin = Gold001;
+            try { if (HandTwin(d, key) is { } t) { twin = t; HandTwinIds.Add(id); } }
+            catch (Exception e) { Problems.Add($"item {id} hand model: {e.Message}"); }
+            handTwinList.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(twin));
         }
+    }
+
+    FormList? handTwinList;
+    /// <summary>The items with a hand twin (<see cref="HandTwin"/>): HandItem(n) on them shows the item held.</summary>
+    public static readonly HashSet<int> HandTwinIds = [];
+
+    /// <summary>
+    /// An item's twin for the hand: a weapon record (the dagger's template, no damage, not playable) wearing the
+    /// item's hand model (ITEM.INI hand_object_file), which HandItem(n) equips on the actor for the while (TMRgState).
+    /// Weapons and the torch are held as themselves; potions are drunk; an item without a hand model has none.
+    /// </summary>
+    FormKey? HandTwin(ItemDef d, FormKey item)
+    {
+        if (d.Type == 1 || item == Torch01 || item == Gold001 || d.Get("hand_object_file").Length == 0) return null;
+        if (ItemMesh(d.Get("hand_object_file"), $"rghand{d.Id:D2}", 60, 1f) is not { } mesh) return null;
+        string name = ItemName(d);
+        var stat = new Static(mod) { EditorID = $"RGHand{d.Id:D2}{Sanitize(name)}1st", Model = new Model { File = mesh.Path[7..] }, ObjectBounds = BoundsOf(mesh) };
+        mod.Statics.Add(stat);
+        var template = vanilla.Get<IWeaponGetter>("IronDagger")!;
+        var w = mod.Weapons.DuplicateInAsNewRecord(template);
+        w.EditorID = $"RGHand{d.Id:D2}{Sanitize(name)}";
+        w.Name = name;
+        w.Description = null;
+        w.Model = new Model { File = mesh.Path[7..] };
+        w.FirstPersonModel = new FormLinkNullable<IStaticGetter>(stat.FormKey);
+        w.ObjectBounds = BoundsOf(mesh);
+        w.ObjectEffect.Clear();
+        w.Keywords?.Clear();
+        w.BasicStats = new WeaponBasicStats { Damage = 0, Value = 0, Weight = 0 };
+        if (w.Data is not null) w.Data.Flags |= WeaponData.Flag.NonPlayable;
+        return w.FormKey;
     }
 
     Skyrim.BookLooks? bookLooks;

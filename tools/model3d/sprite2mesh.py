@@ -26,15 +26,17 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "TripoSR"))
 from tsr.system import TSR  # noqa: E402
 from tsr.bake_texture import bake_texture  # noqa: E402
-from reproject import reproject  # noqa: E402
+from reproject import reproject, painted_by, CUTOUT_RULE  # noqa: E402
 from carve import carved_mesh  # noqa: E402
 from reproject import sprite_mask, grow  # noqa: E402
 from check import outline  # noqa: E402
 
 
 def gpu_temperature():
+    """This process's card (TM_GPU, when the converter gave it one of several), else the first."""
     try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+        gpu = os.environ.get("TM_GPU", "")
+        out = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"] + ([f"--id={gpu}"] if gpu else []),
                              capture_output=True, text=True, timeout=10).stdout.strip().splitlines()
         return int(out[0]) if out else None
     except Exception:
@@ -102,22 +104,37 @@ def main():
     ap.add_argument("--max-temp", type=int, default=78)
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--upscaler", help="Real-ESRGAN x4plus weights (default: ../upscale/RealESRGAN_x4plus.pth)")
+    ap.add_argument("--shard", default="0/1", help="i/n: this process makes every n-th sprite from the i-th (one process a graphics card)")
     args = ap.parse_args()
+    shard, shards = (int(x) for x in args.shard.split("/"))
     global UPSCALER_WEIGHTS
     if args.upscaler:
         UPSCALER_WEIGHTS = args.upscaler
 
-    jobs = []
+    jobs, repaint = [], []
     with open(args.list, encoding="utf-8-sig") as f:
-        for line in f:
-            if line.strip():
-                parts = line.rstrip("\n").split("\t")
-                name, path = parts[0], parts[1]
-                faces = int(parts[2]) if len(parts) > 2 else 5000
-                whiten = float(parts[3]) if len(parts) > 3 else 1.0
-                cutout = len(parts) > 4 and parts[4] in ("Plant", "Tree")
-                if not current(os.path.join(args.out, name)):
+        for n, line in enumerate(l for l in f if l.strip()):
+            if n % shards != shard:
+                continue
+            parts = line.rstrip("\n").split("\t")
+            name, path = parts[0], parts[1]
+            faces = int(parts[2]) if len(parts) > 2 else 5000
+            whiten = float(parts[3]) if len(parts) > 3 else 1.0
+            cutout = len(parts) > 4 and parts[4] in ("Plant", "Tree")
+            model_dir = os.path.join(args.out, name)
+            if not current(model_dir):
+                jobs.append((name, path, faces, whiten, cutout))
+            elif cutout and painted_by(model_dir) != CUTOUT_RULE:
+                # Finished foliage painted by an older cutout rule (2026-11-02: side faces cut away, holes in trees):
+                # painted again from its own AI texture; without that texture it can't be, so it's made again.
+                if os.path.exists(os.path.join(model_dir, "texture_ai.png")):
+                    repaint.append((name, path, whiten))
+                else:
                     jobs.append((name, path, faces, whiten, cutout))
+    for i, (name, path, whiten) in enumerate(repaint):
+        cool_down(args.max_temp)
+        reproject(os.path.join(args.out, name), path, args.tex, whiten, True)
+        print(f"[repaint {i + 1}/{len(repaint)}] {name}", flush=True)
     print(f"{len(jobs)} sprites to make", flush=True)
     if not jobs:
         return

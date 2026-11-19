@@ -36,12 +36,8 @@ namespace HKX2
             m_parent = des.ReadClassPointer<hkClass>(br);
             m_objectSize = br.ReadInt32();
             m_numImplementedInterfaces = br.ReadInt32();
+            // m_declaredEnums is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            des.ReadEmptyPointer(br);
-            m_attributes = des.ReadClassPointer<hkCustomAttributes>(br);
-            m_flags = br.ReadUInt32();
-            m_describedVersion = br.ReadInt32();
         }
 
         public virtual void Write(PackFileSerializer s, BinaryWriterEx bw)
@@ -50,12 +46,8 @@ namespace HKX2
             s.WriteClassPointer(bw, m_parent);
             bw.WriteInt32(m_objectSize);
             bw.WriteInt32(m_numImplementedInterfaces);
+            // m_declaredEnums is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            s.WriteVoidPointer(bw);
-            s.WriteClassPointer(bw, m_attributes);
-            bw.WriteUInt32(m_flags);
-            bw.WriteInt32(m_describedVersion);
         }
 
         public virtual void ReadXml(XmlDeserializer xd, XElement xe)
@@ -64,10 +56,8 @@ namespace HKX2
             m_parent = xd.ReadClassPointer<hkClass>(xe, nameof(m_parent));
             m_objectSize = xd.ReadInt32(xe, nameof(m_objectSize));
             m_numImplementedInterfaces = xd.ReadInt32(xe, nameof(m_numImplementedInterfaces));
+            // m_declaredEnums is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            m_flags = xd.ReadFlag<FlagValues, uint>(xe, nameof(m_flags));
-            m_describedVersion = xd.ReadInt32(xe, nameof(m_describedVersion));
         }
 
         public virtual void WriteXml(XmlSerializer xs, XElement xe)
@@ -76,12 +66,8 @@ namespace HKX2
             xs.WriteClassPointer(xe, nameof(m_parent), m_parent);
             xs.WriteNumber(xe, nameof(m_objectSize), m_objectSize);
             xs.WriteNumber(xe, nameof(m_numImplementedInterfaces), m_numImplementedInterfaces);
+            // m_declaredEnums is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            xs.WriteSerializeIgnored(xe, nameof(m_defaults));
-            xs.WriteSerializeIgnored(xe, nameof(m_attributes));
-            xs.WriteFlag<FlagValues, uint>(xe, nameof(m_flags), m_flags);
-            xs.WriteNumber(xe, nameof(m_describedVersion), m_describedVersion);
         }
 
         public override bool Equals(object? obj)
@@ -96,8 +82,9 @@ namespace HKX2
                    ((m_parent is null && other.m_parent is null) || (m_parent is not null && other.m_parent is not null && m_parent.Equals((IHavokObject)other.m_parent))) &&
                    m_objectSize.Equals(other.m_objectSize) &&
                    m_numImplementedInterfaces.Equals(other.m_numImplementedInterfaces) &&
-                   m_declaredEnums.Equals(other.m_declaredEnums) &&
-                   m_declaredMembers.Equals(other.m_declaredMembers) &&
+                   // not filled by the readers (TYPE_SIMPLEARRAY); a null one threw NullReferenceException here before, and still does
+                   (m_declaredEnums ?? throw new NullReferenceException("hkClass.m_declaredEnums is null")).Equals(other.m_declaredEnums) &&
+                   (m_declaredMembers ?? throw new NullReferenceException("hkClass.m_declaredMembers is null")).Equals(other.m_declaredMembers) &&
                    m_flags.Equals(other.m_flags) &&
                    m_describedVersion.Equals(other.m_describedVersion) &&
                    Signature == other.Signature; ;

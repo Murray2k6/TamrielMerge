@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
@@ -12,7 +12,10 @@ public static class DaggerfallPluginBuilder
 {
     public const string WorldEditorId = "DFIliacBay";
 
-    public static int Build(string arena2, string skyrimData, string outPath, Terrain.TerrainSettings terrain, bool uncut = true, string towns = "Daggerfall@Daggerfall")
+    /// <param name="overlandNavmesh">Make the overland's navmeshes here, over its land and what this plugin places on it;
+    /// false: left to the overland-navmesh step once the town and dungeon plugins have placed theirs.</param>
+    public static int Build(string arena2, string skyrimData, string outPath, Terrain.TerrainSettings terrain, bool uncut = true, string towns = "Daggerfall@Daggerfall",
+        bool overlandNavmesh = true)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
         var mod = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(outPath)), SkyrimRelease.SkyrimSE);
@@ -24,16 +27,40 @@ public static class DaggerfallPluginBuilder
         Console.WriteLine($"Books: {books}");
 
         var map = DfWorldMap.Load(arena2);
-        var field = Terrain.HeightField.Generate(map, terrain);
+        var locations = DfLocations.LoadAll(arena2);
+        // The land, levelled under every location's place on it (LocationLayout: docs/overland-locations.md), and that
+        // layout beside Daggerfall.esm for the steps after (the towns, the dungeons, the foliage, the navmesh).
+        var (field, sites) = Terrain.HeightField.Daggerfall(map, terrain, locations);
+        sites.Save(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(outPath))!, Terrain.LocationLayout.FileName));
+        Console.WriteLine($"Locations: {sites.Sites.Count} laid out on the overland, {sites.Cells().Count:N0} cells of their ground");
+        Terrain.TerrainBuilder.Settled = (vx, vy) => sites.CoversVertex(field, vx, vy);
         // The overland, built in global coordinates and split into tiles at the end (OverlandTiles); its land is in
         // "Daggerfall Land.esm" (split into "Daggerfall Land 2.esm"... when too big for one, OverlandTiles.LandPluginNames).
         var world = Terrain.TerrainBuilder.NewWorldspace(mod, skyrim, field, WorldEditorId, "Iliac Bay");
+        // Map fast travel in the Iliac Bay (user, 2026-11-02: "enable fast travel in daggerfall again"; it was off from
+        // 2026-10-27): to its map markers (below), the time passing as Daggerfall's travel takes it (TMTravel), and not
+        // with enemies nearby (TMDfSensesControl), Daggerfall's own rule.
+        world.Flags &= ~Worldspace.Flag.CannotFastTravel;
         var layout = new Terrain.OverlandTiles(field);
         Console.WriteLine($"Overland: {field.CellsX}x{field.CellsY} cells ({terrain.PixelsPerCell} map pixels per cell), {layout.Columns}x{layout.Rows} tiles of {layout.CoreX}x{layout.CoreY}");
 
-        var locations = DfLocations.LoadAll(arena2);
-        var markers = LocationPlacer.PlaceMarkers(mod, world, field, locations);
-        Console.WriteLine($"Map markers: {markers.Count}");
+        // Map markers where fast travel arrives at each location on the overland (TownBuilder.ArrivalSpot).
+        var blocksBsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+        var townBlocks = new Dictionary<string, DfTownBlock?>(StringComparer.OrdinalIgnoreCase);
+        DfTownBlock? TownBlock(string name)
+        {
+            if (!townBlocks.TryGetValue(name, out var b))
+                townBlocks[name] = b = DfTownBlock.Resolve(blocksBsa, name) is { } resolved ? DfTownBlock.Load(blocksBsa, resolved) : null;
+            return b;
+        }
+        int atSites = 0;
+        var markers = LocationPlacer.PlaceMarkers(mod, world, field, locations, l =>
+        {
+            if (sites.Of(l) is not { } site) return null;
+            atSites++;
+            return TownBuilder.ArrivalSpot(l, Terrain.LocationLayout.Corner(site), TownBlock, (x, y) => LocationPlacer.GroundAt(field, x, y));
+        });
+        Console.WriteLine($"Map markers: {markers.Count} ({atSites} where travel arrives at a location laid out on the overland, the rest at their map pixels)");
         // Daggerfall's opening dungeon, where a new game begins.
         string outDir = Path.GetDirectoryName(Path.GetFullPath(outPath))!;
         // Daggerfall's spells (and their tomes), before dungeons so spell traps cast the spell Daggerfall names.
@@ -74,10 +101,26 @@ public static class DaggerfallPluginBuilder
         DfLaw.AddAll(mod);
         var jailExteriors = DfLaw.PlaceExteriors(mod, world, markers);
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer) { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, FixedPropKeys = true, BackgroundInteriors = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
+        // Towns (and every location's outside) on the overland, each at its place in the layout.
+        var townBuilder = new TownBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), map, dungeons)
+        {
+            People = people,
+            Clutter = clutter,
+            Creatures = creatures,
+            Shops = new TownShops(mod, skyrim) { SpellTomes = [.. spells.Tomes.Values], DaggerfallSmith = DfItems.Lists(mod) },
+        };
+        // Privateer's Hold's door in its ruin's entrance on the overland (the ruin itself is the town parts'), else on
+        // open ground at its map pixel.
         var hold = locations.First(l => l.Name == "Privateer's Hold" && l.DungeonBlocks.Count > 0);
-        var holdCell = dungeons.Build(hold, world, LocationPlacer.WorldPosition(field, hold.PixelX + 0.5, hold.PixelY + 0.5));
+        var holdDoor = sites.Of(hold) is { } holdSite && townBuilder.DungeonSpot(hold, Terrain.LocationLayout.Corner(holdSite)) is { } inRuin ? inRuin
+            : dungeons.OpenGround(LocationPlacer.WorldPosition(field, hold.PixelX + 0.5, hold.PixelY + 0.5));
+        var holdCell = dungeons.Build(hold, world, holdDoor);
         Console.WriteLine($"Dungeon: {hold.Name} -> {holdCell.Cell.EditorID}, {holdCell.Cell.Temporary.Count} refs, navmesh {holdCell.Navmesh.Triangles} triangles / {holdCell.Navmesh.Vertices} vertices, {holdCell.Navmesh.DoorTriangles} door links");
         Console.WriteLine($"  placed: {string.Join(", ", holdCell.Fixtures.OrderByDescending(f => f.Value).Select(f => $"{f.Key} {f.Value}"))}");
+        // Every dungeon block's model and static once, here: the dungeon and town parts take them from this plugin.
+        var blockClock = System.Diagnostics.Stopwatch.StartNew();
+        int blocksMade = dungeons.PrebuildBlocks(locations.Where(l => l.DungeonBlocks.Count > 0));
+        Console.WriteLine($"Dungeon blocks: {blocksMade} models and statics made for the dungeon and town parts ({blockClock.Elapsed.TotalSeconds:F0} s)");
         // Hidden below the start dungeon: holds the player's items while Skyrim's opening strips them.
         var start = holdCell.StartMarker.Placement!.Position;
         var stash = new PlacedObject(mod)
@@ -90,24 +133,25 @@ public static class DaggerfallPluginBuilder
         holdCell.Cell.Persistent.Add(stash);
         recallAnchor.Placement = new Placement { Position = new Noggog.P3Float(start.X, start.Y, start.Z - 4100), Rotation = new Noggog.P3Float(0, 0, 0) };
         holdCell.Cell.Persistent.Add(recallAnchor);
-        // Towns: each its own worldspace, entered from its spot on the overland map.
-        var townBuilder = new TownBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), map, dungeons)
+        // The towns this plugin builds, in the overland's own cells (global coordinates: split into the tiles with the
+        // rest; the land plugins give them their land).
+        var worldCells = new Dictionary<(int, int), Cell>();
+        Cell WorldCell(int cx, int cy)
         {
-            People = people,
-            Clutter = clutter,
-            Creatures = creatures,
-            Shops = new TownShops(mod, skyrim) { SpellTomes = [.. spells.Tomes.Values], DaggerfallSmith = DfItems.Lists(mod) },
-        };
-        var townWorlds = new List<Worldspace>();
+            if (worldCells.TryGetValue((cx, cy), out var c)) return c;
+            c = new Cell(mod) { Grid = new CellGrid { Point = new Noggog.P2Int(cx, cy) }, Persistent = [], Temporary = [] };
+            Terrain.TerrainBuilder.AddCell(world, c);
+            return worldCells[(cx, cy)] = c;
+        }
         var builtTowns = new List<TownBuilder.Built>();
         var questTowns = new List<QuestSites.Town>();
         foreach (var town in SelectTowns(locations, towns))
         {
-            var t = townBuilder.Build(town, skyrim, world, LocationPlacer.WorldPosition(field, town.PixelX + 0.5, town.PixelY + 0.5));
-            townWorlds.Add(t.World);
+            if (sites.Of(town) is not { } site) { Console.WriteLine($"Town: {town.Name} ({town.RegionName}) has no place in the layout"); continue; }
+            var t = townBuilder.Build(town, skyrim, new TownBuilder.OverlandSite(world, WorldCell, Terrain.LocationLayout.Corner(site), site.CellsW, site.CellsH));
             builtTowns.Add(t);
             questTowns.Add(new QuestSites.Town(town, t));
-            Console.WriteLine($"Town: {town.Name} ({town.RegionName}) -> {t.World.EditorID}: {t.Buildings} buildings, {t.Interiors} interiors, {t.Doors} street doors ({t.Unlinked} without a way in)");
+            Console.WriteLine($"Town: {town.Name} ({town.RegionName}) at cells {site.CellX},{site.CellY} ({site.CellsW}x{site.CellsH}, moved {site.Moved:F0} units): {t.Buildings} buildings, {t.Interiors} interiors, {t.Doors} street doors ({t.Unlinked} without a way in)");
             Console.WriteLine($"  placed: {string.Join(", ", t.Fixtures.OrderByDescending(f => f.Value).Take(25).Select(f => $"{f.Key} {f.Value}"))}");
             var named = townBuilder.Placed.Where(p => p.Faction?.Type == DfFactionType.Individual).Select(p => p.Name).Distinct().ToList();
             Console.WriteLine($"  people: {townBuilder.Placed.Count}; named: {string.Join(", ", named.Take(20))}; e.g. {string.Join(", ", townBuilder.Placed.Take(8).Select(p => $"{p.Name} ({p.Building})"))}");
@@ -115,17 +159,16 @@ public static class DaggerfallPluginBuilder
         dungeons.FinishInteriors();
         TownGuilds? guilds = null;
         var everyone = townBuilder.Placed.Concat(dungeons.PlacedPeople).ToList();
-        if (townWorlds.Count > 0)
+        if (builtTowns.Count > 0)
         {
-            Console.WriteLine($"Town navmesh edge links: {dungeons.Navmeshes.LinkExteriorEdges()}");
             // Conversations: factions, greetings by reaction, "Where is...".
-            var talk = new TownTalk(mod, DfText.Load(arena2), townBuilder.People!.Factions);
+            var talk = new TownTalk(mod, DfText.Load(arena2)) { ToneGlobals = TalkTone.Globals(mod, null) };
             talk.Enlist(everyone);
             talk.Build(builtTowns, townBuilder.TalkQuest, townBuilder.Shops?.Shopkeepers, townBuilder.Shops?.TavernKeepers, townBuilder.Shops?.Bankers);
             Console.WriteLine($"Talk: {talk.Responses} responses for {townBuilder.Placed.Count} townsfolk and {dungeons.PlacedPeople.Count} people in town dungeons");
             townBuilder.AttachDaytime();
             // Guilds, temples and knightly orders: joining, ranks, training, healing.
-            guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2), townBuilder.People!.Factions);
+            guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2));
             guilds.Build(talk, townBuilder.TalkQuest, everyone, townBuilder.BreakIns);
             Console.WriteLine($"Guilds: {guilds.Members} guilds with members in town, {guilds.Trainers} trainers, {guilds.Responses} responses");
         }
@@ -135,21 +178,20 @@ public static class DaggerfallPluginBuilder
         music.Build(uncut);
         world.Music = music.Explore.ToNullableLink<IMusicTypeGetter>();
         // The Daggerfall world as one location (the worldspace and every interior), so things meant only for this
-        // world — its battle music — can test for it.
+        // world â€” its battle music â€” can test for it.
         var iliacBay = new Location(mod) { EditorID = "DFLocIliacBay", Name = "Iliac Bay" };
         mod.Locations.Add(iliacBay);
         world.Location = iliacBay.ToNullableLink<ILocationGetter>();
         // Daggerfall's enemy senses work only in the Iliac Bay (its creatures elsewhere keep Skyrim's own detection).
         if (creatures.Senses is { } senses) DfSenses.SetWorld(senses, iliacBay.FormKey);
         // Towns are locations inside the Iliac Bay (their streets and buildings keep the town's location).
-        foreach (var tw in townWorlds) tw.Music = world.Music;
         foreach (var townLoc in mod.Locations.Where(l => l.EditorID?.StartsWith("DFLoc") == true && l != iliacBay))
             townLoc.ParentLocation = iliacBay.ToNullableLink<ILocationGetter>();
         foreach (var cell in mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
             if (cell.Location.IsNull) cell.Location = iliacBay.ToNullableLink<ILocationGetter>();
         music.BuildCombat(skyrim, iliacBay);
         // Daggerfall's holidays, on the town conversation quest (when there are towns).
-        if (townWorlds.Count > 0)
+        if (builtTowns.Count > 0)
         {
             var festival = MerchantsFestivalPerk(mod, iliacBay);
             townBuilder.TalkQuest.VirtualMachineAdapter ??= new QuestAdapter();
@@ -181,12 +223,16 @@ public static class DaggerfallPluginBuilder
         };
         questBuilder.Build();
         // What Daggerfall's monsters' hits give (TMDfSensesControl.MonsterHit): its diseases (the quests made the list),
-        // Paralysis for spiders and scorpions, vampirism (Skyrim's Sanguinare Vampiris) and lycanthropy.
+        // Paralysis for spiders and scorpions, Daggerfall's own vampirism and lycanthropy.
         if (creatures.Senses is { } hitSenses)
         {
             var diseaseList = DfDiseases.List(mod, DfText.Load(arena2));
-            DfSenses.SetHitData(hitSenses, diseaseList, spells.Spells.GetValueOrDefault(66),
-                skyrim.Spells.FirstOrDefault(s => s.EditorID == "DiseaseSanguinareVampiris"), DfDiseases.Lycanthropy(mod, skyrim, diseaseList));
+            var lycanthropy = DfDiseases.Lycanthropy(mod, skyrim, diseaseList);
+            var vampirism = DfDiseases.Vampirism(mod, skyrim, diseaseList, lycanthropy, spells.Spells, DfFactions.Load(arena2), DfText.Load(arena2), questBuilder.Machine!.FormKey);
+            DfSenses.SetHitData(hitSenses, diseaseList, spells.Spells.GetValueOrDefault(66), vampirism, lycanthropy,
+                mod.Globals.First(g => g.EditorID == "DFVampireFedDay"), DfText.Load(arena2)[36] is { Count: > 0 } hungry ? hungry[0].Trim() : "You must feed before you can rest.");
+            // The talk's tone tallies Etiquette and Streetwise through it (TMDfQuestMachine.RollTalk).
+            questBuilder.Machine!.VirtualMachineAdapter!.Scripts[0].Properties.Add(new ScriptObjectProperty { Name = "Senses", Object = hitSenses.ToLink<ISkyrimMajorRecordGetter>() });
         }
         guilds?.AddSummoning(questBuilder.Machine!.FormKey);
         var markerOf = markers.GroupBy(m => (m.Location.Region, m.Location.Index)).ToDictionary(g => g.Key, g => g.First().Marker.FormKey);
@@ -197,7 +243,8 @@ public static class DaggerfallPluginBuilder
         AtmosphereBuilder.ApplyToDungeon(holdCell.Cell, music.Dungeon);
         // Everything on the overland is placed: split it into its tiles.
         var tiles = layout.Split(mod, world);
-        AddOverlandQuest(mod, layout, tiles, markers, iliacBay, field.Settings.PixelsPerCell, map);
+        AddOverlandQuest(mod, layout, tiles, markers, iliacBay, field.Settings.PixelsPerCell, map, creatures.Encounter,
+            field.MinCellX * Terrain.OverlandTiles.CellUnits, (field.MinCellY + field.CellsY) * Terrain.OverlandTiles.CellUnits);
         var (regionAreas, regionOf) = AtmosphereBuilder.AddRegions(mod, skyrim, tiles, layout, field, map);
         Console.WriteLine($"Daggerfall light: {AtmosphereBuilder.ApplyDaggerfallLight(mod, skyrim, world)} weathers copied and relit for the Iliac Bay");
         // The Iliac Bay's thunderstorms, for the covens' summonings (Sheogorath's weather).
@@ -228,6 +275,10 @@ public static class DaggerfallPluginBuilder
         var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
         mod.ModHeader.Description = DoorRefFix.Marker + "; " + StatueRefFix.Marker;   // doors and statues placed as the fixes make old ones
         TopicSubtypes.Fill(mod);
+        // References held by scripts, quests and lists persistent, in their worldspace's persistent cell (HeldReferences).
+        HeldReferences.Prepare(mod, Console.WriteLine);
+        HavokSettle.Apply(mod, Path.GetDirectoryName(Path.GetFullPath(outPath)), Console.WriteLine);
+        InteriorBounds.Apply(mod, Console.WriteLine);
         mod.WriteToBinary(outPath, new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
         {
             MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
@@ -236,9 +287,15 @@ public static class DaggerfallPluginBuilder
         // The tiles' land and distant terrain, a tile at a time.
         var lands = layout.LandPlugins(outPath, skyrimData, field, map, regionOf, line => Console.WriteLine("Land: " + line));
         Console.WriteLine($"Land plugins: {string.Join(", ", lands)}");
-        // The overland's navmeshes, joined into the (last) land plugin.
+        // Daggerfall's nature on the land (Terrain/DfFoliage: its trees, bushes, rocks and flowers), and the overland's
+        // navmeshes over the land and what this plugin stands on it, joined into the (last) land plugin.
         if (lands.Count > 0)
-            Terrain.OverlandNavmesh.Build(lands.Select(l => Path.Combine(outDir, l)).ToList(), line => Console.WriteLine("Navmesh: " + line));
+        {
+            var foliage = Terrain.DfFoliage.Build(outDir, skyrimData, arena2, field, map, sites, line => Console.WriteLine("Foliage: " + line));
+            Console.WriteLine($"Foliage plugins: {string.Join(", ", foliage)}");
+            if (overlandNavmesh)
+                Terrain.OverlandNavmesh.Build(lands.Select(l => Path.Combine(outDir, l)).ToList(), [outPath], skyrimData, line => Console.WriteLine("Navmesh: " + line));
+        }
         foreach (var big in Terrain.OverlandTiles.Oversized(outDir))
             Console.WriteLine($"Land: WARNING {big} is near the 2 GB Mutagen can read: build with --land-plugins {lands.Count + 1}");
         // What procedural creatures may use from Daggerfall: its ordinary monsters and dungeon spots. Daggerfall resets a
@@ -271,8 +328,11 @@ public static class DaggerfallPluginBuilder
     /// "DFOverlandQuest" (TMDfOverland): the tiles' hand-over, with an origin marker in each tile to move to and the
     /// layout, and Daggerfall's travel: every town's map marker by region, for the Tamriel menu's Travel tab.
     /// </summary>
+    /// <param name="encounter">The actor for an encounter table (CreatureBuilder.Encounter), for the overland's random
+    /// encounters (TMDfWilds: tables 20-37); null: none.</param>
+    /// <param name="mapWest">The whole map's west edge and north edge (global units), for the climate under the player.</param>
     public static void AddOverlandQuest(SkyrimMod mod, Terrain.OverlandTiles layout, List<Worldspace> tiles, List<(DfLocation Location, PlacedObject Marker)> markers,
-        Location iliacBay, int pixelsPerCell, DfWorldMap map)
+        Location iliacBay, double pixelsPerCell, DfWorldMap map, Func<int, FormKey?>? encounter = null, float mapWest = 0, float mapNorth = 0)
     {
         static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
         const float u = Terrain.OverlandTiles.CellUnits;
@@ -304,6 +364,7 @@ public static class DaggerfallPluginBuilder
             mod.FormLists.Add(list);
             lists.Add(list.FormKey);
         }
+        var regionTowns = ScriptStrings.Grouped(regions.Select(g => g.OrderBy(m => m.Location.Name, StringComparer.Ordinal).Select(m => m.Location.Name.Replace("|", "/"))));
         ScriptObjectListProperty Objects(string name, IEnumerable<FormKey> keys)
         {
             var p = new ScriptObjectListProperty { Name = name };
@@ -341,9 +402,12 @@ public static class DaggerfallPluginBuilder
                         new ScriptFloatProperty { Name = "CoreMinY", Data = (y0 - oy) * u },
                         new ScriptFloatProperty { Name = "CoreMaxY", Data = (y1 + 1 - oy) * u },
                         new ScriptFloatProperty { Name = "Hysteresis", Data = Terrain.OverlandTiles.Hysteresis },
-                        new ScriptFloatProperty { Name = "UnitsPerPixel", Data = u / pixelsPerCell },
+                        new ScriptFloatProperty { Name = "UnitsPerPixel", Data = (float)(u / pixelsPerCell) },
                         Strings("RegionNames", regions.Select(g => g.Key)),
-                        Strings("RegionTowns", regions.Select(g => string.Join("|", g.OrderBy(m => m.Location.Name, StringComparer.Ordinal).Select(m => m.Location.Name.Replace("|", "/"))))),
+                        // Each region's towns in pieces under ScriptStrings.Limit (a region's 4,347 characters crashed loading a
+                        // save), RegionTownsFirst its first piece (TMStrings.Group).
+                        Strings("RegionTowns", regionTowns.Pieces),
+                        new ScriptIntListProperty { Name = "RegionTownsFirst", Data = [.. regionTowns.First] },
                         Objects("RegionMarkers", lists),
                     ],
                 },
@@ -357,6 +421,38 @@ public static class DaggerfallPluginBuilder
                 },
             ],
         };
+        // Daggerfall's random encounters outdoors (TMDfWilds): the climate's tables 20-37, the travel map's climate squares
+        // (DFTravelClimate), and a global whatever moves time on sets so no spawn follows a jump in time.
+        if (encounter is not null)
+        {
+            var prevent = DfDiseases.PreventSpawns(mod);
+            var tableActors = new ScriptObjectListProperty { Name = "Tables" };
+            int have = 0;
+            for (int table = 20; table <= 37; table++)
+            {
+                var actor = encounter(table);
+                if (actor is not null) have++;
+                tableActors.Objects.Add(new ScriptObjectProperty { Object = (actor ?? FormKey.Null).ToLink<ISkyrimMajorRecordGetter>() });
+            }
+            quest.VirtualMachineAdapter.Scripts.Add(new ScriptEntry
+            {
+                Name = "TMDfWilds",
+                Properties =
+                [
+                    new ScriptObjectProperty { Name = "PlayerRef", Object = Sk(0x14).ToLink<ISkyrimMajorRecordGetter>() },
+                    new ScriptObjectProperty { Name = "Climate", Object = AddTravelClimate(mod, map).ToLink<ISkyrimMajorRecordGetter>() },
+                    new ScriptFloatProperty { Name = "MapWestX", Data = mapWest },
+                    new ScriptFloatProperty { Name = "MapNorthY", Data = mapNorth },
+                    new ScriptFloatProperty { Name = "UnitsPerPixel", Data = (float)(u / pixelsPerCell) },
+                    new ScriptObjectProperty { Name = "IliacBay", Object = iliacBay.ToLink<ISkyrimMajorRecordGetter>() },
+                    tableActors,
+                    new ScriptObjectProperty { Name = "PreventSpawns", Object = prevent.ToLink<ISkyrimMajorRecordGetter>() },
+                    new ScriptStringListProperty { Name = "RegionRows", Data = [.. PoliticRows(map, 2)] },
+                    new ScriptIntProperty { Name = "RegionStep", Data = 2 },
+                ],
+            });
+            Console.WriteLine($"Overland encounters: {have} of 18 climate tables (TMDfWilds)");
+        }
         mod.Quests.Add(quest);
     }
 
@@ -384,6 +480,35 @@ public static class DaggerfallPluginBuilder
     /// row of <see cref="TravelClimateStep"/>-pixel squares, north to south, a <see cref="TravelClass"/> character per
     /// square (the class most of its pixels have; the sea when it's half or more).
     /// </summary>
+    /// <summary>
+    /// Daggerfall's political map (POLITIC.PAK: 64 the sea, 128 + the region's index on land; measured: 46 values, 64
+    /// over 180,704 pixels, 128-189 the 62 regions, a stray 233 on 19) in squares of <paramref name="k"/> pixels, the
+    /// region most of a square's land pixels are in as the character 48 + its index, "." where the square is mostly sea.
+    /// </summary>
+    static List<string> PoliticRows(DfWorldMap map, int k)
+    {
+        var rows = new List<string>();
+        for (int y = 0; y < DfWorldMap.Height; y += k)
+        {
+            var row = new System.Text.StringBuilder();
+            for (int x = 0; x < DfWorldMap.Width; x += k)
+            {
+                var counts = new Dictionary<int, int>();
+                int sea = 0;
+                for (int j = 0; j < k; j++)
+                    for (int i = 0; i < k; i++)
+                    {
+                        int v = map.Politic[Math.Clamp(y + j, 0, DfWorldMap.Height - 1) * DfWorldMap.Width + Math.Clamp(x + i, 0, DfWorldMap.Width - 1)];
+                        if (v >= 128 && v < 128 + DfLocations.RegionNames.Length) counts[v - 128] = counts.GetValueOrDefault(v - 128) + 1;
+                        else sea++;
+                    }
+                row.Append(counts.Count == 0 || sea * 2 >= k * k ? '.' : (char)(48 + counts.MaxBy(p => p.Value).Key));
+            }
+            rows.Add(row.ToString());
+        }
+        return rows;
+    }
+
     static FormKey AddTravelClimate(SkyrimMod mod, DfWorldMap map)
     {
         const int k = TravelClimateStep;
@@ -411,7 +536,9 @@ public static class DaggerfallPluginBuilder
             {
                 new ScriptEntry
                 {
-                    Name = "TMDfTravelClimate",
+                    // The travel plugin's own script (TMTravelClimate, Rows and Step; its Lands unset): the overland's
+                    // random encounters read the climate under the player from it (TMDfWilds).
+                    Name = "TMTravelClimate",
                     Properties =
                     [
                         new ScriptStringListProperty { Name = "Rows", Data = [.. rows] },
@@ -431,12 +558,23 @@ public static class DaggerfallPluginBuilder
     {
         // Daggerfall's grass where its blocks put grass sprites (Terrain/DfGrass).
         new Terrain.DfGrass(mod, null, arena2, outDir).AddBlockGrass(clutter);
-        string work = Path.Combine(Setup.Dependencies.Root, "model3d", "work");
-        if (!Directory.Exists(Path.Combine(work, "models"))) return;
+        // The model maker's work folder (in the temp folder: Util/Paths.ModelWork), else what an earlier conversion
+        // imported into the final output (its manifest), the conversion having removed its work folder.
+        string work = Util.Paths.ModelWork;
         var problems = new List<string>();
-        var models = new Meshes.SpriteModelImporter(mod, outDir, arena2).ImportAll(work, problems);
+        var importer = new Meshes.SpriteModelImporter(mod, outDir, arena2);
+        Dictionary<(int, int), Meshes.SpriteModelImporter.Made> models;
+        string from;
+        if (Directory.Exists(Path.Combine(work, "models"))) { models = importer.ImportAll(work, problems); from = work; }
+        else
+        {
+            string earlier = Util.Paths.FinalOut ?? outDir;
+            if (!File.Exists(Meshes.SpriteModelImporter.ManifestPath(earlier))) return;
+            models = importer.ImportFromManifest(earlier, problems);
+            from = $"the earlier conversion in {earlier}";
+        }
         foreach (var (key, made) in models) clutter.AddGenerated(key, made);
-        Console.WriteLine($"Sprite models: {models.Count} of {SpriteModels.Targets.Count}{(problems.Count > 0 ? "; problems: " + string.Join("; ", problems.Take(5)) : "")}");
+        Console.WriteLine($"Sprite models: {models.Count} of {SpriteModels.Targets.Count} from {from}{(problems.Count > 0 ? "; problems: " + string.Join("; ", problems.Take(5)) : "")}");
     }
 
     /// <summary>

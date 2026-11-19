@@ -1,4 +1,4 @@
-using Mutagen.Bethesda;
+﻿using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Plugins.Binary.Parameters;
 using Mutagen.Bethesda.Plugins.Records;
@@ -9,27 +9,32 @@ using TamrielMerge.Skyrim.Navmesh;
 namespace TamrielMerge.Skyrim.Terrain;
 
 /// <summary>
-/// The overland's load doors on its navmeshes (user, 2026-10-10: "do the gaps"): the town gates and dungeon entrances
-/// that the Towns and Dungeons plugins stand on the overland tiles, each joined to the navmesh of the land cell it
-/// stands in, so NPCs and followers can path to them and through them. The land plugin's navmeshes are built before
-/// those plugins exist, so this is a light plugin of its own ("Daggerfall Overland Doors.esp", after them all, overrides
-/// only): each touched navmesh with the triangle in front of each door tagged (DoorTriangles, the Door flag), and the
-/// navmesh map's entries for those navmeshes with the doors listed (the game joins every plugin's map entries).
-/// Triangles and edge links are left as they are, so the cells' joins with their neighbours stay valid.
+/// The overland's load doors on its navmeshes (user, 2026-10-10: "do the gaps"): the dungeon entrances that
+/// Daggerfall.esm and the Dungeons plugin stand on the overland tiles, each joined to the navmesh of the land cell it
+/// stands in, so NPCs and followers can path to them and through them. This is a light plugin of its own ("Daggerfall
+/// Overland Doors.esp", after them all, overrides only): each touched navmesh (from the navmesh plugins,
+/// OverlandTiles.NavmeshPluginNames) with the triangle in front of each door tagged (DoorTriangles, the Door flag), and
+/// the navmesh map's entries for those navmeshes with the doors listed (the game joins every plugin's map entries).
+/// Triangles and edge links are left as they are, so the cells' joins with their neighbours stay valid. Each touched
+/// cell is the latest of its records (the town plugin's, with its location, where it has one): loaded last, this
+/// plugin's copy is the one the game keeps.
 /// </summary>
 public static class OverlandDoorLinks
 {
     public const string PluginName = "Daggerfall Overland Doors.esp";
     const int DoorTag = unchecked((int)0xE48B73F3);
 
-    public static (int Doors, int Linked, int Navmeshes) Build(string landPlugin, IReadOnlyList<string> doorPlugins, string outPath, Action<string>? log = null)
+    /// <param name="navmeshPlugins">The overland's navmesh plugins, in load order.</param>
+    /// <param name="doorPlugins">The plugins standing doors on the overland, in load order (Daggerfall.esm first: it
+    /// loads before the navmesh plugins, the others after).</param>
+    public static (int Doors, int Linked, int Navmeshes) Build(IReadOnlyList<string> navmeshPlugins, IReadOnlyList<string> doorPlugins, string outPath, Action<string>? log = null)
     {
-        using var land = SkyrimMod.CreateFromBinaryOverlay(landPlugin, SkyrimRelease.SkyrimSE);
+        var navs = navmeshPlugins.Select(p => SkyrimMod.CreateFromBinaryOverlay(p, SkyrimRelease.SkyrimSE)).ToList();
         var others = doorPlugins.Select(p => SkyrimMod.CreateFromBinaryOverlay(p, SkyrimRelease.SkyrimSE)).ToList();
         try
         {
-            // The overland's load doors, by tile worldspace.
-            var tiles = land.Worldspaces.ToDictionary(w => w.FormKey);
+            // The overland's tiles (the navmesh plugins' copies of them), and each door, by tile.
+            var tiles = navs.SelectMany(n => n.Worldspaces).GroupBy(w => w.FormKey).ToDictionary(g => g.Key, g => g.First());
             var doors = new List<(FormKey World, IPlacedObjectGetter Door)>();
             foreach (var mod in others)
                 foreach (var w in mod.Worldspaces.Where(w => tiles.ContainsKey(w.FormKey)))
@@ -41,10 +46,18 @@ public static class OverlandDoorLinks
                             doors.Add((w.FormKey, d));
                 }
 
-            var map = land.NavigationMeshInfoMaps.FirstOrDefault();
-            var infos = map?.MapInfos.ToDictionary(i => i.NavigationMesh.FormKey) ?? [];
+            // The navmesh map's entries, every navmesh plugin's.
+            var map = navs.SelectMany(n => n.NavigationMeshInfoMaps).FirstOrDefault();
+            var infos = new Dictionary<FormKey, INavigationMapInfoGetter>();
+            foreach (var m in navs.SelectMany(n => n.NavigationMeshInfoMaps))
+                foreach (var i in m.MapInfos) infos[i.NavigationMesh.FormKey] = i;
+            // Each cell's latest record, in load order: Daggerfall.esm (before the navmesh plugins), the navmesh plugins,
+            // then the other door plugins (the towns' and dungeons').
+            var order = others.Take(1).Where(o => o.ModKey.FileName.String.Equals("Daggerfall.esm", StringComparison.OrdinalIgnoreCase)).Cast<ISkyrimModGetter>()
+                .Concat(navs).Concat(others.Where(o => !o.ModKey.FileName.String.Equals("Daggerfall.esm", StringComparison.OrdinalIgnoreCase))).ToList();
             var outMod = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(outPath)), SkyrimRelease.SkyrimSE);
-            outMod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
+            // The master flag too: without it every reference in its worldspace cells would take a reference handle at load.
+            outMod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small | SkyrimModHeader.HeaderFlag.Master;
             var worldCopies = new Dictionary<FormKey, Worldspace>();
             var navCopies = new Dictionary<FormKey, (NavigationMesh Navm, NavigationMapInfo? Info)>();
             int linked = 0, noNavmesh = 0, noTriangle = 0;
@@ -52,11 +65,16 @@ public static class OverlandDoorLinks
             // The doors' cells, found in one pass over each world's cells (2026-10-15: each door searched the whole
             // 1000 x 500 overland for its cell, 7,700 times, for over 20 minutes).
             var cellsAt = new Dictionary<(FormKey World, int X, int Y), ICellGetter>();
+            var latest = new Dictionary<(FormKey World, int X, int Y), ICellGetter>();
             foreach (var group in doors.GroupBy(d => d.World))
             {
                 var wanted = group.Select(d => GridOf(d.Door.Placement!.Position)).ToHashSet();
                 foreach (var c in tiles[group.Key].SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
                     if (c.Grid is { } g && wanted.Contains((g.Point.X, g.Point.Y))) cellsAt[(group.Key, g.Point.X, g.Point.Y)] = c;
+                foreach (var plugin in order)
+                    foreach (var w in plugin.Worldspaces.Where(w => w.FormKey == group.Key))
+                        foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                            if (c.Grid is { } g && wanted.Contains((g.Point.X, g.Point.Y))) latest[(group.Key, g.Point.X, g.Point.Y)] = c;
             }
             foreach (var (worldKey, door) in doors)
             {
@@ -65,7 +83,11 @@ public static class OverlandDoorLinks
                 var (gx, gy) = GridOf(p);
                 var cell = cellsAt.GetValueOrDefault((worldKey, gx, gy));
                 var srcNavm = cell?.NavigationMeshes.FirstOrDefault();
-                if (cell is null || srcNavm?.Data is null) { noNavmesh++; continue; }
+                if (cell is null || srcNavm?.Data is null)
+                {
+                    if (noNavmesh++ < 10) log?.Invoke($"  door {door.FormKey} {door.EditorID} at {p.X:F0}, {p.Y:F0}, {p.Z:F0}: cell {gx},{gy} {(cell is null ? "has no record (no land)" : "has no navmesh")}");
+                    continue;
+                }
                 // The triangle the door stands on: the one under it, else the nearest edge, its height counted half,
                 // within 384 units across. (Open ground's triangles run thousands of units across, so the nearest
                 // centre is often far from the door standing on its triangle: that joined only half the doors.)
@@ -80,7 +102,7 @@ public static class OverlandDoorLinks
                         outMod.Worldspaces.Add(ws);
                         worldCopies[worldKey] = ws;
                     }
-                    var cellCopy = cell.DeepCopy(new Cell.TranslationMask(defaultOn: true) { Temporary = false, Persistent = false, NavigationMeshes = false, Landscape = false });
+                    var cellCopy = latest.GetValueOrDefault((worldKey, gx, gy), cell).DeepCopy(new Cell.TranslationMask(defaultOn: true) { Temporary = false, Persistent = false, NavigationMeshes = false, Landscape = false });
                     cellCopy.Temporary.Clear(); cellCopy.Persistent.Clear(); cellCopy.Landscape = null;
                     var navm = srcNavm.DeepCopy();
                     cellCopy.NavigationMeshes.Add(navm);
@@ -95,6 +117,19 @@ public static class OverlandDoorLinks
                 entry.Info?.LinkedDoors.Add(new LinkedDoor { Unknown = DoorTag, Door = door.ToLink() });
                 linked++;
             }
+            // Every tile, as the last plugin to override it: map fast travel in the Iliac Bay (the rule is Daggerfall.esm's,
+            // DaggerfallPluginBuilder; set again here so a plugin built before it, overriding the tile, can't undo it).
+            foreach (var (key, src) in tiles)
+            {
+                if (!worldCopies.TryGetValue(key, out var ws))
+                {
+                    ws = src.DeepCopy(new Worldspace.TranslationMask(defaultOn: true) { SubCells = false, TopCell = false });
+                    ws.SubCells.Clear(); ws.TopCell = null;
+                    outMod.Worldspaces.Add(ws);
+                    worldCopies[key] = ws;
+                }
+                ws.Flags &= ~Worldspace.Flag.CannotFastTravel;
+            }
             if (map is not null && navCopies.Count > 0)
             {
                 var mapOverride = new NavigationMeshInfoMap(map.FormKey, SkyrimRelease.SkyrimSE) { NavMeshVersion = map.NavMeshVersion, PreferredPathing = new PreferredPathing() };
@@ -103,12 +138,16 @@ public static class OverlandDoorLinks
             }
             // The load order: each input's own masters before it (Daggerfall.esm under the land), then the inputs.
             var masters = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f))
-                .Concat(others.Prepend(land).SelectMany(m => m.ModHeader.MasterReferences.Select(r => r.Master).Append(m.ModKey))).Distinct().ToArray();
+                .Concat(order.SelectMany(m => m.ModHeader.MasterReferences.Select(r => r.Master).Append(m.ModKey))).Distinct().ToArray();
             outMod.WriteToBinary(outPath, new BinaryWriteParameters { MastersListOrdering = new MastersListOrderingByLoadOrder(masters) });
             log?.Invoke($"{doors.Count:N0} overland doors, {linked:N0} joined to {navCopies.Count:N0} navmeshes ({noNavmesh:N0} in cells without one, {noTriangle:N0} with no triangle within 384) -> {outPath}");
             return (doors.Count, linked, navCopies.Count);
         }
-        finally { foreach (var o in others) o.Dispose(); }
+        finally
+        {
+            foreach (var o in others) o.Dispose();
+            foreach (var n in navs) n.Dispose();
+        }
     }
 
     /// <summary>The triangle a point stands on: the one under it in plan, else the one with the nearest edge (within 384

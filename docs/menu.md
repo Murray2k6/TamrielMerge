@@ -121,17 +121,14 @@ portable 5.2.2 into tools\blender (5.1's EEVEE drew enclosed streets black; Blen
   planned first. First run: Whiterun 211 people (128 walking), the Imperial City 130, Vivec 149, Daggerfall 347,
   Stros M'Kai 167; 4 to 33 left out a shot.
 - **The games' own worldspaces** (user, 2026-10-09: "the menu flybys need to be the games worldspace not a test
-  area", "ground sinks/floats"): Daggerfall's town is a worldspace of its own without land, and stood on a stand-in
-  plane. Its shot now exports `~+DFTDaggerfall17@door` (with Daggerfall Land.esm): the exporter finds the load door
-  leading into the town, `~` becomes the worldspace holding it (the overland tile: DFIliacBay_0_1 with the default
-  terrain settings), and the town is moved by the offset putting its arrival point on that door (84992, -141312, 2301
-  here; `@dx,dy,dz` gives one by hand). The shot's centre, camera and crowd are in the town's own coordinates and move
-  with the offset scene.json records, so other terrain settings need no new numbers. The town's own land and
-  its stand-in country (cells with fewer than two objects) left out; the box of its cells becomes `holes` in scene.json,
-  where the overland's land and objects are removed and ground at the town's street level fills in. Round the hole
-  the overland is levelled to the town's ground over 8192 units (the overland there runs from 2700 to 5500, the
-  town's streets 2297: it sat in a pit), as Daggerfall levels the land at its places. Stros M'Kai's camera follows the
-  town on the stretched island (moved 8500, 3500: its buildings matched between the exports).
+  area", "ground sinks/floats"): Daggerfall's towns stand on the overland itself since 2026-10-25 (docs/
+  overland-locations.md; until then each was a worldspace of its own, placed into its overland by its entrance door,
+  `~+Town@door`). The shot exports `~+DFLocDaggerfall17@location` (with Daggerfall Land.esm and Daggerfall Towns.esm):
+  the exporter finds the overland tile whose cells carry the city's location record, `~` becomes it, and the shot's
+  centre, camera and crowd are given in the city's own frame (its middle, on its ground: the offset scene.json
+  records), so other terrain settings need no new numbers. A world placed into another by hand (`World@dx,dy,dz`)
+  still has its own land left out and its box of cells made `holes`. Stros M'Kai's camera follows the town on the
+  stretched island (moved 8500, 3500: its buildings matched between the exports).
 - **Towns split over worldspaces** (user, 2026-10-09: "the games have interiors and exteriors so the worldspace needs
   to be correct"): Oblivion's Imperial City is a worldspace a district on Tamriel's coordinates (Tamriel holds only its
   walls, tower and Waterfront), so the shot exports Tamriel plus the Market, Temple, Arena, Elven Gardens, Arboretum,

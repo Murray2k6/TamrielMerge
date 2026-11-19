@@ -15,9 +15,11 @@ public static class Parts
     public static readonly IReadOnlyList<Part> All =
     [
         new("Daggerfall", "The Iliac Bay: its land, towns, dungeons, people and quests",
-            // The land is one plugin or several (OverlandTiles.LandPluginNames; those not there are left out).
-            ["Daggerfall.esm", .. Skyrim.Terrain.OverlandTiles.LandPluginNames, Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName,
-             Skyrim.Terrain.OverlandDoorLinks.PluginName]),
+            // The land is one plugin or several (OverlandTiles.LandPluginNames; those not there are left out), its
+            // navmeshes a plugin a tile (NavmeshPluginNames), before the towns (whose cells override the land's).
+            ["Daggerfall.esm", .. Skyrim.Terrain.OverlandTiles.LandPluginNames, .. Skyrim.Terrain.OverlandTiles.NavmeshPluginNames,
+             Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName,
+             Skyrim.Terrain.OverlandDoorLinks.PluginName, .. Skyrim.Terrain.DfFoliage.PluginNames]),
         new("Redguard", "Stros M'Kai in 2E 864: Cyrus's story", [Redguard.RgPluginBuilder.PluginName]),
         new("Morrowind", "Vvardenfell, Mournhold and Solstheim, with Tribunal and Bloodmoon", [Morrowind.MwPluginBuilder.PluginName]),
         new("Oblivion", "Cyrodiil and the Shivering Isles", [Oblivion.ObPluginBuilder.PluginName]),

@@ -60,7 +60,7 @@ public static class ClimbAnimation
     public static Skeleton ReadSkeleton(byte[] hkx)
     {
         var root = (hkRootLevelContainer)new PackFileDeserializer().Deserialize(new BinaryReaderEx(hkx));
-        var container = root.m_namedVariants.Select(v => v.m_variant).OfType<hkaAnimationContainer>().First();
+        var container = root.m_namedVariants.Select(v => v?.m_variant).OfType<hkaAnimationContainer>().First();
         var s = container.m_skeletons[0];
         return new Skeleton(s.m_name, [.. s.m_bones.Select(b => b.m_name)], [.. s.m_parentIndices.Select(p => (int)p)],
             [.. s.m_referencePose.Select(m => new Vector3(m.M11, m.M12, m.M13))],

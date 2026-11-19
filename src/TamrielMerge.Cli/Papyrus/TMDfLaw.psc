@@ -237,10 +237,16 @@ Function Forget()
   ClearGuards()
 EndFunction
 
+; The Watch placed out of sight and sent to the player together: each closes in (KeepOffsetFromActor, which doesn't wait)
+; and GuardsApproach confronts once one is near. PathToReference waits for each to arrive, so they were sent one after
+; another and the confrontation came long after, the Watch trailing the player with no word of why (user, 2026-11-02:
+; "some npcs follow you around for no reason").
 Function SpawnGuards(Int region)
   If !Watch || pending
     Return
   EndIf
+  pending = True
+  Debug.Notification("You were seen. The City Watch is on its way.")
   Int n = Utility.RandomInt(2, 5)
   Float a = Utility.RandomFloat(0.0, 360.0)
   Bool inside = PlayerRef.IsInInterior()
@@ -258,12 +264,11 @@ Function SpawnGuards(Int region)
         g.SetCrimeFaction(RegionCrime[region])
       EndIf
       g.SetActorValue("Aggression", 0.0)
-      g.PathToReference(PlayerRef, 1.0)
+      g.KeepOffsetFromActor(PlayerRef, 0.0, 120.0 + i * 50.0, 0.0, afCatchUpRadius = 400.0, afFollowRadius = 80.0)
       guards[i] = g
     EndIf
     i += 1
   EndWhile
-  pending = True
 EndFunction
 
 ; The City Watch reach the player: the standing falls, and the player surrenders or fights.
@@ -277,7 +282,7 @@ Function GuardsApproach()
       If guards[i].GetDistance(PlayerRef) < 500.0
         near = True
       ElseIf !guards[i].IsInCombat()
-        guards[i].PathToReference(PlayerRef, 1.0)
+        guards[i].KeepOffsetFromActor(PlayerRef, 0.0, 120.0 + i * 50.0, 0.0, afCatchUpRadius = 400.0, afFollowRadius = 80.0)
       EndIf
     EndIf
     i += 1
@@ -291,6 +296,8 @@ Function GuardsApproach()
     Return
   EndIf
   confronted = True
+  ; Arrived: they stop closing in (they stand while the player answers).
+  StopClosingIn()
   If crime <= 0
     Commit(7, Machine.SiteRegion(Machine.CurrentTown), Machine.CurrentTown)
   EndIf
@@ -316,10 +323,21 @@ Function GuardsApproach()
   EndIf
 EndFunction
 
+Function StopClosingIn()
+  Int i = 0
+  While i < guards.Length
+    If guards[i]
+      guards[i].ClearKeepOffsetFromActor()
+    EndIf
+    i += 1
+  EndWhile
+EndFunction
+
 Function ClearGuards()
   Int i = 0
   While i < guards.Length
     If guards[i]
+      guards[i].ClearKeepOffsetFromActor()
       guards[i].Disable()
       guards[i].Delete()
       guards[i] = None

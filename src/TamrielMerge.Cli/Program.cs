@@ -43,12 +43,14 @@ static class Program
 
     static int Main(string[] args)
     {
+        Util.Paths.Apply();
         WatchParent();
         var opts = ParseOptions(args.Skip(1));
         // Only games installed through a store they were bought from (Steam, GOG) are converted; a game that isn't
         // installed is simply left out (see GameInstalls).
         string arena2 = GameInstalls.DataDir(Game.Daggerfall) ?? "";
         string skyrimData = GameInstalls.SkyrimData() ?? "";
+        Skyrim.HavokSettle.SkyrimData = skyrimData;
 
         switch (args.FirstOrDefault())
         {
@@ -80,12 +82,12 @@ static class Program
                 bool Has(Game g) => found.ContainsKey(g) && !skip.Contains(g.ToString());
                 var plan = new List<(string Step, double Weight)> { ("Setup", 1) };
                 if (Has(Game.Daggerfall) || Has(Game.Morrowind)) plan.Add(("Upscaling textures", opts.ContainsKey("gpu") ? 6 : 20));
-                if (Has(Game.Daggerfall)) plan.AddRange([("Missing models", 4), ("Daggerfall", 6), ("Daggerfall's towns", 25), ("Daggerfall's dungeons", 12)]);
+                if (Has(Game.Daggerfall)) plan.AddRange([("Missing models", 4), ("Daggerfall", 6), ("Daggerfall's towns", 25), ("Daggerfall's dungeons", 12), ("Daggerfall's foliage", 2), ("Daggerfall's overland navmesh", 6)]);
                 if (Has(Game.Redguard)) plan.Add(("Redguard", 2));
                 if (Has(Game.Morrowind)) plan.Add(("Morrowind", 5));
                 if (Has(Game.Oblivion)) plan.Add(("Oblivion", 8));
                 plan.AddRange([("Recorded voices", 3), ("Intro videos", 6), ("Main menu", opts.ContainsKey("gpu") ? 25 : 0), ("Creature models", 3), ("Distant objects and trees", 4), ("Creatures", 1),
-                               ("Story and progression", 2), ("Installing", 2)]);
+                               ("Story and progression", 2), ("Packing the plugins", 4), ("Compressing the plugins", 1), ("Installing", 2)]);
                 if (Has(Game.Morrowind) && !skip.Contains("Voices") && !skip.Contains("VoiceGen")) plan.Add(("Voice generation", 300));
                 // Built on a solid-state drive when --out is on a hard disk (user, 2026-10-13: "why is the cpu not being
                 // used", "with a users dir drives must be looked at automatically"): the builds write hundreds of thousands
@@ -94,14 +96,21 @@ static class Program
                 // moved into --out after the creature models. Intro videos and recorded voices, which keep what an earlier
                 // run made, and the steps after (which read the user's model choices and earlier plugins) use --out itself.
                 string finalDir = outDir;
+                // Temporary files beside the output unless a temp folder was chosen (Util/Paths); the builds told where the
+                // result goes (an earlier conversion's sprite models are there).
+                Util.Paths.TempBeside(finalDir);
+                Util.Paths.ShareFinalOut(finalDir);
                 string? staging = opts.ContainsKey("no-staging") ? null
-                    : opts.ContainsKey("resume") && Util.Drives.Seeks(finalDir) == true && Util.Drives.ExistingStaging("TamrielMergeBuild") is { } left ? left
+                    : opts.ContainsKey("resume") && Util.Drives.ExistingStaging("TamrielMergeBuild") is { } left ? left
                     : Util.Drives.FastStaging(finalDir, ConvertSize(Has), "TamrielMergeBuild");
+                // The most the conversion takes on its drives at once (user, 2026-11-02: "i need a space requirement of
+                // games converted for the tool"): the output's, the build's and the temporary files' drives.
+                var spaceMeter = new Setup.ConversionSize.SpaceMeter([finalDir, staging ?? "", Util.Paths.Temp ?? ""]);
                 if (staging is null && !opts.ContainsKey("no-staging") && Util.Drives.Seeks(finalDir) == true)
                     // 2026-10-15: with 70 GB free on the solid-state drive the build went to the hard disk without a word,
                     // and its hundreds of thousands of small files took many times as long.
-                    Console.WriteLine($"Output: {finalDir} is on a hard disk and no solid-state drive has {ConvertSize(Has) >> 30} GB free beyond what is kept for "
-                        + "Windows: building there directly, which is much slower. Free some space on a solid-state drive to build faster.");
+                    Console.WriteLine($"Output: {finalDir} is on a hard disk: building there, which is much slower than a solid-state drive "
+                        + "(choose a build folder on one in the app's Options, or paths.json, to build faster; it needs about " + (ConvertSize(Has) >> 30) + " GB free).");
                 if (staging is not null)
                 {
                     // A stopped run's partial build is cleared, unless this run carries it on (--resume).
@@ -109,7 +118,16 @@ static class Program
                     Directory.CreateDirectory(staging);
                     outDir = staging;
                     plan.Insert(plan.FindIndex(x => x.Step == "Creatures"), ("Moving the build", 3));
-                    Console.WriteLine($"Output: {finalDir} is on a hard disk; building on a solid-state drive in {staging}, moved there after");
+                    // The drives as Windows reports them. (Until 2026-11-10 this line said "is on a hard disk; building
+                    // on a solid-state drive" whatever they were: on 2026-11-07 the output was on a solid-state drive
+                    // and the chosen build folder on a hard disk, E:, and the run took 26 h 52 min where the same
+                    // conversion built on the solid-state drive took 9 h 26 min three days before.)
+                    string Kind(string path) => Util.Drives.Seeks(path) switch { true => "a hard disk", false => "a solid-state drive", _ => "a drive Windows doesn't describe" };
+                    Console.WriteLine($"Output: {finalDir} ({Kind(finalDir)}); building in {staging} ({Kind(staging)}), moved to the output after");
+                    if (Util.Drives.Seeks(staging) == true)
+                        Console.WriteLine($"SLOW: the build folder {staging} is on a hard disk. A conversion writes about 650,000 small files there and takes about three times as long "
+                            + "as on a solid-state drive (26 h 52 min against 9 h 26 min, measured). Choose a build folder on a solid-state drive in the app's Options"
+                            + (Util.Drives.Seeks(finalDir) == false ? $", or clear the build folder there to build in {finalDir} itself." : "."));
                 }
                 double planTotal = plan.Sum(x => x.Weight), planDone = 0;
                 IDisposable Begin(string step)
@@ -140,6 +158,9 @@ static class Program
                 {
                     // Moved early when a step more would cut into the room the drive keeps (Windows' own, on its drive).
                     if (outDir == finalDir || (!all && Util.Drives.FreeBytes(outDir) >= Util.Drives.Reserve(outDir) + (12L << 30))) return;
+                    // Short of room on a drive the output shares: moving frees nothing there (it cost 8 to 12 minutes of
+                    // three earlier conversions, 530,880 files renamed one by one).
+                    if (!all && string.Equals(Path.GetPathRoot(Path.GetFullPath(outDir)), Path.GetPathRoot(Path.GetFullPath(finalDir)), StringComparison.OrdinalIgnoreCase)) return;
                     AwaitEarlyMove();
                     Console.WriteLine($"Moving the build into {finalDir}{(all ? "" : " (the solid-state drive is short of room)")}...");
                     try
@@ -193,7 +214,16 @@ static class Program
                 // themselves before Daggerfall is built (which then uses them); --skip Models keeps the vanilla stand-ins.
                 if (Has(Game.Daggerfall))
                     using (Begin("Missing models"))
-                        if (!skip.Contains("Models")) Main(opts.ContainsKey("gpu") ? ["sprite-models", "--make", "--gpu"] : ["sprite-models", "--make"]);
+                        if (!skip.Contains("Models"))
+                        {
+                            // Made in the temp folder (Util/Paths.ModelWork, removed at the end); not again when this
+                            // output already holds them (its manifest: the Daggerfall build adds them from it), painted
+                            // as now (else made into the work folder again, the shipped ones repainted, and imported anew).
+                            if (File.Exists(Skyrim.Meshes.SpriteModelImporter.ManifestPath(finalDir)) && Skyrim.Meshes.SpriteModelImporter.ManifestCurrent(finalDir)
+                                && !Directory.Exists(Path.Combine(Util.Paths.ModelWork, "models")))
+                                Console.WriteLine($"Sprite models: in {finalDir} from the earlier conversion ({Skyrim.Meshes.SpriteModelImporter.ManifestPath(finalDir)}); not made again");
+                            else Main(opts.ContainsKey("gpu") ? ["sprite-models", "--make", "--gpu"] : ["sprite-models", "--make"]);
+                        }
                 // The games' textures upscaled from the user's own installs (upscale-textures), before the builds use them;
                 // only what isn't upscaled yet. --skip Upscale keeps what is there (or the 4x pixel-art scaling).
                 if (!skip.Contains("Upscale"))
@@ -207,20 +237,36 @@ static class Program
                     var made = Skyrim.Terrain.OverlandTiles.LandPluginsIn(resume && outDir != finalDir && File.Exists(Path.Combine(outDir, Skyrim.Terrain.OverlandTiles.LandPluginName)) ? outDir : finalDir);
                     return made.Count > 0 && made[0] == Skyrim.Terrain.OverlandTiles.LandPluginName && made.All(Reuse);
                 }
-                if (Has(Game.Daggerfall) && Reuse("Daggerfall.esm") && ReuseLand())
+                // A packed build's land and navmesh are joined with the rest (PluginPack): no pieces to carry on from, so
+                // Daggerfall is built again.
+                bool packedBefore = resume && Skyrim.PluginPack.Packed(finalDir);
+                if (packedBefore) Console.WriteLine($"Daggerfall: {finalDir} holds packed plugins (plugins.json), which can't be resumed from: built again");
+                if (Has(Game.Daggerfall) && !packedBefore && Reuse("Daggerfall.esm") && ReuseLand())
                 {
                     Begin("Daggerfall").Dispose();
                     plugins.Add("Daggerfall.esm");
                     Console.WriteLine("Daggerfall: Daggerfall.esm and its land kept from the stopped run (--resume)");
                 }
-                else if (Has(Game.Daggerfall)) using (Begin("Daggerfall")) Step(Game.Daggerfall, "Daggerfall.esm", ["build", "--out", Path.Combine(outDir, "Daggerfall.esm")]);
-                else Step(Game.Daggerfall, "Daggerfall.esm", ["build", "--out", Path.Combine(outDir, "Daggerfall.esm")]);
+                else if (Has(Game.Daggerfall)) using (Begin("Daggerfall")) Step(Game.Daggerfall, "Daggerfall.esm", ["build", "--out", Path.Combine(outDir, "Daggerfall.esm"), "--no-overland-navmesh"]);
+                else Step(Game.Daggerfall, "Daggerfall.esm", ["build", "--out", Path.Combine(outDir, "Daggerfall.esm"), "--no-overland-navmesh"]);
                 // The overland's land (one plugin, or several when it is too big for one: built a tile at a time by the
                 // Daggerfall build), right after it; land plugins of an earlier run split otherwise aren't left in --out.
                 if (plugins.Contains("Daggerfall.esm") && File.Exists(Path.Combine(outDir, Skyrim.Terrain.OverlandTiles.LandPluginName)))
                 {
                     var lands = Skyrim.Terrain.OverlandTiles.LandPluginsIn(outDir);
                     plugins.AddRange(lands);
+                    // Its foliage (made with the land by the Daggerfall build); a land kept from a run before the foliage
+                    // gets it now.
+                    if (!File.Exists(Path.Combine(outDir, Skyrim.Terrain.DfFoliage.PluginNames[0])) && !skip.Contains("Foliage"))
+                    {
+                        using (Begin("Daggerfall's foliage"))
+                            if (Main(["df-foliage", "--dir", outDir]) != 0) failed.Add("Daggerfall's foliage");
+                    }
+                    else Begin("Daggerfall's foliage").Dispose();
+                    plugins.AddRange(Skyrim.Terrain.DfFoliage.PluginNames.Where(n => File.Exists(Path.Combine(outDir, n))));
+                    if (outDir != finalDir)
+                        foreach (var stale in Skyrim.Terrain.DfFoliage.PluginNames.Where(n => !File.Exists(Path.Combine(outDir, n))).Select(n => Path.Combine(finalDir, n)).Where(File.Exists))
+                            File.Delete(stale);
                     if (outDir != finalDir)
                         foreach (var stale in Skyrim.Terrain.OverlandTiles.LandPluginNames.Except(lands).Select(n => Path.Combine(finalDir, n)).Where(File.Exists))
                             File.Delete(stale);
@@ -248,6 +294,20 @@ static class Program
                 if (plugins.Contains("Daggerfall.esm") && !skip.Contains("Dungeons"))
                     using (Begin("Daggerfall's dungeons"))
                     if (BuildParts("df-dungeons", Skyrim.DaggerfallDungeons.Parts, Skyrim.DaggerfallDungeons.PluginName, k => Skyrim.DaggerfallDungeons.PartPath(outDir, k))) plugins.Add(Skyrim.DaggerfallDungeons.PluginName);
+                // The overland's navmeshes, once everything standing on it is placed (Daggerfall.esm's, the towns' and the
+                // dungeons'), over the land and their collision: the Daggerfall build leaves them to this. Its plugins (a
+                // tile's each, OverlandTiles.NavmeshPluginNames) kept from a stopped run when made after them all; they load
+                // right after the land plugins.
+                if (plugins.Contains(Skyrim.Terrain.OverlandTiles.LandPluginName))
+                {
+                    // A stopped run's tiles made after the town and dungeon plugins are kept (overland-navmesh --keep-newer: the
+                    // builder makes the tiles whose plugin is missing); the rest are made again.
+                    using (Begin("Daggerfall's overland navmesh"))
+                        if (Main(["overland-navmesh", "--dir", outDir, "--no-doors", .. resume ? new[] { "--keep-newer" } : []]) != 0) failed.Add("Daggerfall's overland navmesh");
+                    // Into the plugin list after the land's.
+                    int at = plugins.FindLastIndex(p => Skyrim.Terrain.OverlandTiles.LandPluginNames.Contains(p)) + 1;
+                    plugins.InsertRange(at, Skyrim.Terrain.OverlandTiles.NavmeshPluginsIn(outDir).Where(n => !plugins.Contains(n)));
+                }
                 // The overland's town gates and dungeon entrances joined to the land's navmeshes (a light plugin after them).
                 if (plugins.Contains(Skyrim.Terrain.OverlandTiles.LandPluginName) && (plugins.Contains(Skyrim.DaggerfallTowns.PluginName) || plugins.Contains(Skyrim.DaggerfallDungeons.PluginName)))
                     using (Begin("Daggerfall's overland doors"))
@@ -258,7 +318,8 @@ static class Program
                 // 100,000 files) moved to the hard disk while the other games are built, which leave the disk idle, rather
                 // than all at the end (user, 2026-10-15: "fix everything and the gaps"). Nothing after reads them from the
                 // build folder alone: the distant objects look in --out too, and the menu's render (which doesn't) waits.
-                if (outDir != finalDir && plugins.Contains("Daggerfall.esm"))
+                // Not when installing: the install reads them from the solid-state drive at the end, then they're moved.
+                if (outDir != finalDir && plugins.Contains("Daggerfall.esm") && !opts.ContainsKey("install"))
                 {
                     string from = outDir, to = finalDir;
                     string[] daggerfallOnly = [@"meshes\TamrielMerge\DF", @"meshes\TamrielMerge\Towns", @"meshes\TamrielMerge\Dungeons", @"textures\TamrielMerge\DF",
@@ -278,18 +339,34 @@ static class Program
                 }
                 bool BuildParts(string command, int parts, string plugin, Func<int, string> partPath)
                 {
-                    // Resumed after its parts were joined: the joined plugin (made after this Daggerfall.esm) is kept.
+                    var done = new List<string>();
+                    var pending = new List<int>();
+                    HashSet<int>? onlyParts = null;
+                    // Resumed after its parts were joined: the joined plugin (made after this Daggerfall.esm) is kept; parts
+                    // it lacks (that failed: no records in their FormID range) are made and joined to it (user, 2026-10-25:
+                    // "it shouldnt take that long": two failed parts had all 124 made again).
                     if (resume && new[] { outDir, finalDir }.Select(d => Path.Combine(d, plugin)).FirstOrDefault(File.Exists) is { } joined
                         && File.GetLastWriteTimeUtc(joined) > File.GetLastWriteTimeUtc(Path.Combine(outDir, "Daggerfall.esm")))
                     {
-                        if (Path.GetDirectoryName(joined) != outDir) File.Copy(joined, Path.Combine(outDir, plugin), overwrite: true);
-                        Console.WriteLine($"{plugin}: kept from the stopped run (joined after Daggerfall.esm)");
-                        return true;
+                        var present = Skyrim.PluginMerger.PartsPresent(joined, parts);
+                        var lacking = Enumerable.Range(1, parts).Where(k => !present.Contains(k)).ToList();
+                        if (lacking.Count == 0)
+                        {
+                            if (Path.GetDirectoryName(joined) != outDir) File.Copy(joined, Path.Combine(outDir, plugin), overwrite: true);
+                            Console.WriteLine($"{plugin}: kept from the stopped run (joined after Daggerfall.esm)");
+                            return true;
+                        }
+                        Console.WriteLine($"{plugin}: joined after Daggerfall.esm without part(s) {string.Join(", ", lacking)} of {parts}: those made and joined to it");
+                        // The joined plugin goes in as part 0 (first), its creature spots with it.
+                        string before = Path.Combine(outDir, Path.GetFileNameWithoutExtension(plugin) + ".part0.esm");
+                        File.Copy(joined, before, overwrite: true);
+                        if (File.Exists(Skyrim.CreatureCatalog.PathFor(joined))) File.Copy(Skyrim.CreatureCatalog.PathFor(joined), Skyrim.CreatureCatalog.PathFor(before), overwrite: true);
+                        done.Add(before);
+                        onlyParts = [.. lacking];
                     }
-                    var done = new List<string>();
-                    var pending = new List<int>();
                     for (int k = 1; k <= parts; k++)
                     {
+                        if (onlyParts is not null && !onlyParts.Contains(k)) continue;
                         // A part the stopped run finished (with its creature spots), kept: only one made after this
                         // Daggerfall.esm (2026-10-15: a resume took parts 10-14 from an older conversion left in --out,
                         // built against an older Daggerfall.esm: 100,833 links to the wrong records, navmeshes on the
@@ -371,7 +448,7 @@ static class Program
                         if (Directory.Exists(Path.Combine(sharedDir, "navmeshes"))) Directory.Delete(Path.Combine(sharedDir, "navmeshes"), true);
                         Directory.CreateDirectory(sharedDir);
                         var clock = System.Diagnostics.Stopwatch.StartNew();
-                        Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom([])).Save(heights);
+                        Skyrim.Terrain.HeightField.Daggerfall(DfWorldMap.Load(arena2), TerrainSettingsFrom([]), DfLocations.LoadAll(arena2)).Field.Save(heights);
                         GC.Collect();
                         Console.WriteLine($"Heights for the parts: {new FileInfo(heights).Length / 1048576} MB in {clock.Elapsed.TotalSeconds:F0} s");
                     }
@@ -384,7 +461,7 @@ static class Program
                         Directory.CreateDirectory(work);
                         File.Copy(Path.Combine(outDir, "Daggerfall.esm"), Path.Combine(work, "Daggerfall.esm"), overwrite: true);
                         var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
-                        foreach (var a in new[] { command, "--plugin", Path.Combine(work, "Daggerfall.esm"), "--batch", k.ToString(), "--batches", parts.ToString() }) psi.ArgumentList.Add(a);
+                        foreach (var a in new[] { command, "--plugin", Path.Combine(work, "Daggerfall.esm"), "--batch", k.ToString(), "--batches", parts.ToString(), "--build-dir", outDir }) psi.ArgumentList.Add(a);
                         psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";   // the parent reports the parts
                         psi.Environment["TAMRIELMERGE_HEIGHTS"] = heights;
                         psi.Environment["TAMRIELMERGE_TOWN_MESHES"] = Path.Combine(sharedDir, "meshes");
@@ -479,30 +556,59 @@ static class Program
                         int n = Interlocked.Increment(ref ended);
                         Progress.Report(n / (double)toBuild.Count, $"{r.G.Game} converted ({n} of {toBuild.Count})");
                     }
+                    // What the step is doing, for the app and the log: the games running and for how long, and those waiting
+                    // for memory with what they need against what is free (2026-11-03, user: "morrowind conversion is stuck":
+                    // Morrowind had waited 1 h 40 min for Oblivion, 9.3 GB of RAM free of the 13.9 it needed, with the bar
+                    // standing still and nothing in the log since Oblivion's interiors).
+                    var startedAt = new Dictionary<Game, DateTime>();
+                    DateTime lastStatus = DateTime.MinValue, lastWaitLine = DateTime.MinValue;
+                    string? lastWaitReason = null;
+                    static string Took(TimeSpan t) => t.TotalHours >= 1 ? $"{(int)t.TotalHours} h {t.Minutes} min" : $"{(int)t.TotalMinutes} min";
                     while (waiting.Count > 0 || runningGames.Count > 0)
                     {
                         foreach (var r in runningGames.Where(r => r.P.HasExited).ToList())
                         {
                             Finish(r, r.P.ExitCode);
+                            Console.WriteLine($"{r.G.Game}: {(r.P.ExitCode == 0 ? "done" : $"stopped ({r.P.ExitCode})")} after {Took(DateTime.Now - startedAt[r.G.Game])}");
                             r.P.Dispose();
                             runningGames.Remove(r);
                         }
+                        string? waitReason = null;
                         if (waiting.Count > 0)
                         {
                             var next = waiting.Peek();
                             double growth = runningGames.Sum(r => { try { r.P.Refresh(); return Math.Max(0, PeakGb(r.G.Game) - r.P.PrivateMemorySize64 / (double)(1L << 30)); } catch (InvalidOperationException) { return 0; } });
-                            double free = Util.Machine.FreeCommitGb();
-                            if (runningGames.Count == 0 || (free >= PeakGb(next.Game) + growth + 4 && Util.Machine.FreeRamGb() >= PeakGb(next.Game) + growth + 2))
+                            double free = Util.Machine.FreeCommitGb(), freeRam = Util.Machine.FreeRamGb();
+                            if (runningGames.Count == 0 || (free >= PeakGb(next.Game) + growth + 4 && freeRam >= PeakGb(next.Game) + growth + 2))
                             {
                                 waiting.Dequeue();
                                 var psi = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false };
                                 foreach (var a in next.Args) psi.ArgumentList.Add(a);
                                 psi.Environment["TAMRIELMERGE_PROGRESS"] = "off";
                                 if (runningGames.Count > 0) Console.WriteLine($"{next.Game}: started beside {string.Join(", ", runningGames.Select(r => r.G.Game))} ({free:F0} GB of memory free to commit)");
+                                else Console.WriteLine($"{next.Game}: started");
+                                startedAt[next.Game] = DateTime.Now;
                                 try { runningGames.Add((next, System.Diagnostics.Process.Start(psi)!)); }
                                 catch (Exception e) { Console.WriteLine($"{next.Game}: failed: {e.Message}"); results[next.Game] = false; Interlocked.Increment(ref ended); }
+                                lastStatus = DateTime.MinValue;
                                 continue;
                             }
+                            waitReason = $"{string.Join(", ", waiting.Select(w => w.Game))} waiting for memory to run beside it: {freeRam:F1} GB of RAM free, " +
+                                $"{PeakGb(next.Game) + growth + 2:F1} needed ({next.Game}'s {PeakGb(next.Game):F0} GB, {growth:F1} the running may still grow by, 2 spare), " +
+                                $"{free:F0} GB free to commit of {PeakGb(next.Game) + growth + 4:F0}";
+                        }
+                        if (waitReason is not null && (lastWaitReason is null || DateTime.Now - lastWaitLine >= TimeSpan.FromMinutes(10)))
+                        {
+                            Console.WriteLine(waitReason);
+                            lastWaitLine = DateTime.Now;
+                        }
+                        lastWaitReason = waitReason;
+                        if (DateTime.Now - lastStatus >= TimeSpan.FromSeconds(30))
+                        {
+                            string runningText = string.Join(", ", runningGames.Select(r => $"{r.G.Game} converting ({Took(DateTime.Now - startedAt[r.G.Game])} so far)"));
+                            string waitingText = waiting.Count == 0 ? "" : $"; {string.Join(", ", waiting.Select(w => w.Game))} waiting for memory";
+                            Progress.Report(ended / (double)toBuild.Count, runningText + waitingText);
+                            lastStatus = DateTime.Now;
                         }
                         Thread.Sleep(2000);
                     }
@@ -527,10 +633,11 @@ static class Program
                 {
                     // Its music needs no graphics card.
                     if (Main(["menu-music", "--out", outDir]) != 0) failed.Add("main menu music");
-                    if (opts.ContainsKey("gpu")) { if (Main(["menu", "--plugins", outDir, "--out", outDir]) != 0) failed.Add("main menu"); }
+                    if (opts.ContainsKey("gpu")) { if (Main(["menu", "--plugins", outDir, "--out", outDir, "--no-pack", .. (opts.ContainsKey("remake-menu") ? new[] { "--remake" } : [])]) != 0) failed.Add("main menu"); }
                     else Console.WriteLine("Main menu: skipped (it renders on the graphics card: add --gpu)");
                     // Packed as its own part (TamrielMerge Menu.esp), so the app can switch it off for Skyrim's menu.
-                    Main(["menu-pack", "--out", outDir]);
+                    // With the last render and music kept from the earlier menu (in --out, then Data) where this run made none.
+                    Main(["menu-pack", "--out", outDir, "--keep-from", string.Join(";", new[] { finalDir }.Concat(opts.ContainsKey("install") ? [skyrimData] : Array.Empty<string>()))]);
                     if (File.Exists(Path.Combine(outDir, Skyrim.Render.MenuArchive.PluginName))) plugins.Add(Skyrim.Render.MenuArchive.PluginName);
                 }
                 menuStep.Dispose();
@@ -578,6 +685,11 @@ static class Program
                             {
                                 foreach (var gp in new[] { "Daggerfall.esm", "Redguard.esm", "Morrowind.esm", "Oblivion.esm" }.Select(Skyrim.Creatures.CreatureRecords.PluginFor))
                                     if (File.Exists(Path.Combine(outDir, gp))) plugins.Add(gp);
+                                // An earlier build's .esp names, in the build and the output: they would load the creatures twice.
+                                foreach (var folder in new[] { outDir, finalDir }.Distinct(StringComparer.OrdinalIgnoreCase))
+                                    foreach (var old in Skyrim.Creatures.CreatureRecords.OldEspNames)
+                                        File.Delete(Path.Combine(folder, old));
+                                plugins.RemoveAll(p => Skyrim.Creatures.CreatureRecords.OldEspNames.Contains(p, StringComparer.OrdinalIgnoreCase));
                             }
                             else failed.Add("creature models' plugins");
                         }
@@ -587,7 +699,11 @@ static class Program
                     if (!skip.Contains("LOD") && plugins.Any(p => p is "Daggerfall.esm" or "Redguard.esm" or "Morrowind.esm" or "Oblivion.esm"))
                         try { if (Main(outDir == finalDir ? ["lod", "--dir", outDir, "--only", "objects,trees"] : ["lod", "--dir", outDir, "--only", "objects,trees", "--assets", finalDir]) != 0) failed.Add("distant objects and trees"); }
                         catch (Exception e) { Console.WriteLine($"Distant LOD: failed: {e.Message}"); failed.Add("distant objects and trees"); }
-                if (outDir != finalDir) using (Begin("Moving the build")) Settle(all: true);
+                // Installed from the solid-state drive, then moved (user, 2026-10-25: "it shouldnt take that long"): moved first,
+                // the install read the 35 GB back off the output's hard disk, which the move's writing had left busy, at
+                // about 4 MB a second, 2.4 hours.
+                bool installFromStage = opts.ContainsKey("install") && outDir != finalDir;
+                if (outDir != finalDir && !installFromStage) using (Begin("Moving the build")) Settle(all: true);
                 // An older menu's loose files where the archive now goes override it: removed (MenuArchive.RemoveLoose),
                 // whether this run made the menu or one from before is there (2026-10-15: a conversion without --gpu left
                 // the 10-10 loose flyby in Data, and the menu kept showing it).
@@ -637,16 +753,96 @@ static class Program
 
                 AwaitEarlyMove();
                 storyStep.Dispose();
+                // The world plugins joined into as few as stay under what Mutagen reads (Skyrim/PluginPack), last so that every
+                // step above reads the plugins by their usual names and what they made is re-pointed with the rest. Off with
+                // --skip Pack; a failed pack leaves the plugins as they were.
+                using (Begin("Packing the plugins"))
+                {
+                    if (skip.Contains("Pack")) File.Delete(Path.Combine(outDir, Skyrim.PluginPack.ManifestName));
+                    else if (plugins.Contains("Daggerfall.esm"))
+                    {
+                        if (Child(["pack-plugins", "--dir", outDir, "--order", string.Join(";", plugins)]) != 0) failed.Add("packing the plugins (left as they were)");
+                        else if (Skyrim.PluginPack.Read(outDir) is { } packed)
+                        {
+                            var kept = packed.Plugins.Select(p => p.Name).Where(plugins.Contains).ToList();
+                            plugins.Clear();
+                            plugins.AddRange(kept);
+                            // An earlier build's copies of what was folded mustn't come back with the install or the move.
+                            if (outDir != finalDir)
+                                foreach (var gone in packed.Folded.Select(n => Path.Combine(finalDir, n)).Where(File.Exists)) File.Delete(gone);
+                        }
+                    }
+                }
+                // Script strings a save can't hold (Skyrim/ScriptStrings: one of 4,096 characters or more crashes loading any
+                // save made with it, 2026-11-05): none may be left.
+                try
+                {
+                    int longStrings = 0;
+                    foreach (var name in plugins.Where(n => File.Exists(Path.Combine(outDir, n))))
+                    {
+                        using var mod = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(outDir, name), SkyrimRelease.SkyrimSE);
+                        foreach (var f in Skyrim.ScriptStrings.Find(mod))
+                        {
+                            Console.WriteLine($"  script string too long for a save: {name} {f.Record} {f.Script}.{f.Property}{(f.Index >= 0 ? $"[{f.Index}]" : "")}, {f.Length} characters");
+                            longStrings++;
+                        }
+                    }
+                    Console.WriteLine($"Script strings too long for a save: {longStrings}");
+                    if (longStrings > 0) failed.Add($"{longStrings} script strings too long for a save (loading a save would crash; see above)");
+                }
+                catch (Exception e) { Console.WriteLine($"Script strings: not checked ({e.Message})"); }
+                // What the plugins take of Skyrim's reference handles at load, with a warning near the limit (HandleCount:
+                // a user's Daggerfall Towns.esm with 3.5 million persistent references crashed the data load, 2026-10-27).
+                try { if (Skyrim.HandleCount.Report(outDir, plugins, Console.WriteLine) > Skyrim.HandleCount.Warn) failed.Add("too many reference handles (see the warning above)"); }
+                catch (Exception e) { Console.WriteLine($"Reference handles: not counted ({e.Message})"); }
+                // The master flag on every converted plugin and the light (ESL) flag on every one small enough
+                // (Skyrim/LightPlugins): no reference handles for worldspace references, no load-order slot taken.
+                Console.WriteLine("Plugin flags:");
+                var mastered = Skyrim.LightPlugins.MasterAll(outDir, plugins, Console.WriteLine);
+                var lit = Skyrim.LightPlugins.FlagAll(outDir, plugins, Console.WriteLine);
+                Console.WriteLine($"  {mastered.Count} flagged master now, {lit.Count} flagged light now");
+                // Smaller plugins, everything in them kept (Skyrim/PluginCompression): the record types Skyrim's own
+                // plugins store compressed, compressed. Off with --skip Compress.
+                if (!skip.Contains("Compress"))
+                    using (Begin("Compressing the plugins"))
+                    {
+                        Console.WriteLine("Compressing the plugins:");
+                        Skyrim.PluginCompression.CompressAll(outDir, plugins, Console.WriteLine);
+                    }
                 Console.WriteLine();
-                Console.WriteLine($"Converted into {outDir}. Enable these plugins, in this order, after Skyrim's own:");
+                Console.WriteLine($"Converted into {finalDir}. Enable these plugins, in this order, after Skyrim's own:");
                 foreach (var p in plugins) Console.WriteLine($"  {p}");
                 if (failed.Count > 0) Console.WriteLine($"Failed: {string.Join(", ", failed)} (the others work without them)");
                 Console.WriteLine("Needed: SKSE and Address Library for SKSE Plugins. They run the Tamriel menu, the guide, Daggerfall's seamless overland (SKSE/Plugins/TamrielMergeSeamless.dll: physics past 64 cells), the era in the date (TamrielMergeEra.dll) and the classic script functions the converted scripts call (TamrielMergeNative.dll).");
                 if (plugins.Contains("Daggerfall.esm"))
                     Console.WriteLine("For the climbing animation (Daggerfall's Climbing skill): Open Animation Replacer by Ershin (without it you climb in the falling pose).");
+                // The room this conversion took beyond its result at its peak, for the next one's estimate (the app shows it).
+                // Read before installing, which writes into Skyrim's Data (perhaps on one of these drives).
+                {
+                    long overhead = Math.Max(0, spaceMeter.Peak - spaceMeter.TakenNow);
+                    Setup.ConversionSize.RecordPeak(new[] { Game.Daggerfall, Game.Morrowind, Game.Oblivion, Game.Redguard }.Where(Has).Select(g => g.ToString()), overhead);
+                    Console.WriteLine($"Disk: this conversion took up to {spaceMeter.Peak / (double)(1L << 30):F1} GB on its drives at once, {overhead / (double)(1L << 30):F1} GB of it only while it ran");
+                    spaceMeter.Dispose();
+                }
                 if (opts.ContainsKey("install"))
                 using (Begin("Installing"))
-                    InstallInto(outDir, skyrimData, plugins, opts.GetValueOrDefault("mo2"));
+                    InstallInto(outDir, skyrimData, plugins, opts.GetValueOrDefault("mo2"), also: outDir != finalDir ? finalDir : null, compress: !skip.Contains("Compress"));
+                if (installFromStage) using (Begin("Moving the build")) Settle(all: true);
+                // The output's plugins compressed on the disk too, now that they are in place (written again, a file is
+                // stored plain again).
+                if (!skip.Contains("Compress"))
+                {
+                    Console.WriteLine($"Output {finalDir}:");
+                    Skyrim.PluginCompression.CompressOnDisk(plugins.Select(p => Path.Combine(finalDir, p)).ToList(), Console.WriteLine);
+                }
+                // The model maker's work folder (sprites, job list, models, checks: Util/Paths.ModelWork) goes once the
+                // Daggerfall build has imported the models (user, 2026-10-29: "the model3d tool keeps its files after
+                // conversion is complete"); a later conversion into this output takes them from its manifest.
+                if (Directory.Exists(Util.Paths.ModelWork) && (!plugins.Contains("Daggerfall.esm") || File.Exists(Skyrim.Meshes.SpriteModelImporter.ManifestPath(finalDir))))
+                {
+                    try { Directory.Delete(Util.Paths.ModelWork, true); Console.WriteLine($"Sprite models: the work folder {Util.Paths.ModelWork} removed (the models are in {finalDir})"); }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Console.WriteLine($"Sprite models: the work folder {Util.Paths.ModelWork} not removed ({e.Message})"); }
+                }
                 // Last, as it takes days: Morrowind's dialogue spoken in Skyrim's voices (the voice generator; the app can
                 // pause it, and running it again resumes). --skip VoiceGen leaves it for later.
                 if (voices && plugins.Contains("Morrowind.esm") && !skip.Contains("VoiceGen"))
@@ -657,6 +853,10 @@ static class Program
                         if (opts.ContainsKey("install")) vargs.Add("--install");
                         if (Main([.. vargs]) == 1) failed.Add("voice generation");
                     }
+                // The limit is the whole load order's, the user's other mods too (user, 2026-11-01): counted once installed.
+                if (opts.ContainsKey("install"))
+                    try { Skyrim.HandleAudit.ReportLoadOrder(skyrimData, Console.WriteLine); }
+                    catch (Exception e) { Console.WriteLine($"Reference handles of the load order: not counted ({e.Message})"); }
                 Progress.Report(1, failed.Count == 0 ? "Done" : $"Done; failed: {string.Join(", ", failed)}");
                 return failed.Count == 0 ? 0 : 2;
             }
@@ -689,16 +889,23 @@ static class Program
                 // A finished conversion (--dir, default out/convert) installed into Skyrim's Data folder as convert --install
                 // does (Skyrim/DataArchives); --data DIR installs into another folder instead (a test: no plugin lists
                 // touched). The plugins enabled are the conversion's, in the order convert lists them.
+                // --also DIR: a second folder of the same conversion (the output, when --dir is the build staged on a
+                // solid-state drive): what is only there is installed from it, as convert --install does.
                 string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                string? alsoDir = opts.TryGetValue("also", out var alsoOpt) ? Path.GetFullPath(alsoOpt) : null;
                 bool other = opts.TryGetValue("data", out var dataDir);
                 string data = other ? Path.GetFullPath(dataDir!) : skyrimData;
                 Directory.CreateDirectory(data);
-                string[] order = ConvertPluginOrder;
-                var plugins = order.Where(p => File.Exists(Path.Combine(dir, p)))
-                    .Concat(Directory.EnumerateFiles(dir).Select(Path.GetFileName).Where(f => f!.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase)).Select(f => f!)
-                        .Where(f => !order.Contains(f, StringComparer.OrdinalIgnoreCase)).Order(StringComparer.OrdinalIgnoreCase))
+                // A packed build's own order first (PluginPack's plugins.json), its folded plugins gone.
+                string[] order = [.. Skyrim.PluginPack.OrderIn(dir) ?? [], .. ConvertPluginOrder];
+                var dirs = alsoDir is null ? [dir] : new[] { dir, alsoDir };
+                bool Has(string p) => dirs.Any(d => File.Exists(Path.Combine(d, p)));
+                var plugins = order.Where(Has).Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Concat(dirs.SelectMany(d => Directory.EnumerateFiles(d)).Select(Path.GetFileName).Where(f => f!.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase)).Select(f => f!)
+                        .Where(f => !order.Contains(f, StringComparer.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase))
                     .ToList();
-                InstallInto(dir, data, plugins, opts.GetValueOrDefault("mo2"), lists: !other);
+                // --no-compress: the installed plugins left uncompressed on the disk.
+                InstallInto(dir, data, plugins, opts.GetValueOrDefault("mo2"), lists: !other, also: alsoDir, compress: !opts.ContainsKey("no-compress"));
                 return 0;
             }
             case "drives":
@@ -711,7 +918,7 @@ static class Program
                 var games = GameInstalls.Detect();
                 long need = ConvertSize(g => games.ContainsKey(g));
                 Console.WriteLine($"A convert of the installed games needs about {need >> 30} GB while it builds");
-                Console.WriteLine($"Convert into {outDir}: built {(Util.Drives.FastStaging(outDir, need, "TamrielMergeBuild") is { } st ? $"in {st}, then moved" : "in place")}");
+                Console.WriteLine($"Convert into {outDir}: built {(Util.Drives.FastStaging(outDir, need, "TamrielMergeBuild") is { } st ? $"in {st} (the build folder chosen), then moved" : "in place")}; temporary files in {Util.Paths.Temp ?? Util.Paths.ToolTemp}");
                 return 0;
             }
             case "faction-check":
@@ -1051,6 +1258,102 @@ static class Program
                 }
                 return 0;
             }
+            case "ob-info":
+            {
+                // Dev aid: Oblivion's dialogue responses whose text matches --text (regex), or those of the topics whose
+                // EditorID matches --topic: the topic, quest, flags, lines, conditions, the choices and added topics each
+                // gives, and its result script.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                using var m = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, opts.GetValueOrDefault("plugin", "Oblivion.esm")), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                var textRx = opts.TryGetValue("text", out var tx) ? new System.Text.RegularExpressions.Regex(tx, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+                var topicRx = opts.TryGetValue("topic", out var tp) ? new System.Text.RegularExpressions.Regex(tp, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+                var names = m.EnumerateMajorRecords().Where(r => r is not Mutagen.Bethesda.Oblivion.IPlacedGetter).GroupBy(r => r.FormKey.ID).ToDictionary(g => g.Key, g => g.First().EditorID ?? "(no id)");
+                string Name(uint id) => id == 0 ? "-" : (id & 0xFFFFFF) == 0x14 ? "player" : names.GetValueOrDefault(id & 0xFFFFFF, $"{id:X8}");
+                var topicNames = m.DialogTopics.ToDictionary(t => t.FormKey, t => $"{t.EditorID} \"{t.Name}\"");
+                int shown = 0;
+                foreach (var topic in m.DialogTopics)
+                {
+                    if (topicRx is not null && !topicRx.IsMatch(topic.EditorID ?? "")) continue;
+                    foreach (var item in topic.Items)
+                    {
+                        if (textRx is not null && !item.Responses.Any(r => textRx.IsMatch(r.ResponseText ?? ""))) continue;
+                        if (shown++ >= int.Parse(opts.GetValueOrDefault("max", "40"))) break;
+                        Console.WriteLine($"{topic.EditorID} \"{topic.Name}\" ({topic.DialogType}) info {item.FormKey.ID:X6} quest {Name(item.Quest.FormKey.ID)} flags {item.Data?.Flags}");
+                        foreach (var r in item.Responses) Console.WriteLine($"    \"{r.ResponseText}\"");
+                        foreach (var c in item.Conditions) Console.WriteLine($"    if {c.Function}({Name((uint)c.FirstParameter)}, {((uint)c.SecondParameter < 0x800 ? c.SecondParameter.ToString() : Name((uint)c.SecondParameter))}) {c.CompareOperator} {c.ComparisonValue} [{c.Flags}]");
+                        if (item.Choices.Count > 0) Console.WriteLine("    choices: " + string.Join("; ", item.Choices.Select(c => topicNames.GetValueOrDefault(c.FormKey, c.FormKey.ToString()))));
+                        if (item.Topics.Count > 0) Console.WriteLine("    adds topics: " + string.Join("; ", item.Topics.Select(c => topicNames.GetValueOrDefault(c.FormKey, c.FormKey.ToString()))));
+                        if (item.Script?.SourceCode is { Length: > 0 } src) Console.WriteLine("    result: " + src.Replace("\r", "").Replace("\n", " | "));
+                    }
+                }
+                return 0;
+            }
+            case "ob-refs":
+            {
+                // Dev aid: Oblivion's placed references whose EditorID matches --match (regex), or every one in the
+                // interiors whose EditorID matches --cell: FormID, EditorID, base, place, angles (degrees), and the lock,
+                // owner, "initially disabled" flag and enable parent each has.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                using var m = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, opts.GetValueOrDefault("plugin", "Oblivion.esm")), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                var rx = opts.TryGetValue("match", out var mt) ? new System.Text.RegularExpressions.Regex(mt, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+                var cellRx = opts.TryGetValue("cell", out var ct) ? new System.Text.RegularExpressions.Regex(ct, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+                var names = m.EnumerateMajorRecords().Where(r => r is not Mutagen.Bethesda.Oblivion.IPlacedGetter).GroupBy(r => r.FormKey.ID).ToDictionary(g => g.Key, g => $"{g.First().EditorID ?? "(no id)"} [{g.First().Registration.Name}]");
+                foreach (var cell in m.Cells.Records.SelectMany(bk => bk.SubBlocks).SelectMany(sb => sb.Cells))
+                {
+                    bool whole = cellRx is not null && cellRx.IsMatch(cell.EditorID ?? "");
+                    if (cellRx is not null && !whole) continue;
+                    foreach (var r in cell.Persistent.Concat(cell.Temporary).Concat(cell.VisibleWhenDistant))
+                    {
+                        if (rx is not null && !rx.IsMatch(r.EditorID ?? "")) continue;
+                        Mutagen.Bethesda.Oblivion.ILocationGetter? loc = r switch { Mutagen.Bethesda.Oblivion.IPlacedObjectGetter o => o.Location, Mutagen.Bethesda.Oblivion.IPlacedNpcGetter n => n.Location, Mutagen.Bethesda.Oblivion.IPlacedCreatureGetter c => c.Location, _ => null };
+                        uint baseId = r switch { Mutagen.Bethesda.Oblivion.IPlacedObjectGetter o => o.Base.FormKey.ID, Mutagen.Bethesda.Oblivion.IPlacedNpcGetter n => n.Base.FormKey.ID, Mutagen.Bethesda.Oblivion.IPlacedCreatureGetter c => c.Base.FormKey.ID, _ => 0 };
+                        string extra = "";
+                        if (r is Mutagen.Bethesda.Oblivion.IPlacedObjectGetter po)
+                        {
+                            if (po.Lock is { } lk) extra += $" lock {lk.LockLevel} key {names.GetValueOrDefault(lk.Key.FormKey.ID, "-")}";
+                            if (!po.Owner.IsNull) extra += $" owner {names.GetValueOrDefault(po.Owner.FormKey.ID, po.Owner.FormKey.ToString())}";
+                            if (po.EnableParent is { } ep) extra += $" enable parent {ep.Reference.FormKey.ID:X6} ({ep.Flags})";
+                        }
+                        if ((((Mutagen.Bethesda.Oblivion.IOblivionMajorRecordGetter)r).MajorRecordFlagsRaw & 0x800) != 0) extra += " initially disabled";
+                        Console.WriteLine($"{cell.EditorID}: {r.FormKey.ID:X6} {r.EditorID ?? "-"} base {names.GetValueOrDefault(baseId, baseId.ToString("X6"))} at {loc?.Position.X:F0}, {loc?.Position.Y:F0}, {loc?.Position.Z:F0} rot {(loc?.Rotation.X ?? 0) * 57.29578f:F0}, {(loc?.Rotation.Y ?? 0) * 57.29578f:F0}, {(loc?.Rotation.Z ?? 0) * 57.29578f:F0}{extra}");
+                    }
+                }
+                return 0;
+            }
+            case "ob-npc-packages":
+            {
+                // Dev aid: the AI packages of Oblivion's people whose EditorID matches --match (regex), in their list's
+                // order (Oblivion takes the first whose conditions and schedule hold): kind, flags, target, place, and
+                // each condition (function, its two parameters with the EditorIDs they name, comparison, value).
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                using var m = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, opts.GetValueOrDefault("plugin", "Oblivion.esm")), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                var rx = new System.Text.RegularExpressions.Regex(opts["match"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var names = m.EnumerateMajorRecords().GroupBy(r => r.FormKey.ID).ToDictionary(g => g.Key, g => $"{g.First().EditorID ?? "(no id)"} [{g.First().Registration.Name}]");
+                string Name(uint id) => id == 0 ? "-" : (id & 0xFFFFFF) == 0x14 ? "player" : names.GetValueOrDefault(id & 0xFFFFFF, $"{id:X8}");
+                var packages = m.AIPackages.ToDictionary(pk => pk.FormKey);
+                // People and creatures alike (a rat's packages: the prison's CGRat*).
+                var actors = m.Npcs.Where(n => rx.IsMatch(n.EditorID ?? "")).Select(n => (n.EditorID, n.FormKey, Packages: n.AIPackages.Select(p => p.FormKey).ToList(),
+                        Factions: n.Factions.Select(f => (f.Faction.FormKey.ID, f.Rank)).ToList(), Items: n.Items.Select(it => (it.Item.FormKey.ID, it.Count)).ToList()))
+                    .Concat(m.Creatures.Where(c => rx.IsMatch(c.EditorID ?? "")).Select(c => (c.EditorID, c.FormKey, Packages: c.AIPackages.Select(p => p.FormKey).ToList(),
+                        Factions: c.Factions.Select(f => (f.Faction.FormKey.ID, f.Rank)).ToList(), Items: c.Items.Select(it => (it.Item.FormKey.ID, it.Count)).ToList())));
+                foreach (var npc in actors)
+                {
+                    Console.WriteLine($"{npc.EditorID} {npc.FormKey.ID:X6}: {npc.Packages.Count} packages");
+                    Console.WriteLine("  factions: " + string.Join(", ", npc.Factions.Select(f => $"{Name(f.ID)} rank {f.Rank}")));
+                    Console.WriteLine("  carries: " + string.Join(", ", npc.Items.Select(it => $"{Name(it.ID)} x{it.Count}")));
+                    foreach (var link in npc.Packages)
+                    {
+                        if (!packages.TryGetValue(link, out var pk)) { Console.WriteLine($"  {link} (not in this plugin)"); continue; }
+                        int kind = pk.Data is { } d ? (int)d.Type & 0xFF : -1;
+                        string place = pk.Location is { } l ? $"{l.Type} {Name(l.LocationReference.FormKey.ID)} radius {BitConverter.SingleToInt32Bits(l.Radius)}" : "none";
+                        string target = pk.Target is { } t ? $"{t.ObjectType} {(t.ObjectType == Mutagen.Bethesda.Oblivion.AIPackageTarget.ObjectTypes.ObjectType ? t.Object.ToString() : Name((uint)t.Object))} count {t.Count}" : "none";
+                        Console.WriteLine($"  {pk.EditorID}: kind {kind}, flags {(pk.Data is { } d2 ? $"{(uint)d2.Flags:X}" : "-")}, target {target}, place {place}");
+                        foreach (var c in pk.Conditions)
+                            Console.WriteLine($"      {c.Function}({Name((uint)c.FirstParameter)}, {((uint)c.SecondParameter < 0x800 ? c.SecondParameter.ToString() : Name((uint)c.SecondParameter))}) {c.CompareOperator} {c.ComparisonValue} [{c.Flags}]");
+                    }
+                }
+                return 0;
+            }
             case "sk-packages":
             {
                 // Dev aid: Skyrim.esm's packages whose EditorID, or whose template's, matches --match (regex): template,
@@ -1064,7 +1367,7 @@ static class Program
                     Console.WriteLine($"{pk.FormKey} {pk.EditorID}: template {(pk.PackageTemplate.IsNull ? "none" : Name(pk.PackageTemplate.FormKey))}, flags {pk.Flags}, type {pk.Type}");
                     foreach (var (index, d) in pk.Data)
                     {
-                        string value = d switch
+                        string? value = d switch
                         {
                             IPackageDataTargetGetter t => $"{t.Type} {t.Target?.GetType().Name.Replace("BinaryOverlay", "")} {t.Target switch { IPackageTargetSpecificReferenceGetter r => r.Reference.FormKey.ToString(), IPackageTargetObjectIDGetter o => o.Reference.FormKey.ToString(), IPackageTargetObjectTypeGetter ot => ot.Type.ToString(), _ => "" }}",
                             IPackageDataLocationGetter l => $"{l.Location.Target?.GetType().Name.Replace("BinaryOverlay", "")} radius {l.Location.Radius}",
@@ -1161,10 +1464,34 @@ static class Program
                     var mn = model.Vertices.Aggregate(System.Numerics.Vector3.Min); var mx = model.Vertices.Aggregate(System.Numerics.Vector3.Max);
                     Console.WriteLine($"{name} ({from}, {model.Version}): {model.Vertices.Count} vertices, {model.Faces.Count} faces, bounds {mn}..{mx}");
                     Console.WriteLine($"   textures: {string.Join(" ", model.Faces.GroupBy(f => f.Solid ? $"c{f.ColorIndex}" : $"{f.TextureBank}/{f.ImageId}").OrderByDescending(g => g.Count()).Take(12).Select(g => $"{g.Key}x{g.Count()}"))}");
+                    if (model.Frames.Count > 0)
+                    {
+                        // Each frame's bounds and how far its vertices are from the frame before (the first from the last: a loop closes).
+                        var all = model.Frames.Prepend(model.Vertices.ToArray()).ToList();
+                        Console.WriteLine($"   frames: {all.Count}");
+                        for (int f = 0; f < all.Count; f++)
+                        {
+                            var prev = all[(f + all.Count - 1) % all.Count];
+                            float step = all[f].Select((v, i) => (v - prev[i]).Length()).Max();
+                            Console.WriteLine($"   frame {f}: {all[f].Aggregate(System.Numerics.Vector3.Min)}..{all[f].Aggregate(System.Numerics.Vector3.Max)}, furthest vertex {step:F1} from the frame before");
+                        }
+                    }
                     if (opts.ContainsKey("faces"))
                         foreach (var f in model.Faces.Take(int.Parse(opts["faces"])))
                             Console.WriteLine($"   {(f.Solid ? $"c{f.ColorIndex}" : $"{f.TextureBank}/{f.ImageId}")}: {string.Join("  ", f.Vertices.Select((v, i) => $"{v}:({f.Uv[i].X:F1},{f.Uv[i].Y:F1})"))}");
                 }
+                return 0;
+            }
+            case "rg-objects":
+            {
+                // Dev aid: a scene's (--scene, default ISLAND) objects whose script matches --script (regex): index, object
+                // type, model and script, counted by type and model.
+                string rg = GameInstalls.DataDir(Game.Redguard)!;
+                var scene = Redguard.RgScene.Load(File.ReadAllBytes(Path.Combine(rg, "maps", opts.GetValueOrDefault("scene", "ISLAND") + ".RGM")))!;
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("script", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var hits = Enumerable.Range(0, scene.Objects.Count).Where(i => rx.IsMatch(scene.Objects[i].Script)).ToList();
+                foreach (var g in hits.GroupBy(i => (scene.ObjectTypes[i], scene.Objects[i].Model, scene.Objects[i].Script)))
+                    Console.WriteLine($"{g.Count(),4} x type {g.Key.Item1} model '{g.Key.Model}' script {g.Key.Script} (e.g. #{g.First()})");
                 return 0;
             }
             case "rg-map":
@@ -1196,6 +1523,25 @@ static class Program
                     foreach (var o in set) Put((int)(o.Position.X / Redguard.RgWorld.Cell * px), (int)((opts.ContainsKey("flip") ? Redguard.RgWorld.Size * Redguard.RgWorld.Cell - o.Position.Z : o.Position.Z) / Redguard.RgWorld.Cell * px), color);
                 Util.Png.WriteRgb(opts["out"], n, n, rgb);
                 Console.WriteLine($"wrote {opts["out"]}");
+                return 0;
+            }
+            case "rg-tiles":
+            {
+                // Dev aid: a Redguard world's (--world, default ISLAND) ground pictures read as mixes (RgTileMix): how
+                // many are plain, how many are meetings, and each way of laying the pictures with the grid points where
+                // the four squares round a point agree on its ground (the right way agrees most).
+                string rg = GameInstalls.DataDir(Game.Redguard)!;
+                string world = opts.GetValueOrDefault("world", "ISLAND");
+                var w = Redguard.RgWorld.Load(File.ReadAllBytes(Path.Combine(rg, "maps", world + ".WLD")))!;
+                var pal = Redguard.RgPalette.Load(File.ReadAllBytes(Path.Combine(rg, "3dart", opts.GetValueOrDefault("palette", "ISLAND") + ".COL")));
+                var tiles = Redguard.RgTextureBank.Load(File.ReadAllBytes(Path.Combine(rg, "3dart", "TEXTURE.302")))!;
+                var mix = new Redguard.RgTileMix(w, tiles, pal, _ => true);
+                Console.WriteLine($"{world}: {mix.Plain} plain pictures, {mix.Mixed} meetings");
+                foreach (var (way, agree, differ) in mix.Scores())
+                    Console.WriteLine($"  {way.Name,-36} rows {(way.RowsNorth ? "north" : "south")}: {agree} points agree, {differ} differ");
+                var turns = new int[4];
+                for (int z = 0; z < Redguard.RgWorld.Size; z++) for (int x = 0; x < Redguard.RgWorld.Size; x++) turns[w.Texture[x, z] >> 6]++;
+                Console.WriteLine($"  squares by turn 0-3: {string.Join(", ", turns)}");
                 return 0;
             }
             case "rg-doors":
@@ -1320,22 +1666,186 @@ static class Program
                 foreach (var p in builder.Problems.Take(40)) Console.WriteLine($"  problem: {p}");
                 if (builder.Problems.Count > 40) Console.WriteLine($"  ... {builder.Problems.Count - 40} more problems");
                 Console.WriteLine($"  terrain LOD chunks: {builder.TerrainLodChunks}; Skyrim water surfaces: {builder.WaterSurfaces}; ships: {builder.Ships}");
+                Console.WriteLine($"  interiors: {builder.InteriorsCentred} built about the origin; {Redguard.RgPluginBuilder.InteriorPlacesHeld} placings of objects Redguard parks at its map's corner held {Redguard.RgPluginBuilder.InteriorReach:F0} out");
                 Console.WriteLine($"  lights: {builder.LightCount} placed ({builder.ObjectLightsPlaced} local-light objects; {builder.DarkeningLights} with darkening channels, those left out: Skyrim's lights only add)");
                 Console.WriteLine($"  records: {builder.Mod.Statics.Count} statics, {builder.Mod.Lights.Count} lights, {builder.Mod.Worldspaces.Count} worldspaces, {builder.Mod.Cells.Records.Sum(b => b.SubBlocks.Sum(sb => sb.Cells.Count))} interiors, {builder.Mod.LandscapeTextures.Count} land textures");
                 Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
+                Console.WriteLine($"  navmesh gaps joined: {Skyrim.Navmesh.NavmeshBuilder.GapsBridged} ({string.Join(", ", Skyrim.Navmesh.NavmeshBuilder.BridgeReasons.OrderBy(r => r.Key).Select(r => $"{r.Key} {r.Value}"))})");
                 builder.Write();
                 Console.WriteLine($"Wrote {Path.GetFullPath(Path.Combine(outDir, Redguard.RgPluginBuilder.PluginName))} in {sw.Elapsed.TotalSeconds:F0}s");
+                return 0;
+            }
+            case "rg-floating":
+            {
+                // Dev aid: Redguard's placed models that stand higher over the stretched land than over Redguard's own
+                // (RgPluginBuilder.FloatReport); --min the rise that counts (default 24 units).
+                string rg = GameInstalls.DataDir(Game.Redguard) ?? throw new DirectoryNotFoundException("Redguard isn't installed through Steam or GOG");
+                var floatBuilder = new Redguard.RgPluginBuilder(rg, opts.GetValueOrDefault("out", "out/rgmod"), skyrimData);
+                var report = floatBuilder.FloatReport();
+                Console.WriteLine($"small models in a big one's footprint (doors in walls, lanterns on houses): {floatBuilder.Together} pairs, {floatBuilder.Apart.Count} moved apart by over a unit" + (floatBuilder.Apart.Count > 0 ? $", most {floatBuilder.Apart.Max(x => x.Distance):F0}" : ""));
+                foreach (var g in floatBuilder.Apart.GroupBy(x => (x.Scene, x.Small)).OrderByDescending(g => g.Max(x => x.Distance)).Take(25))
+                    Console.WriteLine($"    {g.Key.Scene} {g.Key.Small}: {g.Count()} pairs, up to {g.Max(x => x.Distance):F0} from {g.OrderByDescending(x => x.Distance).First().Big}");
+                float least = float.Parse(opts.GetValueOrDefault("min", "24"), System.Globalization.CultureInfo.InvariantCulture);
+                var risen = report.Where(r => r.Now - r.Before > least && r.Now > 8 && (!opts.ContainsKey("dry") || r.At.Z > 4)).OrderByDescending(r => r.Now - r.Before).ToList();
+                var sunk = report.Where(r => r.Before - r.Now > least && r.Now < -8).ToList();
+                Console.WriteLine($"{report.Count} placed models on land; {risen.Count} stand over {least} higher than in Redguard ({risen.Count(r => r.Rigid)} rigid, {risen.Count(r => !r.Rigid)} free); {sunk.Count} sunk over {least} deeper");
+                Console.WriteLine($"  floating in Redguard itself by over {least} and as much now: {report.Count(r => r.Before > least && MathF.Abs(r.Now - r.Before) <= least)}");
+                foreach (var r in risen.Take(int.Parse(opts.GetValueOrDefault("show", "60"))))
+                    Console.WriteLine($"  {r.Scene} {r.Model,-10} {(r.Rigid ? "rigid" : "free "),-5} size {r.Size,5:F0} at ({r.At.X:F0}, {r.At.Y:F0}, {r.At.Z:F0}): over the land {r.Before:F0} -> {r.Now:F0}");
+                // --match REGEX: every placed model of those names, with its foot's height and the gap under it.
+                if (opts.TryGetValue("match", out var floatMatch))
+                {
+                    var frx = new System.Text.RegularExpressions.Regex(floatMatch, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    foreach (var g in report.Where(r => frx.IsMatch(r.Model)).GroupBy(r => r.Model).OrderBy(g => g.Key))
+                    {
+                        Console.WriteLine($"  {g.Key}: {g.Count()} placed, {(g.First().Rigid ? "rigid" : "free")}, size {g.First().Size:F0}; over the land now: least {g.Min(r => r.Now):F0}, median {g.OrderBy(r => r.Now).ElementAt(g.Count() / 2).Now:F0}, most {g.Max(r => r.Now):F0}");
+                        foreach (var r in g.OrderByDescending(r => r.Now).Take(6))
+                            Console.WriteLine($"      {r.Scene} foot at ({r.At.X:F0}, {r.At.Y:F0}, {r.At.Z:F0}): over the land {r.Before:F0} -> {r.Now:F0}");
+                    }
+                    return 0;
+                }
+                Console.WriteLine("sunk:");
+                foreach (var r in sunk.OrderBy(r => r.Now - r.Before).Take(20))
+                    Console.WriteLine($"  {r.Scene} {r.Model,-10} {(r.Rigid ? "rigid" : "free "),-5} size {r.Size,5:F0} at ({r.At.X:F0}, {r.At.Y:F0}, {r.At.Z:F0}): over the land {r.Before:F0} -> {r.Now:F0}");
+                return 0;
+            }
+            case "df-light-test":
+            {
+                // Dev aid: a small plugin (--out, default TMLightTest.esp in the working folder) overriding the installed
+                // Daggerfall.esm's weathers with the light AtmosphereBuilder gives them now, for trying numbers in game
+                // without a conversion: --sun, --ambient (day), --night (ambient), --brightness, --bloom.
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                if (opts.TryGetValue("sun", out var ls)) Skyrim.AtmosphereBuilder.SunScale = float.Parse(ls, inv);
+                if (opts.TryGetValue("ambient", out var la)) Skyrim.AtmosphereBuilder.AmbientDay = float.Parse(la, inv);
+                if (opts.TryGetValue("night", out var ln)) Skyrim.AtmosphereBuilder.AmbientNight = float.Parse(ln, inv);
+                if (opts.TryGetValue("brightness", out var lb)) Skyrim.AtmosphereBuilder.Brightness = float.Parse(lb, inv);
+                if (opts.TryGetValue("bloom", out var lbl)) Skyrim.AtmosphereBuilder.BloomScale = float.Parse(lbl, inv);
+                using var df = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Daggerfall.esm"), SkyrimRelease.SkyrimSE);
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                string outPath = opts.GetValueOrDefault("out", "TMLightTest.esp");
+                var test = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(outPath)), SkyrimRelease.SkyrimSE);
+                int n = 0;
+                foreach (var w in df.Weathers.Where(w => w.EditorID?.StartsWith("DF") == true))
+                {
+                    var copy = w.DeepCopy(); test.Weathers.Add(copy);
+                    // The installed copies still carry Skyrim's image spaces (or an earlier build's dimmed ones: left).
+                    Skyrim.AtmosphereBuilder.Relight(copy);
+                    if (copy.ImageSpaces is { } sp && sp.Day.FormKey.ModKey == sk.ModKey) Skyrim.AtmosphereBuilder.Dim(test, sk, copy);
+                    n++;
+                }
+                test.WriteToBinary(outPath, new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters { ModKey = Mutagen.Bethesda.Plugins.Binary.Parameters.ModKeyOption.NoCheck });
+                Console.WriteLine($"{n} weathers relit (sun {Skyrim.AtmosphereBuilder.SunScale}, ambient {Skyrim.AtmosphereBuilder.AmbientNight}-{Skyrim.AtmosphereBuilder.AmbientDay}, brightness x{Skyrim.AtmosphereBuilder.Brightness}, bloom x{Skyrim.AtmosphereBuilder.BloomScale}); {test.ImageSpaces.Count} image spaces; wrote {Path.GetFullPath(outPath)}");
+                return 0;
+            }
+            case "df-uv-census":
+            {
+                // Dev aid: Daggerfall's models read as Daggerfall Unity reads them (DfModel): how many texture coordinates
+                // were packed, how many polygons' fans start at another point than their first, and how many polygons are
+                // left with a texture running over 16 times across one edge (a smear).
+                var all = DfModel.LoadAll(arena2);
+                int polys = all.Values.Sum(m => m.Polygons.Count), smeared = 0, concave = 0;
+                foreach (var m in all.Values)
+                    foreach (var poly in m.Polygons)
+                    {
+                        if (poly.Uvs is not { } uv || poly.Points.Length < 3) continue;
+                        for (int i = 0; i < poly.Points.Length; i++)
+                        {
+                            int j = (i + 1) % poly.Points.Length;
+                            float length = (poly.Points[j] - poly.Points[i]).Length(), texels = (uv[j] - uv[i]).Length();
+                            // Daggerfall's usual density is about a texel a unit; 16 times that over an edge is a streak.
+                            if (length > 8 && texels / length > 16) { smeared++; break; }
+                        }
+                        var n = poly.Normal;
+                        bool anyLeft = false, anyRight = false;
+                        for (int i = 0; i < poly.Points.Length; i++)
+                        {
+                            var p0 = poly.Points[i]; var p1 = poly.Points[(i + 1) % poly.Points.Length]; var p2 = poly.Points[(i + 2) % poly.Points.Length];
+                            float turn = System.Numerics.Vector3.Dot(System.Numerics.Vector3.Cross(p1 - p0, p2 - p1), n);
+                            if (turn > 1e-3f) anyLeft = true; else if (turn < -1e-3f) anyRight = true;
+                        }
+                        if (anyLeft && anyRight) concave++;
+                    }
+                Console.WriteLine($"{all.Count} models, {polys:N0} polygons: {DfModel.Unpacked:N0} packed texture coordinates unpacked, {DfModel.Fanned:N0} polygons fanned from another point than their first; "
+                    + $"{concave:N0} polygons are not convex; {smeared:N0} still run a texture over 16 texels a unit along an edge");
                 return 0;
             }
             case "rg-euler-test":
             {
                 // Dev aid: RgSpace.Euler recomposes to the same rotation (random rotations, max element error).
+                // With --scene NAME: every placement of that scene instead, the worst error and the placements over 0.01.
+                if (opts.TryGetValue("scene", out var eulerScene))
+                {
+                    string rgE = GameInstalls.DataDir(Game.Redguard)!;
+                    var sc = Redguard.RgScene.Load(File.ReadAllBytes(Path.Combine(rgE, "maps", eulerScene + ".RGM")))!;
+                    float worstPlaced = 0; int nPlaced = 0, badPlaced = 0;
+                    foreach (var o in sc.Statics.Concat(sc.Objects))
+                    {
+                        nPlaced++;
+                        var e = Redguard.RgSpace.Euler(o.Rotation);
+                        var sk = Redguard.RgSpace.SkyrimMatrix(e);
+                        float err = 0;
+                        foreach (var v in new[] { System.Numerics.Vector3.UnitX, System.Numerics.Vector3.UnitY, System.Numerics.Vector3.UnitZ })
+                            err = MathF.Max(err, (Redguard.RgSpace.Dir(System.Numerics.Vector3.Transform(v, o.Rotation)) - System.Numerics.Vector3.Transform(Redguard.RgSpace.Dir(v), sk)).Length());
+                        worstPlaced = MathF.Max(worstPlaced, err);
+                        if (err > 0.01f) { badPlaced++; Console.WriteLine($"  {o.Model} {o.Script}: error {err:F3}, angles {e * 57.29578f}"); }
+                        else if (o.Model.Contains("BANN", StringComparison.OrdinalIgnoreCase)) Console.WriteLine($"  {o.Model}: angles {e * 57.29578f}, its long side goes to {Redguard.RgSpace.Dir(System.Numerics.Vector3.Transform(System.Numerics.Vector3.UnitZ, o.Rotation))}, its face to {Redguard.RgSpace.Dir(System.Numerics.Vector3.Transform(System.Numerics.Vector3.UnitY, o.Rotation))}");
+                    }
+                    // Each flat model (no thickness one way: banners, cloths, signs) against the scene's biggest model (the
+                    // room): how far the room's nearest surface is in front of its face and behind it, from its middle.
+                    if (Redguard.RgRob.Load(File.ReadAllBytes(Path.Combine(rgE, "3dart", eulerScene + ".ROB"))) is { } robE)
+                    {
+                        Redguard.RgModel? ModelOf(string file)
+                        {
+                            string nm = file.Split('.')[0].Trim();
+                            var seg = robE.Segments.FirstOrDefault(sg => sg.Type != 512 && sg.Name.Trim().Equals(nm, StringComparison.OrdinalIgnoreCase));
+                            return seg is null ? null : Redguard.RgModel.Load(robE.Data, seg.DataOffset);
+                        }
+                        var withModels = sc.Statics.Concat(sc.Objects).Where(o => o.Model.Length > 0).Select(o => (O: o, M: ModelOf(o.Model))).Where(t => t.M is { Vertices.Count: > 0 }).ToList();
+                        if (withModels.Count > 0)
+                        {
+                            var room = withModels.OrderByDescending(t => { var mn = t.M!.Vertices.Aggregate(System.Numerics.Vector3.Min); var mx = t.M.Vertices.Aggregate(System.Numerics.Vector3.Max); return (mx - mn).Length(); }).First();
+                            var roomTris = new List<(System.Numerics.Vector3 A, System.Numerics.Vector3 B, System.Numerics.Vector3 C)>();
+                            var rv = room.M!.Vertices.Select(v => room.O.Position + System.Numerics.Vector3.Transform(v, room.O.Rotation)).ToList();
+                            foreach (var f in room.M.Faces) for (int t = 1; t + 1 < f.Vertices.Length; t++) roomTris.Add((rv[f.Vertices[0]], rv[f.Vertices[t]], rv[f.Vertices[t + 1]]));
+                            float Hit(System.Numerics.Vector3 from, System.Numerics.Vector3 dir)
+                            {
+                                float best = float.MaxValue;
+                                foreach (var (a0, b0, c0) in roomTris)
+                                {
+                                    var e1 = b0 - a0; var e2 = c0 - a0; var pv = System.Numerics.Vector3.Cross(dir, e2); float det = System.Numerics.Vector3.Dot(e1, pv);
+                                    if (MathF.Abs(det) < 1e-6f) continue;
+                                    var tv = from - a0; float u = System.Numerics.Vector3.Dot(tv, pv) / det; if (u < 0 || u > 1) continue;
+                                    var qv = System.Numerics.Vector3.Cross(tv, e1); float v = System.Numerics.Vector3.Dot(dir, qv) / det; if (v < 0 || u + v > 1) continue;
+                                    float tt = System.Numerics.Vector3.Dot(e2, qv) / det; if (tt > 1e-3f && tt < best) best = tt;
+                                }
+                                return best;
+                            }
+                            foreach (var (o, m) in withModels.Where(t => t.O != room.O))
+                            {
+                                var mn = m!.Vertices.Aggregate(System.Numerics.Vector3.Min); var mx = m.Vertices.Aggregate(System.Numerics.Vector3.Max); var size = mx - mn;
+                                int thin = size.X < 1 ? 0 : size.Y < 1 ? 1 : size.Z < 1 ? 2 : -1;
+                                if (thin < 0) continue;
+                                var normal = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Transform(thin == 0 ? System.Numerics.Vector3.UnitX : thin == 1 ? System.Numerics.Vector3.UnitY : System.Numerics.Vector3.UnitZ, o.Rotation));
+                                var mid = o.Position + System.Numerics.Vector3.Transform((mn + mx) / 2, o.Rotation);
+                                float f1 = Hit(mid, normal), f2 = Hit(mid, -normal);
+                                Console.WriteLine($"  flat {o.Model.Trim()} at {o.Position}: the room's surface {(f1 == float.MaxValue ? "none" : f1.ToString("F1"))} one way, {(f2 == float.MaxValue ? "none" : f2.ToString("F1"))} the other (room {room.O.Model.Trim()})");
+                            }
+                        }
+                    }
+                    Console.WriteLine($"{eulerScene}: {nPlaced} placements, worst error {worstPlaced:G3}, {badPlaced} over 0.01");
+                    return 0;
+                }
                 var rnd = new Random(1);
                 float worst = 0;
                 for (int i = 0; i < 2000; i++)
                 {
                     var q = System.Numerics.Quaternion.Normalize(new((float)rnd.NextDouble() - 0.5f, (float)rnd.NextDouble() - 0.5f, (float)rnd.NextDouble() - 0.5f, (float)rnd.NextDouble() - 0.5f));
                     if (i % 4 == 0) q = System.Numerics.Quaternion.CreateFromAxisAngle(System.Numerics.Vector3.UnitY, (float)rnd.NextDouble() * 6.28f);
+                    // The exact quarter turns (a banner laid flat in its model and hung by its placement): the case where two of
+                    // the three angles turn about the same line.
+                    if (i % 4 == 1)
+                        q = System.Numerics.Quaternion.CreateFromAxisAngle(i % 8 == 1 ? System.Numerics.Vector3.UnitX : System.Numerics.Vector3.UnitZ, (i % 16 < 8 ? 1 : -1) * MathF.PI / 2)
+                            * System.Numerics.Quaternion.CreateFromAxisAngle(System.Numerics.Vector3.UnitY, (i % 32 < 16 ? MathF.PI / 2 * rnd.Next(4) : (float)rnd.NextDouble() * 6.28f));
                     var rot = System.Numerics.Matrix4x4.CreateFromQuaternion(q);
                     var e = Redguard.RgSpace.Euler(rot);
                     var sk = Redguard.RgSpace.SkyrimMatrix(e);
@@ -1410,6 +1920,65 @@ static class Program
                 }
                 Util.Png.WriteRgb(opts["out"], n, n, img);
                 Console.WriteLine($"wrote {opts["out"]}");
+                return 0;
+            }
+            case "rg-uv-stretch":
+            {
+                // Dev aid: a scene's textured faces whose texture is stretched (--scene TAVERN): from each face's final UVs,
+                // the texels per unit along its most and least stretched directions; faces whose two differ by more than
+                // --ratio (default 6), by vertex count and by how nearly in line the first three vertices are, with examples.
+                string rgDir = GameInstalls.DataDir(Game.Redguard)!;
+                var robS = Redguard.RgRob.Load(File.ReadAllBytes(Path.Combine(rgDir, "3dart", opts.GetValueOrDefault("scene", "TAVERN") + ".ROB")))!;
+                float limit = float.Parse(opts.GetValueOrDefault("ratio", "6"), System.Globalization.CultureInfo.InvariantCulture);
+                int faces = 0, bad = 0, shown = 0; var by = new SortedDictionary<string, int>(); int big = 0;
+                int mi = -1;
+                foreach (var sg in robS.Segments.Where(sg => sg.Type != 512))
+                {
+                    mi++;
+                    if (Redguard.RgModel.Load(robS.Data, sg.DataOffset) is not { } md) continue;
+                    for (int fi = 0; fi < md.Faces.Count; fi++)
+                    {
+                        var f = md.Faces[fi];
+                        if (f.Solid || f.Vertices.Length < 3) continue;
+                        faces++;
+                        float worst = 0; float sinFirst = 0;
+                        for (int k = 2; k < f.Vertices.Length; k++)
+                        {
+                            var p0 = md.Vertices[f.Vertices[0]]; var e1 = md.Vertices[f.Vertices[k - 1]] - p0; var e2 = md.Vertices[f.Vertices[k]] - p0;
+                            var nrm = System.Numerics.Vector3.Cross(e1, e2);
+                            float area = nrm.Length();
+                            if (k == 2) sinFirst = area / MathF.Max(1e-6f, e1.Length() * e2.Length());
+                            if (area < 1e-3f) continue;
+                            // The triangle's own 2D frame, then the UV Jacobian's singular values.
+                            var ax = System.Numerics.Vector3.Normalize(e1); var ay = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(nrm, e1));
+                            float x1 = e1.Length(), x2 = System.Numerics.Vector3.Dot(e2, ax), y2 = System.Numerics.Vector3.Dot(e2, ay);
+                            var d1 = f.Uv[k - 1] - f.Uv[0]; var d2 = f.Uv[k] - f.Uv[0];
+                            float a11 = d1.X / x1, a21 = d1.Y / x1, a12 = (d2.X - a11 * x2) / y2, a22 = (d2.Y - a21 * x2) / y2;
+                            float t = a11 * a11 + a12 * a12 + a21 * a21 + a22 * a22, dt = MathF.Abs(a11 * a22 - a12 * a21);
+                            float s1 = MathF.Sqrt((t + MathF.Sqrt(MathF.Max(0, t * t - 4 * dt * dt))) / 2), s2 = dt / MathF.Max(1e-9f, s1);
+                            worst = MathF.Max(worst, s1 / MathF.Max(1e-6f, s2));
+                        }
+                        // --plane axis,value,within (e.g. x,611,5): every face lying in that plane of its model, stretched or not.
+                        if (opts.TryGetValue("plane", out var planeSpec) && planeSpec.Split(',') is [var pax, var pval, var pwithin])
+                        {
+                            float want = float.Parse(pval, System.Globalization.CultureInfo.InvariantCulture), within = float.Parse(pwithin, System.Globalization.CultureInfo.InvariantCulture);
+                            float Axis(System.Numerics.Vector3 v) => pax == "x" ? v.X : pax == "y" ? v.Y : v.Z;
+                            if (f.Vertices.All(v => MathF.Abs(Axis(md.Vertices[v]) - want) <= within))
+                                Console.WriteLine($"  plane: model {mi} face {fi}: {f.Vertices.Length} vertices, ratio {worst:F1}, sin {sinFirst:F3}, bank {f.TextureBank} image {f.ImageId}, raw {string.Join(" ", f.Raw.Select(r => $"({r.X:F0},{r.Y:F0})"))}, pos {string.Join(" ", f.Vertices.Select(v => $"({md.Vertices[v].X:F0},{md.Vertices[v].Y:F0},{md.Vertices[v].Z:F0})"))}");
+                        }
+                        if (worst <= limit) continue;
+                        bad++;
+                        string key = $"{Math.Min(f.Vertices.Length, 6)}{(f.Vertices.Length >= 6 ? "+" : "")} vertices, first three {(sinFirst < 0.02f ? "in line" : sinFirst < 0.2f ? "nearly in line" : "spread")}";
+                        by[key] = by.GetValueOrDefault(key) + 1;
+                        float faceArea = 0;
+                        for (int k = 2; k < f.Vertices.Length; k++) faceArea += System.Numerics.Vector3.Cross(md.Vertices[f.Vertices[k - 1]] - md.Vertices[f.Vertices[0]], md.Vertices[f.Vertices[k]] - md.Vertices[f.Vertices[0]]).Length() / 2;
+                        if (faceArea >= float.Parse(opts.GetValueOrDefault("area", "0"), System.Globalization.CultureInfo.InvariantCulture)) { big++; Console.Write($"  area {faceArea:F0} bank {f.TextureBank} image {f.ImageId}"); } else continue;
+                        if (shown++ < int.Parse(opts.GetValueOrDefault("show", "6")))
+                            Console.WriteLine($" model {mi} face {fi}: {f.Vertices.Length} vertices, ratio {worst:F0}, sin {sinFirst:F3}, raw {string.Join(" ", f.Raw.Select(r => $"({r.X:F0},{r.Y:F0})"))}, uv {string.Join(" ", f.Uv.Select(r => $"({r.X:F0},{r.Y:F0})"))}");
+                    }
+                }
+                Console.WriteLine($"{faces} textured faces, {bad} stretched more than {limit}:1, {big} of them at least the area asked");
+                foreach (var (k, v) in by) Console.WriteLine($"  {v,6}  {k}");
                 return 0;
             }
             case "rg-uvtest":
@@ -2022,21 +2591,32 @@ static class Program
                         .Where(l => !spec.StartsWith("banks:") || HasBank(l))
                         .Take(int.Parse(spec.Split(':')[1])).ToList()
                     : locs.Where(l => l.ExteriorBlocks.Length > 0 && wanted.Any(w => l.Name.Equals(w[0], StringComparison.OrdinalIgnoreCase) && (w.Length < 2 || l.RegionName.Equals(w[1], StringComparison.OrdinalIgnoreCase)))).ToList();
+                // Each on the stand-in overland in cells of its own, side by side west to east, two cells apart.
+                var testCells = new Dictionary<(int, int), Cell>();
+                Cell TestCell(int cx, int cy)
+                {
+                    if (testCells.TryGetValue((cx, cy), out var c)) return c;
+                    c = new Cell(mod) { Grid = new CellGrid { Point = new Noggog.P2Int(cx, cy) }, Persistent = [], Temporary = [] };
+                    Skyrim.Terrain.TerrainBuilder.AddCell(overland, c);
+                    return testCells[(cx, cy)] = c;
+                }
+                int nextCell = 0;
                 foreach (var town in picked)
                 {
-                    var t = townBuilder.Build(town, skyrim, overland, new Noggog.P3Float(0, 0, 0));
+                    int w = town.BlockWidth * Skyrim.Terrain.LocationLayout.CellsPerBlock, h = town.BlockHeight * Skyrim.Terrain.LocationLayout.CellsPerBlock;
+                    var t = townBuilder.Build(town, skyrim, new TownBuilder.OverlandSite(overland, TestCell, new Noggog.P3Float(nextCell * 4096f, 0, 0), w, h));
+                    nextCell += w + 2;
                     built.Add(t);
                     Console.WriteLine($"{town.Name} ({town.RegionName}): {t.Buildings} buildings, {t.Interiors} new interiors, {t.Doors} street doors ({t.Unlinked} without a way in) ({sw.Elapsed.TotalSeconds:F0}s)");
                     Console.WriteLine($"  {string.Join(", ", t.Fixtures.OrderByDescending(f => f.Value).Take(30).Select(f => $"{f.Key} {f.Value}"))}");
                 }
                 Console.WriteLine($"shared interiors: {townBuilder.SharedInteriors}, townsfolk: {townBuilder.Placed.Count}");
-                Console.WriteLine($"town navmesh edge links: {dungeons.Navmeshes.LinkExteriorEdges()}");
-                var talk = new TownTalk(mod, DfText.Load(arena2), townBuilder.People!.Factions);
+                var talk = new TownTalk(mod, DfText.Load(arena2));
                 talk.Enlist(townBuilder.Placed);
                 talk.Build(built, townBuilder.TalkQuest, townBuilder.Shops?.Shopkeepers, townBuilder.Shops?.TavernKeepers, townBuilder.Shops?.Bankers);
                 Console.WriteLine($"talk: {talk.Responses} responses; shops: {townBuilder.Shops!.Shops}");
                 townBuilder.AttachDaytime();
-                var guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2), townBuilder.People!.Factions);
+                var guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2));
                 guilds.Build(talk, townBuilder.TalkQuest, townBuilder.Placed, townBuilder.BreakIns);
                 Console.WriteLine($"guilds: {guilds.Members} with people here ({string.Join(", ", mod.Factions.Where(f => f.EditorID?.StartsWith("DFGuild") == true).Select(f => f.EditorID![7..]))}), {guilds.Trainers} trainers, {guilds.Responses} responses");
                 if (clutter.Missing.Count > 0) Console.WriteLine($"clutter forms not found: {string.Join(", ", clutter.Missing)}");
@@ -2097,7 +2677,7 @@ static class Program
                 // Dev aid: the overland heights file the conversion gives its town and dungeon parts (TAMRIELMERGE_HEIGHTS).
                 string path = Path.GetFullPath(opts.GetValueOrDefault("out", "heights.bin"));
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom(opts)).Save(path);
+                Skyrim.Terrain.HeightField.Daggerfall(DfWorldMap.Load(arena2), TerrainSettingsFrom(opts), DfLocations.LoadAll(arena2)).Field.Save(path);
                 Console.WriteLine($"Wrote {path} ({new FileInfo(path).Length / 1048576} MB) in {sw.Elapsed.TotalSeconds:F0} s");
                 return 0;
             }
@@ -2115,16 +2695,25 @@ static class Program
                     using var master = SkyrimMod.CreateFromBinaryOverlay(main, SkyrimRelease.SkyrimSE);
                     var all = Skyrim.DaggerfallTowns.All(arena2, master);
                     Console.WriteLine($"{all.Count} towns, {all.Sum(t => t.ExteriorBlocks.Length)} blocks beyond {Path.GetFileName(main)}");
+                    // --blocks A.RMB,B.RMB: only the batches with a location using one of those blocks, and which.
+                    var wantBlocks = opts.GetValueOrDefault("blocks", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
                     for (int b = 1; b <= batches; b++)
                     {
                         var slice = Skyrim.DaggerfallTowns.Slice(all, b, batches);
+                        if (wantBlocks.Count > 0)
+                        {
+                            var using_ = slice.Where(t => t.ExteriorBlocks.Any(wantBlocks.Contains)).Select(t => t.Name).ToList();
+                            if (using_.Count > 0) Console.WriteLine($"  batch {b}: {string.Join(", ", using_)}");
+                            continue;
+                        }
                         Console.WriteLine($"  batch {b}: {slice.Count} towns, {slice.Sum(t => t.ExteriorBlocks.Length)} blocks, biggest {slice.MaxBy(t => t.ExteriorBlocks.Length)?.Name} ({slice.Max(t => (int?)t.ExteriorBlocks.Length)})");
                     }
                     return 0;
                 }
                 int batch = int.Parse(opts.GetValueOrDefault("batch", "1"));
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var r = Skyrim.DaggerfallTowns.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts));
+                // --build-dir: the conversion's folder (the layout and land plugins), when --plugin is a part's own copy.
+                var r = Skyrim.DaggerfallTowns.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts), opts.TryGetValue("build-dir", out var townsDir) ? Path.GetFullPath(townsDir) : null);
                 Console.WriteLine($"Towns batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.People} people ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
                 Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 Console.WriteLine($"  time: setup {r.SetupSeconds:F0} s, towns {r.TownsSeconds:F0} s, talk and guilds {r.TalkSeconds:F0} s, writing {r.WriteSeconds:F0} s");
@@ -2136,8 +2725,32 @@ static class Program
                 // N.esm" beside --plugin (the built Daggerfall.esm, their master).
                 string main = Path.GetFullPath(opts.GetValueOrDefault("plugin", "out/convert/Daggerfall.esm"));
                 int batch = int.Parse(opts.GetValueOrDefault("batch", "1")), batches = int.Parse(opts.GetValueOrDefault("batches", "8"));
+                // --list [--blocks A.RMB,B.RMB]: each batch's dungeons (as the parts slice them), or only those using the blocks.
+                if (opts.ContainsKey("list"))
+                {
+                    var allDungeons = Skyrim.DaggerfallDungeons.All(arena2);
+                    var wanted = opts.GetValueOrDefault("blocks", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    int perBatch = (allDungeons.Count + batches - 1) / batches;
+                    // --block-use: how often the dungeons' blocks repeat (each block's navmesh could be made once).
+                    if (opts.ContainsKey("block-use"))
+                    {
+                        var uses = allDungeons.SelectMany(d => d.DungeonBlocks.Select(b => b.BlockName)).GroupBy(n => n, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()).ToList();
+                        var sizes = allDungeons.Select(d => d.DungeonBlocks.Count).OrderBy(n => n).ToList();
+                        Console.WriteLine($"{allDungeons.Count} dungeons, {uses.Sum(g => g.Count())} blocks placed, {uses.Count} distinct; blocks a dungeon: median {sizes[sizes.Count / 2]}, 90% {sizes[sizes.Count * 9 / 10]}, most {sizes[^1]}");
+                        Console.WriteLine("most used: " + string.Join(", ", uses.Take(12).Select(g => $"{g.Key} {g.Count()}")));
+                        Console.WriteLine("biggest: " + string.Join(", ", allDungeons.OrderByDescending(d => d.DungeonBlocks.Count).Take(8).Select(d => $"{d.Name} {d.DungeonBlocks.Count}")));
+                        return 0;
+                    }
+                    for (int b = 1; b <= batches; b++)
+                    {
+                        var slice = allDungeons.Skip((b - 1) * perBatch).Take(perBatch).ToList();
+                        var shown = wanted.Count == 0 ? slice : slice.Where(d => d.ExteriorBlocks.Any(wanted.Contains)).ToList();
+                        if (shown.Count > 0) Console.WriteLine($"  batch {b}: {(wanted.Count == 0 ? $"{slice.Count} dungeons" : string.Join(", ", shown.Select(d => d.Name)))}");
+                    }
+                    return 0;
+                }
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var r = Skyrim.DaggerfallDungeons.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts));
+                var r = Skyrim.DaggerfallDungeons.Build(arena2, skyrimData, main, batch, batches, TerrainSettingsFrom(opts), opts.TryGetValue("build-dir", out var dungeonsDir) ? Path.GetFullPath(dungeonsDir) : null);
                 Console.WriteLine($"Dungeons batch {batch}/{batches}: {r.Built} built, {r.Failed} failed, {r.References} references, {r.NavmeshTriangles} navmesh triangles, {Skyrim.Navmesh.NavmeshBuilder.InteriorsShared} navmeshes made by other parts ({sw.Elapsed.TotalMinutes:F1} min) -> {r.Path}");
                 Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 Console.WriteLine($"  time: setup {r.SetupSeconds:F0} s, dungeons {r.LayoutSeconds:F0} s (navmeshes {r.NavmeshSeconds:F0} s of work across threads), writing {r.WriteSeconds:F0} s");
@@ -2181,7 +2794,7 @@ static class Program
                         var b = dungeons.Build(loc, overland, new Noggog.P3Float(0, 0, 0));
                         refs += b.Cell.Temporary.Count + b.Cell.Persistent.Count;
                         tris += b.Navmesh.Triangles;
-                        Console.WriteLine($"  {loc.Name} ({loc.DungeonType}, {loc.DungeonBlocks.Count} blocks): {b.Cell.Temporary.Count + b.Cell.Persistent.Count} refs, navmesh {b.Navmesh.Triangles} tris; {sw.Elapsed.TotalSeconds:F0}s, {GC.GetTotalMemory(false) / 1048576} MB managed");
+                        Console.WriteLine($"  {loc.Name} ({loc.DungeonType}, {loc.DungeonBlocks.Count} blocks): {b.Cell.Temporary.Count + b.Cell.Persistent.Count} refs, navmesh {b.Navmesh.Triangles} tris, {b.HeldDoors.Count} held doors; {sw.Elapsed.TotalSeconds:F0}s, {GC.GetTotalMemory(false) / 1048576} MB managed");
                         if (opts.ContainsKey("details"))
                         {
                             Console.WriteLine($"    {string.Join(", ", b.Fixtures.Where(f => !f.Key.StartsWith("clutter:") && !f.Key.StartsWith("person:")).OrderByDescending(f => f.Value).Take(40).Select(f => $"{f.Key} {f.Value}"))}");
@@ -3105,7 +3718,22 @@ static class Program
                 string[] device = opts.ContainsKey("gpu") ? ["--device", "cuda", "--model", Setup.Dependencies.UpscaleModel]
                     : ["--device", "cpu", "--threads", Math.Max(2, Environment.ProcessorCount - 4).ToString(), "--model", Setup.Dependencies.FastUpscaleModel];
                 var found = GameInstalls.Detect();
-                string work = Path.GetFullPath("out/video/work");
+                string work = Util.Paths.Cache(Path.Combine("video", "work"));
+                // Finished videos are kept in the tool's work folder (out/video/work/done), each with how it was made, and
+                // copied into a new output rather than made again: an output folder starts empty, and every conversion
+                // remade them all (2026-11-04: 1 h 36 min of a 12.5 h conversion; user: "conversion takes to long").
+                string doneDir = Path.Combine(work, "done");
+                string made = $"v1 remaster={canRemaster} gpu={opts.ContainsKey("gpu")} rt={!opts.ContainsKey("no-rt-look")} upscaleQuest={opts.ContainsKey("upscale-quest-videos")} noUpscale={opts.ContainsKey("no-upscale")}";
+                int reused = 0;
+                if (Directory.Exists(doneDir))
+                    foreach (var kept in Directory.GetFiles(doneDir).Where(f => !f.EndsWith(".made", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        string target = Path.Combine(videoDir, Path.GetFileName(kept));
+                        if (File.Exists(target) || !File.Exists(kept + ".made") || File.ReadAllText(kept + ".made") != made) continue;
+                        File.Copy(kept, target);
+                        if (!kept.EndsWith(".rt", StringComparison.OrdinalIgnoreCase)) reused++;
+                    }
+                if (reused > 0) Console.WriteLine($"videos: {reused} made by an earlier conversion taken from {doneDir}");
                 void Remaster(string name, string input, params string[] extra) => RemasterTo(name, Path.Combine(videoDir, $"TamrielMerge_{name}Intro.bik"), input, extra);
                 void RemasterTo(string name, string target, string input, params string[] extra)
                 {
@@ -3147,8 +3775,12 @@ static class Program
                     }
                     Console.WriteLine($"{name}: ray-traced look ({light} light)");
                     string lit = target + ".rt.bik";
-                    if (Setup.ToolScripts.Run(python, ["-u", Setup.ToolScripts.Path("video", "rt_look.py"), "--frames", frames, "--audio", Path.Combine(src, "audio.wav"),
-                            "--out", lit, "--work", Path.Combine(w, "rt"), "--light", light]) == 0 && File.Exists(lit))
+                    string[] lookArgs = ["-u", Setup.ToolScripts.Path("video", "rt_look.py"), "--frames", frames, "--audio", Path.Combine(src, "audio.wav"),
+                        "--out", lit, "--work", Path.Combine(w, "rt"), "--light", light];
+                    // On every graphics card at once (a run of the frames each, Util/Gpus), then the movie from them all.
+                    int lookCode = Util.Gpus.RunSharded(python, lookArgs, l => Console.WriteLine($"{name}: " + l));
+                    if (lookCode == 0 && Util.Gpus.List().Count > 1) lookCode = Setup.ToolScripts.Run(python, [.. lookArgs, "--encode-only"]);
+                    if (lookCode == 0 && File.Exists(lit))
                     {
                         File.Move(lit, target, true);
                         File.WriteAllText(done, light);
@@ -3239,6 +3871,15 @@ static class Program
                     RtLook("Oblivion", "auto", clean: false);
                 }
                 Console.WriteLine($"intros in {videoDir}: {string.Join(", ", Directory.GetFiles(videoDir, "*.bik").Select(Path.GetFileName))}");
+                // Kept for the next conversion: the videos (and the ray-traced look's marks), with how they were made.
+                Directory.CreateDirectory(doneDir);
+                foreach (var f in Directory.GetFiles(videoDir).Where(f => f.EndsWith(".bik", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".rt", StringComparison.OrdinalIgnoreCase)))
+                {
+                    string kept = Path.Combine(doneDir, Path.GetFileName(f));
+                    if (File.Exists(kept) && new FileInfo(kept).Length == new FileInfo(f).Length && File.Exists(kept + ".made") && File.ReadAllText(kept + ".made") == made) continue;
+                    File.Copy(f, kept, true);
+                    File.WriteAllText(kept + ".made", made);
+                }
                 return 0;
             }
             case "voice-relip":
@@ -3638,13 +4279,14 @@ static class Program
                 {
                     try
                     {
-                        var r = converter.Convert(name, outDir);
+                        // --attach NODE: as a weapon hanging from that node sheathed ("Prn").
+                        var r = converter.Convert(name, outDir, attachNode: opts.GetValueOrDefault("attach"));
                         ok++;
                         if (opts.ContainsKey("verbose")) Console.WriteLine($"  {name}: {r.Shapes} shapes, {r.CollisionPolys} collision polys, size {r.Max - r.Min}{(r.Animated ? " animated" : "")}{(r.Skinned ? " skinned" : "")}");
                     }
                     catch (Exception e) { failed++; Console.WriteLine($"  FAIL {name}: {e.Message}"); }
                 }
-                Console.WriteLine($"{ok} converted, {failed} failed, {textures.Converted} textures, {textures.Missing.Count} missing textures in {sw.Elapsed.TotalSeconds:F0}s");
+                Console.WriteLine($"{ok} converted, {failed} failed, {textures.Converted} textures, {textures.Missing.Count} missing textures in {sw.Elapsed.TotalSeconds:F0}s; {converter.CutoutShapes} blended shapes drawn as cut-outs");
                 foreach (var m in textures.Missing.Distinct().Take(10)) Console.WriteLine($"  missing texture {m}");
                 return failed == 0 ? 0 : 1;
             }
@@ -3689,27 +4331,43 @@ static class Program
                     Console.WriteLine($"  scripts: {builder.ScriptCount} translated, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%), " +
                         $"{builder.ScriptStatementsFaithful} as Morrowind does them ({100.0 * builder.ScriptStatementsFaithful / Math.Max(1, builder.ScriptStatements):F1}%; the rest in scripts-gaps.txt) ({sw.Elapsed.TotalSeconds:F0}s)");
                     Directory.CreateDirectory(outDir); File.WriteAllLines(Path.Combine(outDir, "scripts-gaps.txt"), builder.ScriptGaps.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Value,6} {kv.Key}"));
+                    // --scripts-only: the translation and its gap list alone (a measure in seconds, without the build).
+                    if (opts.ContainsKey("scripts-only")) return 0;
                 }
                 // Worn armour and clothing meshes, all at once in parallel (the records come with the items later).
                 var (wornMade, wornFailed) = builder.PrepareWorn();
                 Console.WriteLine($"  worn meshes: {wornMade} items re-rigged to Skyrim's skeleton, {wornFailed} failed ({sw.Elapsed.TotalSeconds:F0}s)");
                 var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cells", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 int cells = 0, refs = 0;
+                if (!opts.ContainsKey("cells"))
+                {
+                    var (preModels, preTextures) = builder.PrepareTextures();
+                    Console.WriteLine($"  textures: {preTextures} of {preModels} placed models' made ahead on every core ({sw.Elapsed.TotalSeconds:F0}s)");
+                }
+                // Where the interiors' time goes (2026-11-10: 85 minutes of a conversion on what looked like one thread).
+                long interiorTicks = 0, waitTicks = 0;
                 // Navmeshes on every core: each made in the background while the next interiors are built (two per core in hand).
                 builder.BackgroundNavmeshes = true;
                 foreach (var cell in world.Interiors.Values.Where(c => rx.IsMatch(c.Name)))
                 {
+                    long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                     var built = builder.BuildInterior(cell);
+                    long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
                     builder.FinishNavmeshes(Environment.ProcessorCount * 2);
+                    interiorTicks += t1 - t0; waitTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t1;
                     cells++; refs += built.Temporary.Count + built.Persistent.Count;
                     if (opts.ContainsKey("verbose")) Console.WriteLine($"  {cell.Name}: {built.Temporary.Count + built.Persistent.Count} references of {cell.Refs.Count} ({built.EditorID})");
                 }
+                long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
                 builder.FinishNavmeshes();
                 builder.BackgroundNavmeshes = false;
+                double Sec(long ticks) => ticks / (double)System.Diagnostics.Stopwatch.Frequency;
                 Console.WriteLine($"  {cells} interiors, {refs} references, {builder.Navmeshes} navmeshes ({builder.NavmeshTriangles} triangles) ({sw.Elapsed.TotalSeconds:F0}s)");
+                Console.WriteLine($"  time: placing the interiors {Sec(interiorTicks):F0} s (models converted on first use {builder.ModelSeconds:F0} s of it), waiting for navmeshes in hand {Sec(waitTicks):F0} s, the last navmeshes {Sec(System.Diagnostics.Stopwatch.GetTimestamp() - t2):F0} s");
                 Console.WriteLine($"  on the interiors' navmeshes (within 64 units): {builder.ActorsOnNavmesh:N0} of {builder.ActorsChecked:N0} actors");
                 Console.WriteLine($"  hazards: {builder.HazardCells} interiors' navmeshes kept off what hurts to stand on ({Skyrim.Navmesh.NavmeshBuilder.HazardSpans:N0} voxel spans)");
                 Console.WriteLine($"  sky: {builder.SkyInteriors} interiors behaving like exteriors given the sky and their region's weather");
+                Console.WriteLine($"  wander idles: {builder.WanderIdleActors} actors with idle chances; region weather map rows {builder.RegionWeatherRows}; sounds made again at a script's pitch {builder.PitchedSounds}");
                 if (Skyrim.Navmesh.NavmeshBuilder.MemoryTrace)
                     Console.WriteLine($"  memory after the interiors: {GC.GetTotalMemory(false) / 1073741824.0:F1} GB managed, {System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64 / 1073741824.0:F1} GB private");
                 // --doors <cell name>: that cell's teleporting doors and where they lead.
@@ -3733,6 +4391,7 @@ static class Program
                 Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} lead outside or to unbuilt cells; {builder.DoorTrianglesAdded} given their door triangle afterwards");
                 Console.WriteLine($"  effects: {builder.EffectCount} vanilla effects standing in for particle systems");
                 Console.WriteLine($"  locks: {builder.LockCount} locked, {builder.TrapCount} trapped (Morrowind security)");
+                Console.WriteLine($"  ownership: {builder.OwnedByPerson} things owned by a person, {builder.OwnedByFaction} by a faction; {builder.OwnershipByGlobalLeft} owned under a global (rented beds) left free");
                 Console.WriteLine($"  floors: {builder.FlooredInteriors.Count} interiors Morrowind left with nothing to walk on given an invisible floor{(builder.FlooredInteriors.Count > 0 ? ": " + string.Join("; ", builder.FlooredInteriors) : "")}");
                 Console.WriteLine($"  tipped back (too steep to walk): {builder.TippedInteriors.Count} interiors{(builder.TippedInteriors.Count > 0 ? ": " + string.Join(", ", builder.TippedInteriors) : "")}");
                 if (!opts.ContainsKey("no-dialogue"))
@@ -3754,9 +4413,12 @@ static class Program
                     Console.WriteLine($"  topics known to the player: {topicCount} topics, {mentioned} named in responses, {added} added by scripts, {neither.Count} by neither{(neither.Count > 0 ? ": " + string.Join(", ", neither.Take(40)) : "")}");
                 }
                 Console.WriteLine($"  AI settings: {builder.ActorAIs} people and creatures with Morrowind's Hello, Fight, Flee and Alarm (TMMwActorAI); {builder.SoulTracked} creatures' souls kept in gems of their own");
+                Console.WriteLine($"  AI packages: {builder.RecordPackageActors} actors run their record's own packages (walks from point to point, following); {builder.RecordPackageTargetsFound} with the one they follow found");
                 Console.WriteLine(builder.Start is { } st
                     ? $"  start: {st.Cell} at {st.Position}, {st.Degrees} degrees -> {builder.StartMarker.FormKey}{(builder.StartMarker.Placement is { } placed ? $" on the floor at {placed.Position}" : " (cell not built: marker unplaced)")}"
                     : "  start: not found in the CharGen script");
+                Console.WriteLine($"  script positions: {builder.SpotsPlaced} PositionCell spots in interiors marked, {builder.SpotsLanded} set down on the floor under Morrowind's coordinates");
+                Console.WriteLine($"  town map markers: {builder.MapMarkersByTravel} on a travel service's destination, {builder.MapMarkersByDoor} on a door's exit, {builder.MapMarkersAtMiddle} at the town's middle");
                 // --headroom "cell;x,y,z;dx,dy;steps": floor, ceiling and the gap between them along a line (a body needs
                 // about 130 units to pass standing).
                 if (opts.TryGetValue("headroom", out var probe))
@@ -4086,6 +4748,71 @@ static class Program
                 Console.WriteLine($"{ok} read, {bad} failed");
                 return 0;
             }
+            case "sk-file":
+            {
+                // Dev aid: one of Skyrim's mesh files (loose or in Skyrim - Meshes*.bsa), --file a;b, written under --out.
+                var assets = new Skyrim.Meshes.SkyrimCharacterAssets(skyrimData);
+                string into = Path.GetFullPath(opts["out"]);
+                foreach (var f in opts["file"].Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (assets.Read(f) is not { } bytes) { Console.WriteLine($"{f}: not found"); continue; }
+                    string target = Path.Combine(into, f);
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    File.WriteAllBytes(target, bytes);
+                    Console.WriteLine($"{f}: {bytes.Length:N0} bytes");
+                }
+                return 0;
+            }
+            case "ob-file":
+            {
+                // Dev aid: one of Oblivion's files (loose or in its archives), --file a;b, written under --out (a folder).
+                var data = new Oblivion.ObData(GameInstalls.DataDir(Game.Oblivion)!);
+                string into = Path.GetFullPath(opts["out"]);
+                foreach (var f in opts["file"].Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (data.Read(f) is not { } bytes) { Console.WriteLine($"{f}: not found"); continue; }
+                    string target = Path.Combine(into, f);
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    File.WriteAllBytes(target, bytes);
+                    Console.WriteLine($"{f}: {bytes.Length:N0} bytes");
+                }
+                return 0;
+            }
+            case "ob-faces":
+            {
+                // Dev aid: Oblivion's people whose EditorID matches --match (regex): race, sex, the face's age by shape
+                // and by texture (ObFaces), hair, its length and colour. --stats: the ages' spread over everyone.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion)!;
+                var data = new Oblivion.ObData(dataDir);
+                var faces = new Oblivion.ObFaces(data);
+                using var ob = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dataDir, "Oblivion.esm"), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
+                var hairs = ob.Hairs.ToDictionary(h => h.FormKey, h => $"{h.EditorID} ({h.Model?.File})");
+                var races = ob.Races.ToDictionary(r => r.FormKey, r => r.EditorID ?? "");
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "^$"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var all = new List<float>();
+                foreach (var n in ob.Npcs)
+                {
+                    var ages = faces.Ages(n);
+                    if (ages is var (s, t)) all.Add((s + t) / 2);
+                    if (!rx.IsMatch(n.EditorID ?? "")) continue;
+                    bool female = n.Configuration?.Flags.HasFlag(Mutagen.Bethesda.Oblivion.Npc.NpcFlag.Female) == true;
+                    Console.WriteLine($"{n.EditorID}: {races.GetValueOrDefault(n.Race.FormKey)} {(female ? "F" : "M")}, age by shape {ages?.Shape:F1}, by texture {ages?.Texture:F1}; hair {hairs.GetValueOrDefault(n.Hair.FormKey, "none")} length {n.HairLength:F2} colour {n.HairColor}");
+                }
+                if (opts.ContainsKey("stats") && all.Count > 0)
+                {
+                    all.Sort();
+                    Console.WriteLine($"{all.Count} faces: age min {all[0]:F1}, 10% {all[all.Count / 10]:F1}, median {all[all.Count / 2]:F1}, 90% {all[all.Count * 9 / 10]:F1}, max {all[^1]:F1}; under 30: {all.Count(a => a < 30)}, 30-45: {all.Count(a => a >= 30 && a < 45)}, 45-60: {all.Count(a => a >= 45 && a < 60)}, 60 on: {all.Count(a => a >= 60)}");
+                    Console.WriteLine($"hair styles used: {ob.Npcs.Select(n => n.Hair.FormKey).Distinct().Count()}, colours used: {ob.Npcs.Select(n => n.HairColor?.ToArgb() ?? 0).Distinct().Count()}");
+                    List<float> Shades(IEnumerable<Mutagen.Bethesda.Oblivion.INpcGetter> people) { var l = people.Select(n => faces.Shade(n)).OfType<float>().Order().ToList(); if (l.Count == 0) l.Add(0); return l; }
+                    foreach (var g in ob.Npcs.Where(n => faces.Ages(n) is not null).GroupBy(n => (races.GetValueOrDefault(n.Race.FormKey), n.Configuration?.Flags.HasFlag(Mutagen.Bethesda.Oblivion.Npc.NpcFlag.Female) == true)).OrderBy(g => g.Key.Item1).ThenBy(g => g.Key.Item2))
+                    {
+                        var s = g.Select(n => faces.Ages(n)!.Value.Shape).OrderBy(x => x).ToList();
+                        var t = g.Select(n => faces.Ages(n)!.Value.Texture).OrderBy(x => x).ToList();
+                        Console.WriteLine($"  {g.Key.Item1} {(g.Key.Item2 ? "F" : "M")}: {s.Count} faces, shape age 10% {s[s.Count / 10]:F0} median {s[s.Count / 2]:F0} 90% {s[s.Count * 9 / 10]:F0}; texture age 10% {t[t.Count / 10]:F0} median {t[t.Count / 2]:F0} 90% {t[t.Count * 9 / 10]:F0}; skin shade 10% {Shades(g)[Shades(g).Count / 10]:F2} median {Shades(g)[Shades(g).Count / 2]:F2} 90% {Shades(g)[Shades(g).Count * 9 / 10]:F2}");
+                    }
+                }
+                return 0;
+            }
             case "ob-find":
             {
                 // Dev aid: Oblivion's files (loose and in its archives) under --folder (default meshes) whose path contains
@@ -4277,8 +5004,249 @@ static class Program
             }
             case "compile-scripts":
             {
-                // Compiles TamrielMerge's Papyrus scripts into --out (default out/mod) without rebuilding the plugins.
-                AltStartBuilder.CompileScripts(skyrimData, Path.Combine(AppContext.BaseDirectory, "Papyrus"), opts.GetValueOrDefault("out", "out/mod"));
+                // Compiles TamrielMerge's Papyrus scripts into --out (default out/mod) without rebuilding the plugins;
+                // --src another folder's (a test's own scripts).
+                AltStartBuilder.CompileScripts(skyrimData, opts.GetValueOrDefault("src", Path.Combine(AppContext.BaseDirectory, "Papyrus")), opts.GetValueOrDefault("out", "out/mod"));
+                return 0;
+            }
+            case "nav-rebuild":
+            {
+                // Dev aid for in-game experiments (never part of a conversion): a Skyrim interior's own navmesh made again
+                // by our builder from the cell's own collision, as Oblivion's interiors are made (FloorFit 8, its inner
+                // doors' doorways), into a plugin (--out FILE.esp) that overrides the cell's one navmesh and its navmesh
+                // map entry. --cell EditorID (one navmesh). Walked as Skyrim's own beside it, it tells whether a fault
+                // is our navmeshes' or our cells' (a jail guard walked Dragonsreach cleanly and stood in our prison).
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var cache = sk.ToImmutableLinkCache();
+                var test = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(opts["out"])), SkyrimRelease.SkyrimSE);
+                var source = sk.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).First(c => string.Equals(c.EditorID, opts["cell"], StringComparison.OrdinalIgnoreCase));
+                var vanillaNavm = source.NavigationMeshes.Single();
+                var navCtx = sk.EnumerateMajorRecordContexts<INavigationMesh, INavigationMeshGetter>(cache).First(c => c.Record.FormKey == vanillaNavm.FormKey);
+                var navOverride = navCtx.GetOrAddAsOverride(test);
+                var cellOverride = test.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Single();
+                var refs = source.Persistent.Concat(source.Temporary).OfType<IPlacedObjectGetter>().ToList();
+                var need = refs.Select(r => r.Base.FormKey).ToHashSet();
+                var bases = new Dictionary<FormKey, (bool Door, string Model, IObjectBoundsGetter? Bounds)>();
+                foreach (var rec in sk.EnumerateMajorRecords())
+                    if (need.Contains(rec.FormKey) && rec is IModeledGetter { Model: { } mo })
+                        bases[rec.FormKey] = (rec is IDoorGetter, mo.File.DataRelativePath.Path, (rec as IObjectBoundedGetter)?.ObjectBounds);
+                var finder = new Skyrim.DungeonCheck.FileFinder(skyrimData, skyrimData);
+                var modelTris = new Dictionary<string, List<(System.Numerics.Vector3[] Tri, uint Layer)>>(StringComparer.OrdinalIgnoreCase);
+                var asWound = new List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)>();
+                var turned = new List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)>();
+                var layers = new Dictionary<uint, int>();
+                foreach (var r in refs)
+                {
+                    // What stands in the way or is walked on: statics, animated statics, trees and stair helpers. Doors
+                    // left out (the navmesh runs under them), and clutter, triggers and the rest that the game moves.
+                    if (r.Placement is not { } pl || !bases.TryGetValue(r.Base.FormKey, out var bs) || bs.Door) continue;
+                    if ((r.MajorRecordFlagsRaw & (int)SkyrimMajorRecord.SkyrimMajorRecordFlag.InitiallyDisabled) != 0) continue;
+                    if (!modelTris.TryGetValue(bs.Model, out var local))
+                    {
+                        var bytes = finder.Find(bs.Model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? bs.Model : Path.Combine("meshes", bs.Model));
+                        try { local = modelTris[bs.Model] = bytes is null ? [] : Skyrim.Meshes.CollisionReader.Read(bytes).Triangles.Select(t => (t.Tri, t.Layer)).ToList(); }
+                        catch { local = modelTris[bs.Model] = []; }
+                    }
+                    var rot = Skyrim.SkyrimRotation.Matrix(pl.Rotation);
+                    var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+                    float sc = r.Scale ?? 1;
+                    foreach (var (t, layer) in local)
+                    {
+                        if (layer is not (1 or 2 or 13 or 31)) continue;
+                        var w = t.Select(v => System.Numerics.Vector3.Transform(v * sc, rot) + pos).ToArray();
+                        var n = System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0]);
+                        if (n.LengthSquared() < 1e-9f) continue;
+                        n = System.Numerics.Vector3.Normalize(n);
+                        layers[layer] = layers.GetValueOrDefault(layer) + 1;
+                        asWound.Add((w, n));
+                        turned.Add(n.Z < 0 ? ([w[0], w[2], w[1]], -n) : (w, n));
+                    }
+                }
+                // Inner doors' doorways, as ObWorld.Doorways makes Oblivion's.
+                var doorways = new List<Skyrim.Navmesh.NavmeshBuilder.Doorway>();
+                foreach (var r in refs)
+                {
+                    if (r.TeleportDestination is not null || r.Placement is not { } pl || !bases.TryGetValue(r.Base.FormKey, out var bs) || !bs.Door || bs.Bounds is not { } b) continue;
+                    const float Across = 8, Through = 32, Below = 64, Above = 48;
+                    float sc = r.Scale ?? 1;
+                    bool wideOnX = b.Second.X - b.First.X >= b.Second.Y - b.First.Y;
+                    float x0 = b.First.X - (wideOnX ? Across : Through), x1 = b.Second.X + (wideOnX ? Across : Through);
+                    float y0 = b.First.Y - (wideOnX ? Through : Across), y1 = b.Second.Y + (wideOnX ? Through : Across);
+                    var m = Skyrim.SkyrimRotation.Matrix(pl.Rotation);
+                    var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+                    var corners = new[] { (x0, y0), (x1, y0), (x1, y1), (x0, y1) }
+                        .Select(c => System.Numerics.Vector3.Transform(new System.Numerics.Vector3(c.Item1, c.Item2, 0) * sc, m) + pos)
+                        .Select(w => new System.Numerics.Vector2(w.X, w.Y)).ToArray();
+                    doorways.Add(new(corners, pl.Position.Z - Below, pl.Position.Z + Above));
+                }
+                var loadDoors = refs.Where(r => r.TeleportDestination is not null).ToList();
+                var actors = source.Persistent.Concat(source.Temporary).OfType<IPlacedNpcGetter>().Where(a => a.Placement is not null).Select(a => a.Placement!.Position).ToList();
+                var builder = new Skyrim.Navmesh.NavmeshBuilder(test) { FloorFit = 8 };
+                var built = builder.BeginInterior(cellOverride, asWound, turned, loadDoors, null, actors, null, null, false, doorways).Finish();
+                // Ours into Skyrim's record (the same FormKey: nothing else names a new one), its own taken out of the cell.
+                navOverride.Data = built.Navmesh.Data;
+                cellOverride.NavigationMeshes.Remove(built.Navmesh);
+                var infos = builder.TakeInfos();
+                foreach (var info in infos) if (info.NavigationMesh.FormKey == built.Navmesh.FormKey) info.NavigationMesh.SetTo(vanillaNavm.FormKey);
+                test.NavigationMeshInfoMaps.Add(Skyrim.Navmesh.NavmeshBuilder.InfoMapWith(infos));
+                test.WriteToBinary(opts["out"], new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(Skyrim.VanillaMasters.Order),
+                });
+                Console.WriteLine($"Wrote {opts["out"]}: {source.EditorID} navmesh {vanillaNavm.FormKey} ({vanillaNavm.Data?.Triangles.Count} triangles) made again from {asWound.Count:N0} collision triangles (layers {string.Join(",", layers.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}:{kv.Value}"))}): {built.Triangles} triangles, {built.DoorTriangles} door triangles, {doorways.Count} doorways, {infos.Count} map entries");
+                return 0;
+            }
+            case "probe-follow":
+            {
+                // Dev aid for in-game scene tests (never part of a conversion): a plugin (--out FILE.esp) that walks the
+                // player with Skyrim's own movement (user, 2026-11-17: "use the movement instead of computed movement"):
+                // a quest whose alias is the player, carrying follow packages made from Skyrim's DA02FighterFollowPlayer,
+                // one per leader (--leaders: placed references as FormKeys, ';'-separated), each held to the global
+                // TMFollowMode equal to its number (from 1); the quest carries --script (Mode, Leaders: a form list).
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var test = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(opts["out"])), SkyrimRelease.SkyrimSE);
+                var template = sk.Packages.First(p => p.EditorID == "DA02FighterFollowPlayer");
+                var mode = new GlobalShort(test) { EditorID = "TMFollowMode", Data = 0 };
+                test.Globals.Add(mode);
+                var leaders = new FormList(test) { EditorID = "TMFollowLeaders" };
+                test.FormLists.Add(leaders);
+                var alias = new QuestAlias { ID = 0, Name = "Player", ForcedReference = new FormLinkNullable<IPlacedGetter>(FormKey.Factory("000014:Skyrim.esm")) };
+                int number = 0;
+                foreach (var text in opts["leaders"].Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    number++;
+                    var leader = FormKey.Factory(text);
+                    var package = template.Duplicate(test.GetNextFormKey());
+                    test.Packages.Add(package);
+                    package.EditorID = $"TMFollowLeader{number}";
+                    package.OwnerQuest.Clear();
+                    package.VirtualMachineAdapter = null;
+                    package.Conditions.Clear();
+                    var held = new GetGlobalValueConditionData(); held.Global = new FormLinkOrIndex<IGlobalGetter>(held, mode.FormKey);
+                    package.Conditions.Add(new ConditionFloat { Data = held, CompareOperator = CompareOperator.EqualTo, ComparisonValue = number });
+                    package.ScheduleMonth = -1; package.ScheduleDayOfWeek = (Package.DayOfWeek)(-1); package.ScheduleDate = 0;
+                    package.ScheduleHour = -1; package.ScheduleMinute = -1; package.ScheduleDurationInMinutes = 0;
+                    foreach (var data in package.Data.Values)
+                        if (data is PackageDataTarget t) t.Target = new PackageTargetSpecificReference { Reference = new FormLink<IPlacedGetter>(leader) };
+                    alias.PackageData.Add(new FormLink<IPackageGetter>(package.FormKey));
+                    leaders.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(leader));
+                }
+                var followQuest = new Quest(test)
+                {
+                    EditorID = opts["script"] + "Quest",
+                    Flags = Quest.Flag.StartGameEnabled,
+                    Priority = 0,
+                    VirtualMachineAdapter = new QuestAdapter
+                    {
+                        Scripts = [new ScriptEntry
+                        {
+                            Name = opts["script"],
+                            Properties =
+                            [
+                                new ScriptObjectProperty { Name = "Mode", Object = new FormLink<ISkyrimMajorRecordGetter>(mode.FormKey) },
+                                new ScriptObjectProperty { Name = "Leaders", Object = new FormLink<ISkyrimMajorRecordGetter>(leaders.FormKey) },
+                            ],
+                        }],
+                    },
+                };
+                followQuest.Aliases.Add(alias);
+                test.Quests.Add(followQuest);
+                var order = Skyrim.VanillaMasters.Order.Concat(new[] { "Oblivion.esm", "Morrowind.esm", "Redguard.esm", "Daggerfall.esm" }.Select(f => ModKey.FromFileName(f))).Distinct().ToArray();
+                test.WriteToBinary(opts["out"], new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(order),
+                });
+                Console.WriteLine($"Wrote {opts["out"]}: quest {followQuest.EditorID} with the player's alias and {number} follow packages");
+                return 0;
+            }
+            case "probe-travel":
+            {
+                // Dev aid for in-game experiments (never part of a conversion): a plugin (--out FILE.esp) with a walker,
+                // a copy of Skyrim's jail guard (109AAC) whose only packages are travel packages made as the converter
+                // makes "go there" (MS14LamiWait's), one per goal (--goals: placed references as FormKeys, ';'-separated,
+                // e.g. 0D1002:Skyrim.esm), each held to the global TMProbeGoal equal to its number (from 1); and a quest
+                // carrying --script with properties Walker (the copy), Goal (the global) and Goals (the goals, a form
+                // list in order). A package, not PathToReference: scene actors move on packages, and PathToReference
+                // stops short even in Skyrim's own Dragonsreach (probe p5, 2026-11-16).
+                using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                var probe = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(opts["out"])), SkyrimRelease.SkyrimSE);
+                var template = sk.Packages.First(p => p.EditorID == "MS14LamiWait");
+                var goal = new GlobalShort(probe) { EditorID = "TMProbeGoal", Data = 0 };
+                probe.Globals.Add(goal);
+                var goals = new FormList(probe) { EditorID = "TMProbeGoals" };
+                probe.FormLists.Add(goals);
+                var walker = sk.Npcs.First(n => n.FormKey.ID == 0x109AAC && n.FormKey.ModKey == sk.ModKey).Duplicate(probe.GetNextFormKey());
+                probe.Npcs.Add(walker);
+                walker.EditorID = "TMProbeWalker";
+                walker.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.AIPackages;
+                walker.Packages.Clear();
+                int number = 0;
+                foreach (var text in opts["goals"].Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    number++;
+                    var target = FormKey.Factory(text);
+                    var package = template.Duplicate(probe.GetNextFormKey());
+                    probe.Packages.Add(package);
+                    package.EditorID = $"TMProbeTravel{number}";
+                    package.OwnerQuest.Clear();
+                    package.VirtualMachineAdapter = null;
+                    package.Conditions.Clear();
+                    var held = new GetGlobalValueConditionData(); held.Global = new FormLinkOrIndex<IGlobalGetter>(held, goal.FormKey);
+                    package.Conditions.Add(new ConditionFloat { Data = held, CompareOperator = CompareOperator.EqualTo, ComparisonValue = number });
+                    package.ScheduleMonth = -1; package.ScheduleDayOfWeek = (Package.DayOfWeek)(-1); package.ScheduleDate = 0;
+                    package.ScheduleHour = -1; package.ScheduleMinute = -1; package.ScheduleDurationInMinutes = 0;
+                    foreach (var data in package.Data.Values)
+                        if (data is PackageDataLocation loc)
+                            loc.Location = new LocationTargetRadius { Target = new LocationTarget { Link = new FormLink<IPlacedGetter>(target) }, Radius = 0 };
+                    walker.Packages.Add(new FormLink<IPackageGetter>(package.FormKey));
+                    goals.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(target));
+                }
+                var probeQuest = new Quest(probe)
+                {
+                    EditorID = opts["script"] + "Quest",
+                    Flags = Quest.Flag.StartGameEnabled | Quest.Flag.RunOnce,
+                    Priority = 0,
+                    VirtualMachineAdapter = new QuestAdapter
+                    {
+                        Scripts = [new ScriptEntry
+                        {
+                            Name = opts["script"],
+                            Properties =
+                            [
+                                new ScriptObjectProperty { Name = "Walker", Object = new FormLink<ISkyrimMajorRecordGetter>(walker.FormKey) },
+                                new ScriptObjectProperty { Name = "Goal", Object = new FormLink<ISkyrimMajorRecordGetter>(goal.FormKey) },
+                                new ScriptObjectProperty { Name = "Goals", Object = new FormLink<ISkyrimMajorRecordGetter>(goals.FormKey) },
+                            ],
+                        }],
+                    },
+                };
+                probe.Quests.Add(probeQuest);
+                // Masters in load order (Skyrim's, then the converted games'), not Mutagen's alphabetical default.
+                var probeOrder = Skyrim.VanillaMasters.Order.Concat(new[] { "Oblivion.esm", "Morrowind.esm", "Redguard.esm", "Daggerfall.esm" }.Select(f => ModKey.FromFileName(f))).Distinct().ToArray();
+                probe.WriteToBinary(opts["out"], new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                {
+                    MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(probeOrder),
+                });
+                Console.WriteLine($"Wrote {opts["out"]}: walker {walker.FormKey} with {number} travel packages, quest {probeQuest.EditorID}; masters {string.Join(", ", probe.ModHeader.MasterReferences.Select(m => m.Master.FileName))}");
+                return 0;
+            }
+            case "probe-quest":
+            {
+                // Dev aid for in-game experiments: a small plugin (--out FILE.esp) with one quest that starts with the game
+                // and carries the script --script (a test's own, compiled with compile-scripts --src). Its masters are
+                // whatever the script looks up at run time (Game.GetFormFromFile), so none. A test's own file: never
+                // part of a conversion.
+                var probe = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(opts["out"])), SkyrimRelease.SkyrimSE);
+                var quest = new Quest(probe)
+                {
+                    EditorID = opts["script"] + "Quest",
+                    Flags = Quest.Flag.StartGameEnabled | Quest.Flag.RunOnce,
+                    Priority = 0,
+                    VirtualMachineAdapter = new QuestAdapter { Scripts = [new ScriptEntry { Name = opts["script"] }] },
+                };
+                probe.Quests.Add(quest);
+                probe.WriteToBinary(opts["out"]);
+                Console.WriteLine($"Wrote {opts["out"]}: quest {quest.EditorID} {quest.FormKey} with {opts["script"]}");
                 return 0;
             }
             case "ob-build":
@@ -4300,9 +5268,12 @@ static class Program
                 if (scripts)
                 {
                     builder.PrepareScripts();
+                    Console.WriteLine($"  scripts carried by actors and by other things too (an ObjectReference's, so they bind to both): {builder.MixedScripts}");
                     Console.WriteLine($"  scripts: {builder.ScriptCount} translated and {builder.ResultScripts + builder.StageScripts} result scripts, {builder.ScriptStatementsTranslated}/{builder.ScriptStatements} statements ({100.0 * builder.ScriptStatementsTranslated / Math.Max(1, builder.ScriptStatements):F1}%), " +
                         $"{builder.ScriptStatementsFaithful} as Oblivion does them ({100.0 * builder.ScriptStatementsFaithful / Math.Max(1, builder.ScriptStatements):F1}%; the rest in scripts-gaps.txt) ({sw.Elapsed.TotalSeconds:F0}s)");
                     Directory.CreateDirectory(outDir); File.WriteAllLines(Path.Combine(outDir, "scripts-gaps.txt"), builder.ScriptGaps.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => $"{kv.Value,6} {kv.Key}"));
+                    // --scripts-only: the translation and its gap list alone (a measure in seconds, without the build).
+                    if (opts.ContainsKey("scripts-only")) return 0;
                 }
                 // Worn armour and clothing meshes, all at once in parallel (the records come with the items later).
                 var (obWornMade, obWornFailed) = builder.PrepareWorn();
@@ -4312,6 +5283,8 @@ static class Program
                 {
                     var (modelsMade, modelsFailed) = builder.PrepareModels();
                     Console.WriteLine($"  models: {modelsMade} converted ahead on every core, {modelsFailed} couldn't be ({sw.Elapsed.TotalSeconds:F0}s) {Util.Machine.MemoryNote()}");
+                    var obMissing = builder.MissingTextures.ToList();
+                    Console.WriteLine($"  textures the models name that Oblivion's data hasn't: {obMissing.Count}{(obMissing.Count > 0 ? " (" + string.Join(", ", obMissing.Take(12)) + ")" : "")}");
                 }
                 if (opts.TryGetValue("cells", out var only))
                     foreach (var id in only.Split(','))
@@ -4336,15 +5309,19 @@ static class Program
                             ? (bx0, by0, bx1, by1) : ((int, int, int, int)?)null;
                         var (worlds, cells) = builder.BuildWorldspaces(opts.TryGetValue("worldspaces", out var wsOnly)
                             ? new System.Text.RegularExpressions.Regex(wsOnly, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null, navBox);
-                        Console.WriteLine($"  {worlds} worldspaces, {cells} exterior cells, {builder.RegionCount} regions, {builder.ExteriorNavmeshes} exterior navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s) {Util.Machine.MemoryNote()}");
+                        Console.WriteLine($"  land: {builder.LandCrowdedQuadrants} quadrants held more than six textures; {builder.LandVerticesRestood} vertices on such a quadrant or its edge given their share to grounds every quadrant there lays ({builder.LandNothingShared} where they lay none in common)");
+                        Console.WriteLine($"  {worlds} worldspaces, {cells} exterior cells, {builder.RegionCount} regions, {builder.WeatherCount} weathers, {builder.ExteriorNavmeshes} exterior navmeshes ({builder.ExteriorEdgeLinks} edge links), {builder.TerrainLodChunks} terrain LOD chunks ({sw.Elapsed.TotalSeconds:F0}s) {Util.Machine.MemoryNote()}");
                     }
                 }
                 var (linked, unlinked) = builder.LinkDoors();
                 Console.WriteLine($"  doors: {linked} load doors linked, {unlinked} partners not built; {builder.DoorTrianglesAdded} given their door triangle afterwards {Util.Machine.MemoryNote()}");
                 Console.WriteLine($"  floors: {builder.FlooredInteriors.Count} interiors Oblivion left with nothing to walk on given an invisible floor{(builder.FlooredInteriors.Count > 0 ? ": " + string.Join("; ", builder.FlooredInteriors) : "")}");
                 Console.WriteLine($"  hazards: {builder.TriggersPlaced} trigger boxes for Oblivion's trigger shapes (TMObTrigger), of {builder.TriggerShapesSeen} references with one (none listening: {string.Join(", ", builder.TriggerUnheard)}); {builder.HazardCells} interiors in lava (swum over as water, flagged Water)");
+                Console.WriteLine($"  path points: {builder.PathCutsPlaced} linked path points as navmesh-cutting boxes on {builder.PathCutOwners} references (Enable/DisableLinkedPathPoints)");
+                Console.WriteLine($"  map: {builder.MapMarkersPlaced} map markers (Oblivion's XMRK references: fast travel, the ones known from the start kept so)");
                 Console.WriteLine($"  effects: {builder.EffectCount} vanilla effects standing in for particle systems");
                 Console.WriteLine($"  locks: {builder.LockCount} locked doors and containers (Oblivion lockpicking)");
+                Console.WriteLine($"  ownership: {builder.OwnedRefs} things and {builder.OwnedCells} interiors owned; {builder.OwnershipByGlobalLeft} owned under a global (rented beds and rooms) left free");
                 Console.WriteLine($"  levels: {builder.LevelFits.Actors} actors follow the player's level (Oblivion's level + offset as Skyrim's multiplier), "
                     + $"missing Oblivion's level over the player's levels 1-50 by at most {builder.LevelFits.WorstMiss} (actors by their worst miss: {string.Join(", ", builder.LevelFits.Misses.Select(m => $"{m.Key}: {m.Value}"))})");
                 if (!opts.ContainsKey("no-dialogue"))
@@ -4370,10 +5347,11 @@ static class Program
                 Console.WriteLine($"  worn: {builder.WornConverted} armour/clothing with Oblivion's own worn look (re-rigged to Skyrim's skeleton), {builder.WornFallbacks} kept their Skyrim template's look (see problems)");
                 Console.WriteLine($"  {Skyrim.Navmesh.NavmeshBuilder.RecastSummary}");
                 Console.WriteLine($"  before writing {Util.Machine.MemoryNote()}");
+                builder.HangWeapons();   // once more, after the last model is written (scripts make items too)
                 builder.Write();
                 Console.WriteLine($"  written {Util.Machine.MemoryNote()}");
                 Console.WriteLine($"  topics: {builder.TopicsGated} hidden until the player learns them (AddTopic, Add Topics), {builder.ResponsesLearning} responses teaching some; "
-                    + $"Say timed: {builder.TimedResponses} responses, {builder.TimedRecorded} with Oblivion's recordings ({builder.TimedVoices} of their {builder.TimedResponses * Oblivion.ObVoices.VoiceTypes.Count} voices measured; the rest by words at {builder.SecondsPerCharacter:F4} s a character until first said); animation groups timed: {builder.AnimationGroups}");
+                    + $"Say timed: {builder.TimedResponses} responses, {builder.TimedRecorded} with Oblivion's recordings ({builder.TimedVoices} of their {builder.TimedResponses * Oblivion.ObVoices.VoiceTypes.Count} voices measured; the rest by words at {builder.SecondsPerCharacter:F4} s a character until first said); animation groups timed: {builder.AnimationGroups}, their sounds carried: {builder.AnimationSounds}");
                 Console.WriteLine($"  conversations between people: {builder.ConversationTopics} topics, {builder.ConversationResponses} responses, {builder.ConversationPeople} people taking part (TMObConversations)");
                 Console.WriteLine($"  Oblivion's engine: {builder.TrapModelCount} trap models on the trap layer (TrapUpdate), {builder.QuestItems} quest items kept with the player, {builder.ActorsWithStats} people and creatures with their Oblivion attributes and skills, {builder.ScriptLocks} references given a lock for the scripts to set");
                 Directory.CreateDirectory(outDir);
@@ -4385,6 +5363,23 @@ static class Program
                     Console.WriteLine($"  conditions judged never to hold (what left a response, package or log entry out): {string.Join(", ", builder.NeverHoldingBy.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value}"))}");
                 Console.WriteLine($"  conditions (dialogue, packages, journal) Skyrim can't test as Oblivion: {builder.ConditionsUntested.Values.Sum()} ({string.Join(", ", builder.ConditionsUntested.OrderByDescending(kv => kv.Value).Take(8).Select(kv => $"{kv.Key} {kv.Value}"))}; conditions-untested.txt); Skyrim moments silenced for Oblivion's people: {builder.SkyrimMomentsSilenced}");
                 Console.WriteLine($"  schedules: {builder.NpcsWithSchedules} NPCs given their Oblivion packages ({builder.ScheduledPackagesMade} packages, with Oblivion's schedules and conditions), the sandbox kept last");
+                Console.WriteLine($"  follows: {builder.FollowEndsListed} package copies end on arrival (Oblivion's Follow and Accompany with a place)");
+                Console.WriteLine($"  owners' keys: {builder.OwnerKeys} made for owned locks that name no key, carried by {builder.OwnerKeysGiven} people");
+                Console.WriteLine($"  enable states: {builder.StartDisabled} references start disabled, {builder.EnableParents} follow an enable parent ({builder.EnableParentsLost} whose parent wasn't placed)");
+                Console.WriteLine($"  hair: {builder.HairModels} models of Oblivion's styles in their people's colours, worn by {builder.HairWorn} people ({builder.HairUnderHeadwear} more wear a helmet or hood over it, {builder.HairFailed} couldn't be made)");
+                Console.WriteLine($"  faces: {builder.FacesByAge} picked by age ({builder.FacesAgeUnmatched} with no face of their age among their race's), {builder.FacesByShade} by skin shade");
+                Console.WriteLine($"  voices: {builder.VoicesByRace} people speak in their Oblivion race's voice ({builder.VoicesKept} of races with no voice folder here keep their face's)");
+                Console.WriteLine($"  use packages: {builder.UsePackages} of Oblivion's \"use item at\" a switch, door or chest made to walk there and activate it ({builder.UsePackagesAimed} with their thing placed)");
+                Console.WriteLine($"  navmesh: {builder.SolidsGivingWay} placed walls, gates and the like that a script moves aside left out of its input (walked through once moved)");
+                Console.WriteLine($"  owned doors: {builder.OwnedDoorLocks} inner doors of a person's or a faction's keep Oblivion's lock in their script, for their owners to pass");
+                Console.WriteLine($"  inner doors: {builder.InnerDoorsWatched} open for those who come at them and may open them (Oblivion's rule: unlocked, or the comer's own, their faction's or their key's); navmesh kept to the frame in their doorways ({Skyrim.Navmesh.NavmeshBuilder.DoorwaysKept:N0} doorways given to Recast, {Skyrim.Navmesh.NavmeshBuilder.DoorwaySpans:N0} floor spans kept that the agent's radius had taken off, over all of Recast's tries); navmesh corners set on the floor under them: {Skyrim.Navmesh.NavmeshBuilder.CornersOnFloor:N0} (moved {(Skyrim.Navmesh.NavmeshBuilder.CornersOnFloor == 0 ? 0 : Skyrim.Navmesh.NavmeshBuilder.CornerLift / Skyrim.Navmesh.NavmeshBuilder.CornersOnFloor):F1} on average, down where positive); ways down off ledges: {Skyrim.Navmesh.NavmeshBuilder.DropsAdded:N0}; navmeshes of their own for pieces reached only through a load door: {Skyrim.Navmesh.NavmeshBuilder.DoorPieceMeshes:N0}");
+                Console.WriteLine($"  swinging doors: {builder.SwingingDoorsPlaced} placed as Skyrim doors on {builder.SwingingDoorModels} models given an Open and Close of their own ({builder.SwingingDoorsFailed} models couldn't be: swung by script)");
+                Console.WriteLine($"  doors: {builder.DoorsFooted} placed with one of {builder.DoorModelsFooted} models whose origin was moved to its foot (people open a door that stands on their floor)");
+                Console.WriteLine($"  quiet packages: {builder.BusyPackages} whose people don't greet, mutter or stop to talk (Oblivion's skip fallout behavior)");
+                Console.WriteLine($"  own faces: {builder.OwnFaces} people wear their own Oblivion face (head, ears, eyes, mouth, teeth and tongue moved by their FaceGen numbers, their own skin; {builder.HeadSetsMade} race-and-sex sets), {builder.FacesBorrowed} keep a borrowed Skyrim face; normals made again turned to face the model's way for {builder.FaceNormalsTurned} faces, already so for {builder.FaceNormalsKept}");
+                Console.WriteLine($"  corpses: {builder.CorpsesPlaced} actors placed dead, of {builder.CorpseBases} bases with no health (Oblivion's corpses; its data has 132 such bases)");
+                Console.WriteLine($"  greetings: {builder.GreetPackages} packages walk up to the player and start talking (Oblivion's Find and Ambush aimed at the player)");
+                Console.WriteLine($"  weapons: {builder.WeaponsHung} models hang from their place on the body when sheathed");
                 Console.WriteLine($"  levelling (Mundus stones): {builder.LevellingSummary}");
                 foreach (var line in builder.NpcAnimationLog) Console.WriteLine("  people's animations: " + line);
                 var problems = builder.Problems.Distinct().ToList();
@@ -4446,11 +5441,15 @@ static class Program
                 builder.BuildDialogue();
                 Console.WriteLine($"  cells and dialogue built ({sw.Elapsed.TotalSeconds:F0}s)");
                 int n = builder.AttachScripts(precompiled: Path.GetFullPath(opts.GetValueOrDefault("scripts", "out/mwscripts/Scripts")));
+                if (builder.Start is { } st0 && builder.StartMarker.Placement is { } sp) Console.WriteLine($"  start: {st0.Cell} at {st0.Position} -> marker at {sp.Position}");
+                foreach (var line in builder.SpotReport()) Console.WriteLine($"  spot {line}");
                 // --write: the test's plugin (only these cells, the dialogue and the scripts' records) into --out, for plugin-check.
                 if (opts.ContainsKey("write"))
                 {
                     TamrielMerge.Skyrim.TopicSubtypes.Fill(builder.Mod);
                     var masterOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
+                    // References held by scripts, quests and lists persistent, in their worldspace's persistent cell (HeldReferences).
+                    Skyrim.HeldReferences.Prepare(builder.Mod, Console.WriteLine);
                     builder.Mod.WriteToBinary(Path.Combine(outDir, Morrowind.MwPluginBuilder.PluginName), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
                     {
                         MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(masterOrder),
@@ -4617,6 +5616,24 @@ static class Program
                 foreach (var p in problems) Console.WriteLine("problem: " + p);
                 return 0;
             }
+            case "ob-creature-test":
+            {
+                // Dev aid: Oblivion's creatures re-rigged onto Skyrim's skeletons (Oblivion/ObCreatureLooks) into --out, each body read
+                // back and measured. --creature REGEX (EditorID, name or model), --take n, --png: side and front drawings beside the
+                // vanilla body, --pairs: the bone map, --records: the actors, races and skins as the plugin makes them, --list: every
+                // skeleton with its stance.
+                string dataDir = GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed through Steam or GOG");
+                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/obcreatures"));
+                using var builder = new Oblivion.ObPluginBuilder(new Oblivion.ObData(dataDir, Mods.ModCatalog.Selected(Game.Oblivion, dataDir, [])), outDir) { SkyrimData = skyrimData };
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("creature", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                int take = int.Parse(opts.GetValueOrDefault("take", "100000"));
+                if (opts.ContainsKey("list")) { foreach (var line in builder.CreatureLookList()) Console.WriteLine(line); return 0; }
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                foreach (var line in opts.ContainsKey("records") ? builder.CreatureLookRecords(rx, take) : builder.CreatureLookReport(rx, take, opts.ContainsKey("png") ? Path.Combine(outDir, "png") : null, opts.ContainsKey("pairs")))
+                    Console.WriteLine(line);
+                Console.WriteLine($"{sw.Elapsed.TotalSeconds:F1}s; {builder.Problems.Count} problems");
+                return 0;
+            }
             case "ob-worn":
             {
                 // Dev aid: Oblivion armour and clothing (EditorID matching --match, --take n) with their worn look converted
@@ -4630,6 +5647,8 @@ static class Program
                 Console.WriteLine($"worn looks: {builder.WornConverted} Oblivion's, {builder.WornFallbacks} template fallbacks in {sw.Elapsed.TotalSeconds:F1}s");
                 var masterOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
                 Directory.CreateDirectory(outDir);
+                // References held by scripts, quests and lists persistent, in their worldspace's persistent cell (HeldReferences).
+                Skyrim.HeldReferences.Prepare(builder.Mod, Console.WriteLine);
                 builder.Mod.WriteToBinary(Path.Combine(outDir, Oblivion.ObPluginBuilder.PluginName), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
                 {
                     MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(masterOrder),
@@ -4747,6 +5766,8 @@ static class Program
                 foreach (var p in builder.Problems.Where(p => p.StartsWith("worn"))) Console.WriteLine($"  problem: {p}");
                 var loadOrder = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f)).ToArray();
                 Directory.CreateDirectory(outDir);
+                // References held by scripts, quests and lists persistent, in their worldspace's persistent cell (HeldReferences).
+                Skyrim.HeldReferences.Prepare(builder.Mod, Console.WriteLine);
                 builder.Mod.WriteToBinary(Path.Combine(outDir, "Morrowind.esm"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
                 {
                     MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(loadOrder),
@@ -4944,7 +5965,9 @@ static class Program
                 string model = gpu ? Setup.Dependencies.UpscaleModel : Setup.Dependencies.FastUpscaleModel;
                 if (!File.Exists(model)) { Console.Error.WriteLine($"upscale-textures: {model} is missing: run setup"); return 1; }
                 string[] device = gpu ? ["--device", "cuda"] : ["--device", "cpu", "--threads", Math.Max(2, Environment.ProcessorCount - 2).ToString()];
-                return Setup.ToolScripts.Run(py, ["-u", Setup.ToolScripts.Path("upscale", "upscale.py"), "--input", input, "--output", output, "--model", model, .. device]);
+                string[] upscaleArgs = ["-u", Setup.ToolScripts.Path("upscale", "upscale.py"), "--input", input, "--output", output, "--model", model, .. device];
+                // On every graphics card at once (a process a card, each a share of the textures: Util/Gpus).
+                return gpu ? Util.Gpus.RunSharded(py, upscaleArgs, l => Console.WriteLine("upscale-textures: " + l)) : Setup.ToolScripts.Run(py, upscaleArgs);
             }
             case "df-upscale-export":
             {
@@ -4962,6 +5985,29 @@ static class Program
                 string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
                 int n = Morrowind.MwTextures.ExportAll(Morrowind.Tes3Data.Open(dataFiles), opts.GetValueOrDefault("out", "tools/upscale/in"));
                 Console.WriteLine($"{n} textures exported");
+                return 0;
+            }
+            case "mw-town-arrivals":
+            {
+                // Dev aid: each Morrowind settlement's middle and where its map marker (fast travel's arrival) stands
+                // (MwPluginBuilder.TownArrivals), with the land's height under each: a marker far over the land is in
+                // the air or on a roof, one under it is buried.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles, Mods.ModCatalog.Selected(Game.Morrowind, dataFiles, []));
+                var heights = new Dictionary<(int, int), float[,]?>();
+                float? Land(System.Numerics.Vector3 p) => Morrowind.MwTerrain.GroundAt(world, p.X, p.Y, heights);
+                string Over(System.Numerics.Vector3 p) => Land(p) is { } g ? $"{p.Z - g,7:F0}" : "      ?";
+                var towns = Morrowind.MwPluginBuilder.TownArrivals(world);
+                Console.WriteLine($"{"town",-28} {"by",-6} {"middle over land",16} {"marker over land",16}  moved");
+                foreach (var t in towns.OrderBy(t => t.Name))
+                    Console.WriteLine($"{t.Name,-28} {t.By,-6} {Over(t.Middle),16} {Over(t.Arrival),16}  {System.Numerics.Vector2.Distance(new(t.Middle.X, t.Middle.Y), new(t.Arrival.X, t.Arrival.Y)),6:F0}");
+                var mid = towns.Select(t => Land(t.Middle) is { } g ? MathF.Abs(t.Middle.Z - g) : float.NaN).Where(v => !float.IsNaN(v)).Order().ToList();
+                var arr = towns.Select(t => Land(t.Arrival) is { } g ? MathF.Abs(t.Arrival.Z - g) : float.NaN).Where(v => !float.IsNaN(v)).Order().ToList();
+                Console.WriteLine($"{towns.Count} towns: {towns.Count(t => t.By == Morrowind.MwPluginBuilder.ArrivalKind.Travel)} by travel service, {towns.Count(t => t.By == Morrowind.MwPluginBuilder.ArrivalKind.Door)} by door, {towns.Count(t => t.By == Morrowind.MwPluginBuilder.ArrivalKind.Middle)} at the middle");
+                int Buried(Func<Morrowind.MwPluginBuilder.TownArrival, System.Numerics.Vector3> at) => towns.Count(t => Land(at(t)) is { } g && at(t).Z < g - 50);
+                Console.WriteLine($"more than 50 units under the land: old markers {Buried(t => t.Middle)}, new {Buried(t => t.Arrival)}");
+                if (mid.Count > 0) Console.WriteLine($"old marker (middle) height off the land: median {mid[mid.Count / 2]:F0}, over 200 units: {mid.Count(v => v > 200)} of {mid.Count}, worst {mid[^1]:F0}");
+                if (arr.Count > 0) Console.WriteLine($"new marker height off the land: median {arr[arr.Count / 2]:F0}, over 200 units: {arr.Count(v => v > 200)} of {arr.Count}, worst {arr[^1]:F0}");
                 return 0;
             }
             case "mw-near":
@@ -5047,7 +6093,7 @@ static class Program
                 {
                     foreach (var w in ob.Weathers) Console.WriteLine($"  WTHR {w.FormKey} {w.EditorID}");
                     foreach (var rg in ob.Regions.Take(int.Parse(opts["weathers"])))
-                        Console.WriteLine($"  REGN {rg.EditorID} ws={rg.Worldspace.FormKey} areas={rg.Areas.Count} weathers=[{string.Join(", ", rg.Weather?.Weathers.Select(x => x.Weather.FormKey.ID.ToString("X6") + ":" + x.Chance) ?? [])}]");
+                        Console.WriteLine($"  REGN {rg.EditorID} ws={rg.Worldspace.FormKey} areas={rg.Areas.Count} weathers=[{string.Join(", ", rg.Weather?.Weathers?.Select(x => x.Weather.FormKey.ID.ToString("X6") + ":" + x.Chance) ?? [])}]");
                     return 0;
                 }
                 // --guards: Oblivion's guards (their class's guard flag) by EditorID prefix, with where they stand and their
@@ -5394,6 +6440,201 @@ static class Program
             {
                 // Summarise MAPS.BSA: location counts by type, block usage, and a few named samples.
                 var locs = DfLocations.LoadAll(arena2);
+                // --layout: the overland layout (Terrain/LocationLayout) every location's exterior gets: how far they move
+                // from their map pixels, by kind, and any that found no clear land.
+                if (opts.ContainsKey("layout"))
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    var field = Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom(opts));
+                    var layout = Skyrim.Terrain.LocationLayout.Make(field, locs);
+                    int landCells = 0;
+                    for (int cy = 0; cy < field.CellsY; cy++)
+                        for (int cx = 0; cx < field.CellsX; cx++)
+                            if (Skyrim.Terrain.TerrainBuilder.HasLand(field, cx, cy)) landCells++;
+                    Console.WriteLine($"{field.CellsX}x{field.CellsY} cells, {landCells:N0} with land; footprints {layout.Cells().Count * 100.0 / landCells:F1}% of them");
+                    Console.WriteLine($"{layout.Sites.Count} locations laid out in {sw.Elapsed.TotalSeconds:F0} s; {layout.Cells().Count:N0} cells of footprint");
+                    var typeOf = locs.ToDictionary(l => (l.Region, l.Index), l => l.Type);
+                    // --embank: how far each footprint's ground level stands over (raise) or under (cut) the land along its
+                    // edge before levelling, and so how steep the blend back to the land is (user, 2026-11-03: "the towns
+                    // were on hills").
+                    if (opts.ContainsKey("embank"))
+                    {
+                        int q = Skyrim.Terrain.HeightField.QuadsPerCell;
+                        var edges = new List<(Skyrim.Terrain.LocationLayout.Site Site, float Raise, float Cut)>();
+                        foreach (var s in layout.Sites)
+                        {
+                            int vx0 = (s.CellX - field.MinCellX) * q, vy0 = (s.CellY - field.MinCellY) * q, vx1 = vx0 + s.CellsW * q, vy1 = vy0 + s.CellsH * q;
+                            float raise = 0, cut = 0;
+                            void Edge(int vx, int vy) { float land = field.At(vx, vy); raise = MathF.Max(raise, s.Ground - land); cut = MathF.Max(cut, land - s.Ground); }
+                            for (int x = vx0; x <= vx1; x += 4) { Edge(x, vy0); Edge(x, vy1); }
+                            for (int y = vy0; y <= vy1; y += 4) { Edge(vx0, y); Edge(vx1, y); }
+                            edges.Add((s, raise, cut));
+                        }
+                        void Line(string what, List<float> v)
+                        {
+                            v.Sort();
+                            double Deg(float h) => Math.Atan(h / Skyrim.Terrain.LocationLayout.Blend) * 180 / Math.PI;
+                            Console.WriteLine($"  {what}: median {v[v.Count / 2]:F0} units, 90% {v[(int)(v.Count * 0.9)]:F0}, 99% {v[(int)(v.Count * 0.99)]:F0}, most {v[^1]:F0}; "
+                                + $"over 500 {v.Count(x => x > 500)}, over 1000 {v.Count(x => x > 1000)}, over 2000 {v.Count(x => x > 2000)}; blend slope at the median {Deg(v[v.Count / 2]):F0} deg, 90% {Deg(v[(int)(v.Count * 0.9)]):F0} deg");
+                        }
+                        foreach (var g in edges.GroupBy(e => typeOf[(e.Site.Region, e.Site.Index)] is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage ? "towns" : "others"))
+                        {
+                            Console.WriteLine($"  {g.Key} ({g.Count()}):");
+                            Line("built up at the edge", g.Select(e => e.Raise).ToList());
+                            Line("cut down at the edge", g.Select(e => e.Cut).ToList());
+                        }
+                        foreach (var e in edges.Where(e => typeOf[(e.Site.Region, e.Site.Index)] == DfLocationType.TownCity).OrderByDescending(e => e.Raise).Take(8))
+                            Console.WriteLine($"    {e.Site.Name}: {e.Site.CellsW}x{e.Site.CellsH} cells, built up {e.Raise:F0}, cut {e.Cut:F0}, eased over {Skyrim.Terrain.LocationLayout.BlendOf(field, e.Site):F0}");
+                        // The land round each town, before and after levelling: the steepest step (degrees, over 4 quads)
+                        // along eight lines out from its edge (corners and edge middles) as far as its easing reaches and
+                        // two cells on.
+                        var towns = edges.Where(e => typeOf[(e.Site.Region, e.Site.Index)] is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage).Select(e => e.Site).ToList();
+                        // BlendOf reads the land as made, so it is taken before levelling for both.
+                        var reachBefore = towns.ToDictionary(s => s, s => Skyrim.Terrain.LocationLayout.BlendOf(field, s));
+                        // Where each town's steepest step is: on the coast (one end under the sea), in or at another
+                        // footprint, at the town's own edge (the first step out), or out in its easing.
+                        var where = new Dictionary<string, int>();
+                        List<float> Steepest(bool tell = false)
+                        {
+                            var result = new List<float>();
+                            foreach (var s in towns)
+                            {
+                                int vx0 = (s.CellX - field.MinCellX) * q, vy0 = (s.CellY - field.MinCellY) * q, vx1 = vx0 + s.CellsW * q, vy1 = vy0 + s.CellsH * q;
+                                int far = (int)(reachBefore[s] / Skyrim.Terrain.HeightField.UnitsPerQuad) + 2 * q;
+                                float most = 0;
+                                string kind = "";
+                                foreach (var (sx, sy, dx, dy) in new[] { (vx0, vy0, -1, -1), (vx1, vy0, 1, -1), (vx0, vy1, -1, 1), (vx1, vy1, 1, 1),
+                                    ((vx0 + vx1) / 2, vy0, 0, -1), ((vx0 + vx1) / 2, vy1, 0, 1), (vx0, (vy0 + vy1) / 2, -1, 0), (vx1, (vy0 + vy1) / 2, 1, 0) })
+                                {
+                                    float step = 4 * Skyrim.Terrain.HeightField.UnitsPerQuad * MathF.Sqrt(dx * dx + dy * dy);
+                                    for (int i = 0; i + 4 <= far; i += 4)
+                                    {
+                                        int ax = sx + dx * i, ay = sy + dy * i, bx = sx + dx * (i + 4), by = sy + dy * (i + 4);
+                                        if (bx < 0 || by < 0 || bx >= field.VertsX || by >= field.VertsY || ax < 0 || ay < 0) break;
+                                        float a = field.At(ax, ay), b = field.At(bx, by);
+                                        if (a < 0 && b < 0) continue;   // the sea floor
+                                        float deg = MathF.Atan(MathF.Abs(b - a) / step) * 180 / MathF.PI;
+                                        if (deg <= most) continue;
+                                        most = deg;
+                                        if (tell)
+                                        {
+                                            // Another site within 3 cells of the step, and how far its level is from this town's.
+                                            float mx = (ax + bx) / 2f / q + field.MinCellX, my = (ay + by) / 2f / q + field.MinCellY;
+                                            var other = layout.Sites.Where(o => o != s).Select(o => (o, D: MathF.Max(MathF.Max(o.CellX - mx, mx - (o.CellX + o.CellsW)), 0) + MathF.Max(MathF.Max(o.CellY - my, my - (o.CellY + o.CellsH)), 0)))
+                                                .Where(x => x.D < 3).OrderBy(x => x.D).Select(x => x.o).FirstOrDefault();
+                                            kind = a < 0 || b < 0 ? "coast" : i > 0 && (layout.CoversVertex(field, ax, ay) || layout.CoversVertex(field, bx, by)) ? "another footprint"
+                                                : other is not null ? $"by another site {(MathF.Abs(other.Ground - s.Ground) > 1000 ? "over 1000" : "within 1000")} from its level"
+                                                : i == 0 ? "own edge" : $"easing ({(i * Skyrim.Terrain.HeightField.UnitsPerQuad <= reachBefore[s] ? "within" : "past")} its reach)";
+                                        }
+                                    }
+                                }
+                                result.Add(most);
+                                if (tell && most > 30) where[kind] = where.GetValueOrDefault(kind) + 1;
+                            }
+                            result.Sort();
+                            return result;
+                        }
+                        var before = Steepest();
+                        layout.Level(field);
+                        var after = Steepest(tell: true);
+                        Console.WriteLine($"  levelled, towns with a step over 30 deg, where: {string.Join(", ", where.OrderByDescending(w => w.Value).Select(w => $"{w.Key} {w.Value}"))}");
+                        string Show(List<float> v) => $"median {v[v.Count / 2]:F0} deg, 90% {v[(int)(v.Count * 0.9)]:F0}, 99% {v[(int)(v.Count * 0.99)]:F0}, most {v[^1]:F0}; over 20 deg {v.Count(x => x > 20)}, over 30 {v.Count(x => x > 30)}";
+                        Console.WriteLine($"  steepest round towns, the land as made: {Show(before)}");
+                        Console.WriteLine($"  steepest round towns, levelled:        {Show(after)}");
+                        var eased = reachBefore.Values.Order().ToList();
+                        Console.WriteLine($"  towns' easing: median {eased[eased.Count / 2]:F0} units, 90% {eased[(int)(eased.Count * 0.9)]:F0}, most {eased[^1]:F0}; longer than {Skyrim.Terrain.LocationLayout.Blend:F0}: {eased.Count(x => x > Skyrim.Terrain.LocationLayout.Blend)}");
+                    }
+                    foreach (var g in layout.Sites.GroupBy(s => typeOf[(s.Region, s.Index)]).OrderByDescending(g => g.Count()))
+                    {
+                        var moved = g.Select(s => s.Moved / 4096f).OrderBy(m => m).ToList();
+                        Console.WriteLine($"  {g.Key,-18} {g.Count(),5}: {moved.Count(m => m == 0),5} at their pixel; moved cells median {moved[moved.Count / 2]:F1}, 95% {moved[(int)(moved.Count * 0.95)]:F1}, most {moved[^1]:F1}");
+                    }
+                    // The tiles' seams (each tile's core edge; footprints keep clear of it and its overlap), and the
+                    // footprints within the overlap of one (there should be none).
+                    var tiling = new Skyrim.Terrain.OverlandTiles(field);
+                    for (int c = 1; c < tiling.Columns; c++)
+                    {
+                        int seam = tiling.MinCellX + c * tiling.CoreX;
+                        int near = layout.Sites.Count(s => s.CellX < seam + Skyrim.Terrain.OverlandTiles.Overlap && s.CellX + s.CellsW > seam - Skyrim.Terrain.OverlandTiles.Overlap);
+                        Console.WriteLine($"  seam at cell x {seam}: {near} footprints within {Skyrim.Terrain.OverlandTiles.Overlap} cells of it");
+                    }
+                    for (int r = 1; r < tiling.Rows; r++)
+                    {
+                        int seam = tiling.MinCellY + r * tiling.CoreY;
+                        int near = layout.Sites.Count(s => s.CellY < seam + Skyrim.Terrain.OverlandTiles.Overlap && s.CellY + s.CellsH > seam - Skyrim.Terrain.OverlandTiles.Overlap);
+                        Console.WriteLine($"  seam at cell y {seam}: {near} footprints within {Skyrim.Terrain.OverlandTiles.Overlap} cells of it");
+                    }
+                    // Cities' start markers (199.10 among their blocks' outside flats), where travel arrives (TownBuilder.ArrivalSpot).
+                    var layoutBsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                    int cities = 0, withStart = 0, markersFound = 0;
+                    foreach (var l in locs.Where(l => l.Type == DfLocationType.TownCity && l.ExteriorBlocks.Length > 0))
+                    {
+                        cities++;
+                        int n = l.ExteriorBlocks.Select(b => DfTownBlock.Resolve(layoutBsa, b) is { } rb ? DfTownBlock.Load(layoutBsa, rb) : null).OfType<DfTownBlock>()
+                            .Sum(b => DfTownLayout.Exterior(b).Objects.Count(o => o.Type == DfRdbObjectType.Flat && o.TextureArchive == 199 && o.TextureRecord == 10));
+                        if (n > 0) withStart++;
+                        markersFound += n;
+                    }
+                    Console.WriteLine($"  cities: {cities}, {withStart} with start markers ({markersFound} in all)");
+                    // Dungeons whose outside has no entrance surface (DfTownLayout.DungeonEntrances): their door goes by the
+                    // footprint's south side; named, with their blocks, to see why.
+                    var entranceModels = DfModel.LoadAll(arena2);
+                    var entranceMap = DfWorldMap.Load(arena2);
+                    var noEntrance = new List<string>();
+                    int dungeonsWithOutside = 0;
+                    int crypts = 0;
+                    foreach (var l in locs.Where(l => l.DungeonBlocks.Count > 0 && l.ExteriorBlocks.Length > 0))
+                    {
+                        dungeonsWithOutside++;
+                        var nature = DfTownLayout.NatureArchiveOf(entranceMap.ClimateAt(l.PixelX, l.PixelY));
+                        var exteriors = l.ExteriorBlocks.Select(b => DfTownBlock.Resolve(layoutBsa, b) is { } rb ? DfTownLayout.Exterior(DfTownBlock.Load(layoutBsa, rb), nature) : null).ToList();
+                        if (exteriors.Any(e => e is not null && DfTownLayout.DungeonEntrances(e, entranceModels).Any())) continue;
+                        // Daggerfall's graveyard crypt added to its middle block (TownBuilder.Outside), and its way in.
+                        var middle = exteriors[l.BlockHeight / 2 * l.BlockWidth + l.BlockWidth / 2];
+                        var crypt = DfTownLayout.Exterior(DfTownBlock.Load(layoutBsa, DfTownLayout.CryptBlock), nature).Objects.First(o => o.Type == DfRdbObjectType.Model && o.ModelId == DfTownLayout.CryptModel);
+                        var given = middle is null ? null : DfTownLayout.WithCrypt(middle, crypt, entranceModels);
+                        var way = given is null ? null : DfTownLayout.DungeonEntrances(given, entranceModels).FirstOrDefault();
+                        if (way is not null) crypts++;
+                        noEntrance.Add($"{l.Name} ({l.RegionName}, {l.Type}, {l.DungeonType}): {string.Join(" ", l.ExteriorBlocks)}; "
+                            + (way is { } w ? $"crypt at {given!.Objects[^1].Position.X:F0},{given.Objects[^1].Position.Z:F0}, its way in at {w.Centre.X:F0},{w.Centre.Y:F0},{w.Centre.Z:F0} facing {w.Normal.X:F2},{w.Normal.Z:F2}" : "no place for a crypt"));
+                    }
+                    Console.WriteLine($"  dungeons with an outside: {dungeonsWithOutside}, {noEntrance.Count} with no entrance surface in it, {crypts} of them given Daggerfall's crypt with its way in");
+                    foreach (var n in noEntrance.Take(40)) Console.WriteLine($"    {n}");
+                    var withBlocks = locs.Where(l => l.ExteriorBlocks.Length > 0 && l.BlockWidth > 0 && l.BlockHeight > 0).ToList();
+                    long allBlocks = withBlocks.Sum(l => (long)l.ExteriorBlocks.Length);
+                    Console.WriteLine($"  locations with an outside: {withBlocks.Count}, {allBlocks:N0} blocks: {(allBlocks + Skyrim.DaggerfallTowns.BlocksPerPart - 1) / Skyrim.DaggerfallTowns.BlocksPerPart} town parts of {Skyrim.DaggerfallTowns.BlocksPerPart} blocks");
+                    if (opts.TryGetValue("out", out var layoutOut)) layout.Save(layoutOut);
+                    return 0;
+                }
+                // --overlaps: each location's exterior at its full size (BlockMeshBuilder.Scale: an RMB block is
+                // 4096 x Scale units) round its spot on the overland (one map pixel a cell), and how many overlap another.
+                if (opts.ContainsKey("overlaps"))
+                {
+                    float block = Skyrim.Meshes.BlockMeshBuilder.Scale * 4096 / 4096f;   // cells per block
+                    var placed = locs.Where(l => l.ExteriorBlocks.Length > 0)
+                        .Select(l => (L: l, X0: l.PixelX + 0.5f - l.BlockWidth * block / 2, X1: l.PixelX + 0.5f + l.BlockWidth * block / 2,
+                                      Y0: l.PixelY + 0.5f - l.BlockHeight * block / 2, Y1: l.PixelY + 0.5f + l.BlockHeight * block / 2)).ToList();
+                    var grid = new Dictionary<(int, int), List<int>>();
+                    for (int i = 0; i < placed.Count; i++)
+                        for (int gx = (int)MathF.Floor(placed[i].X0); gx <= (int)MathF.Floor(placed[i].X1); gx++)
+                            for (int gy = (int)MathF.Floor(placed[i].Y0); gy <= (int)MathF.Floor(placed[i].Y1); gy++)
+                            {
+                                if (!grid.TryGetValue((gx, gy), out var l)) grid[(gx, gy)] = l = [];
+                                l.Add(i);
+                            }
+                    var hit = new HashSet<int>();
+                    foreach (var l in grid.Values)
+                        for (int a = 0; a < l.Count; a++)
+                            for (int b = a + 1; b < l.Count; b++)
+                            {
+                                var (p, q) = (placed[l[a]], placed[l[b]]);
+                                if (p.X0 < q.X1 && q.X0 < p.X1 && p.Y0 < q.Y1 && q.Y0 < p.Y1) { hit.Add(l[a]); hit.Add(l[b]); }
+                            }
+                    Console.WriteLine($"{placed.Count} locations with exteriors, {block:F0} cells a block: {hit.Count} overlap another at full size");
+                    foreach (var g in placed.Select((p, i) => (p, i)).GroupBy(x => x.p.L.Type).OrderByDescending(g => g.Count()))
+                        Console.WriteLine($"  {g.Key,-18} {g.Count(),5}, {g.Count(x => hit.Contains(x.i)),5} overlapping; size {g.Average(x => x.p.X1 - x.p.X0):F1} x {g.Average(x => x.p.Y1 - x.p.Y0):F1} cells on average, largest {g.Max(x => x.p.X1 - x.p.X0):F0}");
+                    return 0;
+                }
                 var blocks = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
                 Console.WriteLine($"{locs.Count} locations in {locs.Select(l => l.Region).Distinct().Count()} regions");
                 foreach (var g in locs.GroupBy(l => l.Type).OrderByDescending(g => g.Count()))
@@ -5417,6 +6658,28 @@ static class Program
                         Console.WriteLine($"  {l.LocationId} {l.Name} ({l.RegionName}, region {l.Region}) @({l.PixelX},{l.PixelY}) blocks [{string.Join(",", l.ExteriorBlocks)}] buildings [{string.Join(",", l.Buildings.Select(b => $"{b.BuildingType}/f{b.FactionId}/q{b.Quality}"))}]");
                 return 0;
             }
+            case "df-land-crowded":
+            {
+                // How many of the overland's land quadrants hold more than the six grounds a quadrant can lay (where a
+                // ground dropped by one quadrant alone would show as a seam along its edge), towns' ground included.
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var map = DfWorldMap.Load(arena2);
+                var field = Skyrim.Terrain.HeightField.Generate(map, TerrainSettingsFrom(opts));
+                var layout = Skyrim.Terrain.LocationLayout.Make(field, DfLocations.LoadAll(arena2));
+                Skyrim.Terrain.TerrainBuilder.Settled = (vx, vy) => layout.CoversVertex(field, vx, vy);
+                int landCells = 0;
+                Parallel.For(0, field.CellsY, cy =>
+                {
+                    for (int cx = 0; cx < field.CellsX; cx++)
+                    {
+                        if (!Skyrim.Terrain.TerrainBuilder.HasLand(field, cx, cy)) continue;
+                        Interlocked.Increment(ref landCells);
+                        for (int q = 0; q < 4; q++) Skyrim.Terrain.TerrainBuilder.Order(field, map, cx * 2 + (q & 1), cy * 2 + (q >> 1), 0);
+                    }
+                });
+                Console.WriteLine($"{landCells:N0} land cells, {landCells * 4:N0} quadrants; {Skyrim.Terrain.TerrainBuilder.CrowdedQuadrants:N0} hold more than six grounds ({sw.Elapsed.TotalSeconds:F0} s)");
+                return 0;
+            }
             case "ground-preview":
             {
                 // The overland's ground from above around a place (--near NAME, default Daggerfall; --pixels N map pixels
@@ -5428,7 +6691,7 @@ static class Program
                 string near = opts.GetValueOrDefault("near", "Daggerfall");
                 var loc = DfLocations.LoadAll(arena2).First(l => l.Name.Equals(near, StringComparison.OrdinalIgnoreCase));
                 int pixels = int.Parse(opts.GetValueOrDefault("pixels", "24"));
-                double perVert = (double)settings.PixelsPerCell / Skyrim.Terrain.HeightField.QuadsPerCell;
+                double perVert = settings.PixelsPerCell / Skyrim.Terrain.HeightField.QuadsPerCell;
                 int cvx = (int)((loc.PixelX + 0.5) / perVert), cvy = (int)((field.CellsY * settings.PixelsPerCell - (loc.PixelY + 0.5)) / perVert);
                 int size = (int)(pixels / perVert);
                 var palette = DfTexture.Palette(arena2);
@@ -5863,6 +7126,64 @@ static class Program
                 }
                 return 0;
             }
+            case "df-dungeon-swaps":
+            {
+                // Dev aid: Daggerfall's dungeon texture swaps (Skyrim/DungeonTextureTable): the tables of --names a;b, and
+                // over every dungeon how many placed blocks change; with --out DIR every block's mesh made there and its
+                // shapes (names, order) checked against BlockMeshBuilder.Describe, which the swaps' alternate textures name.
+                var locations = DfLocations.LoadAll(arena2).Where(l => l.DungeonBlocks.Count > 0).ToList();
+                var map = DfWorldMap.Load(arena2);
+                var blocksBsa = new DfBsa(Path.Combine(arena2, "BLOCKS.BSA"));
+                var models = DfModel.LoadAll(arena2);
+                var blocks = new Dictionary<string, DfDungeonBlock>(StringComparer.OrdinalIgnoreCase);
+                DfDungeonBlock BlockOf(string name) => blocks.TryGetValue(name, out var b) ? b : blocks[name] = DfDungeonBlock.Load(blocksBsa, name);
+                foreach (var name in opts.GetValueOrDefault("names", "Privateer's Hold;Daggerfall").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    foreach (var l in locations.Where(l => l.Name == name))
+                    {
+                        var climate = map.ClimateAt(l.PixelX, l.PixelY);
+                        Console.WriteLine($"{l.Name} ({l.RegionName}) id {l.LocationId} {climate}: table {string.Join(" ", Skyrim.DungeonTextureTable.Classic(l.LocationId, climate))}, step {Skyrim.DungeonTextureTable.ClimateBase(climate)}");
+                    }
+                var described = new Dictionary<string, (List<Skyrim.Meshes.BlockMeshBuilder.ShapeTexture> Shapes, System.Numerics.Vector3 Min, System.Numerics.Vector3 Max)>(StringComparer.OrdinalIgnoreCase);
+                int placed = 0, swapped = 0, missing = 0;
+                var distinct = new HashSet<string>();
+                foreach (var l in locations)
+                {
+                    var climate = map.ClimateAt(l.PixelX, l.PixelY);
+                    var table = Skyrim.DungeonTextureTable.Classic(l.LocationId, climate);
+                    int step = Skyrim.DungeonTextureTable.ClimateBase(climate);
+                    foreach (var p in l.DungeonBlocks)
+                    {
+                        if (!described.TryGetValue(p.BlockName, out var d)) described[p.BlockName] = d = Skyrim.Meshes.BlockMeshBuilder.Describe(BlockOf(p.BlockName), models);
+                        var swaps = d.Shapes.Where(s => s.Archive >= 0 && Skyrim.DungeonTextureTable.Apply(s.Archive, table, step) != s.Archive)
+                            .Select(s => (s, To: Skyrim.DungeonTextureTable.Apply(s.Archive, table, step))).ToList();
+                        placed++;
+                        if (swaps.Count == 0) continue;
+                        swapped++;
+                        distinct.Add(p.BlockName + string.Join("_", swaps.Select(w => w.To)));
+                        foreach (var (s, to) in swaps)
+                            if (DfTexture.Load(arena2, to) is not { } tex || s.Record >= tex.Count) missing++;
+                    }
+                }
+                Console.WriteLine($"{locations.Count} dungeons, {placed} blocks placed ({described.Count} distinct): {swapped} in other textures than the block's ({distinct.Count} distinct statics), {placed - swapped} as made; {missing} swapped textures whose archive hasn't the record");
+                if (opts.TryGetValue("out", out var meshDir))
+                {
+                    int same = 0, differ = 0;
+                    foreach (var (name, d) in described.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                    {
+                        string path = Path.Combine(meshDir, Path.ChangeExtension(name, ".nif"));
+                        Skyrim.Meshes.BlockMeshBuilder.Export = new Skyrim.Meshes.DfTextureExport(arena2, meshDir);
+                        Skyrim.Meshes.BlockMeshBuilder.Build(BlockOf(name), models, path);
+                        using var nif = new nifly.NifFile();
+                        nif.Load(path);
+                        var names = new List<string>();
+                        foreach (var s in nif.GetShapes()) names.Add(s.name.get());
+                        if (names.SequenceEqual(d.Shapes.Select(s => s.Name))) same++;
+                        else { differ++; Console.WriteLine($"  {name}: mesh {string.Join(",", names.Take(6))}... vs described {string.Join(",", d.Shapes.Take(6).Select(s => s.Name))}..."); }
+                    }
+                    Console.WriteLine($"shapes as described: {same} of {same + differ} blocks");
+                }
+                return 0;
+            }
             case "dungeon-textures":
             {
                 // Dev aid: Daggerfall textures (archive.record) used by a dungeon's models, by polygon count; with --sheet
@@ -6047,7 +7368,14 @@ static class Program
                 {
                     using var m = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, master), SkyrimRelease.SkyrimSE);
                     foreach (var w in m.Weathers.Where(w => rx.IsMatch(w.EditorID ?? "")))
+                    {
                         Console.WriteLine($"{master,-15} {w.FormKey} {w.EditorID,-36} {w.Flags}");
+                        // --light: its daytime sun, ambient and directional ambient colours and image space.
+                        if (!opts.ContainsKey("light")) continue;
+                        string C(System.Drawing.Color c) => $"({c.R},{c.G},{c.B})";
+                        var d = w.DirectionalAmbientLightingColors?.Day;
+                        Console.WriteLine($"    day: sun {C(w.SunlightColor.Day)} ambient {C(w.AmbientColor.Day)} directional ambient x+ {(d is null ? "-" : C(d.DirectionalXPlus))} z+ {(d is null ? "-" : C(d.DirectionalZPlus))} z- {(d is null ? "-" : C(d.DirectionalZMinus))} scale {d?.Scale}; image space day {w.ImageSpaces?.Day.FormKey}");
+                    }
                 }
                 return 0;
             }
@@ -6132,6 +7460,126 @@ static class Program
                 foreach (var d in skyrim.SoundMarkers.Where(d => rx.IsMatch(d.EditorID ?? "")).Take(40)) Console.WriteLine($"SOUN {d.FormKey} {d.EditorID}");
                 return 0;
             }
+            case "nif-partitions":
+            {
+                // Dev aid: how many bones a skinned shape's skin partitions use (what the game's skinning has to hold at once).
+                // --file a NIF (';' list), or --archive (default the game's "Skyrim - Meshes*.bsa") with --match (regex on the
+                // archive path, default actors' models): each model's largest partition, then the largest of all and how many
+                // models' largest partitions fall in each band of 10 bones.
+                var largest = new List<(string File, int Bones, int Partitions)>();
+                void Measure(string label, string path)
+                {
+                    using var nif = new nifly.NifFile();
+                    if (nif.Load(path) != 0) return;
+                    var hdr = nif.GetHeader();
+                    int most = 0, parts = 0;
+                    for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                        if (hdr.GetBlockById(i) is nifly.NiSkinPartition sp)
+                            foreach (var pb in sp.partitions)
+                            {
+                                parts++;
+                                most = Math.Max(most, Math.Max(pb.numBones, pb.bones.Count));
+                                if (opts.ContainsKey("detail"))
+                                    Console.WriteLine($"  [{i}] partition {parts}: numBones {pb.numBones}, bones listed {pb.bones.Count}, vertices {pb.numVertices}/{pb.vertexMap.Count} mapped, triangles {pb.numTriangles}/{pb.triangles.Count}, weights per vertex {pb.numWeightsPerVertex}, weights {pb.vertexWeights.Count}, bone indices {pb.boneIndices.Count}");
+                            }
+                    // --verify: each partition's weights against the skin data's (partition bone k = the partition's
+                    // bones[k], a shape bone), and the shared vertex data's bone numbers read both ways: as the shape's
+                    // bones, or as the bones of the first partition holding the vertex.
+                    if (opts.ContainsKey("verify"))
+                    {
+                        using var vc = new nifly.niflycpp.BlockCache(hdr);
+                        foreach (var shape in nif.GetShapes())
+                        {
+                            uint instId = shape.SkinInstanceRef().index;
+                            if (instId == uint.MaxValue) continue;
+                            var inst = vc.EditableBlockById<nifly.NiSkinInstance>(instId);
+                            var sd = vc.EditableBlockById<nifly.NiSkinData>(inst.dataRef.index);
+                            var spart = vc.EditableBlockById<nifly.NiSkinPartition>(inst.skinPartitionRef.index);
+                            if (sd is null || spart is null) continue;
+                            var want = new Dictionary<int, Dictionary<int, float>>();
+                            for (int b = 0; b < sd.bones.Count; b++)
+                                foreach (var sw in sd.bones[b].vertexWeights)
+                                    (want.TryGetValue(sw.index, out var d) ? d : want[sw.index] = [])[b] = sw.weight;
+                            bool Same(Dictionary<int, float> got, int v)
+                            {
+                                // Weights under 0.005 left out on both sides (a partition drops them; they move nothing).
+                                var w = (want.GetValueOrDefault(v) ?? []).Where(x => x.Value >= 0.005f).ToList();
+                                return w.Count == got.Count(g => g.Value >= 0.005f) && w.All(x => MathF.Abs(got.GetValueOrDefault(x.Key) - x.Value) < 0.01f);
+                            }
+                            int partBad = 0, partChecked = 0, triangles = 0;
+                            var firstPart = new Dictionary<int, int>();
+                            var covered = new HashSet<int>();
+                            for (int p = 0; p < spart.partitions.Count; p++)
+                            {
+                                var pb = spart.partitions[p];
+                                triangles += pb.triangles.Count;
+                                for (int j = 0; j < pb.vertexMap.Count; j++)
+                                {
+                                    int v = pb.vertexMap[j];
+                                    covered.Add(v);
+                                    firstPart.TryAdd(v, p);
+                                    if (j >= pb.vertexWeights.Count || j >= pb.boneIndices.Count) { partBad++; continue; }
+                                    var vw = pb.vertexWeights[j]; var bi = pb.boneIndices[j];
+                                    var got = new Dictionary<int, float>();
+                                    foreach (var (k, w) in new[] { (bi.i1, vw.w1), (bi.i2, vw.w2), (bi.i3, vw.w3), (bi.i4, vw.w4) })
+                                        if (w > 0.001f && k < pb.bones.Count) got[pb.bones[k]] = got.GetValueOrDefault(pb.bones[k]) + w;
+                                    partChecked++;
+                                    if (!Same(got, v))
+                                    {
+                                        if (partBad++ < int.Parse(opts.GetValueOrDefault("show", "0")))
+                                            Console.WriteLine($"    vertex {v}: skin data {string.Join(" ", (want.GetValueOrDefault(v) ?? []).OrderBy(x => x.Key).Select(x => $"{x.Key}:{x.Value:F3}"))} | partition {p + 1} {string.Join(" ", got.OrderBy(x => x.Key).Select(x => $"{x.Key}:{x.Value:F3}"))}");
+                                    }
+                                }
+                            }
+                            int asShape = 0, asPart = 0, vdChecked = 0;
+                            for (int v = 0; v < spart.vertData.Count; v++)
+                            {
+                                var vd = spart.vertData[v];
+                                var ws = vd.weights; var bs = vd.weightBones;
+                                var g1 = new Dictionary<int, float>(); var g2 = new Dictionary<int, float>();
+                                var pbBones = firstPart.TryGetValue(v, out int fp) ? spart.partitions[fp].bones : null;
+                                for (int k = 0; k < 4; k++)
+                                {
+                                    float w = ws[k]; int b = bs[k];
+                                    if (w <= 0.001f) continue;
+                                    g1[b] = g1.GetValueOrDefault(b) + w;
+                                    if (pbBones is not null && b < pbBones.Count) g2[pbBones[b]] = g2.GetValueOrDefault(pbBones[b]) + w;
+                                }
+                                vdChecked++;
+                                if (!Same(g1, v) && vdChecked - asShape <= int.Parse(opts.GetValueOrDefault("show", "0")) + 1)
+                                    Console.WriteLine($"    vertex {v}: skin data {string.Join(" ", (want.GetValueOrDefault(v) ?? []).OrderBy(x => x.Key).Select(x => $"{x.Key}:{x.Value:F3}"))} | shared {string.Join(" ", Enumerable.Range(0, 4).Select(k => $"{bs[k]}:{ws[k]:F3}"))}");
+                                if (Same(g1, v)) asShape++;
+                                if (Same(g2, v)) asPart++;
+                            }
+                            Console.WriteLine($"  {shape.name.get()}: {spart.partitions.Count} partitions, {triangles} of {shape.GetNumTriangles()} triangles, {covered.Count} of {shape.GetNumVertices()} vertices; partition weights {partChecked - partBad} of {partChecked} as the skin data's; shared vertex data {vdChecked}: {asShape} read as shape bones, {asPart} as its first partition's");
+                        }
+                    }
+                    if (parts > 0) largest.Add((label, most, parts));
+                }
+                if (opts.TryGetValue("file", out var partFiles))
+                    foreach (var f in partFiles.Split(';', StringSplitOptions.RemoveEmptyEntries)) Measure(f, f);
+                else
+                {
+                    var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", @"^meshes\\actors\\.*\.nif$"), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    string tmp = Path.Combine(Path.GetTempPath(), "TamrielMerge", "nif-partitions.nif");
+                    Directory.CreateDirectory(Path.GetDirectoryName(tmp)!);
+                    foreach (var b in Directory.GetFiles(skyrimData, opts.GetValueOrDefault("archive", "Skyrim - Meshes*.bsa")))
+                        foreach (var f in Mutagen.Bethesda.Archives.Archive.CreateReader(Mutagen.Bethesda.GameRelease.SkyrimSE, b).Files.Where(f => rx.IsMatch(f.Path)))
+                        {
+                            File.WriteAllBytes(tmp, f.GetBytes());
+                            Measure($"{Path.GetFileName(b)}: {f.Path}", tmp);
+                        }
+                    File.Delete(tmp);
+                }
+                foreach (var l in largest.OrderByDescending(l => l.Bones).Take(int.Parse(opts.GetValueOrDefault("top", "25"))))
+                    Console.WriteLine($"{l.Bones,4} bones in its largest of {l.Partitions} partitions  {l.File}");
+                if (largest.Count > 0)
+                {
+                    Console.WriteLine($"{largest.Count} skinned models; the largest partition anywhere uses {largest.Max(l => l.Bones)} bones");
+                    foreach (var g in largest.GroupBy(l => l.Bones / 10 * 10).OrderBy(g => g.Key)) Console.WriteLine($"  {g.Key,3}-{g.Key + 9,3} bones: {g.Count()} models");
+                }
+                return 0;
+            }
             case "nif-anim":
             {
                 // Dev aid: the animation side of a NIF (--file): every block's type, and for controller managers,
@@ -6197,7 +7645,7 @@ static class Program
                 var mod = new SkyrimMod(ModKey.FromFileName("SpriteImportTest.esp"), SkyrimRelease.SkyrimSE);
                 var problems = new List<string>();
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var made = new Skyrim.Meshes.SpriteModelImporter(mod, outDir, arena2).ImportAll(Path.Combine(Setup.Dependencies.Root, "model3d", "work"), problems);
+                var made = new Skyrim.Meshes.SpriteModelImporter(mod, outDir, arena2).ImportAll(opts.GetValueOrDefault("dir", Util.Paths.ModelWork), problems);
                 Console.WriteLine($"{made.Count} models in {sw.Elapsed.TotalSeconds:F1} s; {problems.Count} problems");
                 if (opts.TryGetValue("list", out var list)) File.WriteAllLines(list, mod.Statics.Select(st => $"{st.FormKey.ID:X6} {st.EditorID} {st.Model?.File} {st.ObjectBounds.First} {st.ObjectBounds.Second}"));
                 return 0;
@@ -6347,6 +7795,25 @@ static class Program
                     foreach (var (t, ratio, longest) in worst)
                         Console.WriteLine($"  {ratio:F1} (longest {longest:F1}): {t.A} ({v[t.A].X:F1},{v[t.A].Y:F1},{v[t.A].Z:F1}) {t.B} ({v[t.B].X:F1},{v[t.B].Y:F1},{v[t.B].Z:F1}) {t.C} ({v[t.C].X:F1},{v[t.C].Y:F1},{v[t.C].Z:F1})");
                 }
+                return 0;
+            }
+            case "mw-cell-refs":
+            {
+                // Dev aid: an interior's references (--cell NAME, --match regex on the base id): base, type, position and
+                // rotation (degrees), and a door's destination.
+                string dataFiles = GameInstalls.DataDir(Game.Morrowind)!;
+                var world = Morrowind.MwWorld.Load(dataFiles);
+                var rx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("match", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (opts.ContainsKey("exteriors"))
+                {
+                    // --exteriors: the outdoor references matching, with their cell (the first --max, default 12).
+                    foreach (var (cellAt, r) in world.Exteriors.Values.SelectMany(c => c.Refs.Where(r => rx.IsMatch(r.BaseId)).Select(r => (c, r))).Take(int.Parse(opts.GetValueOrDefault("max", "12"))))
+                        Console.WriteLine($"{r.BaseId,-30} cell {cellAt.GridX},{cellAt.GridY} at {r.Position.X,9:F0} {r.Position.Y,9:F0} {r.Position.Z,8:F0}");
+                    return 0;
+                }
+                if (!world.Interiors.TryGetValue(opts["cell"], out var mwCell)) { Console.WriteLine("no such interior"); return 1; }
+                foreach (var r in mwCell.Refs.Where(r => rx.IsMatch(r.BaseId)))
+                    Console.WriteLine($"{r.BaseId,-30} {world.Objects.GetValueOrDefault(r.BaseId)?.Type,-5} at {r.Position.X,8:F1} {r.Position.Y,8:F1} {r.Position.Z,8:F1}  rot {r.Rotation.X * 57.29578f,6:F1} {r.Rotation.Y * 57.29578f,6:F1} {r.Rotation.Z * 57.29578f,6:F1}");
                 return 0;
             }
             case "mw-record":
@@ -6606,8 +8073,8 @@ static class Program
                     foreach (var name in gridCells.Split(','))
                         foreach (var cell in ob.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Where(x => string.Equals(x.EditorID, name, StringComparison.OrdinalIgnoreCase)))
                         {
-                            var pts = cell.PathGrid?.PointToPointConnections.Select(q => q.Point).ToList() ?? [];
-                            int links = cell.PathGrid?.PointToPointConnections.Sum(q => q.Connections.Count) ?? 0;
+                            var pts = cell.PathGrid?.PointToPointConnections?.Select(q => q.Point).ToList() ?? [];
+                            int links = cell.PathGrid?.PointToPointConnections?.Sum(q => q.Connections.Count) ?? 0;
                             var bases = cell.Persistent.Concat(cell.Temporary).Select(r => r switch { Mutagen.Bethesda.Oblivion.IPlacedObjectGetter o => o.Base.FormKey, Mutagen.Bethesda.Oblivion.IPlacedNpcGetter n => n.Base.FormKey, Mutagen.Bethesda.Oblivion.IPlacedCreatureGetter cr => cr.Base.FormKey, _ => FormKey.Null })
                                 .GroupBy(k => ob.EnumerateMajorRecords().FirstOrDefault(m => m.FormKey == k)?.GetType().Name.Replace("BinaryOverlay", "") ?? "elsewhere").Select(g => $"{g.Key} {g.Count()}");
                             Console.WriteLine($"{name}: {pts.Count} pathgrid points, {links} connections{(pts.Count > 0 ? $", x {pts.Min(q => q.X):F0}..{pts.Max(q => q.X):F0} y {pts.Min(q => q.Y):F0}..{pts.Max(q => q.Y):F0} z {pts.Min(q => q.Z):F0}..{pts.Max(q => q.Z):F0}" : "")}; holds {string.Join(", ", bases)}");
@@ -6616,7 +8083,7 @@ static class Program
                 }                var refs = new List<Skyrim.RotationOrderCheck.Ref>();
                 foreach (var cell in ob.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
                 {
-                    var points = cell.PathGrid?.PointToPointConnections.Select(p => new System.Numerics.Vector3(p.Point.X, p.Point.Y, p.Point.Z)).ToList() ?? [];
+                    var points = cell.PathGrid?.PointToPointConnections?.Select(p => new System.Numerics.Vector3(p.Point.X, p.Point.Y, p.Point.Z)).ToList() ?? [];
                     if (points.Count == 0) continue;
                     foreach (var r in cell.Persistent.Concat(cell.Temporary))
                     {
@@ -6713,11 +8180,11 @@ static class Program
                     using var plugin = Mutagen.Bethesda.Oblivion.OblivionMod.CreateFromBinaryOverlay(Path.Combine(dir, file), Mutagen.Bethesda.Oblivion.OblivionRelease.Oblivion);
                     foreach (var cell in plugin.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
                     {
-                        if (cell.PathGrid is not { } pg || pg.PointToPointConnections.Count == 0) continue;
-                        var pts = pg.PointToPointConnections.Select(q => new System.Numerics.Vector3(q.Point.X, q.Point.Y, q.Point.Z)).ToList();
+                        if (cell.PathGrid is not { PointToPointConnections: { Count: > 0 } grid }) continue;
+                        var pts = grid.Select(q => new System.Numerics.Vector3(q.Point.X, q.Point.Y, q.Point.Z)).ToList();
                         var links = new List<(int, int)>();
-                        for (int i = 0; i < pg.PointToPointConnections.Count; i++)
-                            foreach (var j in pg.PointToPointConnections[i].Connections.Select(x => (int)x).Where(j => j > i && j < pts.Count)) links.Add((i, j));
+                        for (int i = 0; i < grid.Count; i++)
+                            foreach (var j in grid[i].Connections.Select(x => (int)x).Where(j => j > i && j < pts.Count)) links.Add((i, j));
                         grids["OB" + Sanitized(cell.EditorID ?? cell.FormKey.ID.ToString("X6"))] = new(pts, links);
                     }
                 }
@@ -7179,7 +8646,7 @@ static class Program
                     if (c.Flags is not { } cf || !cf.HasFlag(Mutagen.Bethesda.Oblivion.Cell.Flag.HasWater)) { dry++; return; }
                     float level = c.WaterHeight ?? 0;
                     cellsWith++;
-                    foreach (var p in pg.PointToPointConnections)
+                    foreach (var p in pg.PointToPointConnections ?? [])
                     {
                         points++;
                         if (p.Point.Z < level) { under++; if (underAt.Count < 8) underAt.Add($"{where} {p.Point} (surface {level})"); }
@@ -7507,6 +8974,106 @@ static class Program
                 }
                 return 0;
             }
+            case "gpus":
+            {
+                // The graphics cards the GPU work is shared across (Util/Gpus), as nvidia-smi reports them.
+                Console.WriteLine(Util.Gpus.Describe());
+                return 0;
+            }
+            case "pack-plugins":
+            {
+                // Joins --dir's Daggerfall plugins into as few as stay under --budget MB (default 1,900), the game seeing
+                // the same records (Skyrim/PluginPack): measures them, plans, writes, verifies, writes pack-report.txt and
+                // plugins.json. --plan stops after the plan, writing nothing. --order A;B: the load order (default the
+                // convert's). Exit 2 when a check fails; the plugins are then as they were.
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                long budget = (opts.TryGetValue("budget", out var mb) ? long.Parse(mb) : Skyrim.PluginPack.DefaultBudget >> 20) << 20;
+                var order = opts.TryGetValue("order", out var listed) ? listed.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) : ConvertPluginOrder;
+                try
+                {
+                    var outcome = Skyrim.PluginPack.Run(dir, budget, order, Console.WriteLine, opts.ContainsKey("plan"));
+                    Console.WriteLine($"{outcome.Folded.Count} plugins folded{(opts.ContainsKey("plan") ? " by this plan; nothing written" : "")}: load order {string.Join(", ", outcome.Order)}");
+                    return 0;
+                }
+                // Anything: the work folder is cleared and the plugins stand as they were, so a build isn't lost to it.
+                catch (Exception e)
+                {
+                    Console.WriteLine($"Plugins not packed: {e.Message}");
+                    return 2;
+                }
+            }
+            case "pack-test":
+                // PluginPack proved on small plugins made in --dir (Skyrim/PluginPackTest); no game data read.
+                return Skyrim.PluginPackTest.Run(Path.GetFullPath(opts["dir"]), Console.WriteLine) == 0 ? 0 : 2;
+            case "navmesh-compare":
+            {
+                // Dev aid (Skyrim/Navmesh/NavmeshCompare): --first and --second, ';'-separated navmesh plugins of the same
+                // land: over the cells of the second, the ground each covers, what the second lost, and doors' reach of
+                // both. --placed: ';'-separated plugins whose doors are looked at. Reads only.
+                static List<string> Paths(string? list) => (list ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(Path.GetFullPath).ToList();
+                return Skyrim.Navmesh.NavmeshCompare.Run(Paths(opts.GetValueOrDefault("first")), Paths(opts.GetValueOrDefault("second")), Paths(opts.GetValueOrDefault("placed")), Console.WriteLine);
+            }
+            case "navmesh-split-check":
+            {
+                // The overland navmesh plugins in --dir read back (OverlandTiles.NavmeshPluginNames, in load order): each
+                // plugin's own navmeshes and its overrides of earlier plugins', its edge links by the plugin they point
+                // into, and whether every link's target is a navmesh in the set and in the plugin's masters. Exit 2 on a
+                // dangling link.
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                var names = Skyrim.Terrain.OverlandTiles.NavmeshPluginsIn(dir);
+                var mods = names.Select(n => SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, n), SkyrimRelease.SkyrimSE)).ToList();
+                var all = new HashSet<FormKey>();
+                foreach (var pm in mods) foreach (var nm in pm.EnumerateMajorRecords<INavigationMeshGetter>()) all.Add(nm.FormKey);
+                long dangling = 0;
+                foreach (var pm in mods)
+                {
+                    var mastersOf = pm.ModHeader.MasterReferences.Select(r => r.Master).ToHashSet();
+                    long own = 0, over = 0, infos = pm.NavigationMeshInfoMaps.Sum(x => x.MapInfos.Count);
+                    var linksTo = new Dictionary<ModKey, long>();
+                    foreach (var nm in pm.EnumerateMajorRecords<INavigationMeshGetter>())
+                    {
+                        if (nm.FormKey.ModKey == pm.ModKey) own++; else over++;
+                        foreach (var link in nm.Data?.EdgeLinks ?? [])
+                        {
+                            var key = link.Mesh.FormKey;
+                            linksTo[key.ModKey] = linksTo.GetValueOrDefault(key.ModKey) + 1;
+                            if (!all.Contains(key) || (key.ModKey != pm.ModKey && !mastersOf.Contains(key.ModKey))) dangling++;
+                        }
+                    }
+                    Console.WriteLine($"{pm.ModKey.FileName}: {own:N0} navmeshes of its own, {over:N0} overrides of earlier plugins', {infos:N0} map entries, {new FileInfo(Path.Combine(dir, pm.ModKey.FileName)).Length / 1048576:N0} MB; "
+                        + $"masters {string.Join(", ", pm.ModHeader.MasterReferences.Select(r => r.Master.FileName))}; links into {string.Join(", ", linksTo.OrderBy(x => x.Key.FileName.String).Select(x => $"{x.Key.FileName} {x.Value:N0}"))}");
+                }
+                Console.WriteLine(dangling == 0 ? $"{all.Count:N0} navmeshes in {names.Count} plugins, every link's target among them and in its plugin's masters" : $"WARNING: {dangling:N0} links to a navmesh not in the set or not in the plugin's masters");
+                foreach (var pm in mods) pm.Dispose();
+                return dangling == 0 ? 0 : 2;
+            }
+            case "light-flag":
+            {
+                // Sets the master flag on the converted plugins in --dir (default out/convert; --plugins A;B for some) and
+                // the light (ESL) flag on those that fit one (Skyrim/LightPlugins: at most 4,096 new records, FormIDs up to 0xFFF).
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                var which = opts.TryGetValue("plugins", out var chosen) ? chosen.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList()
+                    : Directory.GetFiles(dir).Where(f => f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)).Select(Path.GetFileName).Select(f => f!).Order().ToList();
+                var mastered = Skyrim.LightPlugins.MasterAll(dir, which, Console.WriteLine);
+                var lit = Skyrim.LightPlugins.FlagAll(dir, which, Console.WriteLine);
+                Console.WriteLine($"{mastered.Count} flagged master now, {lit.Count} flagged light now in {dir}");
+                return 0;
+            }
+            case "handle-count":
+            {
+                // --load-order: the whole load order instead, the user's other mods too (Skyrim's Data and Plugins.txt).
+                // --why PLUGIN: what that plugin's persistent references are.
+                if (opts.TryGetValue("why", out var whyPlugin)) { Skyrim.HandleAudit.Why(Path.GetFullPath(whyPlugin), Console.WriteLine); return 0; }
+                if (opts.TryGetValue("unneeded", out var unneededList)) { Skyrim.HandleAudit.Unneeded(unneededList.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(Path.GetFullPath).ToList(), Console.WriteLine); return 0; }
+                if (opts.ContainsKey("load-order")) { Skyrim.HandleAudit.ReportLoadOrder(skyrimData, Console.WriteLine); return 0; }
+                // What the plugins take of Skyrim's 1,048,576 reference handles at load (Skyrim/HandleCount): --dir (default
+                // out/convert) and --plugins A;B (default: the converted plugins there, in load order).
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                var which = opts.TryGetValue("plugins", out var chosen) ? chosen.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList()
+                    : ConvertPluginOrder.Where(p => File.Exists(Path.Combine(dir, p))).ToList();
+                long total = Skyrim.HandleCount.Report(dir, which, Console.WriteLine);
+                return total > Skyrim.HandleCount.Warn ? 2 : 0;
+            }
             case "plugin-check":
             {
                 // A plugin's links checked against the load order (--data, default Skyrim's Data; --plugins A;B the ones
@@ -7551,7 +9118,7 @@ static class Program
                                 if (link.IsNull || link.FormKey.ID < 0x800 && link.FormKey.ModKey.FileName.String.Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase)) continue;
                                 links++;
                                 string? problem = null;
-                                if (!cache.TryResolve(link.FormKey, out var found)) problem = "missing";
+                                if (!cache.TryResolve<ISkyrimMajorRecordGetter>(link.FormKey, out var found)) problem = "missing";
                                 else if (!link.Type.IsAssignableFrom(found.GetType())) problem = $"wrong kind ({found.Registration.Name} where a {link.Type.Name} goes)";
                                 if (problem is null) continue;
                                 string key = $"{rec.Registration.Name} -> {problem}";
@@ -7612,6 +9179,19 @@ static class Program
                 Console.WriteLine($"records {a.Types.Values.Sum()} vs {b.Types.Values.Sum()}; navmesh {a.Nav} vs {b.Nav} ({a.NavTris:N0} vs {b.NavTris:N0} triangles, {a.NavVerts:N0} vs {b.NavVerts:N0} vertices); land {a.Land} vs {b.Land}");
                 return a.Types.Values.Sum() == b.Types.Values.Sum() && a.Nav == b.Nav && a.Land == b.Land ? 0 : 2;
             }
+            case "plugin-decompress":
+            {
+                // A copy of a plugin (--plugin) with every compressed record written plain, into --out: a load test of a
+                // plugin past 2 GB in the game (2026-10-28: whether the engine takes one decides how far the land and
+                // navmesh plugins can be joined).
+                string file = Path.GetFullPath(opts["plugin"]);
+                string target = Path.GetFullPath(opts["out"]);
+                var head = new byte[12];
+                using (var fs = File.OpenRead(file)) fs.ReadExactly(head);
+                long records = Skyrim.PluginMerger.Merge([file], target, (BitConverter.ToUInt32(head, 8) & 1) != 0, unpack: true);
+                Console.WriteLine($"{Path.GetFileName(target)}: {records} records and groups, {new FileInfo(file).Length >> 20} MB -> {new FileInfo(target).Length >> 20} MB");
+                return 0;
+            }
             case "plugin-compress":
             {
                 // A plugin rewritten with its navmesh and land records compressed (PluginMerger), in place unless --out.
@@ -7623,6 +9203,69 @@ static class Program
                 long records = Skyrim.PluginMerger.Merge([file], target, (BitConverter.ToUInt32(head, 8) & 1) != 0);
                 if (!opts.ContainsKey("out")) File.Move(target, file, overwrite: true);
                 Console.WriteLine($"{Path.GetFileName(file)}: {records} records and groups, {before >> 20} MB -> {new FileInfo(opts.ContainsKey("out") ? target : file).Length >> 20} MB");
+                return 0;
+            }
+            case "lod-terrain-check":
+            {
+                // Dev aid: a worldspace's terrain LOD (--dir: a folder holding meshes\terrain\<world>\*.btr; --world EditorID)
+                // against its land in --plugin: each chunk's vertex heights (local units times the level, at the chunk's
+                // south-west cell) against the land's height there (its cell's 33 x 33 heights, bilinear), by level; the worst
+                // chunks; and land cells no level-4 chunk covers.
+                using var lm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                string worldId = opts["world"];
+                var lws = lm.Worldspaces.First(w => string.Equals(w.EditorID, worldId, StringComparison.OrdinalIgnoreCase));
+                var landH = new Dictionary<(int, int), float[]>();
+                foreach (var c in lws.SubCells.SelectMany(b => b.Items).SelectMany(s => s.Items))
+                    if (c.Grid is { } g && c.Landscape?.VertexHeightMap is { } vh)
+                    {
+                        var h = new float[33 * 33];
+                        float row = vh.Offset;
+                        for (int y = 0; y < 33; y++) { row += vh.HeightMap[0, y]; float v = row; h[y * 33] = v * 8; for (int x = 1; x < 33; x++) { v += vh.HeightMap[x, y]; h[y * 33 + x] = v * 8; } }
+                        landH[(g.Point.X, g.Point.Y)] = h;
+                    }
+                float? LandAt(double wx, double wy)
+                {
+                    int cx = (int)Math.Floor(wx / 4096), cy = (int)Math.Floor(wy / 4096);
+                    if (!landH.TryGetValue((cx, cy), out var h)) return null;
+                    double fx = (wx - cx * 4096) / 128, fy = (wy - cy * 4096) / 128;
+                    int ix = Math.Clamp((int)fx, 0, 31), iy = Math.Clamp((int)fy, 0, 31);
+                    float tx = (float)(fx - ix), ty = (float)(fy - iy);
+                    float a = h[iy * 33 + ix], b = h[iy * 33 + ix + 1], c2 = h[(iy + 1) * 33 + ix], d = h[(iy + 1) * 33 + ix + 1];
+                    return (a * (1 - tx) + b * tx) * (1 - ty) + (c2 * (1 - tx) + d * tx) * ty;
+                }
+                string tdir = Path.Combine(opts["dir"], "meshes", "terrain", worldId.ToLowerInvariant());
+                var byLevel = new SortedDictionary<int, (int Points, double Sum, float Worst)>();
+                var worstChunks = new List<(float Off, string Name, string Where)>();
+                var covered = new HashSet<(int, int)>();
+                foreach (var f in Directory.GetFiles(tdir, "*.btr"))
+                {
+                    var parts = Path.GetFileNameWithoutExtension(f).Split('.');
+                    int level = int.Parse(parts[^3]), x0 = int.Parse(parts[^2]), y0 = int.Parse(parts[^1]);
+                    using var nif = new nifly.NifFile();
+                    if (nif.Load(f) != 0) { Console.WriteLine($"{Path.GetFileName(f)}: didn't load"); continue; }
+                    var land = nif.GetShapes().FirstOrDefault(s => s.name.get() == "land") ?? nif.GetShapes().FirstOrDefault();
+                    if (land is null) continue;
+                    var tr = land.transform.translation;
+                    var vs = nif.GetVertsForShape(land);
+                    float worst = 0; string where = ""; int n = 0; double sum = 0;
+                    foreach (var v in vs)
+                    {
+                        double wx = x0 * 4096.0 + (v.x + tr.x) * level, wy = y0 * 4096.0 + (v.y + tr.y) * level;
+                        if (LandAt(wx, wy) is not { } want) continue;
+                        float got = (v.z + tr.z) * level, off = MathF.Abs(got - want);
+                        n++; sum += off;
+                        if (off > worst) { worst = off; where = $"({wx:F0},{wy:F0}) LOD {got:F0}, land {want:F0}"; }
+                    }
+                    if (level == 4) for (int cx = x0; cx < x0 + 4; cx++) for (int cy = y0; cy < y0 + 4; cy++) covered.Add((cx, cy));
+                    var cur = byLevel.GetValueOrDefault(level);
+                    byLevel[level] = (cur.Points + n, cur.Sum + sum, MathF.Max(cur.Worst, worst));
+                    if (n > 0) worstChunks.Add((worst, Path.GetFileName(f), where));
+                }
+                Console.WriteLine($"{worldId}: {landH.Count} land cells");
+                foreach (var (level, s) in byLevel) Console.WriteLine($"  level {level}: {s.Points} LOD points over land, off by {s.Sum / Math.Max(1, s.Points):F1} on average, {s.Worst:F0} at worst");
+                foreach (var w in worstChunks.OrderByDescending(w => w.Off).Take(int.Parse(opts.GetValueOrDefault("worst", "6")))) Console.WriteLine($"    {w.Name}: {w.Off:F0} off at {w.Where}");
+                var uncovered = landH.Keys.Where(k => !covered.Contains(k)).ToList();
+                Console.WriteLine($"  land cells no level-4 chunk covers: {uncovered.Count}{(uncovered.Count > 0 ? " e.g. " + string.Join(" ", uncovered.Take(6)) : "")}");
                 return 0;
             }
             case "lod-test":
@@ -7649,8 +9292,105 @@ static class Program
                 Util.Png.WriteRgb(opts["out"], img.W, img.H, rgb);
                 return 0;
             }
+            case "lod-normal-fit":
+            {
+                // Dev aid: how a terrain LOD normal map (--n, a _n.dds) encodes its chunk's (--btr) slopes: each triangle's
+                // normal from the mesh (x east, y north, z up) against the map's colour at the triangle's middle, as a
+                // least-squares fit colour = a x + b y + c z + d per channel (2026-11-03: vanilla's maps are mostly green
+                // where ours, Z as blue, were blue; the world map had no relief).
+                using var nif = new nifly.NifFile();
+                if (nif.Load(opts["btr"]) != 0) { Console.Error.WriteLine("unreadable btr"); return 1; }
+                var img = Util.DdsImage.Decode(File.ReadAllBytes(opts["n"])) ?? throw new InvalidDataException("unsupported DDS");
+                var rows = new List<(double X, double Y, double Z, double R, double G, double B)>();
+                var hdr = nif.GetHeader();
+                for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+                {
+                    if (hdr.GetBlockById(i) is not nifly.BSTriShape ts || ts.name.get() == "WATER") continue;
+                    var v = nif.GetVertsForShape(ts); var uv = nif.GetUvsForShape(ts);
+                    var tris = new nifly.vectorTriangle();
+                    ts.GetTriangles(tris);
+                    if (v is null || uv is null || v.Count == 0 || uv.Count != v.Count) continue;
+                    foreach (var t in tris)
+                    {
+                        var a = new System.Numerics.Vector3(v[t.p1].x, v[t.p1].y, v[t.p1].z);
+                        var b = new System.Numerics.Vector3(v[t.p2].x, v[t.p2].y, v[t.p2].z);
+                        var c = new System.Numerics.Vector3(v[t.p3].x, v[t.p3].y, v[t.p3].z);
+                        var n = System.Numerics.Vector3.Cross(b - a, c - a);
+                        if (n.Length() < 1e-6f) continue;
+                        n = System.Numerics.Vector3.Normalize(n);
+                        if (n.Z < 0) n = -n;
+                        float u = (uv[t.p1].u + uv[t.p2].u + uv[t.p3].u) / 3, w = (uv[t.p1].v + uv[t.p2].v + uv[t.p3].v) / 3;
+                        int col = Math.Clamp((int)(u * img.W), 0, img.W - 1), row = Math.Clamp((int)(w * img.H), 0, img.H - 1);
+                        uint p = img.Px[row * img.W + col];
+                        rows.Add((n.X, n.Y, n.Z, (byte)(p >> 16) / 255.0, (byte)(p >> 8) / 255.0, (byte)p / 255.0));
+                    }
+                }
+                // Normal equations for [x y z 1] -> each channel.
+                var ata = new double[4, 4];
+                var atb = new double[3, 4];
+                foreach (var r in rows)
+                {
+                    double[] f = [r.X, r.Y, r.Z, 1];
+                    double[] ch = [r.R, r.G, r.B];
+                    for (int i = 0; i < 4; i++)
+                    {
+                        for (int j = 0; j < 4; j++) ata[i, j] += f[i] * f[j];
+                        for (int k = 0; k < 3; k++) atb[k, i] += f[i] * ch[k];
+                    }
+                }
+                double[] Solve(int k)
+                {
+                    var m = new double[4, 5];
+                    for (int i = 0; i < 4; i++) { for (int j = 0; j < 4; j++) m[i, j] = ata[i, j]; m[i, 4] = atb[k, i]; }
+                    for (int p = 0; p < 4; p++)
+                    {
+                        int best = p;
+                        for (int i = p + 1; i < 4; i++) if (Math.Abs(m[i, p]) > Math.Abs(m[best, p])) best = i;
+                        for (int j = 0; j < 5; j++) (m[p, j], m[best, j]) = (m[best, j], m[p, j]);
+                        for (int i = 0; i < 4; i++)
+                        {
+                            if (i == p || m[p, p] == 0) continue;
+                            double f = m[i, p] / m[p, p];
+                            for (int j = 0; j < 5; j++) m[i, j] -= f * m[p, j];
+                        }
+                    }
+                    return [.. Enumerable.Range(0, 4).Select(i => m[i, i] == 0 ? 0 : m[i, 4] / m[i, i])];
+                }
+                var zs = rows.Select(r => r.Z).Order().ToList();
+                Console.WriteLine($"{rows.Count} triangles; normal z median {zs[zs.Count / 2]:F3}, 10% {zs[zs.Count / 10]:F3}");
+                string[] names = ["R", "G", "B"];
+                for (int k = 0; k < 3; k++)
+                {
+                    var s = Solve(k);
+                    double mean = rows.Average(r => k == 0 ? r.R : k == 1 ? r.G : r.B);
+                    double res = Math.Sqrt(rows.Average(r => { double pred = s[0] * r.X + s[1] * r.Y + s[2] * r.Z + s[3]; double ch = k == 0 ? r.R : k == 1 ? r.G : r.B; return (ch - pred) * (ch - pred); }));
+                    Console.WriteLine($"  {names[k]} = {s[0]:F3} x + {s[1]:F3} y + {s[2]:F3} z + {s[3]:F3}   (mean {mean:F3}, residual {res:F3})");
+                }
+                return 0;
+            }
             case "btr-info":
             {
+                // Each block's start and size in a NIF file (as BtoWriter.Patch reads the header).
+                static (int[] Offsets, uint[] Sizes) NifBlockSpans(byte[] b)
+                {
+                    int i = Array.IndexOf(b, (byte)'\n') + 1;
+                    i += 4 + 1 + 4;
+                    uint blocks = BitConverter.ToUInt32(b, i); i += 4;
+                    uint bsver = BitConverter.ToUInt32(b, i); i += 4;
+                    for (int k = 0; k < 3; k++) i += 1 + b[i];
+                    if (bsver >= 103) i += 1 + b[i];
+                    int types = BitConverter.ToUInt16(b, i); i += 2;
+                    for (int k = 0; k < types; k++) i += 4 + BitConverter.ToInt32(b, i);
+                    i += 2 * (int)blocks;
+                    var sizes = new uint[blocks];
+                    for (int k = 0; k < blocks; k++) { sizes[k] = BitConverter.ToUInt32(b, i); i += 4; }
+                    int strings = BitConverter.ToInt32(b, i); i += 8;
+                    for (int k = 0; k < strings; k++) i += 4 + BitConverter.ToInt32(b, i);
+                    int groups = BitConverter.ToInt32(b, i); i += 4 + 4 * groups;
+                    var offsets = new int[blocks];
+                    for (int k = 0; k < blocks; k++) { offsets[k] = i; i += (int)sizes[k]; }
+                    return (offsets, sizes);
+                }
                 // Dev aid: a terrain LOD chunk's shapes: vertex and UV ranges, colours, vertex format, transforms, bounds.
                 using var nif = new nifly.NifFile();
                 nif.Load(opts["file"]);
@@ -7672,6 +9412,41 @@ static class Program
                         Console.Write($" shader={ts.ShaderPropertyRef().index} alpha={ts.AlphaPropertyRef().index}");
                         Console.Write($" colors={ts.HasVertexColors()} normals={ts.HasNormals()} tangents={ts.HasTangents()} vsize={ts.vertexSize} desc={ts.vertexDesc.GetFlags()} bound=({ts.GetBounds().center.x},{ts.GetBounds().center.y},{ts.GetBounds().center.z}) r={ts.GetBounds().radius}");
                         for (int k = 0; k < 3; k++) Console.Write($" v{k}=({v[k].x},{v[k].y},{v[k].z})/{(uv is { Count: > 0 } ? $"{uv[k].u},{uv[k].v}" : "")}");
+                    }
+                    // --segcells: each segment of a sub-index shape (object LOD) and the cells its triangles lie in (local
+                    // units 0-4096 across the chunk, a quarter a cell at level 4), to see which order Skyrim numbers them in.
+                    if (opts.ContainsKey("segcells") && block is nifly.BSSubIndexTriShape seg)
+                    {
+                        Console.WriteLine();
+                        // nifly reads no SE segments: they are the block's tail (a count, then per segment a flags byte,
+                        // its first index and its triangle count), found by the count that fits the block's end.
+                        var raw = File.ReadAllBytes(opts["file"]);
+                        var (offsets, sizes) = NifBlockSpans(raw);
+                        int end = offsets[(int)i] + (int)sizes[(int)i];
+                        var runs = new List<(int First, int Count)>();
+                        for (int n = 0; n <= 64; n++)
+                        {
+                            int at = end - (4 + 9 * n);
+                            if (at < offsets[(int)i] || BitConverter.ToInt32(raw, at) != n) continue;
+                            for (int k = 0; k < n; k++) runs.Add((BitConverter.ToInt32(raw, at + 4 + 9 * k + 1) / 3, BitConverter.ToInt32(raw, at + 4 + 9 * k + 5)));
+                            break;
+                        }
+                        var segVerts = nif.GetVertsForShape(seg);
+                        var segTris = new nifly.vectorTriangle();
+                        seg.GetTriangles(segTris);
+                        int level = int.Parse(opts.GetValueOrDefault("level", "4"));
+                        float cellLocal = 4096f / level;
+                        for (int k = 0; k < runs.Count; k++)
+                        {
+                            var cells = new HashSet<(int, int)>();
+                            for (int t = runs[k].First; t < runs[k].First + runs[k].Count && t < segTris.Count; t++)
+                            {
+                                var tri = segTris[t];
+                                float cx = (segVerts[tri.p1].x + segVerts[tri.p2].x + segVerts[tri.p3].x) / 3, cy = (segVerts[tri.p1].y + segVerts[tri.p2].y + segVerts[tri.p3].y) / 3;
+                                cells.Add(((int)MathF.Floor(cx / cellLocal), (int)MathF.Floor(cy / cellLocal)));
+                            }
+                            Console.WriteLine($"    segment {k}: {runs[k].Count} triangles, cells (dx,dy) {string.Join(" ", cells.OrderBy(c => c))}");
+                        }
                     }
                     // Sub-index shapes (object LOD): their segments, read by reflection (--segments).
                     if (opts.ContainsKey("segments") && block is nifly.BSSubIndexTriShape)
@@ -7735,6 +9510,67 @@ static class Program
                             Console.WriteLine($"   radius {e.radius} speed {e.speed} life {e.lifeSpan} rise {e.speed * e.lifeSpan:F0} {vol}");
                         }
                 }
+                return 0;
+            }
+            case "nif-variant":
+            {
+                // Dev aid for in-game bisects (2026-11-09, invisible creature bodies): --file a NIF, --out the copy, --mode a
+                // comma list of one-change edits to every BSTriShape: flags (0x8000E as vanilla's), bounds (zeroed as
+                // vanilla's skinned shapes), noskinflag (shader flag Skinned off), hide (flag bit 0).
+                using var vnif = new nifly.NifFile();
+                if (vnif.Load(opts["file"]) != 0) { Console.Error.WriteLine("failed to load"); return 1; }
+                var vhdr = vnif.GetHeader();
+                var modes = opts["mode"].Split(',');
+                for (uint bi = 0; bi < vhdr.GetNumBlocks(); bi++)
+                {
+                    string bn = vhdr.GetBlockById(bi).GetBlockName();
+                    if (bn == "NiSkinData" && modes.Contains("skininfo"))
+                        Skyrim.Meshes.BlockMeshBuilder.EditBlock<nifly.NiSkinData>(vnif, bi, sd =>
+                        {
+                            var st = sd.skinTransform;
+                            Console.WriteLine($"[{bi}] NiSkinData bones {sd.bones.Count} skinTransform t=({st.translation.x:G4},{st.translation.y:G4},{st.translation.z:G4}) s={st.scale:G4}");
+                            for (int k = 0; k < sd.bones.Count && k < 6; k++)
+                            {
+                                var bd = sd.bones[k]; var t = bd.boneTransform;
+                                Console.WriteLine($"   bone {k}: t=({t.translation.x:G4},{t.translation.y:G4},{t.translation.z:G4}) s={t.scale:G4} bounds c=({bd.bounds.center.x:G4},{bd.bounds.center.y:G4},{bd.bounds.center.z:G4}) r={bd.bounds.radius:G4} verts {bd.numVertices} weights {bd.vertexWeights.Count}");
+                            }
+                        });
+                    if (bn == "BSTriShape")
+                        Skyrim.Meshes.BlockMeshBuilder.EditBlock<nifly.BSTriShape>(vnif, bi, sh =>
+                        {
+                            if (modes.Contains("flags")) sh.flags = 524302;
+                            if (modes.Contains("bounds")) sh.SetBounds(new nifly.BoundingSphere { center = new nifly.Vector3(0, 0, 0), radius = 0 });
+                        });
+                }
+                if (!opts.ContainsKey("out")) return 0;
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(opts["out"]))!);
+                Console.WriteLine(vnif.Save(opts["out"]) == 0 ? "saved " + opts["out"] : "save failed");
+                return 0;
+            }
+            case "keep-placed":
+            {
+                // Plugins converted before 2026-11-11 (or by an older tool) drop their books, bottles and other loose
+                // things into the physics as a cell loads. This flags them in place, as a new conversion does
+                // (Skyrim/HavokSettle): --data FOLDER (default Skyrim's Data), --plugins a;b (default every converted
+                // plugin there). The files keep their size.
+                string dir = opts.GetValueOrDefault("data", skyrimData);
+                var names = opts.TryGetValue("plugins", out var list) ? list.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList()
+                    : Directory.EnumerateFiles(dir).Select(Path.GetFileName).OfType<string>()
+                        .Where(n => (n.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) || n.EndsWith(".esp", StringComparison.OrdinalIgnoreCase))
+                            && (n.StartsWith("Daggerfall", StringComparison.OrdinalIgnoreCase) || n.StartsWith("Morrowind", StringComparison.OrdinalIgnoreCase) || n.StartsWith("Oblivion", StringComparison.OrdinalIgnoreCase)
+                                || n.StartsWith("Redguard", StringComparison.OrdinalIgnoreCase) || n.StartsWith("TamrielMerge", StringComparison.OrdinalIgnoreCase)))
+                        .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+                int total = 0;
+                foreach (var n in names)
+                {
+                    string path = Path.Combine(dir, n);
+                    if (!File.Exists(path)) { Console.WriteLine($"{n}: not there"); continue; }
+                    if (new FileInfo(path).Length < 100) continue;
+                    var r = Skyrim.HavokSettle.Stamp(path, [dir, skyrimData], Console.WriteLine);
+                    total += r.Flagged;
+                    Console.WriteLine($"{n}: {r.Placed:N0} placed references, {r.Flagged:N0} loose things flagged to stay where they were put, {r.Already:N0} already were");
+                }
+                Console.WriteLine($"{total:N0} flagged in {names.Count} plugins");
                 return 0;
             }
             case "nif-dump":
@@ -8132,12 +9968,12 @@ static class Program
                 foreach (var ws in plugin.Worldspaces)
                 {
                     var climate = plugin.Climates.FirstOrDefault(c => c.FormKey == ws.Climate.FormKey);
-                    bool ok = climate is not null && climate.WeatherTypes.All(t => ours.Contains(t.Weather.FormKey));
+                    bool ok = climate is not null && (climate.WeatherTypes ?? []).All(t => ours.Contains(t.Weather.FormKey));
                     if (!ok) bad++;
                     Console.WriteLine($"worldspace {ws.EditorID}: climate {climate?.EditorID ?? ws.Climate.FormKey.ToString()} {(ok ? "uses only relit weathers" : "NOT Daggerfall's")}");
                 }
                 if (plugin.Weathers.FirstOrDefault() is { } sample)
-                    Console.WriteLine($"sample {sample.EditorID}: sun day {sample.SunlightColor.Day} night {sample.SunlightColor.Night}; ambient day {sample.DirectionalAmbientLightingColors.Day.DirectionalZPlus} night {sample.DirectionalAmbientLightingColors.Night.DirectionalZPlus}");
+                    Console.WriteLine($"sample {sample.EditorID}: sun day {sample.SunlightColor.Day} night {sample.SunlightColor.Night}; ambient day {sample.DirectionalAmbientLightingColors?.Day.DirectionalZPlus} night {sample.DirectionalAmbientLightingColors?.Night.DirectionalZPlus}");
                 foreach (var cell in plugin.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
                     Console.WriteLine($"cell {cell.EditorID}: ambient {cell.Lighting?.AmbientColor} inherits {cell.Lighting?.Inherits}; lights: " + string.Join(", ", cell.Temporary.OfType<IPlacedObjectGetter>().Where(p => plugin.Lights.Any(l => l.FormKey == p.Base.FormKey)).GroupBy(p => p.Base.FormKey).Select(g => $"{plugin.Lights.First(l => l.FormKey == g.Key).EditorID} x{g.Count()}")));
                 Console.WriteLine($"{plugin.Weathers.Count} Daggerfall weathers, {bad} problems");
@@ -8567,6 +10403,72 @@ static class Program
                 Console.WriteLine($"{missing}/{total} doors without floor under them");
                 return 0;
             }
+            case "door-walls":
+            {
+                // Dev aid (user, 2026-11-10: "some doors arent against walls"): each of a Daggerfall dungeon's doors (--name)
+                // against the walls beside it. From the middle of Daggerfall's door panel, the nearest wall each way along its
+                // width (the block's own geometry, doors left out); the panel's half width; and the half width of the Skyrim
+                // door put there (ImpDoorExtSingleSmall01's frame, 134 at scale 1; ImpDoorDouble01's, 292). Gap: wall to the
+                // Skyrim frame's edge (over 0: the door stands clear of the wall; under: its frame is in the wall).
+                var models = DfModel.LoadAll(arena2);
+                var loc = DfLocations.LoadAll(arena2).First(l => l.Name == opts.GetValueOrDefault("name", "Privateer's Hold") && l.DungeonBlocks.Count > 0);
+                var dungeon = DfDungeon.Load(loc, new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), []);
+                float S = Skyrim.Meshes.BlockMeshBuilder.Scale;
+                var tris = new List<(System.Numerics.Vector3 A, System.Numerics.Vector3 B, System.Numerics.Vector3 C)>();
+                foreach (var (block, placement) in dungeon.Blocks)
+                {
+                    var o = DfDungeon.BlockOrigin(placement);
+                    var shift = new System.Numerics.Vector3(o.X, o.Z, o.Y) * S;
+                    foreach (var poly in Skyrim.Meshes.BlockMeshBuilder.SolidPolygons(block, models).Where(q => MathF.Abs(q.Normal.Z) < 0.7f))
+                        for (int k = 1; k + 1 < poly.Points.Length; k++) tris.Add((poly.Points[0] + shift, poly.Points[k] + shift, poly.Points[k + 1] + shift));
+                }
+                float Hit(System.Numerics.Vector3 from, System.Numerics.Vector3 dir)
+                {
+                    float best = float.MaxValue;
+                    foreach (var (a0, b0, c0) in tris)
+                    {
+                        var e1 = b0 - a0; var e2 = c0 - a0; var h = System.Numerics.Vector3.Cross(dir, e2);
+                        float det = System.Numerics.Vector3.Dot(e1, h);
+                        if (MathF.Abs(det) < 1e-6f) continue;
+                        var sv = from - a0; float u = System.Numerics.Vector3.Dot(sv, h) / det;
+                        if (u < -0.001f || u > 1.001f) continue;
+                        var qv = System.Numerics.Vector3.Cross(sv, e1); float v = System.Numerics.Vector3.Dot(dir, qv) / det;
+                        if (v < -0.001f || u + v > 1.002f) continue;
+                        float t = System.Numerics.Vector3.Dot(e2, qv) / det;
+                        if (t > 0.5f && t < best) best = t;
+                    }
+                    return best;
+                }
+                var gaps = new List<float>(); var dfGaps = new List<float>();
+                int clear = 0, total = 0;
+                foreach (var (block, placement) in dungeon.Blocks)
+                    foreach (var o in block.Objects.Where(Skyrim.Meshes.BlockMeshBuilder.IsDoor))
+                    {
+                        var model = models[o.ModelId];
+                        var m = DfDungeon.ObjectTransform(o, DfDungeon.BlockOrigin(placement));
+                        float ex = model.Max.X - model.Min.X, ez = model.Max.Z - model.Min.Z, height = (model.Max.Y - model.Min.Y) * S;
+                        var along = System.Numerics.Vector3.TransformNormal(ex < ez ? System.Numerics.Vector3.UnitZ : System.Numerics.Vector3.UnitX, m);
+                        var t = System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(along.X, along.Z, 0));
+                        var c = System.Numerics.Vector3.Transform(new System.Numerics.Vector3((model.Min.X + model.Max.X) / 2, (model.Min.Y + model.Max.Y) / 2, (model.Min.Z + model.Max.Z) / 2), m);
+                        var mid = new System.Numerics.Vector3(c.X, c.Z, c.Y) * S;
+                        float half = MathF.Max(ex, ez) * S / 2;
+                        bool dbl = o.Tag == "DDR";
+                        float scale = dbl ? Math.Clamp(half * 2 / 292, 0.6f, 2f) : Math.Clamp(height / 228, 0.6f, 2f);
+                        float skyHalf = (dbl ? 292 : 134) * scale / 2;
+                        float w1 = Hit(mid, t), w2 = Hit(mid, -t);
+                        total++;
+                        float g1 = w1 - skyHalf, g2 = w2 - skyHalf;
+                        if (w1 < 4096) { gaps.Add(g1); dfGaps.Add(w1 - half); }
+                        if (w2 < 4096) { gaps.Add(g2); dfGaps.Add(w2 - half); }
+                        bool off = (w1 < 4096 && g1 > 8) || (w2 < 4096 && g2 > 8) || w1 >= 4096 || w2 >= 4096;
+                        if (off) clear++;
+                        if (off || opts.ContainsKey("all"))
+                            Console.WriteLine($"{block.Name} door {o.ModelId} {o.Tag} at ({mid.X:F0},{mid.Y:F0},{mid.Z:F0}): panel {half * 2:F0} x {height:F0}, Skyrim door x{scale:F2} = {skyHalf * 2:F0} wide; wall {(w1 < 4096 ? $"{w1:F0}" : "none")} and {(w2 < 4096 ? $"{w2:F0}" : "none")} from its middle: gap to the frame {g1:F0} and {g2:F0} (Daggerfall's panel {w1 - half:F0} and {w2 - half:F0})");
+                    }
+                string Stats(List<float> l) => l.Count == 0 ? "none" : $"min {l.Min():F0}, median {l.OrderBy(x => x).ElementAt(l.Count / 2):F0}, max {l.Max():F0}";
+                Console.WriteLine($"{total} doors; {clear} with a side more than 8 clear of its wall (or no wall beside it). Gap wall to Skyrim frame: {Stats(gaps)}; wall to Daggerfall's panel: {Stats(dfGaps)}");
+                return 0;
+            }
             case "verify-creatures":
             {
                 // Daggerfall creatures: every actor and encounter list resolves; every placed actor stands on the navmesh.
@@ -8676,7 +10578,7 @@ static class Program
             }
             case "render-music":
             {
-                var lengths = DfMusic.RenderAll(arena2, MusicTools(skyrimData), Path.Combine(opts.GetValueOrDefault("out", "out/mod"), "Music", "TamrielMerge"), Path.GetFullPath("out/music-work"), uncut: !opts.ContainsKey("no-uncut"), only: opts.GetValueOrDefault("only"));
+                var lengths = DfMusic.RenderAll(arena2, MusicTools(skyrimData), Path.Combine(opts.GetValueOrDefault("out", "out/mod"), "Music", "TamrielMerge"), Util.Paths.Cache("music-work"), uncut: !opts.ContainsKey("no-uncut"), only: opts.GetValueOrDefault("only"));
                 Console.WriteLine($"{lengths.Count} songs, total {lengths.Values.Sum() / 60:F0} minutes");
                 return 0;
             }
@@ -8831,6 +10733,208 @@ static class Program
                     Console.WriteLine($"  interior entry parent={D(mi.Parent)} unknown={mi.Unknown} unknown2={mi.Unknown2} doors={mi.LinkedDoors.Count} island={(mi.Island is null ? "null" : "yes")} merges={mi.PreferredMerges.Count}");
                 return 0;
             }
+            case "nif-turn":
+            {
+                // Dev aid for in-game experiments: a node of a model (--file, --node NAME) turned --deg degrees about its
+                // up axis (counter-clockwise from above), written to --out.
+                using var tn = new nifly.NifFile();
+                if (tn.Load(opts["file"]) != 0) { Console.WriteLine("can't read it"); return 1; }
+                var th = tn.GetHeader();
+                float ang = float.Parse(opts["deg"], System.Globalization.CultureInfo.InvariantCulture) * MathF.PI / 180f;
+                float cs = MathF.Cos(ang), sn = MathF.Sin(ang);
+                int turned = 0;
+                for (uint i = 0; i < th.GetNumBlocks(); i++)
+                    if (th.GetBlockById(i) is nifly.NiNode node && node.name.get() == opts["node"])
+                    {
+                        var t = node.transform;
+                        t.rotation = new nifly.Matrix3(cs, -sn, 0, sn, cs, 0, 0, 0, 1);
+                        node.transform = t;
+                        turned++;
+                    }
+                if (tn.Save(opts["out"]) != 0) { Console.WriteLine("can't write it"); return 1; }
+                Console.WriteLine($"{turned} node(s) turned {opts["deg"]} degrees in {opts["out"]}");
+                return turned > 0 ? 0 : 1;
+            }
+            case "rec-print":
+            {
+                // Dev aid: a record of a Skyrim plugin in full, as Mutagen prints it (--plugin, a path or a file name in
+                // Skyrim's Data; --id, its FormID's low six hex digits; several as a;b).
+                string path = opts["plugin"];
+                if (!File.Exists(path)) path = Path.Combine(skyrimData, path);
+                using var pm = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+                var ids = opts["id"].Split(';', StringSplitOptions.RemoveEmptyEntries).Select(h => Convert.ToUInt32(h, 16)).ToHashSet();
+                foreach (var rec in pm.EnumerateMajorRecords().Where(r => r.FormKey.ModKey == pm.ModKey && ids.Contains(r.FormKey.ID)))
+                {
+                    Console.WriteLine($"{rec.GetType().Name} {rec.FormKey} {rec.EditorID}");
+                    void Show(object? o, string indent, int depth)
+                    {
+                        if (o is null) return;
+                        foreach (var pr in o.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance).Where(pr => pr.GetIndexParameters().Length == 0).OrderBy(pr => pr.Name))
+                        {
+                            if (pr.Name is "FormKey" or "EditorID" or "Registration" or "StaticRegistration" or "BinaryWriteTranslator" or "CommonInstance" or "CommonSetterInstance" or "CommonSetterTranslationInstance" or "CommonInstanceGetter") continue;
+                            object? v;
+                            try { v = pr.GetValue(o); } catch { continue; }
+                            if (v is null) continue;
+                            if (v is string or ValueType || (v is not System.Collections.IEnumerable && (v.GetType().Namespace?.StartsWith("Mutagen.Bethesda.Plugins") == true || v.GetType().Namespace?.StartsWith("Noggog") == true)))
+                                Console.WriteLine($"{indent}{pr.Name} = {v}");
+                            else if (v is System.Collections.IEnumerable list)
+                            {
+                                int n = 0;
+                                foreach (var item in list)
+                                {
+                                    // (No cut at 12 entries, as until 2026-11-15: a package's 20 inputs printed as 12
+                                    // read as "the inputs are missing".)
+                                    if (n++ >= 400) { Console.WriteLine($"{indent}{pr.Name}: more than 400 entries, the rest not shown"); break; }
+                                    if (item is not null && item.GetType().IsGenericType && item.GetType().GetGenericTypeDefinition() == typeof(KeyValuePair<,>))
+                                    {
+                                        object? kk = item.GetType().GetProperty("Key")!.GetValue(item), vv = item.GetType().GetProperty("Value")!.GetValue(item);
+                                        Console.WriteLine($"{indent}{pr.Name}[{kk}]: {vv?.GetType().Name}");
+                                        if (depth < 4) Show(vv, indent + "  ", depth + 1);
+                                    }
+                                    else if (item is string or ValueType || item?.GetType().Namespace?.StartsWith("Mutagen.Bethesda.Plugins") == true) Console.WriteLine($"{indent}{pr.Name}[{n - 1}] = {item}");
+                                    else if (depth < 3) { Console.WriteLine($"{indent}{pr.Name}[{n - 1}]: {item?.GetType().Name}"); Show(item, indent + "  ", depth + 1); }
+                                }
+                            }
+                            else if (depth < 3) { Console.WriteLine($"{indent}{pr.Name}: {v.GetType().Name}"); Show(v, indent + "  ", depth + 1); }
+                        }
+                    }
+                    Show(rec, "  ", 0);
+                }
+                return 0;
+            }
+            case "ref-patch":
+            {
+                // Dev aid for in-game experiments: a small plugin (--out FILE.esp) overriding placed objects of a built
+                // plugin (--plugin; --refs HEX;HEX, their FormIDs' low six digits): --base MASTER:HEX gives them another
+                // base object, --no-script takes their scripts off, --no-lock their lock, --z N moves them up by N.
+                // A test's own file: never part of a conversion.
+                string path = Path.GetFullPath(opts["plugin"]);
+                using var master = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+                var wanted = opts.GetValueOrDefault("refs", "").Split(';', StringSplitOptions.RemoveEmptyEntries).Select(h => new FormKey(master.ModKey, Convert.ToUInt32(h, 16))).ToHashSet();
+                var patch = new SkyrimMod(ModKey.FromFileName(Path.GetFileName(opts["out"])), SkyrimRelease.SkyrimSE);
+                FormKey? newBase = null;
+                if (opts.TryGetValue("base", out var baseText)) { var bits = baseText.Split(':'); newBase = new FormKey(ModKey.FromFileName(bits[0]), Convert.ToUInt32(bits[1], 16)); }
+                int done = 0;
+                if (wanted.Count > 0) foreach (var ctx in master.EnumerateMajorRecordContexts<IPlacedObject, IPlacedObjectGetter>(master.ToImmutableLinkCache()))
+                {
+                    if (!wanted.Contains(ctx.Record.FormKey)) continue;
+                    var r = ctx.GetOrAddAsOverride(patch);
+                    if (newBase is { } nb) r.Base.SetTo(nb);
+                    if (opts.ContainsKey("no-script")) r.VirtualMachineAdapter = null;
+                    if (opts.ContainsKey("no-lock")) r.Lock = null;
+                    // --no-owner: nobody's (whether Skyrim's people route through an owned door).
+                    if (opts.ContainsKey("no-owner")) r.Owner.Clear();
+                    if (opts.TryGetValue("rz", out var rzText) && r.Placement is { } plr) plr.Rotation = new Noggog.P3Float(plr.Rotation.X, plr.Rotation.Y, plr.Rotation.Z + float.Parse(rzText, System.Globalization.CultureInfo.InvariantCulture) * MathF.PI / 180f);
+                    if (opts.TryGetValue("z", out var zText) && r.Placement is { } pl) pl.Position = new Noggog.P3Float(pl.Position.X, pl.Position.Y, pl.Position.Z + float.Parse(zText, System.Globalization.CultureInfo.InvariantCulture));
+                    Console.WriteLine($"{r.FormKey}: base {r.Base.FormKey}, owner {r.Owner.FormKeyNullable?.ToString() ?? "none"}, lock {(r.Lock is { } lk ? $"{lk.Level} key {lk.Key.FormKeyNullable}" : "none")}, scripts {string.Join(",", r.VirtualMachineAdapter?.Scripts.Select(x => x.Name) ?? [])}, at {r.Placement?.Position}");
+                    if (++done == wanted.Count) break;
+                }
+                // --packages HEX;HEX --interrupt N: those packages overridden with that interrupt flags value (1: hellos to
+                // the player), each printed with its old value.
+                if (opts.TryGetValue("packages", out var pkList))
+                {
+                    var pkIds = pkList.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(h => Convert.ToUInt32(h, 16)).ToHashSet();
+                    foreach (var pkg in master.Packages.Where(pk => pkIds.Contains(pk.FormKey.ID)))
+                    {
+                        var op = pkg.DeepCopy(); patch.Packages.Add(op);
+                        Console.WriteLine($"package {op.FormKey} {op.EditorID}: interrupt flags {op.InterruptFlags} ({(uint)op.InterruptFlags:X}), flags {op.Flags}");
+                        if (opts.TryGetValue("interrupt", out var iv)) op.InterruptFlags = (Package.InterruptFlag)Convert.ToUInt32(iv, 16);
+                        // --topic helo | HEX: the package's topic input (7, a forcegreet's) made "subtype HELO" (the
+                        // actor's own greeting) or that topic of the plugin.
+                        if (opts.TryGetValue("topic", out var tv) && op.Data.FirstOrDefault(kv => kv.Key == 7).Value is PackageDataTopic pdt)
+                        {
+                            pdt.Topics.Clear();
+                            if (tv.Equals("helo", StringComparison.OrdinalIgnoreCase)) pdt.Topics.Add(new TopicReferenceSubtype { Subtype = new RecordType("HELO") });
+                            else { var tr = new TopicReference(); tr.Reference.SetTo(new FormKey(master.ModKey, Convert.ToUInt32(tv, 16))); pdt.Topics.Add(tr); }
+                            Console.WriteLine($"  topic input: {tv}");
+                        }
+                    }
+                }
+                // --door HEX --door-model PATH [--door-bounds x0,y0,z0,x1,y1,z1]: that door base overridden with another
+                // model (and bounds).
+                if (opts.TryGetValue("door", out var doorHex) && master.Doors.FirstOrDefault(dd => dd.FormKey.ID == Convert.ToUInt32(doorHex, 16)) is { } doorBase)
+                {
+                    var od = doorBase.DeepCopy(); patch.Doors.Add(od);
+                    if (opts.TryGetValue("door-model", out var dm)) od.Model = new Model { File = dm };
+                    if (opts.TryGetValue("door-bounds", out var db))
+                    {
+                        var v = db.Split(',').Select(short.Parse).ToArray();
+                        od.ObjectBounds = new ObjectBounds { First = new Noggog.P3Int16(v[0], v[1], v[2]), Second = new Noggog.P3Int16(v[3], v[4], v[5]) };
+                    }
+                    Console.WriteLine($"door {od.FormKey} {od.EditorID}: model {od.Model?.File}, bounds {od.ObjectBounds.First} to {od.ObjectBounds.Second}");
+                }
+                patch.WriteToBinary(opts["out"]);
+                Console.WriteLine($"{done} of {wanted.Count} references overridden in {opts["out"]}; masters {string.Join(", ", patch.ModHeader.MasterReferences.Select(m => m.Master))}");
+                return done == wanted.Count ? 0 : 1;
+            }
+            case "nav-inner-doors":
+            {
+                // Dev aid: the doors inside interiors that lead nowhere (no teleport: a gate, a room's door) against their
+                // cell's navmesh (--plugin, a built plugin or a vanilla master by file name in Skyrim's Data; --cell
+                // EditorID regex): whether the navmesh lists each among its door triangles, the flags of the triangle
+                // the door stands over, how far over the navmesh its origin is, and the base door's flags. Run on
+                // Skyrim.esm it shows how Bethesda's own inner doors are known to the navmesh.
+                string path = opts["plugin"];
+                if (!File.Exists(path)) path = Path.Combine(skyrimData, path);
+                using var im = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+                var cellFilter = opts.TryGetValue("cell", out var cf) ? new System.Text.RegularExpressions.Regex(cf, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+                var doorBases = im.Doors.ToDictionary(d => d.FormKey);
+                if (!path.EndsWith("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+                {
+                    using var sk = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                    foreach (var d in sk.Doors) doorBases.TryAdd(d.FormKey, d);
+                }
+                int inner = 0, listed = 0, over = 0, shown = 0, show = int.Parse(opts.GetValueOrDefault("show", "12"));
+                var flagsUnder = new Dictionary<string, int>(); var heights = new List<float>();
+                // The navmesh map's entries: which doors each navmesh's entry links (load doors are; are these?).
+                var mapLinked = im.NavigationMeshInfoMaps.SelectMany(m => m.MapInfos).SelectMany(i => i.LinkedDoors.Select(l => l.Door.FormKey)).ToHashSet();
+                int inMap = 0, underIsDoorTri = 0, tagged = 0;
+                foreach (var cell in im.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
+                {
+                    if (cellFilter is not null && !cellFilter.IsMatch(cell.EditorID ?? "")) continue;
+                    var navs = cell.NavigationMeshes.Where(n => n.Data is not null).ToList();
+                    if (navs.Count == 0) continue;
+                    var doorTris = navs.SelectMany(n => n.Data!.DoorTriangles.Select(t => (t.Door.FormKey, t.TriangleBeforeDoor, t.Unknown))).ToLookup(t => t.FormKey);
+                    foreach (var r in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>())
+                    {
+                        if (!doorBases.TryGetValue(r.Base.FormKey, out var door) || r.TeleportDestination is not null || r.Placement is not { } pl) continue;
+                        inner++;
+                        bool isListed = doorTris.Contains(r.FormKey);
+                        if (isListed) listed++;
+                        if (mapLinked.Contains(r.FormKey)) inMap++;
+                        if (isListed && doorTris[r.FormKey].Any(t => t.Unknown == unchecked((int)0xE48B73F3))) tagged++;
+                        // The triangle its origin is over (nearest below or above), and whether that is the one listed.
+                        string under = "none"; float best = float.MaxValue; int underIndex = -1;
+                        foreach (var n in navs)
+                        {
+                            var nd = n.Data!;
+                            for (int ti = 0; ti < nd.Triangles.Count; ti++)
+                            {
+                                var t = nd.Triangles[ti];
+                                var a0 = nd.Vertices[t.Vertices.X]; var b0 = nd.Vertices[t.Vertices.Y]; var c0 = nd.Vertices[t.Vertices.Z];
+                                float d0 = (b0.X - a0.X) * (pl.Position.Y - a0.Y) - (b0.Y - a0.Y) * (pl.Position.X - a0.X);
+                                float d1 = (c0.X - b0.X) * (pl.Position.Y - b0.Y) - (c0.Y - b0.Y) * (pl.Position.X - b0.X);
+                                float d2 = (a0.X - c0.X) * (pl.Position.Y - c0.Y) - (a0.Y - c0.Y) * (pl.Position.X - c0.X);
+                                if (!((d0 >= 0 && d1 >= 0 && d2 >= 0) || (d0 <= 0 && d1 <= 0 && d2 <= 0))) continue;
+                                float z = (a0.Z + b0.Z + c0.Z) / 3, dz = pl.Position.Z - z;
+                                if (MathF.Abs(dz) < MathF.Abs(best)) { best = dz; under = t.Flags.ToString(); underIndex = ti; }
+                            }
+                        }
+                        if (under != "none") { over++; heights.Add(best); }
+                        if (isListed && doorTris[r.FormKey].Any(t => t.TriangleBeforeDoor == underIndex)) underIsDoorTri++;
+                        flagsUnder[under] = flagsUnder.GetValueOrDefault(under) + 1;
+                        if (shown < show && (cellFilter is not null || shown < show))
+                        {
+                            shown++;
+                            Console.WriteLine($"  {cell.EditorID}: door {r.FormKey} base {door.EditorID} flags {door.Flags} at {pl.Position}; listed {(isListed ? string.Join(",", doorTris[r.FormKey].Select(t => $"tri {t.TriangleBeforeDoor} tag {t.Unknown:X8}")) : "no")}; over triangle [{under}] by {(under == "none" ? "-" : best.ToString("F0"))}; lock {(r.Lock is { } lk ? $"{lk.Level} key {lk.Key.FormKeyNullable}" : "none")}; scripts {string.Join(",", r.VirtualMachineAdapter?.Scripts.Select(x => x.Name) ?? [])}");
+                        }
+                    }
+                }
+                Console.WriteLine($"{inner} inner doors; {listed} listed among their navmesh's door triangles ({tagged} with the tag E48B73F3, {underIsDoorTri} on the very triangle under the door); {inMap} linked in the navmesh map's entries; {over} with their origin over a triangle");
+                Console.WriteLine("  flags of the triangle under them: " + string.Join("; ", flagsUnder.OrderByDescending(k => k.Value).Take(10).Select(k => $"[{k.Key}] x{k.Value}")));
+                if (heights.Count > 0) { heights.Sort(); Console.WriteLine($"  origin above its triangle: 5% {heights[heights.Count / 20]:F0}, median {heights[heights.Count / 2]:F0}, 95% {heights[heights.Count * 19 / 20]:F0}"); }
+                return 0;
+            }
             case "find-forms":
             {
                 // Dev aid: lighting templates, lights, doors and containers whose EditorID matches --name.
@@ -8931,10 +11035,12 @@ static class Program
             case "start-build":
             {
                 // Rebuilds just the start plugin into --dir (default out/mod) and compiles the scripts. Daggerfall's start
-                // marker is found in a converted Daggerfall.esm (in --dir or Skyrim's Data), if there is one.
+                // marker is found in a converted Daggerfall.esm (in --dir or Skyrim's Data), if there is one. --find DIR: the
+                // converted plugins the starts are found in, when not --dir (a check against the installed ones).
                 string dir = opts.GetValueOrDefault("dir", "out/mod");
+                string find = opts.GetValueOrDefault("find", dir);
                 uint? dfStart = null;
-                foreach (var candidate in new[] { Path.Combine(dir, "Daggerfall.esm"), Path.Combine(skyrimData, "Daggerfall.esm") })
+                foreach (var candidate in new[] { Path.Combine(find, "Daggerfall.esm"), Path.Combine(skyrimData, "Daggerfall.esm") })
                 {
                     if (!File.Exists(candidate)) continue;
                     using var df = SkyrimMod.CreateFromBinaryOverlay(candidate, SkyrimRelease.SkyrimSE);
@@ -8943,9 +11049,11 @@ static class Program
                 }
                 Console.WriteLine(dfStart is { } id ? $"Daggerfall start: {id:X6}" : "Daggerfall not converted: the stories begin with the first converted game");
                 // Each converted game's start after its opening, for the alternative starts.
-                var afterOpenings = Skyrim.AltStarts.Find(dir);
+                var afterOpenings = Skyrim.AltStarts.Find(find);
                 foreach (var a in afterOpenings) Console.WriteLine($"After the opening ({a.Story}): ref {a.RefId:X6} offset ({a.Dx:F0},{a.Dy:F0},{a.Dz:F0}) quest {a.QuestId:X6} stage {a.QuestStage} item {a.ItemId:X6}");
-                Skyrim.AltStartBuilder.Build(skyrimData, dir, dfStart, afterOpenings);
+                var steps = Skyrim.AltStarts.Steps(find);
+                foreach (var st in steps) Console.WriteLine($"Start-up step ({st.Story}, {(st.After ? "after the opening" : "opening")}): {st.What} ({st.FormId:X6})");
+                Skyrim.AltStartBuilder.Build(skyrimData, dir, dfStart, afterOpenings, steps);
                 AltStartBuilder.CompileScripts(skyrimData, Path.Combine(AppContext.BaseDirectory, "Papyrus"), dir);
                 AltStartBuilder.CopyEraPlugin(dir);
                 return 0;
@@ -9008,6 +11116,27 @@ static class Program
                     foreach (var kv in c.Unread) unread[kv.Key] = unread.GetValueOrDefault(kv.Key) + kv.Value;
                     if (c.Triangles.Count == 0) { if (verbose) Console.WriteLine($"{model}: no collision{(c.Unread.Count > 0 ? $" (not read: {string.Join(", ", c.Unread.Select(kv => $"{kv.Key} x{kv.Value}"))})" : "")}"); continue; }
                     withCollision++; tris += c.Triangles.Count;
+                    // --box x0,x1,y0,y1,z0,z1 (with --offset x,y,z, the model's placement, unturned): each collision
+                    // triangle with a corner inside the box, in placed coordinates, with its unit normal (what stands
+                    // in the way of a walker there).
+                    if (opts.TryGetValue("box", out var boxText))
+                    {
+                        var bx = boxText.Split(',').Select(s => float.Parse(s, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                        var off = opts.TryGetValue("offset", out var offText) ? offText.Split(',').Select(s => float.Parse(s, System.Globalization.CultureInfo.InvariantCulture)).ToArray() : [0f, 0f, 0f];
+                        var o3 = new System.Numerics.Vector3(off[0], off[1], off[2]);
+                        bool In(System.Numerics.Vector3 p) => p.X >= bx[0] && p.X <= bx[1] && p.Y >= bx[2] && p.Y <= bx[3] && p.Z >= bx[4] && p.Z <= bx[5];
+                        int shown = 0;
+                        foreach (var (t, _) in c.Triangles)
+                        {
+                            var w = t.Select(p => p + o3).ToArray();
+                            if (!w.Any(In)) continue;
+                            var nrm = System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0]);
+                            if (nrm.LengthSquared() > 1e-9f) nrm = System.Numerics.Vector3.Normalize(nrm);
+                            Console.WriteLine($"  tri ({w[0].X:F0},{w[0].Y:F0},{w[0].Z:F0}) ({w[1].X:F0},{w[1].Y:F0},{w[1].Z:F0}) ({w[2].X:F0},{w[2].Y:F0},{w[2].Z:F0}) normal ({nrm.X:F2},{nrm.Y:F2},{nrm.Z:F2})");
+                            if (++shown >= int.Parse(opts.GetValueOrDefault("max", "200"))) break;
+                        }
+                        Console.WriteLine($"  {shown} triangles in the box");
+                    }
                     var pts = c.Triangles.SelectMany(t => t.Tri).ToList();
                     var lo = pts.Aggregate(new System.Numerics.Vector3(float.MaxValue), System.Numerics.Vector3.Min);
                     var hi = pts.Aggregate(new System.Numerics.Vector3(float.MinValue), System.Numerics.Vector3.Max);
@@ -9328,6 +11457,28 @@ static class Program
                 }
                 return 0;
             }
+            case "navmesh-sizes":
+            {
+                // Triangles per navmesh in --plugins (';'-separated, e.g. the overland navmesh's parts): how many navmeshes
+                // fall in each band of triangle counts, and the triangles each band holds (what makes a navmesh plugin big).
+                var bands = new[] { 50, 100, 200, 400, 800, 1600, 3200, int.MaxValue };
+                var count = new long[bands.Length]; var tris = new long[bands.Length];
+                foreach (var path in opts["plugins"].Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    using var pm = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+                    foreach (var nm in pm.EnumerateMajorRecords<INavigationMeshGetter>())
+                    {
+                        int n = nm.Data?.Triangles.Count ?? 0;
+                        int b = Array.FindIndex(bands, x => n <= x);
+                        count[b]++; tris[b] += n;
+                    }
+                }
+                long all = tris.Sum(), meshes = count.Sum();
+                Console.WriteLine($"{meshes:N0} navmeshes, {all:N0} triangles ({(meshes == 0 ? 0 : all / (double)meshes):F0} a navmesh)");
+                for (int b = 0; b < bands.Length; b++)
+                    Console.WriteLine($"  up to {(bands[b] == int.MaxValue ? "more" : bands[b].ToString())}: {count[b],9:N0} navmeshes, {tris[b],12:N0} triangles ({(all == 0 ? 0 : 100.0 * tris[b] / all):F0}%)");
+                return 0;
+            }
             case "navmesh-flags":
             {
                 // How a plugin's interior navmeshes are flagged (--plugin; --cells N, default 600, spread through the list):
@@ -9595,6 +11746,992 @@ static class Program
                 }
                 return 0;
             }
+            case "ship-gaps":
+            {
+                // Dev aid: each placed ship (--plugin; base EditorID --ship, default RGShip) against what stands round it (models
+                // with collision, from --assets, else the plugin's folder, then the game's): its hull's outline from above (the
+                // convex hull of its collision above the water, z > --water, default 0) and, for each model within 1,500 units,
+                // the signed distance of its collision points between the water and the deck from that outline (negative:
+                // inside the hull), the least of them; the ship's place, heading, length and width.
+                using var sm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var finder = new Skyrim.DungeonCheck.FileFinder(skyrimData, opts.TryGetValue("assets", out var sa) ? Path.GetFullPath(sa) : Path.GetDirectoryName(Path.GetFullPath(opts["plugin"]))!);
+                string shipId = opts.GetValueOrDefault("ship", "RGShip");
+                float water = float.Parse(opts.GetValueOrDefault("water", "0"), System.Globalization.CultureInfo.InvariantCulture);
+                var modelOf = new Dictionary<FormKey, (string Edid, string Model)>();
+                foreach (var rec in sm.EnumerateMajorRecords()) if (rec is IModeledGetter { Model: { } mo } && rec is not INpcGetter) modelOf[rec.FormKey] = (rec.EditorID ?? "", mo.File.DataRelativePath.Path);
+                var colCache = new Dictionary<string, List<System.Numerics.Vector3[]>>(StringComparer.OrdinalIgnoreCase);
+                List<System.Numerics.Vector3[]> Col(string model)
+                {
+                    if (colCache.TryGetValue(model, out var c)) return c;
+                    var bytes = finder.Find(model);
+                    try { c = bytes is null ? [] : Skyrim.Meshes.CollisionReader.Read(bytes).Triangles.Select(t => t.Tri).ToList(); } catch (Exception) { c = []; }
+                    return colCache[model] = c;
+                }
+                List<System.Numerics.Vector3> Placed(IPlacedObjectGetter o)
+                {
+                    var rot = Skyrim.SkyrimRotation.Matrix(o.Placement!.Rotation);
+                    var pos = new System.Numerics.Vector3(o.Placement.Position.X, o.Placement.Position.Y, o.Placement.Position.Z);
+                    float sc = o.Scale ?? 1;
+                    return Col(modelOf[o.Base.FormKey].Model).SelectMany(t => t).Select(v => System.Numerics.Vector3.Transform(v * sc, rot) + pos).ToList();
+                }
+                static List<System.Numerics.Vector2> Hull(List<System.Numerics.Vector2> pts)
+                {
+                    var p = pts.Distinct().OrderBy(v => v.X).ThenBy(v => v.Y).ToList();
+                    if (p.Count < 3) return p;
+                    static float Cross(System.Numerics.Vector2 o, System.Numerics.Vector2 a, System.Numerics.Vector2 b) => (a.X - o.X) * (b.Y - o.Y) - (a.Y - o.Y) * (b.X - o.X);
+                    var h = new List<System.Numerics.Vector2>();
+                    foreach (var pass in new[] { p, Enumerable.Reverse(p).ToList() })
+                    {
+                        int start = h.Count;
+                        foreach (var v in pass) { while (h.Count >= start + 2 && Cross(h[^2], h[^1], v) <= 0) h.RemoveAt(h.Count - 1); h.Add(v); }
+                        h.RemoveAt(h.Count - 1);
+                    }
+                    return h;
+                }
+                static float Signed(System.Numerics.Vector2 q, List<System.Numerics.Vector2> hull)
+                {
+                    bool inside = true; float best = float.MaxValue;
+                    for (int i = 0; i < hull.Count; i++)
+                    {
+                        var a = hull[i]; var b = hull[(i + 1) % hull.Count]; var ab = b - a;
+                        float t = Math.Clamp(System.Numerics.Vector2.Dot(q - a, ab) / ab.LengthSquared(), 0, 1);
+                        best = MathF.Min(best, System.Numerics.Vector2.Distance(q, a + ab * t));
+                        if ((ab.X * (q.Y - a.Y) - ab.Y * (q.X - a.X)) < 0) inside = false;
+                    }
+                    return inside ? -best : best;
+                }
+                foreach (var w in sm.Worldspaces)
+                {
+                    var all = w.SubCells.SelectMany(b => b.Items).SelectMany(s => s.Items).SelectMany(c => c.Temporary.Concat(c.Persistent))
+                        .Concat(w.TopCell?.Persistent ?? []).OfType<IPlacedObjectGetter>().Where(o => o.Placement is not null && modelOf.ContainsKey(o.Base.FormKey)).ToList();
+                    foreach (var ship in all.Where(o => modelOf[o.Base.FormKey].Edid == shipId))
+                    {
+                        var pts = Placed(ship);
+                        if (pts.Count == 0) continue;
+                        // The main deck (--deck: its height over the keel at scale 1, ShipModel.Made.Deck: 448); the hull below it.
+                        float deck = ship.Placement!.Position.Z + float.Parse(opts.GetValueOrDefault("deck", "448"), System.Globalization.CultureInfo.InvariantCulture) * (ship.Scale ?? 1);
+                        var hull = Hull(pts.Where(v => v.Z > water && v.Z <= deck + 16).Select(v => new System.Numerics.Vector2(v.X, v.Y)).ToList());
+                        var c = ship.Placement!.Position;
+                        float len = 0, wid = 0;
+                        var fwd = new System.Numerics.Vector2(MathF.Sin(ship.Placement.Rotation.Z), MathF.Cos(ship.Placement.Rotation.Z));
+                        var side = new System.Numerics.Vector2(fwd.Y, -fwd.X);
+                        if (hull.Count > 0) { len = hull.Max(h => System.Numerics.Vector2.Dot(h, fwd)) - hull.Min(h => System.Numerics.Vector2.Dot(h, fwd)); wid = hull.Max(h => System.Numerics.Vector2.Dot(h, side)) - hull.Min(h => System.Numerics.Vector2.Dot(h, side)); }
+                        Console.WriteLine($"{w.EditorID} ship at ({c.X:F0},{c.Y:F0},{c.Z:F0}) heading {ship.Placement.Rotation.Z * 180 / MathF.PI:F0}, scale {ship.Scale ?? 1:F2}: {len:F0} long, {wid:F0} wide, deck {deck:F0}");
+                        // --profile: the hull's highest point across its middle (64 units along), by 32-unit bands across, over the keel.
+                        if (opts.ContainsKey("profile"))
+                        {
+                            var rows = pts.Select(v => (Along: System.Numerics.Vector2.Dot(new(v.X - c.X, v.Y - c.Y), fwd), Across: System.Numerics.Vector2.Dot(new(v.X - c.X, v.Y - c.Y), side), Z: v.Z - c.Z)).Where(v => MathF.Abs(v.Along) < 64 && v.Z < deck - c.Z + 400).ToList();
+                            Console.WriteLine("    profile (across: top over the keel): " + string.Join(" ", rows.GroupBy(v => (int)MathF.Floor(v.Across / 32) * 32).OrderBy(g => g.Key).Select(g => $"{g.Key}:{g.Max(v => v.Z):F0}")));
+                        }
+                        var near = new List<(float D, string What)>();
+                        foreach (var o in all)
+                        {
+                            if (ReferenceEquals(o, ship) || modelOf[o.Base.FormKey].Edid == shipId) continue;
+                            var op = o.Placement!.Position;
+                            if (System.Numerics.Vector2.Distance(new(op.X, op.Y), new(c.X, c.Y)) > 1500 + len / 2) continue;
+                            var ptsO = Placed(o).Where(v => v.Z > water - 64 && v.Z < deck + 64).ToList();
+                            if (ptsO.Count == 0) continue;
+                            float d = ptsO.Min(v => Signed(new(v.X, v.Y), hull));
+                            near.Add((d, $"{modelOf[o.Base.FormKey].Edid} at ({op.X:F0},{op.Y:F0},{op.Z:F0})"));
+                        }
+                        foreach (var n in near.OrderBy(n => n.D).Take(int.Parse(opts.GetValueOrDefault("top", "4"))))
+                            Console.WriteLine($"    {(n.D < 0 ? $"{-n.D:F0} inside the hull" : $"{n.D:F0} from the hull")}: {n.What}");
+                    }
+                }
+                return 0;
+            }
+            case "gangway-check":
+            {
+                // Whether each ship's gangway can be walked by the navmesh (--plugin; planks RGGangplank<n>, RgMooring): a
+                // gangway's planks are numbered in a row (each next one within 900 of the last); from the navmesh under its
+                // first plank's foot (on the dock) to the navmesh under its last plank's low end (on the deck), across the
+                // world's navmeshes by their triangles' links, within their cells and over cell borders. Each end must be within
+                // 48 of the navmesh.
+                using var gm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var plankNo = gm.Statics.Where(st => st.EditorID?.StartsWith("RGGangplank") == true)
+                    .ToDictionary(st => st.FormKey, st => int.Parse(st.EditorID!["RGGangplank".Length..]));
+                int ways = 0, whole = 0;
+                foreach (var w in gm.Worldspaces)
+                {
+                    var cellList = w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).ToList();
+                    var navs = cellList.SelectMany(c => c.NavigationMeshes).Where(nm => nm.Data is not null).ToDictionary(nm => nm.FormKey, nm => nm.Data!);
+                    var planks = cellList.SelectMany(c => c.Temporary).OfType<IPlacedObjectGetter>().Where(o => plankNo.ContainsKey(o.Base.FormKey) && o.Placement is not null)
+                        .Select(o => (No: plankNo[o.Base.FormKey], At: new System.Numerics.Vector3(o.Placement!.Position.X, o.Placement.Position.Y, o.Placement.Position.Z))).OrderBy(x => x.No).ToList();
+                    var groups = new List<List<System.Numerics.Vector3>>();
+                    foreach (var (no, at) in planks)
+                        if (groups.Count > 0 && System.Numerics.Vector3.Distance(groups[^1][^1], at) < 900) groups[^1].Add(at); else groups.Add([at]);
+                    // The nearest triangle to a point, over every navmesh of the world.
+                    ((FormKey Mesh, int Tri) Node, float D) Nearest(System.Numerics.Vector3 p)
+                    {
+                        ((FormKey, int), float) best = ((FormKey.Null, -1), float.MaxValue);
+                        foreach (var (key, nav) in navs)
+                            for (int i = 0; i < nav.Triangles.Count; i++)
+                            {
+                                var t = nav.Triangles[i]; var a = nav.Vertices[t.Vertices.X]; var b = nav.Vertices[t.Vertices.Y]; var c = nav.Vertices[t.Vertices.Z];
+                                // The distance to the triangle itself (a big one's middle can be far from a point on it).
+                                float d = System.Numerics.Vector3.Distance(Skyrim.Navmesh.NavmeshBuilder.ClosestOnTriangle(p, new(a.X, a.Y, a.Z), new(b.X, b.Y, b.Z), new(c.X, c.Y, c.Z)), p);
+                                if (d < best.Item2) best = ((key, i), d);
+                            }
+                        return best;
+                    }
+                    bool Reach((FormKey Mesh, int Tri) from, (FormKey Mesh, int Tri) to)
+                    {
+                        var seen = new HashSet<(FormKey, int)> { from };
+                        var queue = new Queue<(FormKey Mesh, int Tri)>([from]);
+                        while (queue.Count > 0)
+                        {
+                            var (mesh, tri) = queue.Dequeue();
+                            if ((mesh, tri) == to) return true;
+                            var nav = navs[mesh]; var t = nav.Triangles[tri];
+                            foreach (var (link, flag) in new[] { (t.EdgeLink_0_1, NavmeshTriangle.Flag.EdgeLink_0_1), (t.EdgeLink_1_2, NavmeshTriangle.Flag.EdgeLink_1_2), (t.EdgeLink_2_0, NavmeshTriangle.Flag.EdgeLink_2_0) })
+                            {
+                                if (link < 0) continue;
+                                (FormKey, int) next;
+                                if (t.Flags.HasFlag(flag))
+                                {
+                                    if (link >= nav.EdgeLinks.Count) continue;
+                                    var el = nav.EdgeLinks[link];
+                                    if (!navs.ContainsKey(el.Mesh.FormKey)) continue;
+                                    next = (el.Mesh.FormKey, el.TriangleIndex);
+                                }
+                                else next = (mesh, link);
+                                if (seen.Add(next)) queue.Enqueue(next);
+                            }
+                        }
+                        return false;
+                    }
+                    foreach (var g in groups.Where(g => g.Count > 1))
+                    {
+                        ways++;
+                        var (from, df) = Nearest(g[0]); var (to, dt) = Nearest(g[^1]);
+                        bool ok = df <= 48 && dt <= 48 && Reach(from, to);
+                        if (ok) whole++;
+                        Console.WriteLine($"{w.EditorID} gangway of {g.Count} planks from ({g[0].X:F0},{g[0].Y:F0},{g[0].Z:F0}) to ({g[^1].X:F0},{g[^1].Y:F0},{g[^1].Z:F0}): {(ok ? "walkable" : df > 48 || dt > 48 ? $"an end off the navmesh (dock {df:F0}, deck {dt:F0})" : "dock and deck apart")}");
+                    }
+                }
+                Console.WriteLine($"{whole} of {ways} gangways walkable end to end");
+                return 0;
+            }
+            case "navmesh-cell-test":
+            {
+                // Dev aid: an exterior cell's navmesh input as a build kept it (TM_NAVCELL: --file <world>_<x>_<y>.bin, --cell X,Y)
+                // made again with and without the shut-in test's input (_around.bin beside it): the navmesh triangles whose middle
+                // is within --r (default 200) of --at X,Y,Z across and 48 up or down.
+                var tris = Skyrim.Navmesh.NavmeshBuilder.ReadPolygons(opts["file"]).Select(p => p.Points).ToList();
+                // --near X,Y,R: only the faces with a corner within R across of (X, Y).
+                if (opts.TryGetValue("near", out var nearOnly)) { var nq = nearOnly.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray(); tris = tris.Where(t => t.Any(v => MathF.Abs(v.X - nq[0]) <= nq[2] && MathF.Abs(v.Y - nq[1]) <= nq[2])).ToList(); Console.WriteLine($"{tris.Count} faces kept"); }
+                // --only X0,Y0,Z0,X1,Y1,Z1: only the faces wholly inside that box.
+                if (opts.TryGetValue("only", out var onlyBox)) { var ob = onlyBox.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray(); tris = tris.Where(t => t.All(v => v.X >= ob[0] && v.Y >= ob[1] && v.Z >= ob[2] && v.X <= ob[3] && v.Y <= ob[4] && v.Z <= ob[5])).ToList(); Console.WriteLine($"{tris.Count} faces in the box"); }
+                // --drop X0,Y0,Z0,X1,Y1,Z1: the faces wholly inside that box left out.
+                if (opts.TryGetValue("drop", out var dropBox)) { var db = dropBox.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray(); int was = tris.Count; tris = tris.Where(t => !t.All(v => v.X >= db[0] && v.Y >= db[1] && v.Z >= db[2] && v.X <= db[3] && v.Y <= db[4] && v.Z <= db[5])).ToList(); Console.WriteLine($"{was - tris.Count} faces left out"); }
+                if (opts.ContainsKey("list")) foreach (var t in tris) { var nn = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(t[1] - t[0], t[2] - t[0])); Console.WriteLine($"  face z {t.Min(v => v.Z):F0}..{t.Max(v => v.Z):F0} x {t.Min(v => v.X):F0}..{t.Max(v => v.X):F0} y {t.Min(v => v.Y):F0}..{t.Max(v => v.Y):F0} nz {nn.Z:F2}"); }
+                var cxy = opts["cell"].Split(',').Select(int.Parse).ToArray();
+                var at = opts["at"].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                float r = float.Parse(opts.GetValueOrDefault("r", "200"), System.Globalization.CultureInfo.InvariantCulture);
+                string aroundFile = opts["file"][..^4] + "_around.bin";
+                float[]? around = File.Exists(aroundFile) ? System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(aroundFile)).ToArray() : null;
+                foreach (var (label, ar) in new[] { ("with the shut-in test", around), ("without it", (float[]?)null) })
+                {
+                    var made = Skyrim.Navmesh.NavmeshBuilder.GenerateExterior(cxy[0], cxy[1], tris, [], around: ar);
+                    int near = made is { } m ? m.Tris.Count(t =>
+                    {
+                        var (a, b, c) = t; var pa = m.Verts[a]; var pb = m.Verts[b]; var pc = m.Verts[c];
+                        float x = (pa.X + pb.X + pc.X) / 3, y = (pa.Y + pb.Y + pc.Y) / 3, z = (pa.Z + pb.Z + pc.Z) / 3;
+                        return MathF.Abs(x - at[0]) <= r && MathF.Abs(y - at[1]) <= r && MathF.Abs(z - at[2]) <= 48;
+                    }) : 0;
+                    Console.WriteLine($"{label}: {made?.Tris.Count ?? 0} triangles; {near} at ({at[0]},{at[1]},{at[2]})");
+                    if (made is { } mm) Console.WriteLine("  heights within r: " + string.Join(" ", mm.Tris.Select(t => (A: mm.Verts[t.A], B: mm.Verts[t.B], C: mm.Verts[t.C])).Where(t => MathF.Abs((t.A.X + t.B.X + t.C.X) / 3 - at[0]) <= r && MathF.Abs((t.A.Y + t.B.Y + t.C.Y) / 3 - at[1]) <= r).GroupBy(t => (int)MathF.Floor((t.A.Z + t.B.Z + t.C.Z) / 3 / 32) * 32).OrderBy(g => g.Key).Select(g => $"{g.Key}:{g.Count()}")));
+                    // --link X,Y,Z;X,Y,Z: whether the navmesh nearest each of two points is one piece.
+                    if (made is { } lm && opts.TryGetValue("link", out var linkAt))
+                    {
+                        var lp = linkAt.Split(';').Select(q => q.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray()).ToArray();
+                        var parent = Enumerable.Range(0, lm.Verts.Count).ToArray();
+                        int F(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+                        foreach (var (a, b, c) in lm.Tris) { parent[F(a)] = F(b); parent[F(b)] = F(c); }
+                        int Near(float[] q) => lm.Tris.MinBy(t => { var pa = lm.Verts[t.A]; var pb = lm.Verts[t.B]; var pc = lm.Verts[t.C]; float dx = (pa.X + pb.X + pc.X) / 3 - q[0], dy = (pa.Y + pb.Y + pc.Y) / 3 - q[1], dz = (pa.Z + pb.Z + pc.Z) / 3 - q[2]; return dx * dx + dy * dy + dz * dz; }).A;
+                        Console.WriteLine($"  {(F(Near(lp[0])) == F(Near(lp[1])) ? "one piece" : "apart")}: ({string.Join(",", lp[0])}) and ({string.Join(",", lp[1])})");
+                    }
+                }
+                return 0;
+            }
+            case "navmesh-ramp-test":
+            {
+                // Dev aid: what the exterior navmesh makes of a plank ramp on a dock (no land): a dock slab 1,200 across with its
+                // top at 142, a plank --width wide (default 96 and up) and 8 thick from the dock's middle rising --rise (228) over
+                // --run (380), as RgMooring lays them; for each width, the navmesh area on the plank (over the dock by 16+) and
+                // whether it joins the dock's.
+                float rise = float.Parse(opts.GetValueOrDefault("rise", "228"), System.Globalization.CultureInfo.InvariantCulture);
+                float runLen = float.Parse(opts.GetValueOrDefault("run", "380"), System.Globalization.CultureInfo.InvariantCulture);
+                var widths = opts.GetValueOrDefault("width", "96,128,160,192").Split(',').Select(w => float.Parse(w, System.Globalization.CultureInfo.InvariantCulture));
+                foreach (float width in widths)
+                {
+                    var tris = new List<System.Numerics.Vector3[]>();
+                    void Quad(System.Numerics.Vector3 a, System.Numerics.Vector3 b, System.Numerics.Vector3 c, System.Numerics.Vector3 d) { tris.Add([a, b, c]); tris.Add([a, c, d]); }
+                    void Box(System.Numerics.Vector3[] p)
+                    {
+                        // p: 8 corners, bottom 0-3 then top 4-7, each ring the same way round.
+                        Quad(p[4], p[5], p[6], p[7]); Quad(p[3], p[2], p[1], p[0]);
+                        for (int k = 0; k < 4; k++) Quad(p[k], p[(k + 1) % 4], p[4 + (k + 1) % 4], p[4 + k]);
+                    }
+                    System.Numerics.Vector3 V(float x, float y, float z) => new(x, y, z);
+                    // --at X,Y: the dock's middle (default 2048,2048, in cell 0,0).
+                    var rat = opts.GetValueOrDefault("at", "2048,2048").Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                    float cx0 = rat[0], cy0 = rat[1];
+                    Box([V(cx0 - 600, cy0 - 600, 78), V(cx0 + 600, cy0 - 600, 78), V(cx0 + 600, cy0 + 600, 78), V(cx0 - 600, cy0 + 600, 78),
+                         V(cx0 - 600, cy0 - 600, 142), V(cx0 + 600, cy0 - 600, 142), V(cx0 + 600, cy0 + 600, 142), V(cx0 - 600, cy0 + 600, 142)]);
+                    float h = width / 2;
+                    // From the dock's middle toward +y, rising.
+                    // --dir -1: rising toward -y.
+                    float dirY = float.Parse(opts.GetValueOrDefault("dir", "1"), System.Globalization.CultureInfo.InvariantCulture);
+                    // --skew DEGREES: the plank turned off the grid by that much.
+                    float skew = float.Parse(opts.GetValueOrDefault("skew", "0"), System.Globalization.CultureInfo.InvariantCulture) * MathF.PI / 180;
+                    System.Numerics.Vector3 T(float along, float across, float down) => V(cx0 + across * MathF.Cos(skew) + along * MathF.Sin(skew), cy0 + dirY * (along * MathF.Cos(skew) - across * MathF.Sin(skew)), 142 + rise * along / runLen - down);
+                    Box([T(0, -h, 8), T(0, h, 8), T(runLen, h, 8), T(runLen, -h, 8), T(0, -h, 0), T(0, h, 0), T(runLen, h, 0), T(runLen, -h, 0)]);
+                    // A deck at the top to land on (not with --nodeck).
+                    if (!opts.ContainsKey("nodeck") && dirY > 0) Box([V(cx0 - 400, cy0 + runLen, 142 + rise - 16), V(cx0 + 400, cy0 + runLen, 142 + rise - 16), V(cx0 + 400, cy0 + runLen + 600, 142 + rise - 16), V(cx0 - 400, cy0 + runLen + 600, 142 + rise - 16),
+                         V(cx0 - 400, cy0 + runLen, 142 + rise), V(cx0 + 400, cy0 + runLen, 142 + rise), V(cx0 + 400, cy0 + runLen + 600, 142 + rise), V(cx0 - 400, cy0 + runLen + 600, 142 + rise)]);
+                    var made = Skyrim.Navmesh.NavmeshBuilder.GenerateExterior((int)MathF.Floor(cx0 / 4096), (int)MathF.Floor(cy0 / 4096), tris, [new Noggog.P3Float(cx0, cy0 - 300, 142)]);
+                    if (made is not { } m) { Console.WriteLine($"width {width}: no navmesh"); continue; }
+                    float onPlank = 0; int planks = 0;
+                    foreach (var (a, b, c) in m.Tris)
+                    {
+                        var pa = m.Verts[a]; var pb = m.Verts[b]; var pc = m.Verts[c];
+                        float zMid = (pa.Z + pb.Z + pc.Z) / 3, yMid = (pa.Y + pb.Y + pc.Y) / 3;
+                        float alongMid = (yMid - cy0) * dirY;
+                        if (alongMid > 8 && alongMid < runLen - 8 && zMid > 142 + 16 && zMid < 142 + rise - 16)
+                        {
+                            planks++;
+                            if (opts.ContainsKey("show")) Console.WriteLine($"    plank triangle z {MathF.Min(pa.Z, MathF.Min(pb.Z, pc.Z)):F0}..{MathF.Max(pa.Z, MathF.Max(pb.Z, pc.Z)):F0}, along {(MathF.Min(pa.Y, MathF.Min(pb.Y, pc.Y)) - cy0) * dirY:F0}..{(MathF.Max(pa.Y, MathF.Max(pb.Y, pc.Y)) - cy0) * dirY:F0}");
+                            onPlank += MathF.Abs((pb.X - pa.X) * (pc.Y - pa.Y) - (pc.X - pa.X) * (pb.Y - pa.Y)) / 2;
+                        }
+                    }
+                    var parent = Enumerable.Range(0, m.Verts.Count).ToArray();
+                    int F(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+                    foreach (var (a, b, c) in m.Tris) { parent[F(a)] = F(b); parent[F(b)] = F(c); }
+                    int pieces = m.Tris.Select(t => F(t.A)).Distinct().Count();
+                    Console.WriteLine($"width {width}: {m.Tris.Count} triangles in {pieces} pieces; on the plank {planks} triangles, {onPlank:F0} sq units ({onPlank / (runLen * width) * 100:F0}% of its top seen from above)");
+                }
+                return 0;
+            }
+            case "ship-nif":
+            {
+                // Dev aid: the ship's mesh and textures alone, written under --out (seconds, where rg-build takes
+                // minutes). With TM_SHIP_TEST=1 the eight port lids are eight shapes, each drawn another way.
+                TamrielMerge.Skyrim.Meshes.ShipModel.WriteOnly(opts["out"]);
+                Console.WriteLine($"ship written under {opts["out"]}");
+                return 0;
+            }
+            case "nif-normals":
+            {
+                // Dev aid: each shape of a NIF (--file): its vertex normals' lengths, how many of its triangles are wound
+                // the way their vertices' normals point, and its tangents' lengths: for finding why a shape draws black.
+                using var nn = new nifly.NifFile();
+                nn.Load(opts["file"]);
+                foreach (var shape in nn.GetShapes())
+                {
+                    using var tris = new nifly.vectorTriangle();
+                    var verts = nn.GetVertsForShape(shape);
+                    var norms = nn.GetNormalsForShape(shape);
+                    shape.GetTriangles(tris);
+                    var tans = nn.GetTangentsForShape(shape);
+                    int agree = 0, against = 0, zeroN = 0, zeroT = 0, nanT = 0, nN = norms?.Count ?? 0, nT = tans?.Count ?? 0;
+                    for (int i = 0; i < nN; i++) { var q = norms![i]; if (q.x * q.x + q.y * q.y + q.z * q.z < 0.25f) zeroN++; }
+                    for (int i = 0; i < nT; i++) { var q = tans![i]; float l2 = q.x * q.x + q.y * q.y + q.z * q.z; if (float.IsNaN(l2)) nanT++; else if (l2 < 0.25f) zeroT++; }
+                    if (nN > 0)
+                        foreach (var t in tris)
+                        {
+                            var a = verts[t.p1]; var b = verts[t.p2]; var c = verts[t.p3];
+                            var fn = System.Numerics.Vector3.Cross(new(b.x - a.x, b.y - a.y, b.z - a.z), new(c.x - a.x, c.y - a.y, c.z - a.z));
+                            var vn = new System.Numerics.Vector3(norms![t.p1].x + norms[t.p2].x + norms[t.p3].x, norms[t.p1].y + norms[t.p2].y + norms[t.p3].y, norms[t.p1].z + norms[t.p2].z + norms[t.p3].z);
+                            if (System.Numerics.Vector3.Dot(fn, vn) >= 0) agree++; else against++;
+                        }
+                    Console.WriteLine($"{shape.name.get(),-18} {verts.Count,6} vertices, normals {nN} ({zeroN} short), tangents {nT} ({zeroT} short, {nanT} not numbers); triangles wound with their normals {agree}, against {against}; texture {nn.GetTexturePathByIndex(shape, 0)}; x {verts.Min(q => q.x):F0}..{verts.Max(q => q.x):F0} y {verts.Min(q => q.y):F0}..{verts.Max(q => q.y):F0} z {verts.Min(q => q.z):F0}..{verts.Max(q => q.z):F0}, scale {shape.transform.scale:F2} at {shape.transform.translation.x:F0}, {shape.transform.translation.y:F0}, {shape.transform.translation.z:F0}");
+                }
+                return 0;
+            }
+            case "dialogue-of":
+            {
+                // Dev aid: a speaker's dialogue in a built plugin (--plugin; --speaker: the NPC's EditorID or name, a
+                // part of it will do): every response whose conditions name the speaker (GetIsID), under its topic
+                // (its kind, its prompt), with the response's text and its other conditions as the game tests them;
+                // --max responses a topic (default 4). For finding why a talk shows no topics.
+                using var dm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                string who = opts["speaker"];
+                var npcs = dm.Npcs.Where(n => (n.EditorID?.Contains(who, StringComparison.OrdinalIgnoreCase) ?? false) || (n.Name?.String?.Contains(who, StringComparison.OrdinalIgnoreCase) ?? false)).ToList();
+                if (npcs.Count == 0) { Console.WriteLine("no such speaker"); return 1; }
+                var ids = npcs.Select(n => n.FormKey).ToHashSet();
+                foreach (var n in npcs) Console.WriteLine($"speaker {n.EditorID} \"{n.Name}\" {n.FormKey.ID:X6}");
+                var names = dm.EnumerateMajorRecords().Where(r => r.EditorID is not null).GroupBy(r => r.FormKey).ToDictionary(g => g.Key, g => g.First().EditorID!);
+                var globalNow = dm.Globals.ToDictionary(g => g.FormKey, g => g switch { IGlobalFloatGetter f => f.Data ?? 0, IGlobalIntGetter i2 => i2.Data ?? 0, IGlobalShortGetter s2 => s2.Data ?? 0, _ => 0f });
+                int maxEach = int.Parse(opts.GetValueOrDefault("max", "4"));
+                string Cond(IConditionGetter c)
+                {
+                    string data = c.Data.GetType().Name.Replace("ConditionData", "").Replace("BinaryOverlay", "");
+                    var parts = new List<string>();
+                    foreach (var p in c.Data.GetType().GetProperties().Where(p => p.GetIndexParameters().Length == 0))
+                    {
+                        object? v; try { v = p.GetValue(c.Data); } catch { continue; }
+                        if (v is IFormLinkGetter fl) { if (!fl.IsNull) parts.Add(names.GetValueOrDefault(fl.FormKey, fl.FormKey.ToString()) + (globalNow.TryGetValue(fl.FormKey, out float gv) ? $"[starts {gv}]" : "")); }
+                        else if (v?.GetType().GetProperty("Link")?.GetValue(v) is IFormLinkGetter li) { if (!li.IsNull) parts.Add(names.GetValueOrDefault(li.FormKey, li.FormKey.ToString()) + (globalNow.TryGetValue(li.FormKey, out float gv2) ? $"[starts {gv2}]" : "")); }
+                        else if (v is not null && p.PropertyType.IsPrimitive && p.Name is not ("Unknown3" or "UseAliases" or "UsePackageData" or "ParameterOneNumber" or "ParameterTwoNumber")) parts.Add($"{p.Name}={v}");
+                    }
+                    string value = c switch { IConditionFloatGetter f => f.ComparisonValue.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), IConditionGlobalGetter g => names.GetValueOrDefault(g.ComparisonValue.FormKey, "global"), _ => "?" };
+                    return $"{data}({string.Join(", ", parts)}) {c.CompareOperator} {value}{(c.Flags.HasFlag(Condition.Flag.OR) ? " OR" : "")}";
+                }
+                int topics = 0, responses = 0;
+                foreach (var topic in dm.DialogTopics)
+                {
+                    var mine = topic.Responses.Where(r => r.Conditions.Any(c => c.Data is IGetIsIDConditionDataGetter g && ids.Contains(g.Object.Link.FormKey))).ToList();
+                    if (mine.Count == 0) continue;
+                    topics++; responses += mine.Count;
+                    Console.WriteLine($"topic {topic.EditorID} [{topic.Category}/{topic.Subtype}] \"{topic.Name}\" quest {names.GetValueOrDefault(topic.Quest.FormKey, "?")} branch {names.GetValueOrDefault(topic.Branch.FormKey, "-")}: {mine.Count} responses");
+                    foreach (var r in mine.Take(maxEach))
+                    {
+                        string said = string.Join(" / ", r.Responses.Select(x => x.Text.String));
+                        Console.WriteLine($"   {r.FormKey.ID:X6} \"{r.Prompt}\" -> \"{(said.Length > 110 ? said[..110] + "..." : said)}\"{(r.Flags?.Flags.HasFlag(DialogResponses.Flag.Goodbye) == true ? " [goodbye]" : "")}{(r.LinkTo.Count > 0 ? $" links {r.LinkTo.Count}" : "")}");
+                        foreach (var c in r.Conditions.Where(c => c.Data is not IGetIsIDConditionDataGetter)) Console.WriteLine($"        if {Cond(c)}");
+                    }
+                }
+                Console.WriteLine($"{topics} topics, {responses} responses");
+                return 0;
+            }
+            case "plugin-shift-cell":
+            {
+                // Dev aid: a copy of a plugin (--plugin, --out) with every placed reference of one interior (--cell
+                // EditorID) moved by --by X,Y,Z: for testing in the game whether where an interior stands changes how
+                // Skyrim loads it (the Redguard interiors 30,000 units from the origin, 2026-11-12).
+                var sm = SkyrimMod.CreateFromBinary(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var by = opts["by"].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                var sc = sm.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).FirstOrDefault(c => string.Equals(c.EditorID, opts["cell"], StringComparison.OrdinalIgnoreCase));
+                if (sc is null) { Console.WriteLine("no such interior"); return 1; }
+                int shifted = 0;
+                foreach (var p in sc.Persistent.Concat(sc.Temporary))
+                {
+                    var pl = p switch { IPlacedObject o => o.Placement, IPlacedNpc a => a.Placement, _ => null };
+                    if (pl is null) continue;
+                    pl.Position = new Noggog.P3Float(pl.Position.X + by[0], pl.Position.Y + by[1], pl.Position.Z + by[2]);
+                    shifted++;
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(opts["out"]))!);
+                sm.WriteToBinary(opts["out"], new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters { MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(Skyrim.VanillaMasters.Order) });
+                Console.WriteLine($"{sc.EditorID}: {shifted} references moved by {by[0]}, {by[1]}, {by[2]}");
+                return 0;
+            }
+            case "navmesh-joined":
+            {
+                // Dev aid: whether two points of an interior stand on one piece of its navmesh (--plugin, --cell EditorID,
+                // --a X,Y,Z --b X,Y,Z): the triangle under each (the nearest in height), its piece (triangles joined
+                // edge to edge) and the piece's size; apart, the nearest two corners of the two pieces.
+                using var jm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var jc = jm.EnumerateMajorRecords<ICellGetter>().FirstOrDefault(c => string.Equals(c.EditorID, opts["cell"], StringComparison.OrdinalIgnoreCase));
+                if (jc is null) { Console.WriteLine("no such cell"); return 1; }
+                float[] P(string k) => opts[k].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                var pa = P("a"); var pb = P("b");
+                int meshIndex = 0;
+                foreach (var mesh in jc.NavigationMeshes)
+                {
+                    var vs = mesh.Data!.Vertices; var ts = mesh.Data.Triangles;
+                    var parent = Enumerable.Range(0, ts.Count).ToArray();
+                    int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+                    var byEdge = new Dictionary<(int, int), int>();
+                    for (int i = 0; i < ts.Count; i++)
+                    {
+                        int[] v = [ts[i].Vertices.X, ts[i].Vertices.Y, ts[i].Vertices.Z];
+                        for (int e = 0; e < 3; e++)
+                        {
+                            var key = (Math.Min(v[e], v[(e + 1) % 3]), Math.Max(v[e], v[(e + 1) % 3]));
+                            if (byEdge.TryGetValue(key, out int other)) parent[Find(i)] = Find(other); else byEdge[key] = i;
+                        }
+                    }
+                    int Under(float[] p)
+                    {
+                        int hit = -1; float best = float.MaxValue;
+                        for (int i = 0; i < ts.Count; i++)
+                        {
+                            var a0 = vs[ts[i].Vertices.X]; var b0 = vs[ts[i].Vertices.Y]; var c0 = vs[ts[i].Vertices.Z];
+                            float d = (b0.Y - c0.Y) * (a0.X - c0.X) + (c0.X - b0.X) * (a0.Y - c0.Y);
+                            if (MathF.Abs(d) < 1e-6f) continue;
+                            float u = ((b0.Y - c0.Y) * (p[0] - c0.X) + (c0.X - b0.X) * (p[1] - c0.Y)) / d;
+                            float w = ((c0.Y - a0.Y) * (p[0] - c0.X) + (a0.X - c0.X) * (p[1] - c0.Y)) / d;
+                            if (u < 0 || w < 0 || u + w > 1) continue;
+                            float z = u * a0.Z + w * b0.Z + (1 - u - w) * c0.Z;
+                            if (MathF.Abs(z - p[2]) < best) { best = MathF.Abs(z - p[2]); hit = i; }
+                        }
+                        return hit;
+                    }
+                    int ta = Under(pa), tb = Under(pb);
+                    var sizes = Enumerable.Range(0, ts.Count).GroupBy(Find).ToDictionary(g => g.Key, g => g.Count());
+                    Console.WriteLine($"navmesh {meshIndex++} ({mesh.FormKey.ID:X6}): {ts.Count} triangles in {sizes.Count} pieces (largest {sizes.Values.Max()})");
+                    if (ta < 0 || tb < 0) { Console.WriteLine($"  a over {(ta < 0 ? "nothing" : "triangle " + ta)}, b over {(tb < 0 ? "nothing" : "triangle " + tb)}"); continue; }
+                    int ca = Find(ta), cb = Find(tb);
+                    Console.WriteLine($"  a: triangle {ta}, piece of {sizes[ca]} triangles; b: triangle {tb}, piece of {sizes[cb]} triangles; {(ca == cb ? "ONE piece" : "APART")}");
+                    if (ca != cb)
+                    {
+                        // The nearest two corners of the two pieces.
+                        var cornersA = Enumerable.Range(0, ts.Count).Where(i => Find(i) == ca).SelectMany(i => new[] { vs[ts[i].Vertices.X], vs[ts[i].Vertices.Y], vs[ts[i].Vertices.Z] }).Distinct().ToList();
+                        var cornersB = Enumerable.Range(0, ts.Count).Where(i => Find(i) == cb).SelectMany(i => new[] { vs[ts[i].Vertices.X], vs[ts[i].Vertices.Y], vs[ts[i].Vertices.Z] }).Distinct().ToList();
+                        var near = cornersA.SelectMany(x => cornersB.Select(y => (x, y, d: MathF.Sqrt((x.X - y.X) * (x.X - y.X) + (x.Y - y.Y) * (x.Y - y.Y) + (x.Z - y.Z) * (x.Z - y.Z))))).OrderBy(t => t.d).Take(4);
+                        foreach (var (x, y, d) in near) Console.WriteLine($"    nearest corners: {x.X:F0},{x.Y:F0},{x.Z:F0} and {y.X:F0},{y.Y:F0},{y.Z:F0}: {d:F1} apart ({MathF.Abs(x.Z - y.Z):F0} up)");
+                    }
+                }
+                return 0;
+            }
+            case "cell-walk":
+            {
+                // Dev aid (user, 2026-11-15: "fix the steps it seems some steps in oblivion cant be traversed by npcs"):
+                // the ground under the navmesh's own way between two points of a built interior (--plugin, --data the
+                // folder holding its meshes, --cell EditorID, --a X,Y,Z --b X,Y,Z), from the collision of the placed
+                // models as the game has it: every rise or drop of 5 units or more between samples 2 units apart, with
+                // its height, the material stepped onto (stairs or not) and how steep the ground is there.
+                using var wm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var wc = wm.EnumerateMajorRecords<ICellGetter>().FirstOrDefault(c => string.Equals(c.EditorID, opts["cell"], StringComparison.OrdinalIgnoreCase));
+                if (wc is null) { Console.WriteLine("no such cell"); return 1; }
+                System.Numerics.Vector3 P3(string k) { var f = opts[k].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray(); return new(f[0], f[1], f[2]); }
+                var wa = P3("a"); var wb = P3("b");
+                var navData = wc.NavigationMeshes.Where(n => n.Data is not null).OrderByDescending(n => n.Data!.Triangles.Count).FirstOrDefault()?.Data;
+                if (navData is null) { Console.WriteLine("the cell has no navmesh"); return 1; }
+                var nv = navData.Vertices.Select(v => new System.Numerics.Vector3(v.X, v.Y, v.Z)).ToArray();
+                var nt = navData.Triangles.Select(t => new[] { (int)t.Vertices.X, (int)t.Vertices.Y, (int)t.Vertices.Z }).ToArray();
+                int TriUnder(System.Numerics.Vector3 q)
+                {
+                    int hit = -1; float best = float.MaxValue;
+                    for (int i = 0; i < nt.Length; i++)
+                    {
+                        var a0 = nv[nt[i][0]]; var b0 = nv[nt[i][1]]; var c0 = nv[nt[i][2]];
+                        float d = (b0.Y - c0.Y) * (a0.X - c0.X) + (c0.X - b0.X) * (a0.Y - c0.Y);
+                        if (MathF.Abs(d) < 1e-6f) continue;
+                        float u = ((b0.Y - c0.Y) * (q.X - c0.X) + (c0.X - b0.X) * (q.Y - c0.Y)) / d;
+                        float w = ((c0.Y - a0.Y) * (q.X - c0.X) + (a0.X - c0.X) * (q.Y - c0.Y)) / d;
+                        if (u < -0.01f || w < -0.01f || u + w > 1.01f) continue;
+                        float z = u * a0.Z + w * b0.Z + (1 - u - w) * c0.Z;
+                        if (MathF.Abs(z - q.Z) < best) { best = MathF.Abs(z - q.Z); hit = i; }
+                    }
+                    return hit;
+                }
+                int ta = TriUnder(wa), tb = TriUnder(wb);
+                if (ta < 0 || tb < 0) { Console.WriteLine($"a over {(ta < 0 ? "no triangle" : "triangle " + ta)}, b over {(tb < 0 ? "no triangle" : "triangle " + tb)}"); return 1; }
+                // The way over the navmesh: triangle to triangle through the middles of their shared edges, the shortest.
+                var edgeTris = new Dictionary<(int, int), List<int>>();
+                for (int i = 0; i < nt.Length; i++)
+                    for (int e = 0; e < 3; e++)
+                    {
+                        var key = (Math.Min(nt[i][e], nt[i][(e + 1) % 3]), Math.Max(nt[i][e], nt[i][(e + 1) % 3]));
+                        if (!edgeTris.TryGetValue(key, out var l)) edgeTris[key] = l = [];
+                        l.Add(i);
+                    }
+                System.Numerics.Vector3 Centre(int i) => (nv[nt[i][0]] + nv[nt[i][1]] + nv[nt[i][2]]) / 3;
+                var dist = Enumerable.Repeat(float.MaxValue, nt.Length).ToArray();
+                var from = Enumerable.Repeat(-1, nt.Length).ToArray();
+                var via = new System.Numerics.Vector3[nt.Length];
+                var queue = new PriorityQueue<int, float>();
+                dist[ta] = 0; queue.Enqueue(ta, 0);
+                while (queue.TryDequeue(out int cur, out float curD))
+                {
+                    if (curD > dist[cur]) continue;
+                    if (cur == tb) break;
+                    for (int e = 0; e < 3; e++)
+                    {
+                        int v0 = nt[cur][e], v1 = nt[cur][(e + 1) % 3];
+                        foreach (int other in edgeTris[(Math.Min(v0, v1), Math.Max(v0, v1))])
+                        {
+                            if (other == cur) continue;
+                            float nd = curD + System.Numerics.Vector3.Distance(Centre(cur), Centre(other));
+                            if (nd < dist[other]) { dist[other] = nd; from[other] = cur; via[other] = (nv[v0] + nv[v1]) / 2; queue.Enqueue(other, nd); }
+                        }
+                    }
+                }
+                if (dist[tb] == float.MaxValue) { Console.WriteLine("the navmesh does not join the two points"); return 1; }
+                var way = new List<System.Numerics.Vector3> { wb };
+                for (int t = tb; t != ta; t = from[t]) way.Add(via[t]);
+                way.Add(wa);
+                way.Reverse();
+                // The collision of every placed model: our converted models hold convex slabs (points and planes).
+                const float HkUnits = 69.99125f;
+                var walkCache = wm.ToImmutableLinkCache();
+                var slabsOf = new Dictionary<string, List<(System.Numerics.Vector3[] Pts, System.Numerics.Vector3[] Normals, uint Material)>>(StringComparer.OrdinalIgnoreCase);
+                var world = new List<(System.Numerics.Vector3 Lo, System.Numerics.Vector3 Hi, System.Numerics.Vector4[] Planes, uint Material, string Model)>();
+                int placedModels = 0, noFile = 0;
+                foreach (var r in wc.Persistent.Concat(wc.Temporary).OfType<IPlacedObjectGetter>())
+                {
+                    if (r.Placement is not { } pl) continue;
+                    if (!walkCache.TryResolve<ISkyrimMajorRecordGetter>(r.Base.FormKey, out var b0) || b0 is not IModeledGetter { Model: { } model }) continue;
+                    if ((r.MajorRecordFlagsRaw & 0x800) != 0) continue;   // initially disabled
+                    string rel = model.File.DataRelativePath.Path;
+                    if (!slabsOf.TryGetValue(rel, out var slabs))
+                    {
+                        slabsOf[rel] = slabs = [];
+                        string file = Path.Combine(opts["data"], rel);
+                        if (!File.Exists(file)) { noFile++; continue; }
+                        using var nif = new nifly.NifFile();
+                        if (nif.Load(file) != 0) continue;
+                        var hdr = nif.GetHeader();
+                        using var bc = new nifly.niflycpp.BlockCache(hdr);
+                        for (uint id = 0; id < hdr.GetNumBlocks(); id++)
+                        {
+                            if (hdr.GetBlockTypeStringById(id) != "bhkConvexVerticesShape") continue;
+                            var cv = bc.EditableBlockById<nifly.bhkConvexVerticesShape>(id);
+                            var pts = cv.verts.items().Select(q => new System.Numerics.Vector3(q.x, q.y, q.z) * HkUnits).ToArray();
+                            var nrm = cv.normals.items().Select(q => new System.Numerics.Vector3(q.x, q.y, q.z)).ToArray();
+                            if (pts.Length >= 4 && nrm.Length >= 4) slabs.Add((pts, nrm, cv.GetMaterial()));
+                        }
+                    }
+                    if (slabs.Count == 0) continue;
+                    placedModels++;
+                    var m = TamrielMerge.Skyrim.SkyrimRotation.Matrix(pl.Rotation);
+                    var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+                    float sc = r.Scale ?? 1;
+                    foreach (var (pts, nrm, mat) in slabs)
+                    {
+                        var wp = pts.Select(q => System.Numerics.Vector3.Transform(q * sc, m) + pos).ToArray();
+                        var planes = nrm.Select(n0 =>
+                        {
+                            var n = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.TransformNormal(n0, m));
+                            return new System.Numerics.Vector4(n, -wp.Max(q => System.Numerics.Vector3.Dot(n, q)));
+                        }).ToArray();
+                        world.Add((wp.Aggregate(System.Numerics.Vector3.Min), wp.Aggregate(System.Numerics.Vector3.Max), planes, mat, Path.GetFileNameWithoutExtension(rel)));
+                    }
+                }
+                Console.WriteLine($"{placedModels} placed models with collision ({slabsOf.Count} different, {noFile} with no file under --data), {world.Count} slabs; the way: {way.Count} points over {dist[tb]:F0} units of navmesh");
+                // The ground at a point: the top of the highest slab there that is no more than 34 above the height
+                // come from (a person steps up no further) and no more than 120 below it.
+                (float Z, uint Material, float Up, string Model)? Ground(float x, float y, float zFrom)
+                {
+                    (float Z, uint Material, float Up, string Model)? best = null;
+                    foreach (var (lo, hi, planes, mat, name) in world)
+                    {
+                        if (x < lo.X || x > hi.X || y < lo.Y || y > hi.Y || lo.Z > zFrom + 34 || hi.Z < zFrom - 120) continue;
+                        float top = float.MaxValue, bottom = float.MinValue, up = 1; bool inside = true;
+                        foreach (var pn in planes)
+                        {
+                            if (pn.Z > 0.02f) { float z = (-pn.W - pn.X * x - pn.Y * y) / pn.Z; if (z < top) { top = z; up = pn.Z; } }
+                            else if (pn.Z < -0.02f) { float z = (-pn.W - pn.X * x - pn.Y * y) / pn.Z; if (z > bottom) bottom = z; }
+                            else if (pn.X * x + pn.Y * y + pn.W > 0.5f) { inside = false; break; }
+                        }
+                        if (!inside || top == float.MaxValue || top < bottom - 0.05f) continue;
+                        if (top > zFrom + 34 || top < zFrom - 120) continue;
+                        if (best is null || top > best.Value.Z) best = (top, mat, up, name);
+                    }
+                    return best;
+                }
+                static string MaterialName(uint mat) => mat == 899511101 ? "stairs (stone)" : mat == 1461712277 ? "stairs (wood)" : $"plain ({mat})";
+                float zNow = wa.Z, walked = 0; int lost = 0, samples = 0;
+                var gaps = new List<(float At, System.Numerics.Vector3 Where, float Gap)>();
+                var risers = new List<(float At, System.Numerics.Vector3 Where, float Height, uint Material, string Model)>();
+                float riseFrom = float.NaN, riseAt = 0; System.Numerics.Vector3 riseWhere = default;
+                (float Z, uint Material, float Up, string Model)? last = null;
+                var steep = new List<(float At, System.Numerics.Vector3 Where, float Degrees, string Model)>();
+                for (int i = 0; i + 1 < way.Count; i++)
+                {
+                    var p0 = way[i]; var p1 = way[i + 1];
+                    float len = MathF.Sqrt((p1.X - p0.X) * (p1.X - p0.X) + (p1.Y - p0.Y) * (p1.Y - p0.Y));
+                    for (float t = 0; t < len; t += 2)
+                    {
+                        float x = p0.X + (p1.X - p0.X) * t / len, y = p0.Y + (p1.Y - p0.Y) * t / len;
+                        samples++;
+                        var g = Ground(x, y, zNow);
+                        if (g is null) { lost++; walked += 2; continue; }
+                        float dz = g.Value.Z - zNow;
+                        bool jump = last is not null && MathF.Abs(dz) >= 5;
+                        if (jump && !float.IsNaN(riseFrom) && MathF.Sign(dz) != MathF.Sign(zNow - riseFrom))
+                        {
+                            risers.Add((riseAt, riseWhere, zNow - riseFrom, last!.Value.Material, last.Value.Model));
+                            riseFrom = float.NaN;
+                        }
+                        if (jump && float.IsNaN(riseFrom)) { riseFrom = zNow; riseAt = walked; riseWhere = new(x, y, zNow); }
+                        float degrees = MathF.Acos(Math.Clamp(g.Value.Up, 0, 1)) * 180 / MathF.PI;
+                        if (degrees > 47 && (steep.Count == 0 || walked - steep[^1].At > 16)) steep.Add((walked, new(x, y, g.Value.Z), degrees, g.Value.Model));
+                        zNow = g.Value.Z; last = g; walked += 2;
+                        // How far the navmesh lies from the ground here (the engine finds an actor's triangle by height).
+                        float navZ = float.NaN;
+                        {
+                            float bestGap = float.MaxValue;
+                            for (int ti = 0; ti < nt.Length; ti++)
+                            {
+                                var a0 = nv[nt[ti][0]]; var b0 = nv[nt[ti][1]]; var c0 = nv[nt[ti][2]];
+                                float d = (b0.Y - c0.Y) * (a0.X - c0.X) + (c0.X - b0.X) * (a0.Y - c0.Y);
+                                if (MathF.Abs(d) < 1e-6f) continue;
+                                float u = ((b0.Y - c0.Y) * (x - c0.X) + (c0.X - b0.X) * (y - c0.Y)) / d;
+                                float w = ((c0.Y - a0.Y) * (x - c0.X) + (a0.X - c0.X) * (y - c0.Y)) / d;
+                                if (u < -0.01f || w < -0.01f || u + w > 1.01f) continue;
+                                float tz = u * a0.Z + w * b0.Z + (1 - u - w) * c0.Z;
+                                if (MathF.Abs(tz - zNow) < bestGap) { bestGap = MathF.Abs(tz - zNow); navZ = tz; }
+                            }
+                        }
+                        if (!float.IsNaN(navZ)) gaps.Add((walked, new System.Numerics.Vector3(x, y, zNow), navZ - zNow));
+                        if (!jump && !float.IsNaN(riseFrom))
+                        {
+                            risers.Add((riseAt, riseWhere, zNow - dz - riseFrom, g.Value.Material, g.Value.Model));
+                            riseFrom = float.NaN;
+                        }
+                    }
+                }
+                if (!float.IsNaN(riseFrom) && last is not null) risers.Add((riseAt, riseWhere, zNow - riseFrom, last.Value.Material, last.Value.Model));
+                Console.WriteLine($"{samples} samples, {lost} with no ground found; ends at height {zNow:F0} (b is at {wb.Z:F0})");
+                Console.WriteLine($"rises and drops of 5 or more: {risers.Count}");
+                foreach (var (at, where, height, mat, modelName) in risers)
+                    Console.WriteLine($"  {at,6:F0} along, at {where.X:F0},{where.Y:F0},{where.Z:F0}: {(height > 0 ? "UP" : "down")} {MathF.Abs(height):F0} onto {MaterialName(mat)} of {modelName}");
+                Console.WriteLine($"ground steeper than 47 degrees: {steep.Count}");
+                foreach (var (at, where, degrees, modelName) in steep.Take(30))
+                    Console.WriteLine($"  {at,6:F0} along, at {where.X:F0},{where.Y:F0},{where.Z:F0}: {degrees:F0} degrees, {modelName}");
+                if (gaps.Count > 0)
+                {
+                    var sortedGaps = gaps.Select(g => MathF.Abs(g.Gap)).Order().ToList();
+                    Console.WriteLine($"navmesh against the ground along the way: median {sortedGaps[sortedGaps.Count / 2]:F1} apart, 90% within {sortedGaps[(int)(sortedGaps.Count * 0.9)]:F1}, worst {sortedGaps[^1]:F1}; over 16 apart at {gaps.Count(g => MathF.Abs(g.Gap) > 16)} of {gaps.Count} samples");
+                    float lastShown = -100;
+                    foreach (var (at, where, gap) in gaps.Where(g => MathF.Abs(g.Gap) > 16))
+                    {
+                        if (at - lastShown < 24) continue;
+                        lastShown = at;
+                        Console.WriteLine($"  {at,6:F0} along, at {where.X:F0},{where.Y:F0},{where.Z:F0}: the navmesh is {MathF.Abs(gap):F0} {(gap > 0 ? "above" : "below")} the ground");
+                    }
+                }
+                var ups = risers.Where(r => r.Height > 0).ToList();
+                Console.WriteLine($"steps up: {ups.Count(r => r.Height <= 8)} of 8 or less, {ups.Count(r => r.Height > 8 && r.Height <= 24)} of 8 to 24 ({ups.Count(r => r.Height > 8 && r.Height <= 24 && r.Material != 899511101 && r.Material != 1461712277)} of them not stairs), {ups.Count(r => r.Height > 24)} over 24");
+                return 0;
+            }
+            case "navmesh-near":
+            {
+                // Dev aid: an interior's navmesh at a point (--plugin, --cell EditorID, --at X,Y,Z): the triangles the point
+                // is over (with their height there) and the nearest triangle's nearest corner, with the distance.
+                using var nm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var np = opts["at"].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                var nc = nm.EnumerateMajorRecords<ICellGetter>().FirstOrDefault(c => string.Equals(c.EditorID, opts["cell"], StringComparison.OrdinalIgnoreCase));
+                if (nc is null) { Console.WriteLine("no such cell"); return 1; }
+                int tris = 0, over = 0; float best = float.MaxValue; Noggog.P3Float bestAt = default;
+                foreach (var mesh in nc.NavigationMeshes)
+                {
+                    var vs = mesh.Data!.Vertices;
+                    foreach (var t in mesh.Data.Triangles)
+                    {
+                        tris++;
+                        var a0 = vs[t.Vertices.X]; var b0 = vs[t.Vertices.Y]; var c0 = vs[t.Vertices.Z];
+                        float d = (b0.Y - c0.Y) * (a0.X - c0.X) + (c0.X - b0.X) * (a0.Y - c0.Y);
+                        if (MathF.Abs(d) > 1e-6f)
+                        {
+                            float u = ((b0.Y - c0.Y) * (np[0] - c0.X) + (c0.X - b0.X) * (np[1] - c0.Y)) / d;
+                            float v = ((c0.Y - a0.Y) * (np[0] - c0.X) + (a0.X - c0.X) * (np[1] - c0.Y)) / d;
+                            if (u >= 0 && v >= 0 && u + v <= 1)
+                            {
+                                over++;
+                                Console.WriteLine($"  over a triangle at height {u * a0.Z + v * b0.Z + (1 - u - v) * c0.Z:F1} (the point's {np[2]:F1})");
+                            }
+                        }
+                        foreach (var q in new[] { a0, b0, c0 })
+                        {
+                            float dist = MathF.Sqrt((q.X - np[0]) * (q.X - np[0]) + (q.Y - np[1]) * (q.Y - np[1]) + (q.Z - np[2]) * (q.Z - np[2]));
+                            if (dist < best) { best = dist; bestAt = q; }
+                        }
+                    }
+                }
+                if (opts.ContainsKey("refs"))
+                {
+                    // --refs: every placed object of the cell: FormID, base (EditorID or FormKey), position and angles.
+                    var baseNames = nm.EnumerateMajorRecords().Where(r => r.EditorID is not null).GroupBy(r => r.FormKey).ToDictionary(g => g.Key, g => g.First().EditorID!);
+                    foreach (var po in nc.Persistent.Concat(nc.Temporary).OfType<IPlacedObjectGetter>())
+                        Console.WriteLine($"  ref {po.FormKey.ID:X6} {baseNames.GetValueOrDefault(po.Base.FormKey, po.Base.FormKey.ToString()),-28} at {po.Placement?.Position.X,9:F0} {po.Placement?.Position.Y,9:F0} {po.Placement?.Position.Z,7:F0} rot {po.Placement?.Rotation}");
+                }
+                foreach (var who in nc.Persistent.Concat(nc.Temporary).OfType<IPlacedNpcGetter>())
+                    Console.WriteLine($"  actor {who.FormKey.ID:X6} {who.EditorID} at {who.Placement?.Position} rot {who.Placement?.Rotation}");
+                Console.WriteLine($"{nc.EditorID}: {nc.NavigationMeshes.Count} navmeshes, {tris} triangles; over {over}; nearest corner {bestAt.X:F1} {bestAt.Y:F1} {bestAt.Z:F1} at {best:F1}");
+                return 0;
+            }
+            case "navmesh-at":
+            {
+                // Dev aid: what is at a point of an exterior (--plugin, --at X,Y; --world EditorID, else every worldspace with a
+                // cell there): the cell's navmesh triangles within --r (default 512) by height band, and the objects and
+                // actors placed within it (persistent ones too), with their heights.
+                using var am = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var atP = opts["at"].Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                float r = float.Parse(opts.GetValueOrDefault("r", "512"), System.Globalization.CultureInfo.InvariantCulture);
+                int cx = (int)MathF.Floor(atP[0] / 4096), cy = (int)MathF.Floor(atP[1] / 4096);
+                foreach (var w in am.Worldspaces.Where(w => !opts.ContainsKey("world") || string.Equals(w.EditorID, opts["world"], StringComparison.OrdinalIgnoreCase)))
+                {
+                    var cell = w.SubCells.SelectMany(b => b.Items).SelectMany(s => s.Items).FirstOrDefault(c => c.Grid?.Point.X == cx && c.Grid?.Point.Y == cy);
+                    if (cell is null) continue;
+                    bool Near(Noggog.P3Float p) => MathF.Abs(p.X - atP[0]) <= r && MathF.Abs(p.Y - atP[1]) <= r;
+                    var zs = new List<float>();
+                    foreach (var nav in cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>())
+                        foreach (var t in nav.Triangles)
+                        {
+                            var a = nav.Vertices[t.Vertices.X]; var b = nav.Vertices[t.Vertices.Y]; var c = nav.Vertices[t.Vertices.Z];
+                            var mid = new Noggog.P3Float((a.X + b.X + c.X) / 3, (a.Y + b.Y + c.Y) / 3, (a.Z + b.Z + c.Z) / 3);
+                            if (Near(mid)) zs.Add(mid.Z);
+                            // --list: each triangle near by, its extent.
+                            if (Near(mid) && opts.ContainsKey("list")) Console.WriteLine($"  tri x {MathF.Min(a.X, MathF.Min(b.X, c.X)):F0}..{MathF.Max(a.X, MathF.Max(b.X, c.X)):F0} y {MathF.Min(a.Y, MathF.Min(b.Y, c.Y)):F0}..{MathF.Max(a.Y, MathF.Max(b.Y, c.Y)):F0} z {MathF.Min(a.Z, MathF.Min(b.Z, c.Z)):F0}..{MathF.Max(a.Z, MathF.Max(b.Z, c.Z)):F0}");
+                        }
+                    Console.WriteLine($"{w.EditorID} cell {cx},{cy}: {cell.NavigationMeshes.Count} navmeshes; {zs.Count} triangles within {r}: heights {string.Join(", ", zs.GroupBy(z => (int)MathF.Floor(z / 64) * 64).OrderBy(g => g.Key).Select(g => $"{g.Key}..{g.Key + 64} x{g.Count()}"))}");
+                    var top = (w.TopCell?.Persistent ?? []).ToHashSet();
+                    foreach (var o in cell.Temporary.Concat(cell.Persistent).Concat(top))
+                    {
+                        (string Kind, FormKey Base, Noggog.P3Float? At, float Scale) info = o switch
+                        {
+                            IPlacedObjectGetter po => ("object", po.Base.FormKey, po.Placement?.Position, po.Scale ?? 1),
+                            IPlacedNpcGetter pn => ("actor", pn.Base.FormKey, pn.Placement?.Position, pn.Scale ?? 1),
+                            _ => ("", FormKey.Null, null, 1),
+                        };
+                        if (info.At is not { } pos || !Near(pos)) continue;
+                        string what = am.EnumerateMajorRecords().FirstOrDefault(rec => rec.FormKey == info.Base)?.EditorID ?? info.Base.ToString();
+                        Console.WriteLine($"  {info.Kind} {what} at {pos} scale {info.Scale}{(top.Contains(o) ? " (persistent)" : "")}");
+                    }
+                }
+                return 0;
+            }
+            case "navmesh-bridge-test":
+            {
+                // Dev aid: NavmeshBuilder.BridgeGaps on a built interior's navmesh (--plugin, --cell EditorID) with its placed
+                // models' collision (from --assets, else the plugin's folder, then the game's; a moving prop's level faces
+                // only, as RgMeshConverter's Walk): how many gaps it joins, why the rest weren't, and the pieces before and after.
+                using var bm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var cell = bm.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).First(c => string.Equals(c.EditorID, opts["cell"], StringComparison.OrdinalIgnoreCase));
+                var finder = new Skyrim.DungeonCheck.FileFinder(skyrimData, opts.TryGetValue("assets", out var ba) ? Path.GetFullPath(ba) : Path.GetDirectoryName(Path.GetFullPath(opts["plugin"]))!);
+                var modelOf = new Dictionary<FormKey, string>();
+                foreach (var rec in bm.EnumerateMajorRecords()) if (rec is IModeledGetter { Model: { } mo } && rec is not INpcGetter) modelOf[rec.FormKey] = mo.File.DataRelativePath.Path;
+                var polys = new List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)>();
+                foreach (var o in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>())
+                {
+                    if (o.Placement is not { } pl || !modelOf.TryGetValue(o.Base.FormKey, out var model) || finder.Find(model) is not { } bytes) continue;
+                    var rot = Skyrim.SkyrimRotation.Matrix(pl.Rotation);
+                    var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+                    float sc = o.Scale ?? 1;
+                    List<System.Numerics.Vector3[]> col;
+                    try { col = Skyrim.Meshes.CollisionReader.Read(bytes).Triangles.Select(t => t.Tri).ToList(); } catch (Exception) { continue; }
+                    foreach (var t in col)
+                    {
+                        var w = t.Select(v => System.Numerics.Vector3.Transform(v * sc, rot) + pos).ToArray();
+                        var n = System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0]);
+                        if (n.LengthSquared() < 1e-6f) continue;
+                        n = System.Numerics.Vector3.Normalize(n);
+                        if (model.Contains("_moving", StringComparison.OrdinalIgnoreCase) && MathF.Abs(n.Z) <= 0.7f) continue;
+                        polys.Add((w, n.Z < 0 ? -n : n));
+                    }
+                }
+                if (opts.TryGetValue("polys", out var polyFile)) polys = Skyrim.Navmesh.NavmeshBuilder.ReadPolygons(polyFile);
+                Skyrim.Navmesh.NavmeshBuilder.BridgeShowUnfloored = int.Parse(opts.GetValueOrDefault("show", "0"));
+                // --near X,Y,Z: the polygons within 48 units across and 96 up or down of a point (their heights and slope).
+                if (opts.TryGetValue("near", out var nearAt))
+                {
+                    var np = nearAt.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                    foreach (var (pts, nrm) in polys)
+                    {
+                        float x0 = pts.Min(q => q.X), x1 = pts.Max(q => q.X), y0 = pts.Min(q => q.Y), y1 = pts.Max(q => q.Y), z0 = pts.Min(q => q.Z), z1 = pts.Max(q => q.Z);
+                        if (np[0] < x0 - 48 || np[0] > x1 + 48 || np[1] < y0 - 48 || np[1] > y1 + 48 || np[2] < z0 - 96 || np[2] > z1 + 96) continue;
+                        var fn = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(pts[1] - pts[0], pts[2] - pts[0]));
+                        Console.WriteLine($"  near: x {x0:F0}..{x1:F0} y {y0:F0}..{y1:F0} z {z0:F0}..{z1:F0} normal z {fn.Z:F2}");
+                    }
+                }
+                var verts = new List<Noggog.P3Float>(); var tris = new List<(int A, int B, int C)>();
+                foreach (var nav in cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>())
+                {
+                    int vb = verts.Count;
+                    verts.AddRange(nav.Vertices);
+                    foreach (var t in nav.Triangles) tris.Add((vb + t.Vertices.X, vb + t.Vertices.Y, vb + t.Vertices.Z));
+                }
+                int Pieces()
+                {
+                    var parent = Enumerable.Range(0, verts.Count).ToArray();
+                    int F(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+                    foreach (var (a, b, c) in tris) { parent[F(a)] = F(b); parent[F(b)] = F(c); }
+                    return tris.Select(t => F(t.A)).Distinct().Count();
+                }
+                int before = Pieces();
+                if (opts.TryGetValue("trace", out var traceAt)) { var tp = traceAt.Split(',').Select(x => float.Parse(x, System.Globalization.CultureInfo.InvariantCulture)).ToArray(); Skyrim.Navmesh.NavmeshBuilder.BridgeTraceAt = new System.Numerics.Vector3(tp[0], tp[1], tp[2]); }
+                var why = new Dictionary<string, int>();
+                int joined = 0;
+                for (int pass = 1; pass <= int.Parse(opts.GetValueOrDefault("passes", "1")); pass++)
+                {
+                    int now = Skyrim.Navmesh.NavmeshBuilder.BridgeGaps(verts, tris, polys,
+                        float.Parse(opts.GetValueOrDefault("gap", "96"), System.Globalization.CultureInfo.InvariantCulture), float.Parse(opts.GetValueOrDefault("climb", "32"), System.Globalization.CultureInfo.InvariantCulture), why);
+                    joined += now;
+                    Console.WriteLine($"  pass {pass}: {now} joined, {Pieces()} pieces");
+                }
+                Console.WriteLine($"{cell.EditorID}: {polys.Count} collision faces; {joined} gaps joined; pieces {before} -> {Pieces()}");
+                foreach (var (k, v) in why.OrderBy(k => k.Key)) Console.WriteLine($"  {k}: {v}");
+                return 0;
+            }
+            case "navmesh-gaps":
+            {
+                // Dev aid: why an interior's navmesh is in pieces (--plugin; --cell EditorID regex, default every interior with
+                // actors). Each piece people stand on that no load door is on, against the pieces doors are on: the nearest two
+                // points of their open edges (across and up between them), and the placed objects within --near (default 192)
+                // of the gap's middle by base record type and EditorID, with the scripts on them (a gate, a lift, a door).
+                using var gm = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var gapMods = new List<ISkyrimModGetter> { gm };
+                foreach (var f in new[] { "Skyrim.esm", "Dawnguard.esm", "Dragonborn.esm" }) gapMods.Add(SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, f), SkyrimRelease.SkyrimSE));
+                var gapCache = gapMods.ToImmutableLinkCache();
+                var cellRx = new System.Text.RegularExpressions.Regex(opts.GetValueOrDefault("cell", "."), System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                float nearBy = float.Parse(opts.GetValueOrDefault("near", "192"), System.Globalization.CultureInfo.InvariantCulture);
+                var causes = new Dictionary<string, int>();
+                foreach (var cell in gm.Cells.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells).Where(c => cellRx.IsMatch(c.EditorID ?? "")))
+                {
+                    var actors = cell.Persistent.Concat(cell.Temporary).OfType<IPlacedNpcGetter>().Where(p => p.Placement is not null).ToList();
+                    if (actors.Count == 0) continue;
+                    var pieceOf = new List<(System.Numerics.Vector3 A, System.Numerics.Vector3 B, System.Numerics.Vector3 C, int Piece)>();
+                    var openOf = new Dictionary<int, List<System.Numerics.Vector3>>();
+                    var doorPieces = new HashSet<int>();
+                    int baseIndex = 0;
+                    foreach (var nav in cell.NavigationMeshes.Select(n => n.Data).OfType<INavigationMeshDataGetter>())
+                    {
+                        int n = nav.Triangles.Count;
+                        var parent = Enumerable.Range(0, n).ToArray();
+                        int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+                        System.Numerics.Vector3 V(int k) => new(nav.Vertices[k].X, nav.Vertices[k].Y, nav.Vertices[k].Z);
+                        var open = new List<(int Tri, System.Numerics.Vector3 A, System.Numerics.Vector3 B)>();
+                        for (int i = 0; i < n; i++)
+                        {
+                            var t = nav.Triangles[i];
+                            foreach (var (link, a, b) in new[] { (t.EdgeLink_0_1, t.Vertices.X, t.Vertices.Y), (t.EdgeLink_1_2, t.Vertices.Y, t.Vertices.Z), (t.EdgeLink_2_0, t.Vertices.Z, t.Vertices.X) })
+                                if (link >= 0 && link < n) parent[Find(i)] = Find(link);
+                                else open.Add((i, V(a), V(b)));
+                        }
+                        foreach (var d in nav.DoorTriangles) doorPieces.Add(baseIndex + Find(d.TriangleBeforeDoor));
+                        for (int i = 0; i < n; i++) { var t = nav.Triangles[i]; pieceOf.Add((V(t.Vertices.X), V(t.Vertices.Y), V(t.Vertices.Z), baseIndex + Find(i))); }
+                        foreach (var (tri, a, b) in open)
+                        {
+                            int p = baseIndex + Find(tri);
+                            var l = openOf.TryGetValue(p, out var x) ? x : openOf[p] = [];
+                            int steps = Math.Max(1, (int)MathF.Ceiling(System.Numerics.Vector3.Distance(a, b) / 8)); for (int s = 0; s <= steps; s++) l.Add(System.Numerics.Vector3.Lerp(a, b, s / (float)steps));
+                        }
+                        baseIndex += n;
+                    }
+                    if (doorPieces.Count == 0) { Console.WriteLine($"{cell.EditorID}: no load door on its navmesh"); continue; }
+                    // Where pieces meet: for each pair of pieces whose open edges come within 64 units, the nearest two points,
+                    // as bands of across and up (edges meeting but not joined lie within a unit or two).
+                    if (opts.ContainsKey("seams"))
+                    {
+                        var grid = new Dictionary<(int, int, int), List<(int Piece, System.Numerics.Vector3 P)>>();
+                        foreach (var (pc, pts) in openOf) foreach (var p in pts) { var k = ((int)MathF.Floor(p.X / 160), (int)MathF.Floor(p.Y / 160), (int)MathF.Floor(p.Z / 160)); (grid.TryGetValue(k, out var l) ? l : grid[k] = []).Add((pc, p)); }
+                        var pairBest = new Dictionary<(int, int), (float D, float Across, float Up)>();
+                        foreach (var (k, list) in grid)
+                            for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) for (int dz = -1; dz <= 1; dz++)
+                                if (grid.TryGetValue((k.Item1 + dx, k.Item2 + dy, k.Item3 + dz), out var other))
+                                    foreach (var (pa, a) in list) foreach (var (pb, b) in other)
+                                    {
+                                        if (pa >= pb) continue;
+                                        float d = System.Numerics.Vector3.Distance(a, b);
+                                        if (d > 160) continue;
+                                        if (!pairBest.TryGetValue((pa, pb), out var cur) || d < cur.D)
+                                            pairBest[(pa, pb)] = (d, new System.Numerics.Vector2(a.X - b.X, a.Y - b.Y).Length(), MathF.Abs(a.Z - b.Z));
+                                    }
+                        string Band(float v) => v < 4 ? "<4" : v < 16 ? "4-16" : v < 32 ? "16-32" : v < 64 ? "32-64" : v < 96 ? "64-96" : v < 128 ? "96-128" : "128-160";
+                        // --probe N: at N seams, the collision faces of the placed models crossing the seam's middle (their
+                        // model, normal, height and width): what parts the two pieces.
+                        if (int.TryParse(opts.GetValueOrDefault("probe", "0"), out int probes) && probes > 0)
+                        {
+                            var finder = new Skyrim.DungeonCheck.FileFinder(skyrimData, opts.TryGetValue("assets", out var gapAssets) ? Path.GetFullPath(gapAssets) : Path.GetDirectoryName(Path.GetFullPath(opts["plugin"]))!);
+                            var modelOf = new Dictionary<FormKey, string>();
+                            foreach (var rec in gm.EnumerateMajorRecords()) if (rec is IModeledGetter { Model: { } mo } && rec is not INpcGetter) modelOf[rec.FormKey] = mo.File.DataRelativePath.Path;
+                            var colCache = new Dictionary<string, List<System.Numerics.Vector3[]>>(StringComparer.OrdinalIgnoreCase);
+                            List<System.Numerics.Vector3[]> Col(string model)
+                            {
+                                if (colCache.TryGetValue(model, out var c)) return c;
+                                var bytes = finder.Find(model);
+                                try { c = bytes is null ? [] : Skyrim.Meshes.CollisionReader.Read(bytes).Triangles.Select(t => t.Tri).ToList(); } catch (Exception) { c = []; }
+                                return colCache[model] = c;
+                            }
+                            var seamPoints = new List<(System.Numerics.Vector3 A, System.Numerics.Vector3 B)>();
+                            foreach (var (k, list) in grid)
+                                foreach (var (pa, a) in list)
+                                    foreach (var (pb, b) in list)
+                                        if (pa < pb && pairBest.TryGetValue((pa, pb), out var best) && MathF.Abs(System.Numerics.Vector3.Distance(a, b) - best.D) < 0.01f && MathF.Abs(a.Z - b.Z) >= float.Parse(opts.GetValueOrDefault("minrise", "0"), System.Globalization.CultureInfo.InvariantCulture) && seamPoints.All(s => System.Numerics.Vector3.Distance(s.A, a) > 256))
+                                            seamPoints.Add((a, b));
+                            foreach (var (a, b) in seamPoints.Take(probes))
+                            {
+                                var mid = (a + b) / 2;
+                                Console.WriteLine($"    seam at ({mid.X:F0},{mid.Y:F0},{mid.Z:F0}): {System.Numerics.Vector3.Distance(a, b):F0} apart, {b.Z - a.Z:+0;-0} up");
+                                foreach (var o in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>())
+                                {
+                                    if (o.Placement is not { } pl || !modelOf.TryGetValue(o.Base.FormKey, out var model)) continue;
+                                    var rot = Skyrim.SkyrimRotation.Matrix(pl.Rotation);
+                                    var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+                                    float sc = o.Scale ?? 1;
+                                    if (System.Numerics.Vector3.Distance(pos, mid) > 4096) continue;
+                                    foreach (var t in Col(model))
+                                    {
+                                        var w = t.Select(v => System.Numerics.Vector3.Transform(v * sc, rot) + pos).ToArray();
+                                        var c = (w[0] + w[1] + w[2]) / 3;
+                                        var lo = System.Numerics.Vector3.Min(w[0], System.Numerics.Vector3.Min(w[1], w[2])); var hi = System.Numerics.Vector3.Max(w[0], System.Numerics.Vector3.Max(w[1], w[2]));
+                                        // The face passes the seam's middle: its box holds the middle within 24 units.
+                                        if (mid.X < lo.X - 24 || mid.X > hi.X + 24 || mid.Y < lo.Y - 24 || mid.Y > hi.Y + 24 || mid.Z < lo.Z - 48 || mid.Z > hi.Z + 96) continue;
+                                        var nrm = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Cross(w[1] - w[0], w[2] - w[0]));
+                                        if (MathF.Abs(nrm.Z) > 0.7f && hi.Z < mid.Z + 24) continue;   // the floor itself
+                                        Console.WriteLine($"      {Path.GetFileName(model)}: normal ({nrm.X:F2},{nrm.Y:F2},{nrm.Z:F2}), z {lo.Z:F0}..{hi.Z:F0}, x {lo.X:F0}..{hi.X:F0}, y {lo.Y:F0}..{hi.Y:F0}");
+                                    }
+                                }
+                            }
+                        }
+                        Console.WriteLine($"  seams: {pairBest.Count} pairs of pieces meeting within 64 units; by across:{string.Join(", ", pairBest.Values.GroupBy(v => Band(v.Across)).OrderBy(g => g.Key).Select(g => $"{g.Key} {g.Count()}"))}; by up: {string.Join(", ", pairBest.Values.GroupBy(v => Band(v.Up)).OrderBy(g => g.Key).Select(g => $"{g.Key} {g.Count()}"))}");
+                    }
+                    int PieceAt(System.Numerics.Vector3 p) => pieceOf.Select(t => (t.Piece, D: System.Numerics.Vector3.Distance(p, (t.A + t.B + t.C) / 3))).MinBy(x => x.D).Piece;
+                    var apart = actors.Select(a => (Actor: a, Piece: PieceAt(new System.Numerics.Vector3(a.Placement!.Position.X, a.Placement.Position.Y, a.Placement.Position.Z)))).Where(x => !doorPieces.Contains(x.Piece)).GroupBy(x => x.Piece).ToList();
+                    Console.WriteLine($"{cell.EditorID}: {pieceOf.Select(t => t.Piece).Distinct().Count()} pieces, {doorPieces.Count} with a load door; {apart.Sum(g => g.Count())} of {actors.Count} people on {apart.Count} pieces apart from the doors");
+                    // --png DIR: the navmesh from above, a colour per piece (the load doors' green, brighter higher up), the
+                    // people white, the load doors red.
+                    if (opts.TryGetValue("png", out var pngDir))
+                    {
+                        const int W = 1600;
+                        var all = pieceOf.SelectMany(t => new[] { t.A, t.B, t.C }).ToList();
+                        float x0 = all.Min(v => v.X), x1 = all.Max(v => v.X), y0 = all.Min(v => v.Y), y1 = all.Max(v => v.Y), z0 = all.Min(v => v.Z), z1 = all.Max(v => v.Z);
+                        float span = MathF.Max(x1 - x0, y1 - y0) * 1.02f;
+                        // --zoom X,Y,R: only the square R units round (X, Y).
+                        if (opts.TryGetValue("zoom", out var zoomAt)) { var zp = zoomAt.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray(); x0 = zp[0] - zp[2]; y0 = zp[1] - zp[2]; span = 2 * zp[2]; }
+                        var rgb = new byte[W * W * 3];
+                        var depth = new float[W * W]; Array.Fill(depth, float.MinValue);
+                        (int, int) Px(System.Numerics.Vector3 v) => ((int)((v.X - x0) / span * W), W - 1 - (int)((v.Y - y0) / span * W));
+                        foreach (var (a, b, c, piece) in pieceOf)
+                        {
+                            uint h = (uint)piece * 2654435761u;
+                            byte r = (byte)(80 + (h & 0x7F)), g = (byte)(60 + ((h >> 8) & 0x7F)), bl = (byte)(80 + ((h >> 16) & 0x7F));
+                            if (doorPieces.Contains(piece)) (r, g, bl) = (40, 200, 60);
+                            var (ax, ay) = Px(a); var (bx, by) = Px(b); var (cx, cy) = Px(c);
+                            int minX = Math.Max(0, Math.Min(ax, Math.Min(bx, cx))), maxX = Math.Min(W - 1, Math.Max(ax, Math.Max(bx, cx)));
+                            int minY = Math.Max(0, Math.Min(ay, Math.Min(by, cy))), maxY = Math.Min(W - 1, Math.Max(ay, Math.Max(by, cy)));
+                            float area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+                            float zMid = (a.Z + b.Z + c.Z) / 3, shade = 0.55f + 0.45f * (zMid - z0) / MathF.Max(1, z1 - z0);
+                            for (int py = minY; py <= maxY; py++)
+                                for (int px = minX; px <= maxX; px++)
+                                {
+                                    float w0 = (bx - px) * (cy - py) - (cx - px) * (by - py), w1 = (cx - px) * (ay - py) - (ax - px) * (cy - py), w2 = (ax - px) * (by - py) - (bx - px) * (ay - py);
+                                    bool inside = area >= 0 ? w0 >= 0 && w1 >= 0 && w2 >= 0 : w0 <= 0 && w1 <= 0 && w2 <= 0;
+                                    if (!inside || zMid < depth[py * W + px]) continue;
+                                    depth[py * W + px] = zMid;
+                                    int q = (py * W + px) * 3; rgb[q] = (byte)(r * shade); rgb[q + 1] = (byte)(g * shade); rgb[q + 2] = (byte)(bl * shade);
+                                }
+                        }
+                        void Dot(System.Numerics.Vector3 v, byte r, byte g, byte b)
+                        {
+                            var (px, py) = Px(v);
+                            for (int dy = -4; dy <= 4; dy++) for (int dx = -4; dx <= 4; dx++)
+                                if (px + dx is >= 0 and < W && py + dy is >= 0 and < W) { int q = ((py + dy) * W + px + dx) * 3; rgb[q] = r; rgb[q + 1] = g; rgb[q + 2] = b; }
+                        }
+                        foreach (var a in actors) Dot(new(a.Placement!.Position.X, a.Placement.Position.Y, a.Placement.Position.Z), 255, 255, 255);
+                        foreach (var d in cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>().Where(o => o.TeleportDestination is not null && o.Placement is not null))
+                            Dot(new(d.Placement!.Position.X, d.Placement.Position.Y, d.Placement.Position.Z), 255, 0, 0);
+                        Directory.CreateDirectory(pngDir);
+                        Util.Png.WriteRgb(Path.Combine(pngDir, cell.EditorID + ".png"), W, W, rgb);
+                        Console.WriteLine($"  drawn: {Path.Combine(pngDir, cell.EditorID + ".png")} ({span:F0} units across, heights {z0:F0} to {z1:F0})");
+                    }
+                    var doorPoints = doorPieces.Where(openOf.ContainsKey).SelectMany(p => openOf[p]).ToList();
+                    var placedObjects = cell.Persistent.Concat(cell.Temporary).OfType<IPlacedObjectGetter>().Where(o => o.Placement is not null).ToList();
+                    foreach (var g in apart.OrderByDescending(g => g.Count()))
+                    {
+                        if (!openOf.TryGetValue(g.Key, out var mine) || doorPoints.Count == 0) continue;
+                        (float D, System.Numerics.Vector3 P, System.Numerics.Vector3 Q) best = (float.MaxValue, default, default);
+                        foreach (var p in mine) foreach (var q in doorPoints) { float d = System.Numerics.Vector3.DistanceSquared(p, q); if (d < best.D) best = (d, p, q); }
+                        var mid = (best.P + best.Q) / 2;
+                        float across = new System.Numerics.Vector2(best.Q.X - best.P.X, best.Q.Y - best.P.Y).Length(), up = best.Q.Z - best.P.Z;
+                        var near = placedObjects.Select(o => (o, D: System.Numerics.Vector3.Distance(mid, new System.Numerics.Vector3(o.Placement!.Position.X, o.Placement.Position.Y, o.Placement.Position.Z)))).Where(x => x.D <= nearBy).OrderBy(x => x.D)
+                            .Select(x => gapCache.TryResolve(x.o.Base.FormKey, typeof(Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter), out var rec)
+                                ? $"{rec.GetType().Name.Replace("BinaryOverlay", "")} {rec.EditorID}{(rec is IHaveVirtualMachineAdapterGetter { VirtualMachineAdapter: { } vm } && vm.Scripts.Count > 0 ? " [" + string.Join(",", vm.Scripts.Select(s => s.Name)) + "]" : "")}{(x.o.VirtualMachineAdapter is { } rvm && rvm.Scripts.Count > 0 ? " ref[" + string.Join(",", rvm.Scripts.Select(s => s.Name)) + "]" : "")} {x.D:F0}"
+                                : $"? {x.o.Base.FormKey} {x.D:F0}").Take(6).ToList();
+                        string kind = MathF.Abs(up) > 64 ? "height" : across > 96 ? "wide" : near.Any(s => s.Contains("TMRg") || s.StartsWith("Door") || s.StartsWith("Activator")) ? "object" : "close";
+                        causes[kind] = causes.GetValueOrDefault(kind) + g.Count();
+                        Console.WriteLine($"  {g.Count()} people (e.g. {g.First().Actor.Base.FormKey.ID:X6} at {g.First().Actor.Placement!.Position}): gap {across:F0} across, {up:+0;-0} up at ({mid.X:F0},{mid.Y:F0},{mid.Z:F0}) [{kind}]; near: {string.Join("; ", near)}");
+                    }
+                }
+                Console.WriteLine($"people apart by the gap's kind: {string.Join(", ", causes.Select(c => $"{c.Key} {c.Value}"))}");
+                foreach (var gmm in gapMods.Skip(1)) ((IDisposable)gmm).Dispose();
+                return 0;
+            }
             case "navmesh-reach":
             {
                 // Whether the interiors' people and load doors are on their navmesh (--plugin, a built plugin or a vanilla
@@ -9851,7 +12988,7 @@ static class Program
                             bool Intended((string Field, string From, string To) d) =>
                                 (plugin.Equals(Skyrim.CreatureSpawns.PluginName, StringComparison.OrdinalIgnoreCase) && byKind.Key == "placed NPCs"
                                     && d.Field == "record flags" && d.To.Contains("InitiallyDisabled") && !d.From.Contains("InitiallyDisabled"))
-                                || (plugin.EndsWith(" Creatures.esp", StringComparison.OrdinalIgnoreCase) && byKind.Key == "NPCs" && d.Field is "race" or "skin" or "template" or "height" or "weight");
+                                || (plugin.EndsWith(" Creatures.esm", StringComparison.OrdinalIgnoreCase) && byKind.Key == "NPCs" && d.Field is "race" or "skin" or "template" or "height" or "weight");
                             var intended = all.Where(x => x.Diff.All(Intended)).ToList();
                             var diffs = all.Where(x => !x.Diff.All(Intended)).ToList();
                             changed += diffs.Count;
@@ -10372,14 +13509,14 @@ static class Program
             }
             case "df-navmesh":
             {
-                // Navmeshes for Daggerfall's overland, added to a built "Daggerfall Land.esm" (--plugin, default
-                // out/convert): Skyrim/Terrain/OverlandNavmesh. The full Daggerfall build runs this after the land. A
-                // split land (its other plugins beside it) gets them in its last plugin.
+                // Navmeshes for Daggerfall's overland over a built "Daggerfall Land.esm" (--plugin, default out/convert)
+                // and its land alone, into the navmesh plugins beside it (Skyrim/Terrain/OverlandNavmesh); the conversion
+                // makes them with what stands on the land (overland-navmesh). A split land's other plugins are read too.
                 string plugin = Path.GetFullPath(opts.GetValueOrDefault("plugin", Path.Combine("out", "convert", Skyrim.Terrain.OverlandTiles.LandPluginName)));
                 var landSet = Skyrim.Terrain.OverlandTiles.LandPluginsIn(Path.GetDirectoryName(plugin)!);
-                var (meshes, tris, links) = Skyrim.Terrain.OverlandNavmesh.Build(landSet.Contains(Path.GetFileName(plugin)) ? landSet.Select(l => Path.Combine(Path.GetDirectoryName(plugin)!, l)).ToList() : [plugin],
-                    line => Console.WriteLine("Navmesh: " + line));
-                Console.WriteLine($"Overland navmesh: {meshes:N0} navmeshes, {tris:N0} triangles, {links:N0} links between cells");
+                var (meshes, tris, links, made) = Skyrim.Terrain.OverlandNavmesh.Build(landSet.Contains(Path.GetFileName(plugin)) ? landSet.Select(l => Path.Combine(Path.GetDirectoryName(plugin)!, l)).ToList() : [plugin],
+                    null, null, line => Console.WriteLine("Navmesh: " + line));
+                Console.WriteLine($"Overland navmesh: {meshes:N0} navmeshes, {tris:N0} triangles, {links:N0} links between cells, in {string.Join(", ", made)}");
                 return 0;
             }
             case "voices":
@@ -10391,6 +13528,7 @@ static class Program
                 // Without --plugin: every converted game with lines to speak, one after another: Morrowind's dialogue (it
                 // recorded only barks) and the lines Oblivion never recorded.
                 string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/convert"));
+                Util.Paths.TempBeside(outDir);
                 var voicePlugins = opts.TryGetValue("plugin", out var onePlugin) ? [Path.GetFullPath(onePlugin)]
                     : new[] { "Morrowind.esm", "Oblivion.esm" }.Select(p => Path.Combine(outDir, p)).Where(File.Exists).ToList();
                 if (voicePlugins.Count == 0) { Console.WriteLine($"Voices: no converted Morrowind.esm or Oblivion.esm in {outDir} (convert first)"); return 1; }
@@ -10418,9 +13556,39 @@ static class Program
                 // to it), packed under --out (default out/obvoice).
                 string dataDir = GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed through Steam or GOG");
                 string pluginPath = opts.GetValueOrDefault("plugin", "out/obmod/Oblivion.esm");
+                // --limit N: only the first N (a timing run); --cache DIR: another cache folder (an empty one times
+                // packing from nothing).
+                if (opts.TryGetValue("cache", out var cacheDir)) Skyrim.VoiceFiles.CacheDirOverride = Path.GetFullPath(cacheDir);
+                var voiceClock = System.Diagnostics.Stopwatch.StartNew();
                 var (packed, existing, unrecorded) = Oblivion.ObVoices.Build(skyrimData, new Oblivion.ObData(dataDir), pluginPath,
-                    Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pluginPath))!, "Oblivion.voicemap.json"), opts.GetValueOrDefault("out", "out/obvoice"));
+                    Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pluginPath))!, "Oblivion.voicemap.json"), opts.GetValueOrDefault("out", "out/obvoice"), int.Parse(opts.GetValueOrDefault("limit", "0")), int.Parse(opts.GetValueOrDefault("threads", "0")));
                 Console.WriteLine($"{packed} voice files from Oblivion's recordings ({Skyrim.VoiceFiles.CacheStats.Hits} of them from the lip sync cache), {existing} already there, {unrecorded} lines Oblivion didn't record");
+                var vt = Skyrim.VoiceFiles.Timing; var ot = Oblivion.ObVoices.Timing;
+                Console.WriteLine($"  {voiceClock.Elapsed.TotalSeconds:F0} s in all ({packed / Math.Max(0.001, voiceClock.Elapsed.TotalSeconds):F0} files a second); cache at {Skyrim.VoiceFiles.CacheDir}; {vt.SourceHits} placed with nothing decoded");
+                Console.WriteLine($"  seconds over all threads: reading the archives {ot.Read:F0}, decoding {ot.Decoded} recordings {ot.Decode:F0}, hashing {vt.Key:F0}, placing files {vt.Place:F0}, encoding the sound {vt.Xwm:F0}, lip sync {vt.Lip:F0} ({vt.LipRuns} runs)");
+                return 0;
+            }
+            case "ob-voices-missing":
+            {
+                // Dev aid: the voice files of a built Oblivion.esm (--plugin) that Oblivion has no recording for, by why,
+                // by voice and by the quest in the file's name, with --samples (default 12) lines of each kind;
+                // --list FILE: all of them, tab-separated (why, voice, file, Oblivion response, words).
+                string dataDir = GameInstalls.DataDir(Game.Oblivion) ?? throw new DirectoryNotFoundException("Oblivion isn't installed through Steam or GOG");
+                string pluginPath = opts.GetValueOrDefault("plugin", "out/obmod/Oblivion.esm");
+                var gone = Oblivion.ObVoices.Unrecorded(skyrimData, new Oblivion.ObData(dataDir), pluginPath,
+                    Path.Combine(Path.GetDirectoryName(Path.GetFullPath(pluginPath))!, "Oblivion.voicemap.json"));
+                int samples = int.Parse(opts.GetValueOrDefault("samples", "12"));
+                Console.WriteLine($"{gone.Count} voice files without a recording; {gone.Select(g => g.Job.Text).Distinct().Count()} different lines of text");
+                foreach (var why in gone.GroupBy(g => g.Why).OrderByDescending(g => g.Count()))
+                {
+                    Console.WriteLine($"{why.Key}: {why.Count()} files, {why.Select(g => g.Origin + "|" + g.Job.Text).Distinct().Count()} different lines");
+                    Console.WriteLine("  by voice: " + string.Join(", ", why.GroupBy(g => g.Job.VoiceType).OrderByDescending(g => g.Count()).Take(12).Select(g => $"{g.Key} {g.Count()}")));
+                    Console.WriteLine("  by quest: " + string.Join(", ", why.GroupBy(g => Path.GetFileName(g.Job.File).Split('_')[0]).OrderByDescending(g => g.Count()).Take(15).Select(g => $"{g.Key} {g.Count()}")));
+                    foreach (var g in why.GroupBy(g => g.Origin + "|" + g.Job.Text).OrderBy(g => VanillaActors.StableHash(g.Key)).Take(samples))
+                        Console.WriteLine($"    {g.First().Origin} x{g.Count()} [{Path.GetFileName(g.First().Job.File)}] \"{g.First().Job.Text}\"");
+                }
+                if (opts.TryGetValue("list", out var listFile))
+                    File.WriteAllLines(listFile, gone.Select(g => $"{g.Why}\t{g.Job.VoiceType}\t{g.Job.File}\t{g.Origin}\t{g.Job.Text}"));
                 return 0;
             }
             case "ob-voice-test":
@@ -10666,6 +13834,39 @@ static class Program
                 Console.WriteLine($"Navmesh map: {m.NavigationMeshInfoMaps.Count} map record(s), {infos.Count} entries, {infos.Count(i => !navs.ContainsKey(i.NavigationMesh.FormKey))} not in the plugin, {navs.Keys.Except(infos.Select(i => i.NavigationMesh.FormKey)).Count()} navmeshes without one");
                 return 0;
             }
+            case "voice-rename":
+            {
+                // Installed voice files (loose, under --data) of TamrielMerge's plugins moved from the names used until
+                // 2026-11-09 to the names Skyrim looks for (VoicePlanner.Prefix); the count per plugin.
+                string data = Path.GetFullPath(opts["data"]);
+                foreach (var plugin in Directory.GetFiles(data, "*.esm").Where(f => Skyrim.Uninstaller.IsOursTop(Path.GetFileName(f))))
+                {
+                    if (!Directory.Exists(Path.Combine(data, "sound", "voice", Path.GetFileName(plugin)))) continue;
+                    using var m = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
+                    var jobs = Skyrim.VoicePlanner.Plan(m, skyrimData, out _);
+                    int differ = jobs.Count(j => j.Was is not null);
+                    int moved = Skyrim.VoicePlanner.Renamed(jobs, data);
+                    Console.WriteLine($"{Path.GetFileName(plugin)}: {jobs.Count:N0} voice files planned, {differ:N0} named differently now, {moved:N0} loose files renamed");
+                }
+                return 0;
+            }
+            case "seq-write":
+            {
+                // The start lists (Skyrim/SeqFiles) of TamrielMerge's plugins in --data, written into --out (default: --data).
+                string data = Path.GetFullPath(opts["data"]), into = Path.GetFullPath(opts.GetValueOrDefault("out", data));
+                var ours = Directory.GetFiles(data).Select(Path.GetFileName).OfType<string>()
+                    .Where(n => System.Text.RegularExpressions.Regex.IsMatch(n, @"\.(esm|esp|esl)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase) && Skyrim.Uninstaller.IsOursTop(n)).ToList();
+                if (into == data) { Skyrim.Uninstaller.Record(data, Skyrim.SeqFiles.Write(data, ours, Console.WriteLine)); return 0; }
+                foreach (var plugin in ours)
+                    if (Skyrim.SeqFiles.Build(Path.Combine(data, plugin)) is { } bytes)
+                    {
+                        string target = Path.Combine(into, Skyrim.SeqFiles.NameOf(plugin));
+                        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                        File.WriteAllBytes(target, bytes);
+                        Console.WriteLine($"{Skyrim.SeqFiles.NameOf(plugin)}: {bytes.Length / 4} quests");
+                    }
+                return 0;
+            }
             case "dlg-dump":
             {
                 // Dev aid: a built plugin's dialogue topic (--topic EditorID regex): each response's conditions, text,
@@ -10673,6 +13874,15 @@ static class Program
                 using var m = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
                 var names = m.EnumerateMajorRecords().ToDictionary(r => r.FormKey, r => r.EditorID ?? r.FormKey.ToString());
                 var rx = new System.Text.RegularExpressions.Regex(opts["topic"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                // --branches: the plugin's blocking branches with their starting topics' kind, count per kind and a few of each.
+                if (opts.ContainsKey("branches"))
+                {
+                    var topics = m.DialogTopics.ToDictionary(t => t.FormKey);
+                    foreach (var g in m.DialogBranches.Where(b => b.Flags == DialogBranch.Flag.Blocking)
+                        .GroupBy(b => topics.GetValueOrDefault(b.StartingTopic.FormKey) is { } t ? $"{t.Category}/{t.Subtype} branch category {b.Category}" : "no topic"))
+                        Console.WriteLine($"{g.Count()} blocking: {g.Key}: {string.Join(", ", g.Take(4).Select(b => $"{b.EditorID} (topic priority {topics.GetValueOrDefault(b.StartingTopic.FormKey)?.Priority}, {topics.GetValueOrDefault(b.StartingTopic.FormKey)?.Responses.Count} responses)"))}");
+                    return 0;
+                }
                 foreach (var t in m.DialogTopics.Where(t => t.EditorID is { } e && rx.IsMatch(e)).Take(3))
                 {
                     Console.WriteLine($"{t.EditorID} \"{t.Name}\" {t.Category}/{t.Subtype}: {t.Responses.Count} responses");
@@ -10850,19 +14060,117 @@ static class Program
             }
             case "overland-doors":
             {
-                // The overland's load doors (Daggerfall Towns.esm's gates, Daggerfall Dungeons.esm's entrances) joined to
-                // the navmeshes of Daggerfall Land.esm in --dir (default out/convert), as "Daggerfall Overland Doors.esp".
-                // --plugins (';' list of names in --dir) picks which of the two (convert passes the ones it built this run,
-                // so a plugin left from an earlier run never becomes a master); else whichever are there.
+                // The overland's load doors (Daggerfall.esm's and Daggerfall Dungeons.esm's entrances) joined to the
+                // overland's navmeshes in --dir (default out/convert; OverlandTiles.NavmeshPluginNames), as "Daggerfall
+                // Overland Doors.esp". --plugins (';' list of names in --dir, in load order) picks which plugins' doors and
+                // cells (convert passes the ones it built this run, so a plugin left from an earlier run never becomes a
+                // master); else Daggerfall.esm and the towns' and dungeons' plugins that are there.
                 string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
-                // The navmeshes are in the last of the land's plugins (all of them, when the land is split).
-                string land = Path.Combine(dir, Skyrim.Terrain.OverlandTiles.NavmeshPluginIn(dir) ?? Skyrim.Terrain.OverlandTiles.LandPluginName);
+                var navPlugins = Skyrim.Terrain.OverlandTiles.NavmeshPluginsIn(dir).Select(n => Path.Combine(dir, n)).ToList();
                 var doorPlugins = (opts.TryGetValue("plugins", out var chosenDoors) ? chosenDoors.Split(';', StringSplitOptions.RemoveEmptyEntries)
-                        : [Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName])
+                        : ["Daggerfall.esm", Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName])
                     .Select(p => Path.Combine(dir, p)).Where(File.Exists).ToList();
-                if (!File.Exists(land) || doorPlugins.Count == 0) { Console.Error.WriteLine($"overland-doors: needs {land} and the towns or dungeons plugin"); return 1; }
-                var r = Skyrim.Terrain.OverlandDoorLinks.Build(land, doorPlugins, Path.Combine(dir, Skyrim.Terrain.OverlandDoorLinks.PluginName), Console.WriteLine);
+                if (navPlugins.Count == 0 || doorPlugins.Count == 0) { Console.Error.WriteLine($"overland-doors: needs the overland's navmesh plugins in {dir} and the plugins standing doors on it"); return 1; }
+                var r = Skyrim.Terrain.OverlandDoorLinks.Build(navPlugins, doorPlugins, Path.Combine(dir, Skyrim.Terrain.OverlandDoorLinks.PluginName), Console.WriteLine);
                 return r.Linked > 0 ? 0 : 2;
+            }
+            case "df-foliage":
+            {
+                // Daggerfall's nature on the overland (Skyrim/Terrain/DfFoliage): its trees, bushes, rocks and flowers as
+                // Daggerfall Unity lays them, over the land plugins in --dir (default out/convert), as "Daggerfall
+                // Foliage.esm" (and on, when too big for one). --count: only how many, by kind, and the sprites without a model.
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                if (arena2.Length == 0) { Console.Error.WriteLine("df-foliage: Daggerfall isn't installed"); return 1; }
+                var map = DfWorldMap.Load(arena2);
+                var locations = DfLocations.LoadAll(arena2);
+                var field = Skyrim.Terrain.HeightField.Shared(map, TerrainSettingsFrom(opts), locations);
+                // Where the locations stand (beside Daggerfall.esm, as its build left it).
+                var sites = Skyrim.Terrain.LocationLayout.In(dir) ?? throw new InvalidOperationException($"no {Skyrim.Terrain.LocationLayout.FileName} in {dir}: build Daggerfall first");
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                if (opts.ContainsKey("count"))
+                {
+                    using var master = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, "Daggerfall.esm"), SkyrimRelease.SkyrimSE);
+                    using var skyrimEsm = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
+                    Skyrim.Terrain.DfFoliage.Count(field, map, sites, Skyrim.Terrain.DfFoliage.Models(master, skyrimEsm, arena2), Console.WriteLine);
+                    Console.WriteLine($"Counted in {sw.Elapsed.TotalSeconds:F0} s");
+                    return 0;
+                }
+                var made = Skyrim.Terrain.DfFoliage.Build(dir, skyrimData, arena2, field, map, sites, Console.WriteLine);
+                Console.WriteLine($"Foliage: {string.Join(", ", made)} in {sw.Elapsed.TotalMinutes:F1} min");
+                return made.Count > 0 ? 0 : 2;
+            }
+            case "town-people":
+            {
+                // Dev aid: the people a town worldspace (--world, EditorID) places in --plugin (default Daggerfall Towns.esm
+                // in out/convert): by base, how many, persistent or not, and their enable parents (with those parents'
+                // flags), as the game would load them.
+                string plugin = Path.GetFullPath(opts.GetValueOrDefault("plugin", "out/convert/Daggerfall Towns.esm"));
+                using var mod = SkyrimMod.CreateFromBinaryOverlay(plugin, SkyrimRelease.SkyrimSE);
+                var ws = mod.Worldspaces.FirstOrDefault(w => w.EditorID == opts["world"]) ?? throw new InvalidOperationException($"{opts["world"]} not in {plugin}");
+                var cells = ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).ToList();
+                if (ws.TopCell is { } top) cells.Add(top);
+                var npcs = cells.SelectMany(c => c.Persistent.Concat(c.Temporary)).OfType<IPlacedNpcGetter>().ToList();
+                var parents = new Dictionary<FormKey, string>();
+                foreach (var w in mod.Worldspaces)
+                    foreach (var r in (w.TopCell?.Persistent ?? []).OfType<IPlacedObjectGetter>())
+                        parents[r.FormKey] = $"{r.EditorID} flags 0x{r.MajorRecordFlagsRaw:X}";
+                var names = mod.Npcs.ToDictionary(n => n.FormKey, n => $"{n.EditorID} \"{n.Name?.String}\"");
+                Console.WriteLine($"{ws.EditorID}: {npcs.Count} people placed in {cells.Count} cells");
+                foreach (var g in npcs.GroupBy(n => (Base: n.Base.FormKey, Persistent: (n.MajorRecordFlagsRaw & 0x400) != 0, Parent: n.EnableParent?.Reference.FormKey, Script: n.VirtualMachineAdapter?.Scripts.FirstOrDefault()?.Name))
+                             .OrderByDescending(g => g.Count()).Take(int.Parse(opts.GetValueOrDefault("top", "30"))))
+                    Console.WriteLine($"  x{g.Count(),-3} {names.GetValueOrDefault(g.Key.Base, g.Key.Base.ToString())}{(g.Key.Persistent ? " persistent" : "")}"
+                        + (g.Key.Parent is { } p ? $" parent {parents.GetValueOrDefault(p, p.ToString())}" : "") + (g.Key.Script is { } s ? $" script {s}" : ""));
+                return 0;
+            }
+            case "overland-navmesh":
+            {
+                // Daggerfall's overland navmeshes (Skyrim/Terrain/OverlandNavmesh) made again over the land plugins in --dir
+                // (default out/convert) and what Daggerfall.esm, Daggerfall Towns.esm and Daggerfall Dungeons.esm (those
+                // there) stand on it, into the navmesh plugins (a tile's each): those there deleted first (and any an older
+                // build left in the last land plugin taken out of it), and the overland doors (Daggerfall Overland
+                // Doors.esp, when there) joined to the new ones' triangles after (not with --no-doors: the conversion makes
+                // the doors' plugin next). --land-only: the land's heights alone.
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                var lands = Skyrim.Terrain.OverlandTiles.LandPluginsIn(dir).Select(l => Path.Combine(dir, l)).ToList();
+                if (lands.Count == 0) { Console.Error.WriteLine($"overland-navmesh: no Daggerfall land plugins in {dir}"); return 1; }
+                var standing = opts.ContainsKey("land-only") ? []
+                    : new[] { "Daggerfall.esm", Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName }.Select(p => Path.Combine(dir, p)).Where(File.Exists).ToList();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                // The navmesh plugins there are made again, unless --keep-newer: one made after every plugin standing on the
+                // land is a finished tile of a stopped run, kept (the builder makes only the tiles without one).
+                // --navmesh-out DIR: the plugins written there instead of beside the land (a test of a few pieces).
+                string navOut = Path.GetFullPath(opts.GetValueOrDefault("navmesh-out", dir));
+                Directory.CreateDirectory(navOut);
+                foreach (var old in Skyrim.Terrain.OverlandTiles.NavmeshPluginsIn(navOut))
+                {
+                    string oldPath = Path.Combine(navOut, old);
+                    bool keep = opts.ContainsKey("keep-newer") && standing.Count > 0 && standing.All(p => File.GetLastWriteTimeUtc(oldPath) > File.GetLastWriteTimeUtc(p));
+                    if (keep) Console.WriteLine($"Navmesh: {old} kept from the stopped run (made after the plugins standing on the land)");
+                    else File.Delete(oldPath);
+                }
+                // --chunks "x,y;x,y": those pieces alone (64-cell chunks), for measuring settings (TM_NAV_GRIDTOL, TM_NAV_GRIDMIN);
+                // the land plugin isn't rewritten then.
+                var onlyChunks = opts.TryGetValue("chunks", out var chunkList)
+                    ? chunkList.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(c => c.Split(',')).Select(c => (int.Parse(c[0]), int.Parse(c[1]))).ToHashSet()
+                    : null;
+                if (onlyChunks is null)
+                {
+                    string last = lands[^1], bare = last + ".bare";
+                    long kept = Skyrim.PluginMerger.DropRecords(last, bare, new HashSet<string> { "NAVM", "NAVI" });
+                    File.Move(bare, last, overwrite: true);
+                    Console.WriteLine($"Navmesh: the navmesh plugins made again ({kept:N0} records and groups left in {Path.GetFileName(last)}); over {(standing.Count == 0 ? "the land alone" : "the land and what " + string.Join(", ", standing.Select(Path.GetFileName)) + " stand on it")}");
+                }
+                var (navmeshes, navTris, navLinks, navPlugins) = Skyrim.Terrain.OverlandNavmesh.Build(lands, standing, skyrimData, l => Console.WriteLine("Navmesh: " + l), onlyChunks, navOut);
+                Console.WriteLine($"Navmesh: {navmeshes:N0} navmeshes, {navTris:N0} triangles, {navLinks:N0} links in {sw.Elapsed.TotalMinutes:F1} min, in {string.Join(", ", navPlugins)}");
+                Console.WriteLine($"Navmesh: {Skyrim.Navmesh.NavmeshBuilder.MarkingSummary}");
+                foreach (var big in Skyrim.Terrain.OverlandTiles.Oversized(navOut)) Console.WriteLine($"Navmesh: WARNING {big} is near the 2 GB Mutagen can read");
+                if (navmeshes == 0) return 2;
+                if (!opts.ContainsKey("no-doors") && File.Exists(Path.Combine(dir, Skyrim.Terrain.OverlandDoorLinks.PluginName)))
+                {
+                    var doorPlugins = new[] { "Daggerfall.esm", Skyrim.DaggerfallTowns.PluginName, Skyrim.DaggerfallDungeons.PluginName }.Where(p => File.Exists(Path.Combine(dir, p)));
+                    return Main(["overland-doors", "--dir", dir, "--plugins", string.Join(";", doorPlugins)]);
+                }
+                return 0;
             }
             case "menu-build":
             {
@@ -10892,6 +14200,327 @@ static class Program
                 }
                 return 0;
             }
+            case "door-names":
+            {
+                // The street doors' names (TMDfStreetDoor DoorName) in --plugin, and the shops' vendor hours (2026-11-04).
+                using var plugin = SkyrimMod.CreateFromBinaryOverlay(opts["plugin"], SkyrimRelease.SkyrimSE);
+                var doorNames = plugin.EnumerateMajorRecords<IPlacedObjectGetter>()
+                    .SelectMany(r => r.VirtualMachineAdapter?.Scripts.Where(s => s.Name == "TMDfStreetDoor") ?? [])
+                    .Select(s => s.Properties.OfType<IScriptStringPropertyGetter>().FirstOrDefault(p => p.Name == "DoorName")?.Data ?? "(none)").ToList();
+                Console.WriteLine($"{doorNames.Count} street doors; {doorNames.Count(n => n == "(none)")} without a name");
+                foreach (var g in doorNames.GroupBy(n => n).OrderByDescending(g => g.Count()).Take(int.Parse(opts.GetValueOrDefault("top", "25")))) Console.WriteLine($"  {g.Count(),4} {g.Key}");
+                foreach (var f in plugin.Factions.Where(f => f.VendorValues is not null).Take(12)) Console.WriteLine($"  vendor {f.Name?.String}: {f.VendorValues!.StartHour}-{f.VendorValues.EndHour}");
+                return 0;
+            }
+            case "furniture-check":
+            {
+                // Each furniture prop in --dir (a build's Meshes\TamrielMerge\Props): its sit positions against the Daggerfall
+                // seat (the highest upward face 15-90 up within 12 units, DfPropBuilder.SeatTop): how far over it, and the
+                // model's extent across, to see sitters inside benches or backrests (2026-11-04).
+                foreach (var file in Directory.GetFiles(opts["dir"], "*.nif").OrderBy(f => f))
+                {
+                    using var nif = new nifly.NifFile();
+                    if (nif.Load(file) != 0) continue;
+                    var hdr = nif.GetHeader();
+                    nifly.BSFurnitureMarker? marker = null;
+                    for (uint i = 0; i < hdr.GetNumBlocks() && marker is null; i++) marker = hdr.GetBlockById(i) as nifly.BSFurnitureMarker;
+                    if (marker is null) continue;
+                    var seats = new List<System.Numerics.Vector3[]>();
+                    var all = new List<System.Numerics.Vector3>();
+                    foreach (var shape in nif.GetShapes())
+                    {
+                        var v = nif.GetVertsForShape(shape);
+                        using var tris = new nifly.vectorTriangle();
+                        shape.GetTriangles(tris);
+                        foreach (var t in tris)
+                        {
+                            System.Numerics.Vector3[] p = [new(v[t.p1].x, v[t.p1].y, v[t.p1].z), new(v[t.p2].x, v[t.p2].y, v[t.p2].z), new(v[t.p3].x, v[t.p3].y, v[t.p3].z)];
+                            all.AddRange(p);
+                            var n = System.Numerics.Vector3.Cross(p[1] - p[0], p[2] - p[0]);
+                            if (n.LengthSquared() > 1e-6f && System.Numerics.Vector3.Normalize(n).Z > 0.7f) seats.Add(p);
+                        }
+                    }
+                    if (all.Count == 0) continue;
+                    var lo = all.Aggregate(System.Numerics.Vector3.Min); var hi = all.Aggregate(System.Numerics.Vector3.Max);
+                    var slots = Skyrim.Meshes.NiflyRaw.Elements<nifly.FurniturePosition>(marker.positions, 24);
+                    var parts = slots.Select(s => Skyrim.DfPropBuilder.SeatTop(seats, s.offset.x, s.offset.y) is { } top
+                        ? $"({s.offset.x:F0},{s.offset.y:F0},{s.offset.z:F1}) {s.offset.z - top:+0.0;-0.0} over the seat"
+                        : $"({s.offset.x:F0},{s.offset.y:F0},{s.offset.z:F1}) no seat under it");
+                    Console.WriteLine($"{Path.GetFileName(file)}: model x {lo.X:F0}..{hi.X:F0} y {lo.Y:F0}..{hi.Y:F0} z {lo.Z:F0}..{hi.Z:F0}; {string.Join("; ", parts)}");
+                }
+                return 0;
+            }
+            case "rg-sfx":
+            {
+                // Dev aid: Redguard's MAIN.SFX effects (--effects 27,28; all without): type, sample rate, length, base
+                // volume and loop flag (0 once, 0xFF until stopped, else that many times).
+                string rgDir = GameInstalls.DataDir(Game.Redguard) ?? throw new DirectoryNotFoundException("Redguard isn't installed through Steam or GOG");
+                var sfx = Redguard.RgSfx.Load(Path.Combine(rgDir, "sound", "MAIN.SFX")) ?? throw new FileNotFoundException("MAIN.SFX");
+                var want = opts.TryGetValue("effects", out var list) ? list.Split(',').Select(int.Parse).ToHashSet() : null;
+                for (int i = 0; i < sfx.Effects.Count; i++)
+                    if (want is null || want.Contains(i))
+                    {
+                        var e = sfx.Effects[i];
+                        Console.WriteLine($"{i,3}: type {e.Type}, {e.Bits} bit, {e.SampleRate} Hz, {e.Seconds():F2} s, base volume {e.BaseVolume}, loop {e.Loop}");
+                    }
+                return 0;
+            }
+            case "follow-packages":
+            {
+                // Packages in --plugin (default Skyrim's Data\Oblivion.esm) aimed at the player (a target input on the player,
+                // 00000014: following, escorting), their conditions and schedule, and the NPCs whose own lists hold them
+                // (2026-11-04, user: Mankar Camoran, a Breton and a dead hound followed the player on fast travel).
+                using var src = SkyrimMod.CreateFromBinaryOverlay(opts.GetValueOrDefault("plugin", Path.Combine(skyrimData, "Oblivion.esm")), SkyrimRelease.SkyrimSE);
+                var player = new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x14);
+                var atPlayer = src.Packages.Where(p => p.Data.Values.OfType<IPackageDataTargetGetter>().Any(t => t.Target is IPackageTargetSpecificReferenceGetter s && s.Reference.FormKey == player)).ToDictionary(p => p.FormKey);
+                var users = src.Npcs.SelectMany(n => n.Packages.Where(k => atPlayer.ContainsKey(k.FormKey)).Select(k => (Npc: n, Package: k.FormKey))).ToLookup(x => x.Package, x => x.Npc);
+                foreach (var p in atPlayer.Values.OrderBy(p => p.EditorID))
+                {
+                    var conds = string.Join(" AND ", p.Conditions.Select(c => $"{c.Data.GetType().Name.Replace("ConditionData", "")} {c.CompareOperator} {(c as IConditionFloatGetter)?.ComparisonValue}"));
+                    Console.WriteLine($"{p.EditorID} ({p.FormKey}) schedule h{p.ScheduleHour} for {p.ScheduleDurationInMinutes} min; {p.Conditions.Count} conditions{(conds.Length > 0 ? ": " + conds : "")}");
+                    foreach (var n in users[p.FormKey].Take(8)) Console.WriteLine($"    used by {n.EditorID} \"{n.Name?.String}\" ({n.FormKey})");
+                }
+                Console.WriteLine($"{atPlayer.Count} packages aimed at the player, {atPlayer.Keys.Count(k => users[k].Any())} in NPCs' own lists");
+                // Every condition of the plugin's packages, dialogue and quests by its operator (6 and above aren't any).
+                var allConditions = src.Packages.SelectMany(p => p.Conditions)
+                    .Concat(src.DialogTopics.SelectMany(t => t.Responses).SelectMany(r => r.Conditions))
+                    .Concat(src.Quests.SelectMany(q => q.DialogConditions.Concat(q.Stages.SelectMany(s => s.LogEntries).SelectMany(l => l.Conditions))));
+                Console.WriteLine("conditions by operator: " + string.Join(", ", allConditions.GroupBy(c => (int)c.CompareOperator).OrderBy(g => g.Key).Select(g => $"{(g.Key <= 5 ? ((CompareOperator)g.Key).ToString() : $"invalid {g.Key}")} {g.Count():N0}")));
+                return 0;
+            }
+            case "face-pools":
+            {
+                // The faces converted people take (VanillaActors.Faces) per playable race and sex: how many, their voices,
+                // and the commonest EditorID families (2026-11-04: Bretons were all Forsworn).
+                var va = new Skyrim.VanillaActors(skyrimData);
+                // --why RACE: that race's men, each with its voice, scars and painted tint layers (mask file and value).
+                if (opts.TryGetValue("why", out var whyRace) && va.Skyrim.Races.FirstOrDefault(r => r.EditorID == whyRace) is { } wr)
+                {
+                    var masks = wr.HeadData?.Male?.TintMasks;
+                    var parts = va.Skyrim.HeadParts.ToDictionary(h => h.FormKey);
+                    foreach (var n in va.Skyrim.Npcs.Where(n => n.Race.FormKey == wr.FormKey && !n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Female)).Take(80))
+                    {
+                        var tints = n.TintLayers.Select(t => $"{Path.GetFileNameWithoutExtension(masks?.FirstOrDefault(m => m.Index == t.Index)?.FileName?.GivenPath ?? "?")}={t.InterpolationValue}");
+                        var heads = n.HeadParts.Select(h => parts.TryGetValue(h.FormKey, out var hp) ? $"{hp.EditorID}({(int?)hp.Type})" : "?");
+                        Console.WriteLine($"  {n.EditorID} voice {va.Skyrim.VoiceTypes.FirstOrDefault(v => v.FormKey == n.Voice.FormKey)?.EditorID}; heads {string.Join(" ", heads)}; tints {string.Join(" ", tints)}");
+                    }
+                    return 0;
+                }
+                foreach (var race in va.Skyrim.Races.Where(r => r.EditorID is { } e && Skyrim.VanillaActors.RaceVoices.ContainsKey((e, false))))
+                    foreach (bool female in new[] { false, true })
+                    {
+                        var pool = va.Faces(race.FormKey, female);
+                        var voices = pool.GroupBy(n => va.Skyrim.VoiceTypes.FirstOrDefault(v => v.FormKey == n.Voice.FormKey)?.EditorID ?? "?").Select(g => $"{g.Key} {g.Count()}");
+                        var families = pool.GroupBy(n => System.Text.RegularExpressions.Regex.Match(n.EditorID ?? "", @"^[A-Z][a-z]+(?:[A-Z][a-z]+)?").Value).OrderByDescending(g => g.Count()).Take(6).Select(g => $"{g.Key} {g.Count()}");
+                        Console.WriteLine($"{race.EditorID} {(female ? "female" : "male")}: {pool.Count} faces; voices {string.Join(", ", voices)}; {string.Join(", ", families)}");
+                    }
+                return 0;
+            }
+            case "scripts-on":
+            {
+                // Dev aid: the records of a built plugin (--plugin, default Skyrim's Data\Morrowind.esm) whose EditorID matches
+                // --edid (regex): their scripts and every property with what it points at (missing: an empty or unresolved
+                // form); for a topic its responses: their conditions and voice. --refs: also the placed references of the
+                // matching bases, with their own scripts.
+                using var plugin = SkyrimMod.CreateFromBinaryOverlay(opts.GetValueOrDefault("plugin", Path.Combine(skyrimData, "Morrowind.esm")), SkyrimRelease.SkyrimSE);
+                var rx = new System.Text.RegularExpressions.Regex(opts["edid"], System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                var all = plugin.EnumerateMajorRecords().GroupBy(r => r.FormKey).ToDictionary(g => g.Key, g => g.First());
+                string Name(FormKey k) => k.IsNull ? "(none)" : all.TryGetValue(k, out var r) ? $"{r.EditorID ?? "?"} [{r.GetType().Name.Replace("BinaryOverlay", "")}]" : k.ModKey == plugin.ModKey ? $"{k} (MISSING)" : k.ToString();
+                void Show(string indent, IEnumerable<IScriptEntryGetter> scripts)
+                {
+                    foreach (var sc in scripts)
+                    {
+                        Console.WriteLine($"{indent}script {sc.Name}");
+                        foreach (var pr in sc.Properties)
+                            Console.WriteLine($"{indent}  {pr.Name} = " + pr switch
+                            {
+                                IScriptObjectPropertyGetter o => Name(o.Object.FormKey),
+                                IScriptObjectListPropertyGetter l => $"[{l.Objects.Count}] " + string.Join(", ", l.Objects.Take(4).Select(o => Name(o.Object.FormKey))),
+                                IScriptIntPropertyGetter i => i.Data.ToString(),
+                                IScriptFloatPropertyGetter f => f.Data.ToString(),
+                                IScriptBoolPropertyGetter b => b.Data.ToString(),
+                                IScriptStringPropertyGetter st => $"\"{st.Data}\"",
+                                _ => pr.GetType().Name.Replace("BinaryOverlay", ""),
+                            });
+                    }
+                }
+                var matched = all.Values.Where(r => r.EditorID is { } e && rx.IsMatch(e)).ToList();
+                foreach (var rec in matched.Take(int.Parse(opts.GetValueOrDefault("max", "12"))))
+                {
+                    Console.WriteLine($"{rec.FormKey} {rec.EditorID} [{rec.GetType().Name.Replace("BinaryOverlay", "")}]");
+                    if (rec is IHaveVirtualMachineAdapterGetter { VirtualMachineAdapter: { } vm }) Show("  ", vm.Scripts);
+                    if (rec is INpcGetter npc) Console.WriteLine($"  voice {Name(npc.Voice.FormKey)}, race {Name(npc.Race.FormKey)}, flags {npc.Configuration.Flags}");
+                    if (rec is IDialogTopicGetter topic)
+                        foreach (var resp in topic.Responses)
+                        {
+                            Console.WriteLine($"  response {resp.FormKey.ID:X6}: {resp.Responses.Count} lines \"{resp.Responses.FirstOrDefault()?.Text?.String}\"; flags {resp.Flags?.Flags}");
+                            foreach (var c in resp.Conditions)
+                                Console.WriteLine($"    if {c.Data.GetType().Name.Replace("ConditionData", "").Replace("BinaryOverlay", "")} {c.CompareOperator} {(c is IConditionFloatGetter cf ? cf.ComparisonValue : 0)} " +
+                                    (c.Data is IGetIsIDConditionDataGetter id ? Name(id.Object.Link.FormKey) : c.Data is IGetGlobalValueConditionDataGetter g ? Name(g.Global.Link.FormKey) : c.Data is IGetIsReferenceConditionDataGetter rr ? Name(rr.Target.Link.FormKey) : ""));
+                        }
+                    if (opts.ContainsKey("refs"))
+                        foreach (var r in plugin.EnumerateMajorRecords<IPlacedNpcGetter>().Where(r => r.Base.FormKey == rec.FormKey))
+                        {
+                            Console.WriteLine($"  placed {r.FormKey} {r.EditorID} at {r.Placement?.Position}, persistent {(r.MajorRecordFlagsRaw & 0x400) != 0}, initially disabled {(r.MajorRecordFlagsRaw & 0x800) != 0}");
+                            if (r.VirtualMachineAdapter is { } rvm) Show("    ", rvm.Scripts);
+                        }
+                }
+                Console.WriteLine($"{matched.Count} records matched");
+                return 0;
+            }
+            case "navi-doors":
+            {
+                // Dev aid: a plugin's navmesh map (NAVI) against its load doors (--plugin, default Skyrim's Data\Oblivion.esm):
+                // per entry its linked doors, each door's destination and whether the destination is linked in some entry
+                // (the game follows a door to its partner's navmesh); entries naming navmeshes or doors the plugin hasn't;
+                // --navm ID: that entry in full.
+                using var plugin = SkyrimMod.CreateFromBinaryOverlay(opts.GetValueOrDefault("plugin", Path.Combine(skyrimData, "Oblivion.esm")), SkyrimRelease.SkyrimSE);
+                var refs = plugin.EnumerateMajorRecords<IPlacedObjectGetter>().GroupBy(r => r.FormKey).ToDictionary(g => g.Key, g => g.First());
+                var navms = plugin.EnumerateMajorRecords<INavigationMeshGetter>().GroupBy(r => r.FormKey).ToDictionary(g => g.Key, g => g.First());
+                var infos = plugin.NavigationMeshInfoMaps.SelectMany(m => m.MapInfos).ToList();
+                var linkedIn = new Dictionary<FormKey, List<FormKey>>();
+                foreach (var i in infos)
+                    foreach (var ld in i.LinkedDoors)
+                        (linkedIn.TryGetValue(ld.Door.FormKey, out var l) ? l : linkedIn[ld.Door.FormKey] = []).Add(i.NavigationMesh.FormKey);
+                int doors = 0, noDest = 0, destUnlinked = 0, missingNav = 0, missingDoor = 0, dupEntries = 0, notTriangle = 0;
+                var perNav = infos.GroupBy(i => i.NavigationMesh.FormKey).ToList();
+                dupEntries = perNav.Count(g => g.Count() > 1);
+                foreach (var i in infos)
+                {
+                    if (!navms.TryGetValue(i.NavigationMesh.FormKey, out var nav)) { missingNav++; continue; }
+                    var triDoors = nav.Data?.DoorTriangles.Select(t => t.Door.FormKey).ToHashSet() ?? [];
+                    foreach (var ld in i.LinkedDoors)
+                    {
+                        doors++;
+                        if (!triDoors.Contains(ld.Door.FormKey)) notTriangle++;
+                        if (!refs.TryGetValue(ld.Door.FormKey, out var door)) { missingDoor++; continue; }
+                        if (door.TeleportDestination is not { } t) { noDest++; continue; }
+                        if (!linkedIn.ContainsKey(t.Door.FormKey)) destUnlinked++;
+                    }
+                }
+                var triOnly = navms.Values.Sum(n => (n.Data?.DoorTriangles ?? []).Count(t => !linkedIn.TryGetValue(t.Door.FormKey, out var l) || !l.Contains(n.FormKey)));
+                Console.WriteLine($"{infos.Count} entries ({dupEntries} navmeshes with more than one), {navms.Count} navmeshes ({navms.Count - perNav.Count} without an entry); entries naming a missing navmesh {missingNav}");
+                // Each entry's parent (the game reads it for every navmesh it loads): its kind, and those naming a cell or
+                // worldspace the plugin and its masters haven't, or a cell other than the navmesh's own.
+                var cellKeys = plugin.EnumerateMajorRecords<ICellGetter>().Select(c => c.FormKey).ToHashSet();
+                var worldKeys = plugin.Worldspaces.Select(w => w.FormKey).ToHashSet();
+                var navCell = new Dictionary<FormKey, FormKey>();
+                foreach (var c in plugin.EnumerateMajorRecords<ICellGetter>())
+                    foreach (var n in c.NavigationMeshes) navCell[n.FormKey] = c.FormKey;
+                var kinds = infos.GroupBy(i => i.Parent?.GetType().Name.Replace("BinaryOverlay", "") ?? "none").Select(g => $"{g.Key} {g.Count()}");
+                int badCell = infos.Count(i => i.Parent is INavigationMapInfoCellParentGetter cp && !cellKeys.Contains(cp.ParentCell.FormKey) && cp.ParentCell.FormKey.ModKey == plugin.ModKey);
+                int otherCell = infos.Count(i => i.Parent is INavigationMapInfoCellParentGetter cp && navCell.TryGetValue(i.NavigationMesh.FormKey, out var own) && own != cp.ParentCell.FormKey);
+                int badWorld = infos.Count(i => i.Parent is INavigationMapInfoWorldParentGetter wp && !worldKeys.Contains(wp.ParentWorldspace.FormKey) && wp.ParentWorldspace.FormKey.ModKey == plugin.ModKey);
+                Console.WriteLine($"parents: {string.Join(", ", kinds)}; a cell it hasn't {badCell}, another cell than the navmesh's {otherCell}, a worldspace it hasn't {badWorld}");
+                Console.WriteLine($"{doors} linked doors: missing {missingDoor}, not a teleport door {noDest}, destination linked nowhere {destUnlinked}, not among the navmesh's door triangles {notTriangle}; door triangles not linked in their navmesh's entry {triOnly}");
+                if (opts.TryGetValue("navm", out var nid))
+                {
+                    uint id = Convert.ToUInt32(nid, 16) & 0xFFFFFF;
+                    foreach (var i in infos.Where(x => x.NavigationMesh.FormKey.ID == id))
+                    {
+                        Console.WriteLine($"entry {i.NavigationMesh.FormKey}: point {i.Point}, flags {i.Unknown}, merges flag {i.PreferredMergesFlag}, merged {i.MergedTo.Count}, preferred {i.PreferredMerges.Count}, island {(i.Island is null ? "none" : "yes")}, parent {i.Parent?.GetType().Name}");
+                        foreach (var ld in i.LinkedDoors)
+                        {
+                            var door = refs.GetValueOrDefault(ld.Door.FormKey);
+                            var dest = door?.TeleportDestination?.Door.FormKey;
+                            Console.WriteLine($"  door {ld.Door.FormKey} tag {ld.Unknown:X8} -> {dest?.ToString() ?? "none"}; destination linked in {(dest is { } dd && linkedIn.TryGetValue(dd, out var l) ? string.Join(",", l) : "nothing")}");
+                        }
+                    }
+                    if (navms.Values.FirstOrDefault(n => n.FormKey.ID == id) is { Data: { } nd } nn)
+                        foreach (var t in nd.DoorTriangles) Console.WriteLine($"  door triangle {t.TriangleBeforeDoor} tag {t.Unknown:X8} door {t.Door.FormKey}");
+                }
+                return 0;
+            }
+            case "script-strings":
+            {
+                // Dev aid: script strings too long for a save (Skyrim.ScriptStrings): in --plugins a,b (default every
+                // converted plugin in --dir, default Skyrim's Data), those of --min characters or more (default 4,096,
+                // where loading a save crashes). Exit 1 when there are any.
+                string dir = opts.GetValueOrDefault("dir", skyrimData);
+                int min = int.Parse(opts.GetValueOrDefault("min", Skyrim.ScriptStrings.SaveBlock.ToString()));
+                var names = opts.TryGetValue("plugins", out var pl) ? pl.Split(',').ToList()
+                    : Directory.GetFiles(dir).Select(Path.GetFileName).Where(f => f is not null && (f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esp", StringComparison.OrdinalIgnoreCase))
+                        && (f.StartsWith("Daggerfall") || f.StartsWith("Redguard") || f.StartsWith("Morrowind") || f.StartsWith("Oblivion") || f.StartsWith("TamrielMerge"))).Select(f => f!).Order().ToList();
+                int total = 0;
+                foreach (var name in names)
+                {
+                    using var mod = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, name), SkyrimRelease.SkyrimSE);
+                    var found = Skyrim.ScriptStrings.Find(mod, min);
+                    total += found.Count;
+                    Console.WriteLine($"{name}: {found.Count} script strings of {min}+ characters");
+                    foreach (var f in found.OrderByDescending(f => f.Length).Take(20))
+                        Console.WriteLine($"  {f.Length,6} {f.Record} {f.Script}.{f.Property}{(f.Index >= 0 ? $"[{f.Index}]" : "")}");
+                    // --pieces: each one cut as the builders now cut it (a list of names by ScriptStrings.Grouped, other text by
+                    // Chunks at ";"), checked: the longest piece, and whether the pieces give back the text.
+                    if (opts.ContainsKey("pieces"))
+                        foreach (var rec in mod.EnumerateMajorRecords())
+                            if (rec is IHaveVirtualMachineAdapterGetter { VirtualMachineAdapter: { } vm })
+                                foreach (var sc in vm.Scripts)
+                                    foreach (var p in sc.Properties)
+                                    {
+                                        var texts = p switch { IScriptStringPropertyGetter one => new List<string> { one.Data }, IScriptStringListPropertyGetter list => list.Data.ToList(), _ => [] };
+                                        if (!texts.Any(t => t.Length >= min)) continue;
+                                        bool nameList = texts.All(t => !t.Contains(';'));
+                                        if (nameList)
+                                        {
+                                            var groups = texts.Select(t => t.Split('|').ToList()).ToList();
+                                            var (pieces, first) = Skyrim.ScriptStrings.Grouped(groups);
+                                            bool same = Enumerable.Range(0, groups.Count).All(g => Skyrim.ScriptStrings.Group(pieces, first, g).SequenceEqual(groups[g]));
+                                            Console.WriteLine($"  {sc.Name}.{p.Name}: {texts.Count} groups -> {pieces.Count} pieces, longest {pieces.Max(x => x.Length)}; read back the same: {same}");
+                                        }
+                                        else
+                                        {
+                                            var pieces = texts.SelectMany(t => Skyrim.ScriptStrings.Chunks(t, ';')).ToList();
+                                            bool same = string.Concat(pieces) == string.Concat(texts) && pieces.All(x => x.Length == 0 || x.EndsWith(';') || x == pieces[^1]);
+                                            Console.WriteLine($"  {sc.Name}.{p.Name}: {pieces.Count} pieces, longest {pieces.Max(x => x.Length)}; joined the same, cut after ';': {same}");
+                                        }
+                                    }
+                }
+                return total > 0 ? 1 : 0;
+            }
+            case "quest-headlines":
+            {
+                // Dev aid: a built plugin's quest objectives (--plugin, default Skyrim's Data\Daggerfall.esm) as
+                // Skyrim.QuestText.Headline makes them: how many were over the HUD's line, how long they are now, and
+                // --show N of them, whole text and headline.
+                using var plugin = SkyrimMod.CreateFromBinaryOverlay(opts.GetValueOrDefault("plugin", Path.Combine(skyrimData, "Daggerfall.esm")), SkyrimRelease.SkyrimSE);
+                var texts = plugin.Quests.SelectMany(q => q.Objectives).Select(o => o.DisplayText?.String ?? "").Where(t => t.Length > 0).ToList();
+                var lines = texts.Select(t => (Text: t, Line: Skyrim.QuestText.Headline(t))).ToList();
+                int over = texts.Count(t => Skyrim.QuestText.Visible(t) > Skyrim.QuestText.HeadlineLength);
+                var after = lines.Select(l => Skyrim.QuestText.Visible(l.Line)).Order().ToList();
+                Console.WriteLine($"{texts.Count} objectives: {over} over {Skyrim.QuestText.HeadlineLength} visible characters; headlines median {(after.Count > 0 ? after[after.Count / 2] : 0)}, max {(after.Count > 0 ? after[^1] : 0)}, over: {after.Count(n => n > Skyrim.QuestText.HeadlineLength)}");
+                foreach (var l in lines.Take(int.Parse(opts.GetValueOrDefault("show", "6")))) Console.WriteLine($"  {l.Text}\n   -> {l.Line}");
+                return 0;
+            }
+            case "rg-start-check":
+            {
+                // Redguard's start (RGOpeningDocks) in a built Redguard.esm (--plugin, default Skyrim's Data) against the
+                // ship nearest it: collision points in a standing body at the marker, and where RgPluginBuilder.OnShip's
+                // landing (ClearSpot, up to 100 over) puts it. The ship's mesh is made into --out (a scratch folder).
+                using var rg = SkyrimMod.CreateFromBinaryOverlay(opts.GetValueOrDefault("plugin", Path.Combine(skyrimData, "Redguard.esm")), SkyrimRelease.SkyrimSE);
+                var refs = rg.Worldspaces.SelectMany(w => w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).Append(w.TopCell).OfType<ICellGetter>()
+                    .SelectMany(c => c.Persistent.Concat(c.Temporary)).OfType<IPlacedObjectGetter>().Select(r => (World: w.EditorID, Ref: r))).ToList();
+                var start = refs.FirstOrDefault(x => x.Ref.EditorID == "RGOpeningDocks");
+                var shipStatic = rg.Statics.FirstOrDefault(s => s.EditorID == "RGShip");
+                if (start.Ref is null || shipStatic is null) { Console.WriteLine("no RGOpeningDocks or RGShip"); return 1; }
+                var sp = start.Ref.Placement!.Position;
+                var feet = new System.Numerics.Vector3(sp.X, sp.Y, sp.Z);
+                var nearest = refs.Where(x => x.World == start.World && x.Ref.Base.FormKey == shipStatic.FormKey)
+                    .OrderBy(x => MathF.Pow(x.Ref.Placement!.Position.X - sp.X, 2) + MathF.Pow(x.Ref.Placement.Position.Y - sp.Y, 2)).First().Ref;
+                var scratch = new SkyrimMod(ModKey.FromFileName("RgStartCheck.esp"), SkyrimRelease.SkyrimSE);
+                var shipProblems = new List<string>();
+                var made = Skyrim.Meshes.ShipModel.Build(scratch, Path.GetFullPath(opts.GetValueOrDefault("out", "out/rgstartcheck")), "RGShip", shipProblems);
+                if (made is null) { Console.WriteLine(string.Join("; ", shipProblems)); return 1; }
+                float scale = nearest.Scale ?? 1;
+                var solid = Redguard.RgPluginBuilder.ShipSolid(made, nearest.Placement!.Position, nearest.Placement.Rotation, scale);
+                var np = nearest.Placement.Position;
+                Console.WriteLine($"start {start.World} ({sp.X:F0}, {sp.Y:F0}, {sp.Z:F0}); ship {nearest.FormKey} at ({np.X:F0}, {np.Y:F0}, {np.Z:F0}) scale {scale:F2}, deck {np.Z + made.Deck * scale:F0} (model deck {made.Deck:F0})");
+                Console.WriteLine($"  at the marker: {Morrowind.MwPluginBuilder.BodyHits(feet, solid)} collision points in a standing body");
+                if (Morrowind.MwPluginBuilder.ClearSpot(feet, solid, above: 100) is { } landed)
+                    Console.WriteLine($"  landed: ({landed.X:F0}, {landed.Y:F0}, {landed.Z:F0}), {System.Numerics.Vector3.Distance(landed, feet):F0} units away: {Morrowind.MwPluginBuilder.BodyHits(landed, solid)} collision points");
+                else Console.WriteLine("  no clear place on the ship within 200 units");
+                return 0;
+            }
             case "refs-near":
             {
                 // Dev aid: what stands near a point of a worldspace (--world, --at x,y, --radius in units) in --plugin
@@ -10919,6 +14548,17 @@ static class Program
                             {
                                 var pos = r switch { IPlacedObjectGetter o => o.Placement?.Position, IPlacedNpcGetter n => n.Placement?.Position, _ => null };
                                 if (pos is not { } p || MathF.Abs(p.X - at[0]) > radius || MathF.Abs(p.Y - at[1]) > radius) continue;
+                                // --list: each reference, its base's model, place and turn.
+                                if (opts.ContainsKey("list"))
+                                {
+                                    var (baseKey, rot, scale) = r switch
+                                    {
+                                        IPlacedObjectGetter o => (o.Base.FormKey, o.Placement?.Rotation, o.Scale),
+                                        IPlacedNpcGetter n => (n.Base.FormKey, n.Placement?.Rotation, (float?)null),
+                                        _ => (FormKey.Null, null, null),
+                                    };
+                                    Console.WriteLine($"  {r.FormKey} {r.EditorID} base {baseKey} {models.GetValueOrDefault(baseKey).Model} at ({p.X:F0}, {p.Y:F0}, {p.Z:F0}) turn {rot?.Z * 180 / MathF.PI:F0} scale {scale ?? 1:F2}{(r.SkyrimMajorRecordFlags.HasFlag((SkyrimMajorRecord.SkyrimMajorRecordFlag)0x800) ? " disabled" : "")}");
+                                }
                                 if (r is IPlacedNpcGetter) { npcs++; continue; }
                                 if (r is IPlacedObjectGetter po) counts[po.Base.FormKey] = counts.GetValueOrDefault(po.Base.FormKey) + 1;
                             }
@@ -11139,6 +14779,15 @@ static class Program
                 foreach (var b in tb.Buildings)
                     Console.WriteLine($"building {b.Index} {b.Data.Type} at {b.XPos},{b.ZPos} turn {b.YRotation}: outside {string.Join(" ", b.Exterior.Models.Select(m => $"{m.ModelId}{(models.ContainsKey(m.ModelId) ? "" : "(missing)")}@{m.Position.X:F0},{m.Position.Z:F0}r{m.YRotation}t{m.ObjectType}"))}; flats {b.Exterior.Flats.Count}; inside models {b.Interior.Models.Count}");
                 Console.WriteLine($"loose: {string.Join(" ", tb.MiscModels.Select(m => $"{m.ModelId}{(models.ContainsKey(m.ModelId) ? "" : "(missing)")}@{m.Position.X:F0},{m.Position.Z:F0}r{m.YRotation}"))}");
+                // --textures: each outside model's texture archive.record pairs (what DfTownLayout's door and entrance tests read).
+                if (opts.ContainsKey("textures"))
+                    foreach (var id in tb.Buildings.SelectMany(b => b.Exterior.Models).Concat(tb.MiscModels).Select(m => m.ModelId).Distinct())
+                        if (models.TryGetValue(id, out var dm))
+                        {
+                            var pts = dm.Polygons.SelectMany(p => p.Points).ToList();
+                            string extent = pts.Count == 0 ? "" : $" extent {pts.Min(v => v.X):F0}..{pts.Max(v => v.X):F0} x {pts.Min(v => v.Y):F0}..{pts.Max(v => v.Y):F0} x {pts.Min(v => v.Z):F0}..{pts.Max(v => v.Z):F0}";
+                            Console.WriteLine($"  model {id}: {string.Join(" ", dm.Polygons.GroupBy(p => (p.TextureArchive, p.TextureRecord)).OrderBy(g => g.Key).Select(g => $"{g.Key.TextureArchive}.{g.Key.TextureRecord}x{g.Count()}"))}{extent}");
+                        }
                 return 0;
             }
             case "creature-build":
@@ -11206,7 +14855,8 @@ static class Program
                             if (stale || opts.ContainsKey("export"))
                             {
                                 string blender = Setup.Dependencies.Blender ?? throw new InvalidOperationException("Blender is needed: run setup");
-                                int code = Setup.ToolScripts.Run(blender, ["-b", "--disable-autoexec", "--python", Path.Combine(Setup.Dependencies.Root, "creatures", "export_creature.py"), "--", config, work]);
+                                // --python-exit-code: a script error (an action that never reached the bones) fails the export.
+                                int code = Setup.ToolScripts.Run(blender, ["-b", "--disable-autoexec", "--python-exit-code", "1", "--python", Path.Combine(Setup.Dependencies.Root, "creatures", "export_creature.py"), "--", config, work]);
                                 if (code != 0 || !File.Exists(exported)) { Console.WriteLine($"{id}: export failed ({code})"); failedCreatures.Add(id); continue; }
                                 File.WriteAllText(keyFile, exportKey);
                             }
@@ -12002,7 +15652,7 @@ static class Program
                             ? nif.Get<Morrowind.NiTriShape>(c.Target)?.Name.Trim() ?? $"#{c.Target}"
                             : $"{nif.Get<Morrowind.NiObjectNET>(c.Target)?.Name.Trim()} on " + string.Join(";", shapes.Where(s => s.Properties.Contains(c.Target)).Select(s => s.Name.Trim() + (s.Hidden ? " (hidden)" : "")));
                         var datas = c.Type == "NiUVController"
-                            ? (nif.Get<Morrowind.NiUVData>(c.Data)?.Groups ?? []).Select((k, i) => (Name: new[] { "U offset", "V offset", "U tiling", "V tiling" }[i], Keys: k)).ToList()
+                            ? (nif.Get<Morrowind.NiUVData>(c.Data)?.Groups ?? []).Select((k, i) => (Name: new[] { "U offset", "V offset", "U tiling", "V tiling" }[i], Keys: (Morrowind.NiKeyData?)k)).ToList()
                             : [(Name: c.Type == "NiAlphaController" ? "alpha" : $"colour {(c.Flags >> 4) & 7}", Keys: nif.Get<Morrowind.NiKeyData>(c.Data))];
                         Console.WriteLine($"  {c.Type} -> {target}: flags {c.Flags:X} (cycle {(c.Flags >> 1) & 3}, {((c.Flags & 8) != 0 ? "active" : "inactive")}), frequency {c.Frequency:F2}, phase {c.Phase:F2}, {c.Start:F2}..{c.Stop:F2}");
                         foreach (var (name, keys) in datas)
@@ -12209,7 +15859,7 @@ static class Program
             }
             case "creature-plugin":
             {
-                // The creature models' plugins (Skyrim/Creatures/CreatureRecords), one per game ("Daggerfall Creatures.esp" over
+                // The creature models' plugins (Skyrim/Creatures/CreatureRecords), one per game ("Daggerfall Creatures.esm" over
                 // Daggerfall.esm, ...), for the creatures in --creatures (ids, comma list; each tools\creatures\<id>\creature.json
                 // gives name, templateRace, actors and its "game", Daggerfall's when none) over the game plugins in --plugins
                 // (';' list), into --out (default out\creatures). A game not among --plugins (not converted) gets none.
@@ -12307,6 +15957,12 @@ static class Program
                     }
                     var names = written.Select(w => Path.GetFileName(w)!).ToList();
                     foreach (var name in names) File.Copy(Path.Combine(outDir, name), Path.Combine(skyrimData, name), overwrite: true);
+                    // The .esp names these had: gone from Skyrim's Data, or the creatures load twice.
+                    foreach (var old in Skyrim.Creatures.CreatureRecords.OldEspNames.Where(o => File.Exists(Path.Combine(skyrimData, o))))
+                    {
+                        File.Delete(Path.Combine(skyrimData, old));
+                        Console.WriteLine($"{old} replaced: {string.Join("; ", Setup.PluginList.SetEnabled([old], false))}");
+                    }
                     Console.WriteLine($"installed {copied} files and {string.Join(", ", names)}; {string.Join("; ", Setup.PluginList.Enable(names))}");
                     // The single plugin earlier builds made over every game is switched off (not deleted: the game folder is
                     // left for the user to tidy).
@@ -12319,7 +15975,8 @@ static class Program
             {
                 // Dev aid: one bone's local rotation in a vanilla skeleton.hkx (quaternion) and its skeleton.nif (matrix, as
                 // the images of the axes), to settle how the two conventions relate. --hkx, --nif (files), --bone.
-                var root = (HKX2.hkRootLevelContainer)new HKX2.PackFileDeserializer().Deserialize(new HKX2.BinaryReaderEx(File.ReadAllBytes(opts["hkx"])));
+                var root = (HKX2.hkRootLevelContainer?)new HKX2.PackFileDeserializer().Deserialize(new HKX2.BinaryReaderEx(File.ReadAllBytes(opts["hkx"])))
+                    ?? throw new InvalidDataException($"{opts["hkx"]}: no root container");
                 var sk = ((HKX2.hkaAnimationContainer)root.m_namedVariants[0].m_variant!).m_skeletons[0];
                 int bi = sk.m_bones.Select(b => b.m_name).ToList().IndexOf(opts["bone"]);
                 var qs = sk.m_referencePose[bi];
@@ -12739,6 +16396,7 @@ static class Program
                 if (root is HKX2.hkRootLevelContainer rc)
                     foreach (var v in rc.m_namedVariants)
                     {
+                        if (v is null) { Console.WriteLine("  (an empty slot)"); continue; }
                         Console.WriteLine($"  {v.m_name} ({v.m_className}): {v.m_variant?.GetType().Name}");
                         if (v.m_variant is HKX2.hkaAnimationContainer ac)
                         {
@@ -13023,11 +16681,113 @@ static class Program
                 sw.Restart(); var ck = Setup.Dependencies.CreationKitMissing(sky ?? ""); Console.WriteLine($"creation kit: {sw.ElapsedMilliseconds} ms");
                 return 0;
             }
+            case "fix-npc-packages":
+            {
+                // A finished plugin (--plugin) mended as the converter now makes it: no package an NPC lists as its own
+                // belongs to a quest (Oblivion/ObScriptRecords: Skyrim never finishes loading its data over one).
+                // Written beside it and put in its place; prints what it cleared.
+                string path = Path.GetFullPath(opts["plugin"]);
+                var mod = SkyrimMod.CreateFromBinary(path, SkyrimRelease.SkyrimSE);
+                var listed = mod.Npcs.SelectMany(n => n.Packages).Select(p => p.FormKey).ToHashSet();
+                var cleared = new List<string>();
+                var clearedKeys = new HashSet<FormKey>();
+                foreach (var pk in mod.Packages)
+                    if (listed.Contains(pk.FormKey) && !pk.OwnerQuest.IsNull)
+                    {
+                        cleared.Add(pk.EditorID ?? pk.FormKey.ToString());
+                        clearedKeys.Add(pk.FormKey);
+                        pk.OwnerQuest.Clear();
+                    }
+                int npcs = mod.Npcs.Count(n => n.Packages.Any(p => clearedKeys.Contains(p.FormKey)));
+                if (cleared.Count > 0)
+                {
+                    // Under its own name (the writer checks the file's name against the plugin's) in a folder beside it.
+                    string tmpDir = Path.Combine(Path.GetDirectoryName(path)!, ".fixing");
+                    Directory.CreateDirectory(tmpDir);
+                    string tmp = Path.Combine(tmpDir, Path.GetFileName(path));
+                    mod.WriteToBinary(tmp, new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+                    {
+                        MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(mod.ModHeader.MasterReferences.Select(m => m.Master).ToArray()),
+                    });
+                    File.Move(tmp, path, overwrite: true);
+                    Directory.Delete(tmpDir);
+                }
+                Console.WriteLine($"{Path.GetFileName(path)}: {cleared.Count} packages NPCs list as their own no longer belong to a quest ({npcs} NPCs){(cleared.Count > 0 ? ": " + string.Join(", ", cleared.Take(8)) : "")}");
+                return 0;
+            }
+            case "size-report":
+            {
+                // A finished conversion's sizes (--out, default out/convert; installed in Skyrim's Data or --data) by game and
+                // part, in its output folder and in Data: what Setup/ConversionSize's figures are taken from.
+                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/convert"));
+                string data = opts.TryGetValue("data", out var dd) ? Path.GetFullPath(dd) : skyrimData;
+                var sizes = Setup.ConversionSize.Measure(outDir, data);
+                static string Gb(long b) => (b / (double)(1L << 30)).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                foreach (var ((game, part), s) in sizes.OrderBy(k => k.Key.Game).ThenBy(k => k.Key.Part))
+                    Console.WriteLine($"{game,-11} {part,-7} output {Gb(s.Output),7} GB   installed {Gb(s.Installed),7} GB");
+                Console.WriteLine($"total       output {Gb(sizes.Values.Sum(s => s.Output)),7} GB   installed {Gb(sizes.Values.Sum(s => s.Installed)),7} GB");
+                return 0;
+            }
+            case "uninstall":
+            {
+                // TamrielMerge's conversions out of Skyrim's Data folder (--data, default the Skyrim found by Steam or GOG),
+                // this version's and earlier ones' (Skyrim/Uninstaller), their plugins off the plugin lists (--mo2: Mod
+                // Organizer 2's too). Without --yes only says what would go. --compare-out DIR (dev aid): the loose files of
+                // a conversion's output the uninstaller wouldn't know by name.
+                string data = opts.TryGetValue("data", out var ud) ? Path.GetFullPath(ud) : skyrimData;
+                if (!Directory.Exists(data)) { Console.WriteLine($"Uninstall: no Skyrim Data folder at {data}"); return 2; }
+                if (opts.TryGetValue("compare-out", out var cmp))
+                {
+                    var unknown = new DirectoryInfo(cmp).EnumerateFiles("*", SearchOption.AllDirectories).Select(f => Path.GetRelativePath(cmp, f.FullName))
+                        .Where(r => !Skyrim.DataArchives.IsPacked(r) && !(r.Contains('\\') ? Skyrim.Uninstaller.IsOursBelow(r) : Skyrim.Uninstaller.IsOursTop(r))).ToList();
+                    Console.WriteLine($"{unknown.Count} loose files of {cmp} not known by name");
+                    foreach (var r in unknown.Take(60)) Console.WriteLine($"  {r}");
+                    return 0;
+                }
+                // --crash-logger: Crash Logger SSE too (the game check installs it).
+                var plan = Skyrim.Uninstaller.Find(data, opts.GetValueOrDefault("mo2"), opts.ContainsKey("crash-logger"));
+                Console.WriteLine($"Uninstall: {plan.Files.Count:N0} of TamrielMerge's files in {data}, {Skyrim.Uninstaller.Size(plan.Bytes)}");
+                foreach (var line in Skyrim.Uninstaller.Describe(plan)) Console.WriteLine($"  {line}");
+                // --files FILE: every path it would remove, one a line (to check against Data).
+                if (opts.TryGetValue("files", out var listFile)) File.WriteAllLines(listFile, plan.Files.Concat(plan.Outside));
+                if (plan.Files.Count == 0 && plan.Plugins.Count == 0 && plan.Outside.Count == 0) { Console.WriteLine("Uninstall: nothing of TamrielMerge's is installed"); return 0; }
+                if (!opts.ContainsKey("yes")) { Console.WriteLine("Uninstall: nothing removed (--yes removes them)"); return 0; }
+                var (_, _, failed) = Skyrim.Uninstaller.Run(plan, opts.GetValueOrDefault("mo2"), Console.WriteLine);
+                return failed.Count == 0 ? 0 : 2;
+            }
+            case "compress-plugins":
+            {
+                // The plugins in --dir (default out/convert; --plugins "a;b" for some) compressed as a conversion does
+                // (Skyrim/PluginCompression): their records of the types Skyrim's own plugins compress; --disk also
+                // compresses them on the disk (NTFS LZX).
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", "out/convert"));
+                var names = opts.TryGetValue("plugins", out var pl) ? pl.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList()
+                    : Directory.EnumerateFiles(dir).Select(Path.GetFileName).OfType<string>().Where(f => f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)).ToList();
+                Skyrim.PluginCompression.CompressAll(dir, names, Console.WriteLine);
+                if (opts.ContainsKey("disk")) Skyrim.PluginCompression.CompressOnDisk(names.Select(n => Path.Combine(dir, n)).ToList(), Console.WriteLine);
+                return 0;
+            }
+            case "install-record":
+            {
+                // Records Skyrim's Data archives as made from --out's files now (Skyrim/DataArchives.RecordInstalled): for an
+                // install made before installs kept a manifest, right after it, so the next install keeps the games whose
+                // files haven't changed instead of packing all of them again.
+                string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/convert"));
+                var installed = ConvertPluginOrder.Where(p => File.Exists(Path.Combine(outDir, p))).ToList();
+                foreach (var (game, n) in Skyrim.DataArchives.RecordInstalled(outDir, skyrimData, installed))
+                    Console.WriteLine($"install-record: {game}: {n} archives recorded");
+                return 0;
+            }
             case "menu-pack":
             {
                 // The main menu and its music in --out (default out/convert) as the "TamrielMerge Menu.esp" part (Render/
                 // MenuArchive): archives of a light plugin instead of loose files over Skyrim's, so it can be switched off.
                 string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/convert"));
+                // --keep-from (';' list of folders): an earlier menu archive there gives the flyby and the music this run made no
+                // new copy of (MenuArchive.CarryEarlier), so a run without --gpu keeps the last render.
+                // Its own folder's earlier archive always (Build replaces it).
+                foreach (var line in Skyrim.Render.MenuArchive.CarryEarlier(outDir, opts.TryGetValue("keep-from", out var keepFrom) ? keepFrom.Split(';', StringSplitOptions.RemoveEmptyEntries) : []))
+                    Console.WriteLine($"menu-pack: kept {line}");
                 int n = Skyrim.Render.MenuArchive.Build(outDir);
                 Console.WriteLine(n == 0 ? "menu-pack: no menu files to pack" : $"menu-pack: {n} files in {Skyrim.Render.MenuArchive.PluginName}");
                 return 0;
@@ -13043,7 +16803,7 @@ static class Program
                 // music take priority"). Without the Creation Kit's encoder it is left as mus_maintheme.wav, which the menu
                 // may not play (the setting names the .xwm). Work files in --work (default out/music-work).
                 string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", "out/convert"));
-                string work = Path.GetFullPath(opts.GetValueOrDefault("work", "out/music-work"));
+                string work = opts.TryGetValue("work", out var musicWork) ? Path.GetFullPath(musicWork) : Util.Paths.Cache("music-work");
                 Directory.CreateDirectory(work);
                 var tools = MusicTools(skyrimData);
                 string py = Setup.Dependencies.Python ?? throw new InvalidOperationException("the Python environment is missing: run setup");
@@ -13087,21 +16847,38 @@ static class Program
                 // (default out/scenes); finished steps (scenes, frames, textures) are kept and skipped on a rerun.
                 string conv = Path.GetFullPath(opts.GetValueOrDefault("plugins", "out/convert"));
                 string outDir = Path.GetFullPath(opts.GetValueOrDefault("out", conv));
-                string art = Path.GetFullPath(opts.GetValueOrDefault("work", "out/menuart"));
+                string art = opts.TryGetValue("work", out var menuWork) ? Path.GetFullPath(menuWork) : Util.Paths.Cache("menuart");
                 string shots = Path.Combine(art, "intro"), menuArt = Path.Combine(art, "menu");
                 string py = Setup.Dependencies.Python ?? throw new InvalidOperationException("the Python environment is missing: run setup");
                 string intro = Setup.ToolScripts.Path("menu", "intro.py");
-                var env = new Dictionary<string, string> { ["TAMRIELMERGE_SCENES"] = Path.GetFullPath(opts.GetValueOrDefault("scenes", "out/scenes")) };
+                var env = new Dictionary<string, string> { ["TAMRIELMERGE_SCENES"] = opts.TryGetValue("scenes", out var menuScenes) ? Path.GetFullPath(menuScenes) : Util.Paths.Cache("scenes") };
                 int Py(params string[] a) => Setup.ToolScripts.Run(py, ["-u", .. a], env);
-                if (Py(intro, "export", shots, "--cli", Environment.ProcessPath!, "--plugins", conv, "--data", skyrimData) != 0) { Console.Error.WriteLine("menu: scene export failed"); return 1; }
-                bool traced = Setup.Dependencies.Blender is not null;
-                if (traced && Py(intro, "prep", shots) != 0) { Console.Error.WriteLine("menu: preparing the scenes failed"); return 1; }
-                Console.WriteLine(traced ? "menu: ray-tracing the intro in Blender's EEVEE" : "menu: Blender missing, rendering the intro with the raster renderer");
-                if (Py(intro, traced ? "rt-render" : "render", shots) != 0) { Console.Error.WriteLine("menu: rendering failed"); return 1; }
+                // --pack-only: the frames a run made already packed again and the logo models made over (a change to how the
+                // flyby is laid out or played; 2026-10-25, one frame a sheet), nothing exported, rendered or upscaled.
+                bool packOnly = opts.ContainsKey("pack-only");
+                // A flyby rendered before (each shot's upscaled frames in the work folder) is packed again rather than
+                // exported, rendered and upscaled anew, unless --remake: its scenes' stamps name the plugins' and the
+                // converter's dates, which every conversion and tool update change, so every conversion rendered it all
+                // again (2026-11-04: 1 h 42 min of a 12.5 h conversion; user: "conversion takes to long").
+                string upscaled = Path.Combine(shots, (Setup.Dependencies.Blender is not null ? "rt" : "") + MenuVideoSize.Split('x')[1]);
+                if (!packOnly && !opts.ContainsKey("remake") && Directory.Exists(upscaled)
+                    && Directory.GetDirectories(upscaled) is { Length: > 0 } rendered && rendered.All(d => Directory.EnumerateFiles(d, "*.png").Any()))
+                {
+                    packOnly = true;
+                    Console.WriteLine($"menu: the flyby rendered before ({rendered.Length} shots in {upscaled}) packed again; --remake-menu renders it anew");
+                }
+                bool traced = Setup.Dependencies.Blender is not null || (packOnly && Directory.Exists(Path.Combine(shots, "rt")));
+                if (!packOnly)
+                {
+                    if (Py(intro, "export", shots, "--cli", Environment.ProcessPath!, "--plugins", conv, "--data", skyrimData) != 0) { Console.Error.WriteLine("menu: scene export failed"); return 1; }
+                    if (traced && Py(intro, "prep", shots) != 0) { Console.Error.WriteLine("menu: preparing the scenes failed"); return 1; }
+                    Console.WriteLine(traced ? "menu: ray-tracing the intro in Blender's EEVEE" : "menu: Blender missing, rendering the intro with the raster renderer");
+                    if (Py(intro, traced ? "rt-render" : "render", shots) != 0) { Console.Error.WriteLine("menu: rendering failed"); return 1; }
+                }
                 // Upscaled to 1440p with Real-ESRGAN (user, 2026-10-08: "the video needs upscaled to 4k"; 1440p chosen,
                 // as 4K's 520 frames would be 2.2 GB of textures in the menu).
                 string frames = traced ? "rt" : "";
-                if (Py(intro, "upscale", shots, "--frames", frames, "--size", MenuVideoSize) != 0) { Console.Error.WriteLine("menu: upscaling failed"); return 1; }
+                if (!packOnly && Py(intro, "upscale", shots, "--frames", frames, "--size", MenuVideoSize) != 0) { Console.Error.WriteLine("menu: upscaling failed"); return 1; }
                 // The red emblem on its banner, a layer in front of the video (the menu mesh's 3D emblem doesn't draw with
                 // the video): emblem.png in the work folder (cut from the game's menu with the red textures), else the
                 // tool's own copy.
@@ -13120,6 +16897,10 @@ static class Program
                         .. logos.Select(l => Path.Combine(vanilla, "textures", "interface", "objects", l))]);
                 }
                 Skyrim.Render.MenuBuilder.Build(skyrimData, menuArt, outDir, Setup.ToolScripts.Path("menu", "menu_camera.json"));
+                // Packed as its own part (TamrielMerge Menu.esp, as convert's menu-pack does), its music kept from the earlier
+                // archive (2026-10-25: run on its own it left its files loose, and the install packed them into TamrielMerge
+                // Start.bsa beside the old menu archive). --no-pack: convert packs it after (with the music it makes).
+                if (!opts.ContainsKey("no-pack")) return Main(["menu-pack", "--out", outDir]);
                 return 0;
             }
             case "models-index":
@@ -13339,7 +17120,7 @@ static class Program
                 mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Master;
                 var map = DfWorldMap.Load(arena2);
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var field = Skyrim.Terrain.HeightField.Generate(map, TerrainSettingsFrom(opts));
+                var field = Skyrim.Terrain.HeightField.Daggerfall(map, TerrainSettingsFrom(opts), DfLocations.LoadAll(arena2)).Field;
                 Console.WriteLine($"Height field {field.CellsX}x{field.CellsY} cells in {sw.Elapsed.TotalSeconds:F0}s");
                 var world = Skyrim.Terrain.TerrainBuilder.NewWorldspace(mod, skyrim, field, DaggerfallPluginBuilder.WorldEditorId, "Iliac Bay");
                 var layout = new Skyrim.Terrain.OverlandTiles(field);
@@ -13377,16 +17158,18 @@ static class Program
                 string dir = Path.GetDirectoryName(outPath)!;
                 // --land-plugins N: the land split into N plugins (as a full map's is when too big for one); --navmesh: the
                 // overland navmeshes made over them too (OverlandNavmesh, as the build does), then checked: each land
-                // cell's navmesh found once, in the last plugin, its edge links reaching navmeshes there.
+                // cell's navmesh found once, in a navmesh plugin, its edge links reaching navmeshes there.
                 if (opts.TryGetValue("land-plugins", out var landPluginsWanted)) Skyrim.Terrain.OverlandTiles.LandPluginsWanted = int.Parse(landPluginsWanted);
                 var lands = layout.LandPlugins(outPath, skyrimData, field, map, regionOf, l => Console.WriteLine("  land: " + l), only);
                 Console.WriteLine($"Land in {sw.Elapsed.TotalSeconds:F0}s: {string.Join(", ", lands.Select(l => $"{l} {new FileInfo(Path.Combine(dir, l)).Length / 1048576} MB"))}");
                 if (opts.ContainsKey("navmesh") && lands.Count > 0)
                 {
                     sw.Restart();
-                    var (navmeshes, navTris, navLinks) = Skyrim.Terrain.OverlandNavmesh.Build(lands.Select(l => Path.Combine(dir, l)).ToList(), l => Console.WriteLine("  navmesh: " + l));
-                    Console.WriteLine($"Navmesh in {sw.Elapsed.TotalSeconds:F0}s: {navmeshes:N0} navmeshes, {navTris:N0} triangles, {navLinks:N0} links; {string.Join(", ", lands.Select(l => $"{l} {new FileInfo(Path.Combine(dir, l)).Length / 1048576} MB"))}");
-                    var mods = lands.Select(l => SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, l), SkyrimRelease.SkyrimSE)).ToList();
+                    foreach (var old in Skyrim.Terrain.OverlandTiles.NavmeshPluginsIn(dir)) File.Delete(Path.Combine(dir, old));
+                    var (navmeshes, navTris, navLinks, navNames) = Skyrim.Terrain.OverlandNavmesh.Build(lands.Select(l => Path.Combine(dir, l)).ToList(), null, null, l => Console.WriteLine("  navmesh: " + l));
+                    Console.WriteLine($"Navmesh in {sw.Elapsed.TotalSeconds:F0}s: {navmeshes:N0} navmeshes, {navTris:N0} triangles, {navLinks:N0} links; {string.Join(", ", navNames.Select(l => $"{l} {new FileInfo(Path.Combine(dir, l)).Length / 1048576} MB"))}");
+                    var mods = lands.Concat(navNames).Select(l => SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, l), SkyrimRelease.SkyrimSE)).ToList();
+                    var navMods = mods.Where(m => navNames.Contains(m.ModKey.FileName.String)).ToList();
                     try
                     {
                         var landAt = new Dictionary<(FormKey, int, int), string>();
@@ -13399,34 +17182,37 @@ static class Program
                                     if (c.Grid is null) continue;
                                     if (c.Landscape is not null) landAt[(w.FormKey, c.Grid.Point.X, c.Grid.Point.Y)] = m.ModKey.FileName;
                                     if (c.NavigationMeshes.Count == 0) continue;
-                                    if (m != mods[^1]) { Console.WriteLine($"  PROBLEM: navmesh in {m.ModKey.FileName}, not the last land plugin"); bad++; }
+                                    if (!navMods.Contains(m)) { Console.WriteLine($"  PROBLEM: navmesh in {m.ModKey.FileName}, not a navmesh plugin"); bad++; }
                                     navAt[(w.FormKey, c.Grid.Point.X, c.Grid.Point.Y)] = navAt.GetValueOrDefault((w.FormKey, c.Grid.Point.X, c.Grid.Point.Y)) + c.NavigationMeshes.Count;
                                     foreach (var n in c.NavigationMeshes) navKeys.Add(n.FormKey);
                                 }
                         int twice = navAt.Values.Count(v => v > 1), dangling = 0, crossLinks = 0;
                         var navCellPlugin = new Dictionary<FormKey, string>();
-                        foreach (var w in mods[^1].Worldspaces)
-                            foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
-                                foreach (var n in c.NavigationMeshes)
-                                {
-                                    navCellPlugin[n.FormKey] = c.FormKey.ModKey.FileName;
-                                    foreach (var e in n.Data?.EdgeLinks ?? [])
-                                        if (!navKeys.Contains(e.Mesh.FormKey)) dangling++;
-                                }
-                        foreach (var w in mods[^1].Worldspaces)
-                            foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
-                                foreach (var n in c.NavigationMeshes)
-                                    foreach (var e in n.Data?.EdgeLinks ?? [])
-                                        if (navCellPlugin.TryGetValue(e.Mesh.FormKey, out var other) && other != c.FormKey.ModKey.FileName) crossLinks++;
+                        foreach (var nm in navMods)
+                            foreach (var w in nm.Worldspaces)
+                                foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                                    foreach (var n in c.NavigationMeshes)
+                                    {
+                                        navCellPlugin[n.FormKey] = c.FormKey.ModKey.FileName;
+                                        foreach (var e in n.Data?.EdgeLinks ?? [])
+                                            if (!navKeys.Contains(e.Mesh.FormKey)) dangling++;
+                                    }
+                        foreach (var nm in navMods)
+                            foreach (var w in nm.Worldspaces)
+                                foreach (var c in w.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items))
+                                    foreach (var n in c.NavigationMeshes)
+                                        foreach (var e in n.Data?.EdgeLinks ?? [])
+                                            if (navCellPlugin.TryGetValue(e.Mesh.FormKey, out var other) && other != c.FormKey.ModKey.FileName) crossLinks++;
+                        int mapEntries = navMods.Sum(nm => nm.NavigationMeshInfoMaps.Sum(x => x.MapInfos.Count));
                         var byPlugin = landAt.Values.GroupBy(v => v).Select(g => $"{g.Key} {g.Count():N0}");
                         Console.WriteLine($"  land cells by plugin: {string.Join(", ", byPlugin)}; cells with a navmesh {navAt.Count:N0} (more than one: {twice}), without land under them {navAt.Keys.Count(k => !landAt.ContainsKey(k))}");
-                        Console.WriteLine($"  edge links reaching no navmesh: {dangling}; links between cells of different land plugins: {crossLinks:N0}; navigation map entries {mods[^1].NavigationMeshInfoMaps.Sum(x => x.MapInfos.Count):N0} for {navKeys.Count:N0} navmeshes");
-                        if (twice > 0 || dangling > 0 || navAt.Keys.Any(k => !landAt.ContainsKey(k)) || mods[^1].NavigationMeshInfoMaps.Sum(x => x.MapInfos.Count) != navKeys.Count) bad++;
+                        Console.WriteLine($"  edge links reaching no navmesh: {dangling}; links between cells of different land plugins: {crossLinks:N0}; navigation map entries {mapEntries:N0} for {navKeys.Count:N0} navmeshes");
+                        if (twice > 0 || dangling > 0 || navAt.Keys.Any(k => !landAt.ContainsKey(k)) || mapEntries != navKeys.Count) bad++;
                         // Overland doors (OverlandDoorLinks, as the conversion joins the towns' gates): a stand-in door
                         // plugin with a door on a navmesh triangle of 20 cells of each land plugin, joined to the navmeshes.
                         var doorsMod = new SkyrimMod(ModKey.FromFileName("DoorsTest.esp"), SkyrimRelease.SkyrimSE);
                         int placedDoors = 0;
-                        foreach (var w in mods[^1].Worldspaces)
+                        foreach (var w in navMods.SelectMany(nm => nm.Worldspaces))
                         {
                             var ws = w.DeepCopy(new Worldspace.TranslationMask(defaultOn: true) { SubCells = false, TopCell = false });
                             ws.SubCells.Clear(); ws.TopCell = null;
@@ -13449,7 +17235,7 @@ static class Program
                         var doorMasters = Skyrim.PluginMerger.Masters([Path.GetFileName(outPath), .. lands]);
                         doorsMod.WriteToBinary(Path.Combine(dir, "DoorsTest.esp"), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
                         { MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(doorMasters) });
-                        var dl = Skyrim.Terrain.OverlandDoorLinks.Build(Path.Combine(dir, lands[^1]), [Path.Combine(dir, "DoorsTest.esp")], Path.Combine(dir, "DoorsTestLinks.esp"), l => Console.WriteLine("  doors: " + l));
+                        var dl = Skyrim.Terrain.OverlandDoorLinks.Build(navNames.Select(n => Path.Combine(dir, n)).ToList(), [Path.Combine(dir, "DoorsTest.esp")], Path.Combine(dir, "DoorsTestLinks.esp"), l => Console.WriteLine("  doors: " + l));
                         using (var links = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dir, "DoorsTestLinks.esp"), SkyrimRelease.SkyrimSE))
                             Console.WriteLine($"  door links plugin: masters {string.Join(", ", links.ModHeader.MasterReferences.Select(m => m.Master.FileName))}");
                         if (dl.Linked != placedDoors) { Console.WriteLine($"  PROBLEM: {dl.Linked} of {placedDoors} doors joined"); bad++; }
@@ -13526,7 +17312,7 @@ static class Program
                 using var plugin = SkyrimMod.CreateFromBinaryOverlay(opts.GetValueOrDefault("plugin", "out/mod/Daggerfall.esm"), SkyrimRelease.SkyrimSE);
                 var ws = plugin.Worldspaces.First(w => w.EditorID == DaggerfallPluginBuilder.WorldEditorId);
                 var (m1, _) = Skyrim.Terrain.TerrainVerifier.EdgeMismatch(ws, int.MaxValue);
-                var field = Skyrim.Terrain.HeightField.Generate(DfWorldMap.Load(arena2), TerrainSettingsFrom(opts));
+                var field = Skyrim.Terrain.HeightField.Daggerfall(DfWorldMap.Load(arena2), TerrainSettingsFrom(opts), DfLocations.LoadAll(arena2)).Field;
                 float src = Skyrim.Terrain.TerrainVerifier.SourceMismatch(ws, field);
                 var cells = ws.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).ToList();
                 var land = cells.Select(c => c.Landscape).Where(l => l is not null).ToList();
@@ -13594,9 +17380,27 @@ static class Program
                 // --dir (default tools/model3d/work) for tools/model3d/sprite2mesh.py.
                 // --make exports them and runs the model maker: on the GPU with --gpu (short bursts, waiting whenever the
                 // card passes 78 C), else on the CPU (much slower). Finished models are kept, so a run resumes.
-                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", Path.Combine(Setup.Dependencies.Root, "model3d", "work")));
+                string dir = Path.GetFullPath(opts.GetValueOrDefault("dir", Util.Paths.ModelWork));
                 if (opts.ContainsKey("export") || opts.ContainsKey("make"))
+                {
                     Console.WriteLine($"exported {Skyrim.SpriteModels.Export(arena2, dir)} of {Skyrim.SpriteModels.Targets.Count} sprites to {dir}");
+                    // Models shipped with the tool (the release's tools\model3d\work\models) seed the work folder, so they
+                    // aren't made again; the shipped ones stay where they are.
+                    string shipped = Path.Combine(Setup.Dependencies.Root, "model3d", "work", "models");
+                    if (Directory.Exists(shipped) && !string.Equals(Path.GetFullPath(shipped), Path.GetFullPath(Path.Combine(dir, "models")), StringComparison.OrdinalIgnoreCase))
+                    {
+                        int seeded = 0;
+                        foreach (var m in Directory.GetDirectories(shipped))
+                        {
+                            string target = Path.Combine(dir, "models", Path.GetFileName(m));
+                            if (Directory.Exists(target) || !File.Exists(Path.Combine(m, "mesh.obj"))) continue;
+                            Directory.CreateDirectory(target);
+                            foreach (var f in Directory.GetFiles(m)) File.Copy(f, Path.Combine(target, Path.GetFileName(f)), overwrite: true);
+                            seeded++;
+                        }
+                        if (seeded > 0) Console.WriteLine($"Sprite models: {seeded} shipped models taken from {shipped}");
+                    }
+                }
                 if (opts.TryGetValue("import", out var importDir))
                 {
                     // Dev aid: the finished models as NIFs, textures and statics in a scratch plugin under --import DIR.
@@ -13616,16 +17420,21 @@ static class Program
                 if (python is null || !File.Exists(script)) { Console.WriteLine("Sprite models: the model maker isn't set up (run setup); the vanilla stand-ins are used."); return 0; }
                 bool gpu = opts.ContainsKey("gpu");
                 if (!gpu) Console.WriteLine("Sprite models: on the CPU (pass --gpu to use the graphics card); this takes a few hours the first time.");
-                var psi = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
-                foreach (var a in new[] { script, "--list", Path.Combine(dir, "sprites.txt"), "--out", Path.Combine(dir, "models"), "--upscaler", Setup.Dependencies.UpscaleModel, "--device", gpu ? "cuda:0" : "cpu" })
-                    psi.ArgumentList.Add(a);
-                psi.Environment["HF_HOME"] = Setup.Dependencies.ModelCache;
-                if (!gpu) psi.Environment["CUDA_VISIBLE_DEVICES"] = "";
-                using (var proc = System.Diagnostics.Process.Start(psi)!)
+                string[] makeArgs = [script, "--list", Path.Combine(dir, "sprites.txt"), "--out", Path.Combine(dir, "models"), "--upscaler", Setup.Dependencies.UpscaleModel, "--device", gpu ? "cuda:0" : "cpu"];
+                int makeCode;
+                // On every graphics card at once (a process a card, each a share of the sprites: Util/Gpus).
+                if (gpu) makeCode = Util.Gpus.RunSharded(python, makeArgs, l => Console.WriteLine("Sprite models: " + l), new Dictionary<string, string> { ["HF_HOME"] = Setup.Dependencies.ModelCache });
+                else
                 {
+                    var psi = new System.Diagnostics.ProcessStartInfo(python) { UseShellExecute = false };
+                    foreach (var a in makeArgs) psi.ArgumentList.Add(a);
+                    psi.Environment["HF_HOME"] = Setup.Dependencies.ModelCache;
+                    psi.Environment["CUDA_VISIBLE_DEVICES"] = "";
+                    using var proc = System.Diagnostics.Process.Start(psi)!;
                     proc.WaitForExit();
-                    if (proc.ExitCode != 0) Console.WriteLine($"Sprite models: the model maker stopped ({proc.ExitCode}); what it finished is kept.");
+                    makeCode = proc.ExitCode;
                 }
+                if (makeCode != 0) Console.WriteLine($"Sprite models: the model maker stopped ({makeCode}); what it finished is kept.");
                 // Every model held to its sprite: the outline check (and a contact sheet, models.png, to look them over).
                 // Not again when no model changed since the last check (2026-10-15: it took 10 minutes a conversion with
                 // nothing new made).
@@ -13753,9 +17562,11 @@ static class Program
                 // --no-uncut leaves out uncut content (songs Daggerfall never plays).
                 // --towns "Daggerfall,Wayrest" (town names, optionally "Name@Region"), "all", or "none"; default Daggerfall.
                 // --land-plugins N splits the land into N plugins (default: as its size needs, OverlandTiles.LandPluginNames).
+                // --no-overland-navmesh leaves the overland's navmeshes to the overland-navmesh step after the town and
+                // dungeon plugins (the conversion's way: they are made over what those place on the land).
                 if (opts.TryGetValue("land-plugins", out var landPlugins)) Skyrim.Terrain.OverlandTiles.LandPluginsWanted = int.Parse(landPlugins);
                 return DaggerfallPluginBuilder.Build(arena2, skyrimData, outPath, TerrainSettingsFrom(opts), uncut: !opts.ContainsKey("no-uncut"),
-                    towns: opts.GetValueOrDefault("towns", "Daggerfall@Daggerfall"));
+                    towns: opts.GetValueOrDefault("towns", "Daggerfall@Daggerfall"), overlandNavmesh: !opts.ContainsKey("no-overland-navmesh"));
             }
             default:
                 Console.Error.WriteLine("""
@@ -13815,8 +17626,10 @@ static class Program
     }
 
     /// <summary>The order the convert's plugins load in (those of them that are there; any others after them).</summary>
-    static readonly string[] ConvertPluginOrder = ["Daggerfall.esm", .. Skyrim.Terrain.OverlandTiles.LandPluginNames, "Daggerfall Towns.esm", "Daggerfall Dungeons.esm",
-        "Redguard.esm", "Morrowind.esm", "Oblivion.esm", "Daggerfall Creatures.esp", "Redguard Creatures.esp", "Morrowind Creatures.esp", "Oblivion Creatures.esp",
+    static readonly string[] ConvertPluginOrder = ["Daggerfall.esm", .. Skyrim.Terrain.OverlandTiles.LandPluginNames, .. Skyrim.Terrain.OverlandTiles.NavmeshPluginNames,
+        "Daggerfall Towns.esm", "Daggerfall Dungeons.esm",
+        .. Skyrim.Terrain.DfFoliage.PluginNames,
+        "Redguard.esm", "Morrowind.esm", "Oblivion.esm", "Daggerfall Creatures.esm", "Redguard Creatures.esm", "Morrowind Creatures.esm", "Oblivion Creatures.esm",
         "TamrielMerge Menu.esp", "Daggerfall Overland Doors.esp", "TamrielMerge Start.esp", "TamrielMerge Travel.esp", "TamrielMerge Progression.esp"];
 
     /// <summary>How an override (<paramref name="b"/>) of a cell, worldspace, water or reference differs from the record it
@@ -13838,13 +17651,13 @@ static class Program
                 ("regions", string.Join(",", (x.Regions ?? []).Select(L)), string.Join(",", (y.Regions ?? []).Select(L))),
                 ("grid", x.Grid?.Point.ToString() ?? "none", y.Grid?.Point.ToString() ?? "none"), ("lighting", Light(x.Lighting), Light(y.Lighting))),
             (IWorldspaceGetter x, IWorldspaceGetter y) => Changed(("flags", x.Flags.ToString(), y.Flags.ToString()), ("name", x.Name?.String ?? "", y.Name?.String ?? ""),
-                ("water", L(x.Water), L(y.Water)), ("distant water", L(x.LodWater), L(y.LodWater)), ("distant water height", x.LodWaterHeight.ToString(), y.LodWaterHeight.ToString()),
+                ("water", L(x.Water), L(y.Water)), ("distant water", L(x.LodWater), L(y.LodWater)), ("distant water height", x.LodWaterHeight.ToString() ?? "", y.LodWaterHeight.ToString() ?? ""),
                 ("climate", L(x.Climate), L(y.Climate)), ("parent", L(x.Parent?.Worldspace), L(y.Parent?.Worldspace)), ("lighting template", L(x.InteriorLighting), L(y.InteriorLighting)),
                 ("music", L(x.Music), L(y.Music)), ("location", L(x.Location), L(y.Location)), ("encounter zone", L(x.EncounterZone), L(y.EncounterZone)),
                 ("land defaults", x.LandDefaults is { } xd ? $"{xd.DefaultLandHeight} {xd.DefaultWaterHeight}" : "none", y.LandDefaults is { } yd ? $"{yd.DefaultLandHeight} {yd.DefaultWaterHeight}" : "none"),
                 ("bounds", $"{x.ObjectBoundsMin} {x.ObjectBoundsMax}", $"{y.ObjectBoundsMin} {y.ObjectBoundsMax}")),
-            (IWaterGetter x, IWaterGetter y) => Changed(("flags", x.Flags?.ToString() ?? "none", y.Flags?.ToString() ?? "none"), ("damage per second", x.DamagePerSecond.ToString(), y.DamagePerSecond.ToString()),
-                ("spell", L(x.Spell), L(y.Spell)), ("material", L(x.Material), L(y.Material)), ("opacity", x.Opacity.ToString(), y.Opacity.ToString()), ("name", x.Name?.String ?? "", y.Name?.String ?? "")),
+            (IWaterGetter x, IWaterGetter y) => Changed(("flags", x.Flags?.ToString() ?? "none", y.Flags?.ToString() ?? "none"), ("damage per second", x.DamagePerSecond.ToString() ?? "", y.DamagePerSecond.ToString() ?? ""),
+                ("spell", L(x.Spell), L(y.Spell)), ("material", L(x.Material), L(y.Material)), ("opacity", x.Opacity.ToString() ?? "", y.Opacity.ToString() ?? ""), ("name", x.Name?.String ?? "", y.Name?.String ?? "")),
             (IPlacedObjectGetter x, IPlacedObjectGetter y) => Changed(("base", L(x.Base), L(y.Base)),
                 ("placement", $"{x.Placement?.Position} {x.Placement?.Rotation}", $"{y.Placement?.Position} {y.Placement?.Rotation}"), ("scale", x.Scale?.ToString() ?? "1", y.Scale?.ToString() ?? "1"),
                 ("scripts", Scripts(x), Scripts(y)), ("primitive", x.Primitive is { } xp ? $"{xp.Type} {xp.Bounds}" : "none", y.Primitive is { } yp ? $"{yp.Type} {yp.Bounds}" : "none"),
@@ -13870,11 +17683,16 @@ static class Program
 
     /// <summary>A conversion in <paramref name="outDir"/> installed into Skyrim's Data folder (Skyrim/DataArchives: its
     /// assets in archives, the stale removed), its plugins switched on where Skyrim reads its plugin list (its own, and
-    /// Mod Organizer 2's profile) and those gone taken off.</summary>
-    static void InstallInto(string outDir, string data, IReadOnlyList<string> plugins, string? mo2, bool lists = true)
+    /// Mod Organizer 2's profile) and those gone taken off. <paramref name="also"/>: the output folder, when
+    /// <paramref name="outDir"/> is the build staged on a solid-state drive (what is only there comes from it).</summary>
+    static void InstallInto(string outDir, string data, IReadOnlyList<string> plugins, string? mo2, bool lists = true, string? also = null, bool compress = true)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var r = Skyrim.DataArchives.Install(outDir, data, plugins, Console.WriteLine);
+        var r = Skyrim.DataArchives.Install(outDir, data, plugins, Console.WriteLine, also);
+        // Each plugin's start list (Skyrim/SeqFiles): without it a new game leaves the plugin's dialogue out.
+        Skyrim.Uninstaller.Record(data, Skyrim.SeqFiles.Write(data, r.Plugins, Console.WriteLine));
+        // The installed plugins compressed on the disk (Windows' LZX: Skyrim reads them as before; Skyrim/PluginCompression).
+        if (compress) Skyrim.PluginCompression.CompressOnDisk(r.Plugins.Select(p => Path.Combine(data, p)).ToList(), Console.WriteLine);
         Console.WriteLine($"Installed into {data} in {sw.Elapsed.TotalMinutes:F1} min: {r.Archives.Count} archives, {r.Raw / (double)(1L << 30):F1} GB of files in {r.Stored / (double)(1L << 30):F1} GB");
         // The climbing animation plays through Open Animation Replacer: say whether it is there (in Data, or among Mod
         // Organizer 2's mods).
@@ -13891,15 +17709,20 @@ static class Program
         foreach (var line in Setup.PluginList.Enable(r.Plugins, mo2)) Console.WriteLine($"  {line}");
     }
 
-    /// <summary>About how much a convert writes while it builds, by the games it converts (2026-10-13: Daggerfall's land,
-    /// LOD, towns and dungeons came to about 30 GB before its dungeons), with room to spare.</summary>
-    static long ConvertSize(Func<Game, bool> has) =>
-        ((has(Game.Daggerfall) ? 40L : 0) + (has(Game.Morrowind) ? 6L : 0) + (has(Game.Oblivion) ? 8L : 0) + (has(Game.Redguard) ? 1L : 0) + 2L) << 30;
+    /// <summary>About how much a convert writes while it builds, by the games it converts: the output measured on the
+    /// 2026-11-01 conversion with every part (Setup/ConversionSize.Measured; the guess of 2026-10-13 had Daggerfall at
+    /// 40 GB, its output was 47.8), and what the last conversion of these games took beyond it at its peak, once one has
+    /// been measured (SpaceMeter), with 2 GB to spare.</summary>
+    static long ConvertSize(Func<Game, bool> has)
+    {
+        var games = new[] { Game.Daggerfall, Game.Morrowind, Game.Oblivion, Game.Redguard }.Where(has).Select(g => g.ToString()).ToList();
+        return Setup.ConversionSize.Estimate(games, voices: true, videos: true, models: true).Output + (Setup.ConversionSize.MeasuredOverhead(games) ?? 0) + (2L << 30);
+    }
 
     static Skyrim.Terrain.TerrainSettings TerrainSettingsFrom(Dictionary<string, string> opts)
     {
         var s = new Skyrim.Terrain.TerrainSettings();
-        if (opts.TryGetValue("pixels-per-cell", out var ppc)) s = s with { PixelsPerCell = int.Parse(ppc) };
+        if (opts.TryGetValue("pixels-per-cell", out var ppc)) s = s with { PixelsPerCell = double.Parse(ppc, System.Globalization.CultureInfo.InvariantCulture) };
         if (opts.TryGetValue("vscale", out var vs)) s = s with { VerticalScale = float.Parse(vs, System.Globalization.CultureInfo.InvariantCulture) };
         if (opts.TryGetValue("exaggeration", out var ex)) s = s with { MountainExaggeration = float.Parse(ex, System.Globalization.CultureInfo.InvariantCulture) };
         return s;

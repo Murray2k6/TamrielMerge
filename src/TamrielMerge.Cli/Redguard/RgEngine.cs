@@ -219,7 +219,6 @@ public sealed partial class RgPluginBuilder
         catch (Exception e) { Problems.Add($"rope {rope.Link}: {e.Message}"); return null; }
     }
 
-    Mutagen.Bethesda.Skyrim.Activator? ropeActivator;
     readonly Dictionary<string, Static> ropeStatics = [];
 
     /// <summary>

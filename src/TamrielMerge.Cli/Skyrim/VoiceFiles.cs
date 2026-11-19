@@ -58,6 +58,60 @@ public static class VoiceFiles
     public static string? CacheDirOverride { get; set; }
     static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> KeyLocks = new();
     static int cacheHits, cacheMisses;
+    static long keyTicks, placeTicks, xwmTicks, lipTicks, lipRuns, sourceHits;
+    /// <summary>Where the time of packing went since the program started, in seconds summed over every thread
+    /// (user, 2026-11-14: "measure why it takes so long for the voices to be done as it needs to be fast"): hashing
+    /// the sound for the cache's key, placing files (links or copies), encoding the sound (xWMAEncode), lip sync
+    /// (LipGenerator: its runs counted too), and the files placed by their source's key with no sound decoded.</summary>
+    public static (double Key, double Place, double Xwm, double Lip, long LipRuns, long SourceHits) Timing =>
+        (Seconds(keyTicks), Seconds(placeTicks), Seconds(xwmTicks), Seconds(lipTicks), Interlocked.Read(ref lipRuns), Interlocked.Read(ref sourceHits));
+    static double Seconds(long ticks) => Interlocked.Read(ref ticks) / (double)Stopwatch.Frequency;
+    static void Timed(ref long ticks, Action work)
+    {
+        long from = Stopwatch.GetTimestamp();
+        try { work(); }
+        finally { Interlocked.Add(ref ticks, Stopwatch.GetTimestamp() - from); }
+    }
+
+    /// <summary>The cache's key for a source recording as it lies in its game's archive (its bytes) and its text: known
+    /// before any sound is decoded.</summary>
+    public static string SourceKey(byte[] recording, string text)
+    {
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        hash.AppendData("source\0"u8);
+        hash.AppendData(recording);
+        hash.AppendData([0]);
+        hash.AppendData(System.Text.Encoding.UTF8.GetBytes(text));
+        return Convert.ToHexString(hash.GetHashAndReset())[..32].ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// A voice file from the cache by its source's key (<see cref="SourceKey"/>) when there, with nothing decoded:
+    /// until 2026-11-14 the key was of the decoded sound alone, so a conversion whose every line was in the cache
+    /// still decoded each recording to find that out. False when not there (<see cref="Pack(string, string, string, string, string)"/>
+    /// then packs it and files it under both keys).
+    /// </summary>
+    public static bool FromCache(string sourceKey, string fuzPath)
+    {
+        string cached = Path.Combine(CacheDir, sourceKey[..2], sourceKey + ".fuz");
+        if (!Current(cached)) return false;
+        Timed(ref placeTicks, () => Place(cached, fuzPath));
+        Interlocked.Increment(ref cacheHits);
+        Interlocked.Increment(ref sourceHits);
+        return true;
+    }
+
+    /// <summary>As <see cref="Pack(string, string, string, string)"/>, the file then kept under its source's key too
+    /// (a link to the same cache entry).</summary>
+    public static bool Pack(string skyrimData, string wav, string text, string fuzPath, string sourceKey)
+    {
+        if (!Pack(skyrimData, wav, text, fuzPath)) return false;
+        string cached = Path.Combine(CacheDir, sourceKey[..2], sourceKey + ".fuz");
+        try { if (!Current(cached)) Place(fuzPath, cached); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return true;
+    }
     /// <summary>Voice files taken from the cache, and packed anew, since the program started.</summary>
     public static (int Hits, int Packed) CacheStats => (Volatile.Read(ref cacheHits), Volatile.Read(ref cacheMisses));
 
@@ -87,7 +141,8 @@ public static class VoiceFiles
     /// or no lip sync can be made for it (no file is written then).</summary>
     public static bool Pack(string skyrimData, string wav, string text, string fuzPath)
     {
-        string key = CacheKey(wav, text);
+        string key = "";
+        Timed(ref keyTicks, () => key = CacheKey(wav, text));
         string cached = Path.Combine(CacheDir, key[..2], key + ".fuz");
         // One line at a time per key: the same recording and text asked for at once (several voice types) is packed
         // once and the others take it from the cache.
@@ -95,7 +150,7 @@ public static class VoiceFiles
         {
             if (Current(cached))
             {
-                Place(cached, fuzPath);
+                Timed(ref placeTicks, () => Place(cached, fuzPath));
                 Interlocked.Increment(ref cacheHits);
                 return true;
             }
@@ -128,15 +183,23 @@ public static class VoiceFiles
         string tools = Tools(skyrimData);
         wav = Path.GetFullPath(wav);   // LipGenerator runs from its own folder
         string xwm = Path.ChangeExtension(wav, ".xwm");
-        Run(Path.Combine(tools, "Audio", "xWMAEncode.exe"), $"-b 48000 \"{wav}\" \"{xwm}\"");
-        if (!File.Exists(xwm)) return false;
+        // The sound is encoded while the lip sync is made (both only read the .wav): measured 2026-11-14 on 1,470 new
+        // files, the encoder was 23% of a file's time and the lip sync 72%, one after the other, with the processor
+        // under half busy.
+        var encoding = Task.Run(() => Timed(ref xwmTicks, () => Run(Path.Combine(tools, "Audio", "xWMAEncode.exe"), $"-b 48000 \"{wav}\" \"{xwm}\"")));
         try
         {
-            if (MakeLip(skyrimData, wav, text, out _) is not { } lipData) return false;
+            var lipData = MakeLip(skyrimData, wav, text, out _);
+            encoding.Wait();
+            if (lipData is null || !File.Exists(xwm)) return false;
             WriteFuz(fuzPath, lipData, File.ReadAllBytes(xwm));
             return true;
         }
-        finally { File.Delete(xwm); }
+        finally
+        {
+            try { encoding.Wait(); } catch (AggregateException) { }
+            File.Delete(xwm);
+        }
     }
 
     static void WriteFuz(string fuzPath, byte[] lipData, byte[] xwmData)
@@ -177,7 +240,9 @@ public static class VoiceFiles
             {
                 if (File.Exists(lip)) File.Delete(lip);
                 // A line takes about a twentieth of its length; one that runs past this has looped.
-                bool finished = Run(slot.Exe, $"\"{wav}\" \"{attempt}\"", slot.Dir, LipTimeLimitMs(wav));
+                bool finished = false;
+                Interlocked.Increment(ref lipRuns);
+                Timed(ref lipTicks, () => finished = Run(slot.Exe, $"\"{wav}\" \"{attempt}\"", slot.Dir, LipTimeLimitMs(wav)));
                 if (finished && File.Exists(lip) && new FileInfo(lip).Length > 0)
                 {
                     var data = File.ReadAllBytes(lip);

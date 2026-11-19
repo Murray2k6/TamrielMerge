@@ -18,6 +18,14 @@ ReferenceAlias[] Property WideSandboxSlots Auto
 {The same, wider (DefaultSandboxCurrentLocation1024).}
 Static Property XMarker Auto
 {Placed as travel destinations.}
+Idle[] Property WanderIdles Auto
+{Skyrim's idles standing in for Morrowind's Idle2 to Idle9 (TMMwActorAI.WanderIdle).}
+Float Property IdleChanceMultiplier = 0.75 Auto
+{Morrowind's fIdleChanceMultiplier.}
+Float Property IdleSeconds = 6.0 Auto
+{How long an idle is given before the next choice.}
+Float Property WalkSeconds = 8.0 Auto
+{How long the wander's own walking is given when no idle is chosen.}
 
 Int Property PackageWander = 0 AutoReadOnly
 Int Property PackageTravel = 1 AutoReadOnly
@@ -59,6 +67,28 @@ Function Setup()
   If !goalCell
     goalCell = new ObjectReference[64]
   EndIf
+  If !fromRecord
+    fromRecord = new Bool[64]
+  EndIf
+EndFunction
+
+; Whether the actor's package now is one of its record's own (TMMwActorAI.RunRecord marks each it starts; any other
+; command, a script's, unmarks it): 1 its record's, 0 a script's, -1 the actor has no slot.
+Bool[] fromRecord
+
+Function MarkRecord(Actor a)
+  Int i = SlotOf(a, False)
+  If i >= 0
+    fromRecord[i] = True
+  EndIf
+EndFunction
+
+Int Function IsRecord(Actor a)
+  Int i = SlotOf(a, False)
+  If i < 0
+    Return -1
+  EndIf
+  Return fromRecord[i] as Int
 EndFunction
 
 ; The actor's slot (made when asked).
@@ -81,6 +111,7 @@ Int Function SlotOf(Actor a, Bool abMake)
     Release(actors[i])
   EndIf
   actors[i] = a
+  fromRecord[i] = False
   packages[i] = -1
   arrived[i] = False
   untils[i] = 0.0
@@ -110,7 +141,9 @@ Function ClearFrom(ReferenceAlias[] slots, Actor a)
   EndWhile
 EndFunction
 
-; Into a free alias of the group (or the first, taken from whoever had it).
+; Into a free alias of the group; with none free, one whose actor is dead or not loaded (it has no use for the package
+; now), and only with none of those the first (2026-11-10: the first was taken from whoever had it at once, a living
+; follower beside the player losing its package to the next actor told to stand).
 Function Put(ReferenceAlias[] slots, Actor a)
   If !slots || slots.Length == 0
     Return
@@ -121,6 +154,18 @@ Function Put(ReferenceAlias[] slots, Actor a)
   EndWhile
   If i >= slots.Length
     i = 0
+    Bool found = False
+    While i < slots.Length && !found
+      Actor held = slots[i].GetActorReference()
+      If !held || held.IsDead() || !held.Is3DLoaded()
+        found = True
+      Else
+        i += 1
+      EndIf
+    EndWhile
+    If !found
+      i = 0
+    EndIf
   EndIf
   slots[i].ForceRefTo(a)
   a.EvaluatePackage()
@@ -137,12 +182,17 @@ Function Lasts(Int i, Float afHours)
 EndFunction
 
 ; AIWander range duration: wander about where it stands (range 0: stand there), for that many hours.
-Function Wander(Actor a, Float afRange, Float afHours = 0.0)
+Function Wander(Actor a, Float afRange, Float afHours = 0.0, Int a2 = -1, Int a3 = 0, Int a4 = 0, Int a5 = 0, Int a6 = 0, Int a7 = 0, Int a8 = 0, Int a9 = 0)
   If !a
     Return
   EndIf
+  ; AIWander's idle chances (a2 -1: the caller is the actor's own record, which sets them itself).
+  If a2 >= 0 && a as TMMwActorAI
+    (a as TMMwActorAI).SetIdles(a2, a3, a4, a5, a6, a7, a8, a9)
+  EndIf
   Int i = SlotOf(a, True)
   tokens[i] = tokens[i] + 1
+  fromRecord[i] = False
   Release(a)
   packages[i] = PackageWander
   arrived[i] = False
@@ -179,6 +229,7 @@ Function Follow(Actor a, Actor akTarget, Float afDuration, Float x, Float y, Flo
   EndIf
   Int i = SlotOf(a, True)
   tokens[i] = tokens[i] + 1
+  fromRecord[i] = False
   Release(a)
   packages[i] = PackageFollow
   arrived[i] = False
@@ -205,6 +256,7 @@ Function ActivateRef(Actor a, ObjectReference akTarget)
   EndIf
   Int i = SlotOf(a, True)
   tokens[i] = tokens[i] + 1
+  fromRecord[i] = False
   Release(a)
   packages[i] = PackageActivate
   arrived[i] = False
@@ -219,6 +271,7 @@ Function Go(Actor a, Actor akLeader, Float x, Float y, Float z, Int aiPackage, O
   EndIf
   Int i = SlotOf(a, True)
   tokens[i] = tokens[i] + 1
+  fromRecord[i] = False
   Release(a)
   packages[i] = aiPackage
   arrived[i] = False
@@ -316,17 +369,47 @@ Event OnUpdate()
   If !a || !target
     Return
   EndIf
-  Float speed = 0.5
-  If packages[i] == PackageEscort
-    speed = 0.3
-  EndIf
+  ; At a walk (Skyrim's, about 80 units a second), as Morrowind's people go to where AiTravel sends them: a guard
+  ; in armour walks at about 100 there. At the half-run it was, and put there at once when no path was found, the
+  ; guard of Morrowind's opening stood by the player four seconds after setting off from the deck above, 925 units
+  ; away, and said "This is where you get off" before Jiub's "Quiet, here comes the guard" (recorded in game,
+  ; 2026-11-10; user: "a guard suppose to come after juib says something like in morrowind").
+  Float speed = 0.0
   Bool reached = a.PathToReference(target, speed)
   If tokens[i] != token
     Return   ; told to do something else meanwhile
   EndIf
-  ; A path the navmesh can't give: Morrowind's actors get there regardless.
+  ; A path the navmesh can't give (a shut door of the cell between): Morrowind's actors get there regardless. After
+  ; the time the walk takes, the actor is set 300 units short on its own side and walks the rest, so it is seen
+  ; coming and whoever waits for it to come near (Jiub, within 400) has it near before it arrives. The wait stops
+  ; in menus, as Morrowind's scripts do.
   If !reached && a.GetDistance(target) > 256.0 && !a.IsDead()
-    a.MoveTo(target)
+    Float away = a.GetDistance(target)
+    Float left = (away - 300.0) / 80.0
+    If left > 60.0
+      left = 60.0
+    EndIf
+    If left > 0.0
+      Utility.Wait(left)
+    EndIf
+    If tokens[i] != token
+      Return
+    EndIf
+    If a.GetDistance(target) > 300.0 && !a.IsDead()
+      Float dx = a.GetPositionX() - target.GetPositionX()
+      Float dy = a.GetPositionY() - target.GetPositionY()
+      Float flat = Math.Sqrt(dx * dx + dy * dy)
+      If flat > 1.0
+        a.MoveTo(target, dx / flat * 300.0, dy / flat * 300.0, 0.0)
+        reached = a.PathToReference(target, speed)
+        If tokens[i] != token
+          Return
+        EndIf
+      EndIf
+    EndIf
+    If !reached && a.GetDistance(target) > 256.0 && !a.IsDead()
+      a.MoveTo(target)
+    EndIf
   EndIf
   arrived[i] = True
   untils[i] = 0.0

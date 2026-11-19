@@ -128,6 +128,14 @@ public sealed class CreatureBuilder
     /// <summary>Daggerfall's enemy senses (DfSenses): the quest its hostile actors' TMDfSenses report to.</summary>
     public Quest? Senses { get; private set; }
 
+    Dictionary<FormKey, string?>? vanillaPackages;
+    /// <summary>A vanilla package's EditorID (Skyrim's and the DLC's packages).</summary>
+    string? PackageId(FormKey key)
+    {
+        vanillaPackages ??= masters.OfType<ISkyrimModGetter>().SelectMany(m => m.Packages).GroupBy(p => p.FormKey).ToDictionary(g => g.Key, g => g.Last().EditorID);
+        return vanillaPackages.GetValueOrDefault(key);
+    }
+
     Dictionary<FormKey, INpcGetter>? vanillaNpcs;
     INpcGetter? Vanilla(FormKey key)
     {
@@ -224,6 +232,15 @@ public sealed class CreatureBuilder
             copy.Factions.Add(new RankPlacement { Faction = TownNights.Guards(mod, "DF").ToLink<IFactionGetter>(), Rank = 0 });
             if (copy.AIData is { } watch) watch.Aggression = passive ? Aggression.Unaggressive : Aggression.Aggressive;
         }
+        // Packages that only make sense beside their vanilla partners or the player: Dawnguard's gargoyle followed the
+        // player (DefaultFollowPlayerRun) wherever Daggerfall's gargoyles stood, unaware and so not attacking (user,
+        // 2026-11-02: "some npcs follow you around for no reason"); the imp kept the witchlight's wisp escort. Those go, and
+        // an actor left with none sandboxes where it stands, as Daggerfall's monsters wander.
+        int before = copy.Packages.Count;
+        copy.Packages.RemoveAll(p => PackageId(p.FormKey) is { } id
+            && (id.Contains("Follow", StringComparison.OrdinalIgnoreCase) || id.Contains("Escort", StringComparison.OrdinalIgnoreCase) || id.Contains("Wisp", StringComparison.OrdinalIgnoreCase)));
+        if (copy.Packages.Count < before && copy.Packages.Count == 0)
+            copy.Packages.Add(new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x01B217).ToLink<IPackageGetter>());   // DefaultSandboxEditorLocation512
         // Templated copies (draugr, ghosts) would otherwise take their name from the template.
         copy.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.BaseData;
         // Daggerfall's senses (DfSenses); the passive ones fight only when attacked or made hostile by a trespass.

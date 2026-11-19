@@ -52,15 +52,18 @@ public sealed partial class ObPluginBuilder
         {
             var made = items[key] = rec switch
             {
+                // The repair hammer: a usable tool (ObWear).
+                Ob.IMiscellaneousGetter m when key == ObRepairHammer => HammerItem(edid, m),
                 Ob.IMiscellaneousGetter m => Misc(edid, m.Name, m.Model?.File, m.Data?.Weight ?? 0, (uint)Math.Max(0, m.Data?.Value ?? 0)),
-                Ob.ISigilStoneGetter s => Misc(edid, s.Name, s.Model?.File, 0, s.Data?.Value ?? 0),
+                // A sigil stone: a potion whose use enchants a worn piece with the stone's effects (ObVampirism).
+                Ob.ISigilStoneGetter s => SigilStoneItem(edid, s),
                 Ob.IKeyGetter k => KeyItem(edid, k),
                 // Skyrim's potions and soul gems carry no scripts: one with an object script (a quest's wine, a
                 // collector's soul gem) is a misc item, which can.
                 Ob.ISoulGemGetter g when ObScriptWorld.ScriptLink(g) is not null => Misc(edid, g.Name, g.Model?.File, g.Data?.Weight ?? 0, g.Data?.Value ?? 0),
                 Ob.IPotionGetter p when ObScriptWorld.ScriptLink(p) is not null => Misc(edid, p.Name, p.Model?.File, p.Weight ?? 0, p.Data?.Value ?? 0),
-                // Oblivion's apparatus (mortars, alembics...) are Skyrim's clutter.
-                Ob.IAlchemicalApparatusGetter a => Misc(edid, a.Name, a.Model?.File, a.Data?.Weight ?? 0, a.Data?.Value ?? 0),
+                // Oblivion's apparatus (mortars, alembics...): usable items that open an alchemy workbench (ObMasteryPerks).
+                Ob.IAlchemicalApparatusGetter a => ApparatusItem(edid, a),
                 Ob.ISoulGemGetter g => SoulGemItem(edid, g),
                 Ob.IBookGetter b => ScrollItem(edid, b) ?? BookItem(edid, b),
                 Ob.IPotionGetter p => PotionItem(edid, p),
@@ -73,6 +76,8 @@ public sealed partial class ObPluginBuilder
                 _ => null,
             };
             Enchant(rec, made);
+            // Its maximum condition (ObWear).
+            WearItem(rec, made);
             return made;
         }
         catch (Exception e) { Problems.Add($"item {rec.EditorID}: {e.Message}"); return null; }
@@ -91,7 +96,8 @@ public sealed partial class ObPluginBuilder
     Key KeyItem(string edid, Ob.IKeyGetter k)
     {
         var mesh = ItemMesh(k.Model?.File, k.Data?.Weight ?? 0);
-        var key = new Key(mod) { EditorID = edid, Name = k.Name, Value = k.Data?.Value ?? 0, Weight = k.Data?.Weight ?? 0, ObjectBounds = Bounds(mesh) };
+        // (A key Oblivion left nameless stays so: Mutagen's key name isn't marked as optional, as the other items' are.)
+        var key = new Key(mod) { EditorID = edid, Name = k.Name!, Value = k.Data?.Value ?? 0, Weight = k.Data?.Weight ?? 0, ObjectBounds = Bounds(mesh) };
         if (mesh is not null) key.Model = new Model { File = SkyrimModelPath(mesh.Path) };
         mod.Keys.Add(key);
         return key;
@@ -154,8 +160,10 @@ public sealed partial class ObPluginBuilder
         ["FRDG"] = "AlchDamageHealth", ["SHDG"] = "AlchDamageHealth",
     };
 
-    void AddEffects(IList<Effect> target, IEnumerable<Ob.IEffectGetter> source)
+    /// <returns>Whether every effect added harms (a poison), false when none was added.</returns>
+    bool AddEffects(IList<Effect> target, IEnumerable<Ob.IEffectGetter> source)
     {
+        int added = 0, harmful = 0;
         foreach (var e in source)
         {
             if (e.Data is not { } d) continue;
@@ -164,13 +172,18 @@ public sealed partial class ObPluginBuilder
             if (ScriptEffectOf(e) is { } scripted && Magic.EffectOf(scripted, TesCast.CastOnce) is { } scriptMgef)
             {
                 target.Add(new Effect { BaseEffect = scriptMgef.ToNullableLink<IMagicEffectGetter>(), Data = new EffectData { Duration = (int)d.Duration } });
+                added++;
+                if (scripted.Hostile) harmful++;
                 continue;
             }
             if (!AlchemyEffects.TryGetValue(code, out var edid) || Vanilla.Get<IMagicEffectGetter>(edid) is not { } mgef) continue;
+            added++;
+            if (mgef.Flags.HasFlag(MagicEffect.Flag.Hostile)) harmful++;
             target.Add(new Effect { BaseEffect = mgef.ToNullableLink(), Data = new EffectData { Magnitude = Math.Max(1, d.Magnitude), Duration = (int)d.Duration, Area = (int)d.Area } });
         }
         if (target.Count == 0 && Vanilla.Get<IMagicEffectGetter>("AlchRestoreHealth") is { } fallback)
             target.Add(new Effect { BaseEffect = fallback.ToNullableLink(), Data = new EffectData { Magnitude = 1 } });
+        return added > 0 && harmful == added;
     }
 
     Ingestible PotionItem(string edid, Ob.IPotionGetter p)
@@ -181,7 +194,7 @@ public sealed partial class ObPluginBuilder
             EditorID = edid, Name = p.Name, Weight = p.Weight ?? 0, Value = p.Data?.Value ?? 0, ObjectBounds = Bounds(mesh),
             ConsumeSound = new FormLink<ISoundDescriptorGetter>(Sk(0x0B6435)), Effects = [],
         };
-        AddEffects(potion.Effects, p.Effects);
+        if (AddEffects(potion.Effects, p.Effects)) potion.Flags |= Ingestible.Flag.Poison;
         potion.Model = new Model { File = mesh is not null ? SkyrimModelPath(mesh.Path) : StandIns.Potion };
         mod.Ingestibles.Add(potion);
         return potion;
@@ -235,8 +248,61 @@ public sealed partial class ObPluginBuilder
             weapon.Model = new Model { File = path };
             weapon.FirstPersonModel = FirstPersonStatic(path).ToNullableLink<IStaticGetter>();
             weapon.ObjectBounds = Bounds(mesh);
+            string node = d.Type switch
+            {
+                Ob.Weapon.WeaponType.BladeOneHand => name.Contains("dagger") ? "WeaponDagger" : "WeaponSword",
+                Ob.Weapon.WeaponType.BluntOneHand => name.Contains("axe") ? "WeaponAxe" : "WeaponMace",
+                Ob.Weapon.WeaponType.BladeTwoHand or Ob.Weapon.WeaponType.BluntTwoHand or Ob.Weapon.WeaponType.Staff => "WeaponBack",
+                _ => "WeaponBow",
+            };
+            // Hung once every model is written (HangWeapons): a model several weapons share (a sword and its
+            // enchanted kinds) is converted again for each, and the later writing took the node off again (22 of 157
+            // weapon models kept it in the build of 2026-11-14; user: "weapons are below the npcs").
+            sheathNodes[Path.Combine(modOutDir, mesh.Path)] = node;
         }
         return weapon;
+    }
+
+    /// <summary>Weapon models given the skeleton node they hang from sheathed.</summary>
+    public int WeaponsHung { get; private set; }
+    readonly HashSet<string> hung = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A weapon's sheathed place on the body: the skeleton node named in the model's "Prn" (WeaponSword, WeaponBack...).
+    /// Without it Skyrim hangs the weapon from the actor's root: every sheathed sword lay on the floor between its
+    /// owner's feet (seen in game 2026-11-14, the Blades and the Emperor in the prison; 0 of 157 converted weapon
+    /// models had one). Oblivion's own name for the place (SideWeapon, BackWeapon) is no node of Skyrim's skeleton.
+    /// </summary>
+    readonly Dictionary<string, string> sheathNodes = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Every weapon's model given the place on the body it hangs from when sheathed; after the last model is
+    /// written.</summary>
+    public void HangWeapons()
+    {
+        foreach (var (file, node) in sheathNodes.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            try { if (HangSheathed(file, node)) WeaponsHung++; }
+            catch (Exception e) { Problems.Add($"weapon model {file}: {e.Message}"); }
+        }
+    }
+
+    bool HangSheathed(string file, string node)
+    {
+        if (!File.Exists(file)) return false;
+        using var nif = new nifly.NifFile();
+        if (nif.Load(file) != 0) throw new InvalidDataException("nifly can't read the converted model");
+        var hdr = nif.GetHeader();
+        for (uint i = 0; i < hdr.GetNumBlocks(); i++)
+            if (hdr.GetBlockById(i) is nifly.NiStringExtraData sx && sx.name.get() == "Prn")
+            {
+                if (sx.stringData.get() == node) return false;
+                sx.stringData = new nifly.NiStringRef(node);
+                if (nif.Save(file) != 0) throw new IOException("nifly failed to save the model");
+                return true;
+            }
+        nif.AssignExtraData(nif.GetRootNode(), TamrielMerge.Skyrim.Meshes.BlockMeshBuilder.Owned(new nifly.NiStringExtraData { name = new nifly.NiStringRef("Prn"), stringData = new nifly.NiStringRef(node) }));
+        if (nif.Save(file) != 0) throw new IOException("nifly failed to save the model");
+        return true;
     }
 
     Ammunition AmmoItem(string edid, Ob.IAmmunitionGetter a)
@@ -352,7 +418,7 @@ public sealed partial class ObPluginBuilder
 
     // ---- actors ----
 
-    static readonly Dictionary<string, string> RaceStandIns = new(StringComparer.OrdinalIgnoreCase)
+    internal static readonly Dictionary<string, string> RaceStandIns = new(StringComparer.OrdinalIgnoreCase)
     {
         ["DarkSeducer"] = "DarkElf", ["GoldenSaint"] = "HighElf", ["Dremora"] = "DarkElf", ["Sheogorath"] = "Breton", ["Vampire"] = "Imperial", ["VampireRace"] = "Imperial",
     };
@@ -409,10 +475,15 @@ public sealed partial class ObPluginBuilder
             }
     }
 
+    /// <summary>People given their Oblivion race's voice, and those whose race has none here (they keep the face's).</summary>
+    public int VoicesByRace { get; private set; }
+    public int VoicesKept { get; private set; }
+
     Npc? Person(Ob.INpcGetter n)
     {
         bool female = n.Configuration?.Flags.HasFlag(Ob.Npc.NpcFlag.Female) == true;
         string raceName = records.GetValueOrDefault(n.Race.FormKey)?.EditorID ?? "";
+        string obRace = raceName;
         // Shivering Isles' Daedric races (and Dremora, whose Skyrim race has no FaceGen NPCs) wear the nearest mortal look.
         raceName = RaceStandIns.GetValueOrDefault(raceName, raceName);
         var race = Vanilla.Get<IRaceGetter>(raceName + "Race");
@@ -420,7 +491,8 @@ public sealed partial class ObPluginBuilder
         var pool = Vanilla.Faces(race.FormKey, female);
         if (pool.Count == 0 && Vanilla.Get<IRaceGetter>("ImperialRace") is { } imperial) { race = imperial; pool = Vanilla.Faces(race.FormKey, female); }
         if (pool.Count == 0) { Problems.Add($"npc {n.EditorID}: no vanilla face for {raceName} {(female ? "F" : "M")}"); return null; }
-        var look = pool[VanillaActors.StableHash(n.EditorID ?? n.FormKey.ToString()) % pool.Count];
+        // By the person's own age and skin shade (ObHair.FaceFor).
+        var look = FaceFor(n, pool, female);
         var npc = mod.Npcs.DuplicateInAsNewRecord(look);
         npc.EditorID = "OB" + Sanitize(n.EditorID ?? n.FormKey.ID.ToString("X6"));
         npc.Name = n.Name;
@@ -435,6 +507,9 @@ public sealed partial class ObPluginBuilder
         npc.DeathItem.Clear();
         npc.Packages.Clear();
         npc.Keywords = null;
+        // Oblivion's vampire people (its Vampire races, mortal stand-ins here) carry Skyrim's Vampire keyword: what
+        // GetVampire and GetIsRace Vampire in the dialogue and TMObState.IsVampire in the scripts test (ObVampirism).
+        if (IsVampireRace(records.GetValueOrDefault(n.Race.FormKey)?.EditorID)) npc.Keywords = [new FormLink<IKeywordGetter>(VampireKeyword)];
         npc.Perks = null;
         npc.Template = new FormLinkNullable<INpcSpawnGetter>(look.FormKey);
         npc.Configuration.TemplateFlags = NpcConfiguration.TemplateFlag.Traits;
@@ -446,17 +521,39 @@ public sealed partial class ObPluginBuilder
         npc.Packages.Add(new FormLink<IPackageGetter>(Sk(0x01B217)));   // DefaultSandboxEditorLocation512
         // Its own Oblivion packages go ahead of it once the quests their conditions name exist (FinishNpcPackages).
         if (n.AIPackages.Count > 0) npcPackageLists.Add((npc, n.AIPackages.Select(p => p.FormKey).ToList()));
-        if (npc.AIData is { } ai) ai.Aggression = (n.AIData?.Aggression ?? 0) >= 80 ? Aggression.VeryAggressive : Aggression.Unaggressive;
+        ObAi(npc, n.AIData?.Aggression ?? 0, n.AIData?.Confidence ?? 50);
         AddInventory(npc, n.Items);
+        // Their race's voice (the race Oblivion's RACE record names for their sex), not the face's own.
+        if (records.GetValueOrDefault(n.Race.FormKey) is Ob.IRaceGetter voiceOf)
+        {
+            var voiceRaceKey = (female ? voiceOf.Voices?.Female : voiceOf.Voices?.Male)?.FormKeyNullable;
+            string voiceRace = voiceRaceKey is { } vk && records.GetValueOrDefault(vk)?.EditorID is { Length: > 0 } vr ? vr : obRace;
+            var voiceName = ObVoices.VoiceTypeFor(voiceRace, female) ?? ObVoices.VoiceTypeFor(obRace, female) ?? ObVoices.VoiceTypeFor(raceName, female);
+            if (voiceName is not null && Vanilla.Get<IVoiceTypeGetter>(voiceName) is { } voiceType) { npc.Voice.SetTo(voiceType.FormKey); VoicesByRace++; }
+            else VoicesKept++;
+        }
         AddSpells(npc, n.Spells);
+        // Their own hair in their own colour, as its own model (ObHair): last, so a helmet or hood of theirs goes first.
+        WearHair(npc, n, female, obRace);
         VanillaActors.WearInventory(mod, npc, outfits, "OB");
         AddFactionsAndClass(npc, n);
         AddCrime(npc, n);
+        // The Repair AI service: the Repair topic (ObWear).
+        MakeRepairer(npc, n);
+        // A barter service: a merchant (ObVendors).
+        MakeVendor(npc, n);
         // A trainer (AI services Training): the skill its AI data names, up to its maximum training level.
-        if (n.AIData is { } td && td.BuySellServices.ToString().Contains("Training") && ObSkillIds.TryGetValue(td.Teaches.ToString(), out var taught))
+        if (n.AIData is { } td && td.BuySellServices.ToString().Contains("Training") && td.Teaches is { } teaches && ObSkillIds.TryGetValue(teaches.ToString(), out var taught))
             obTrainers.Add(new(npc, taught, td.MaximumTrainingLevel));
         // Moving and standing as Oblivion's people do (ObPeople).
         AsOblivionPerson(npc, n, female, race, look);
+        // Their own face, of Oblivion's FaceGen (ObHeads): with it they borrow no one's, and keep their own voice.
+        OwnFace(npc, n, female, obRace, race);
+        // Its Oblivion race where that is a stand-in (OBRace..., which GetIsRace asks: ObRaceKeywords), and its fixed
+        // reactions to the four persuasion actions (ObPersuasion).
+        npc.Keywords ??= [];
+        if (RaceStandIns.ContainsKey(obRace)) npc.Keywords.Add(RaceKeyword(obRace).ToLink<IKeywordGetter>());
+        AddPersuasionReactions(npc, n);
         return npc;
     }
 
@@ -500,6 +597,22 @@ public sealed partial class ObPluginBuilder
     /// 0.01) is the one nearest Oblivion's level over the player's levels 1 to 50 (the worst miss there is counted in
     /// <see cref="LevelFits"/>), the min the level Oblivion gives at the player's first, the max Oblivion's (or 81).
     /// </summary>
+    /// <summary>
+    /// Oblivion's aggression and confidence (0-100) as Skyrim's steps. Oblivion's people attack whoever their disposition
+    /// toward falls under their aggression: a faction enemy's (-50 or worse) sits near nothing, a stranger's near 50. So
+    /// 0 unaggressive, up to 50 aggressive (enemies on sight), over 50 very aggressive (strangers too); confidence by
+    /// fifths, 100 foolhardy (never flees). And they help their own (allies). Until 2026-11-17 all under 80 were made
+    /// unaggressive: the Blades (Oblivion's 5, enemies of the Mythic Dawn through EmperorFaction's -100) never attacked
+    /// the assassins of the first ambush, who stood among them once their scripted fights broke off (runs r109-r111).
+    /// </summary>
+    static void ObAi(Npc npc, int aggression, int confidence)
+    {
+        npc.AIData ??= new AIData();
+        npc.AIData.Aggression = aggression <= 0 ? Aggression.Unaggressive : aggression <= 50 ? Aggression.Aggressive : Aggression.VeryAggressive;
+        npc.AIData.Confidence = confidence switch { <= 10 => Confidence.Cowardly, <= 30 => Confidence.Cautious, <= 60 => Confidence.Average, <= 90 => Confidence.Brave, _ => Confidence.Foolhardy };
+        npc.AIData.Assistance = Assistance.HelpsAllies;
+    }
+
     void SetLevel(Npc npc, bool followsPlayer, int offset, int calcMin, int calcMax)
     {
         if (!followsPlayer)
@@ -550,14 +663,20 @@ public sealed partial class ObPluginBuilder
     {
         string id = (c.EditorID ?? "").ToLowerInvariant(), name = (c.Name ?? "").ToLowerInvariant();
         var map = CreatureTable.FirstOrDefault(t => id.Contains(t.Match) || name.Contains(t.Match));
-        if (map.Template is null) { Problems.Add($"creature {c.EditorID} ({c.Name}): no stand-in"); return null; }
-        var template = Vanilla.Get<INpcGetter>(map.Template);
+        // Its own body on the Skyrim skeleton of the nearest shape (ObCreatureLooks); the stand-in by name when it has none.
+        var look = CreatureLook.For(c.Model?.File);
+        var body = look is null ? null : CreatureBodyOf(c, look, map.Template);
+        if (body is null) CreatureStandInsKept++;
+        if (look is null && map.Template is not null) Problems.Add($"creature {c.EditorID} ({c.Name}): no re-rig row for {c.Model?.File} (stand-in {map.Template} kept)");
+        if (map.Template is null && body is null) { Problems.Add($"creature {c.EditorID} ({c.Name}): no stand-in"); return null; }
+        var template = body?.Template ?? Vanilla.Get<INpcGetter>(map.Template!);
         if (template is null) { Problems.Add($"creature {c.EditorID}: template {map.Template} not found"); return null; }
         var npc = mod.Npcs.DuplicateInAsNewRecord(template);
         npc.EditorID = "OB" + Sanitize(c.EditorID ?? c.FormKey.ID.ToString("X6"));
         npc.Name = c.Name;
         npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.BaseData;
-        if ((c.AIData?.Aggression ?? 0) < 80 && npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
+        ObAi(npc, c.AIData?.Aggression ?? 0, c.AIData?.Confidence ?? 50);
+        npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.AIData;
         // Oblivion's level, not the stand-in's (a vanilla creature's own level or multiplier).
         SetLevel(npc, c.Configuration?.Flags.HasFlag(Ob.Creature.CreatureFlag.PCLevelOffset) == true, c.Configuration?.LevelOffset ?? 1, c.Configuration?.CalcMin ?? 0, c.Configuration?.CalcMax ?? 0);
         // As people: a sandbox round where it stands, and its own Oblivion packages ahead of it (FinishNpcPackages), so
@@ -568,6 +687,7 @@ public sealed partial class ObPluginBuilder
         if (c.AIPackages.Count > 0) npcPackageLists.Add((npc, c.AIPackages.Select(p => p.FormKey).ToList()));
         AddInventory(npc, c.Items);
         AddSpells(npc, c.Spells);
+        if (body is not null) ApplyCreatureLook(npc, c, body);
         return npc;
     }
 
@@ -615,7 +735,30 @@ public sealed partial class ObPluginBuilder
             Placement = new Placement { Position = loc.Position, Rotation = loc.Rotation },
             Scale = PlacedScale(actor.FormKey, scale),
         };
+        // Oblivion's corpses are actors whose base has no health (measured 2026-11-15: 87 NPC and 45 creature bases,
+        // every one named Dead..., ...Dead, ...Corpse or ...Body; none of the 2,008 auto-calculated NPCs): they lie dead
+        // where they are placed. Skyrim's "starts dead". Left alive until then, the dead goblin shaman and the thief's
+        // skeleton in the prison's tunnels stood up (user: "some creatures arenet suppose to be alive as well").
+        if (StartsDead(baseKey))
+        {
+            placed.SkyrimMajorRecordFlags |= (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x200;
+            CorpsesPlaced++;
+            corpseBases.Add(baseKey);
+        }
         if (!PlaceForScripts(source, placed, cell, persistentCell)) cell.Temporary.Add(placed);
         NoteActor(placed, baseKey, cell);
     }
+
+    /// <summary>References placed dead, and the bases they are of.</summary>
+    public int CorpsesPlaced { get; private set; }
+    public int CorpseBases => corpseBases.Count;
+    readonly HashSet<FormKey> corpseBases = [];
+
+    /// <summary>Whether Oblivion's actor base is a corpse: its health is 0.</summary>
+    bool StartsDead(FormKey baseKey) => records.GetValueOrDefault(baseKey) switch
+    {
+        Ob.INpcGetter n => n.Stats is { Health: 0 },
+        Ob.ICreatureGetter c => c.Data is { Health: 0 },
+        _ => false,
+    };
 }

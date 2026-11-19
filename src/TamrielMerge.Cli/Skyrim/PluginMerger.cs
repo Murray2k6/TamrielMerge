@@ -15,15 +15,57 @@ namespace TamrielMerge.Skyrim;
 /// overrides, their persistent cells) is kept once and its children merged. Keeps the converted Daggerfall to a few
 /// full plugins rather than one per batch.
 /// </summary>
-public static class PluginMerger
+public static partial class PluginMerger
 {
     /// <summary>The masters every part lists, in this order (Skyrim's and its DLCs, then <paramref name="extra"/>).</summary>
     public static ModKey[] Masters(params string[] extra) =>
         new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Concat(extra).Select(f => ModKey.FromFileName(f)).ToArray();
 
-    /// <summary>First FormID of part <paramref name="part"/> (1-based) of <paramref name="parts"/>: the 24-bit space split evenly.</summary>
+    /// <summary>
+    /// FormIDs from here up are no part's own range: records every part must name the same (a shared interior's cell, anchor
+    /// and quest markers, made by one part and pointed at by the others: <see cref="SharedId"/>).
+    /// </summary>
+    public const uint SharedStart = 0xF00000;
+
+    /// <summary>The <paramref name="slot"/>-th of <paramref name="perItem"/> FormIDs of shared item <paramref name="index"/>.</summary>
+    public static uint SharedId(int index, int slot, int perItem)
+    {
+        long id = SharedStart + (long)index * perItem + slot;
+        if (id > 0xFFFFFF) throw new InvalidOperationException($"shared FormIDs ran out at item {index}");
+        return (uint)id;
+    }
+
+    /// <summary>First FormID of part <paramref name="part"/> (1-based) of <paramref name="parts"/>: the space below
+    /// <see cref="SharedStart"/> split evenly.</summary>
     public static uint PartStart(int part, int parts) => 0x800 + (uint)((part - 1) * Stride(parts));
-    public static uint Stride(int parts) => (0xFFFFFFu - 0x800) / (uint)Math.Max(parts, 1);
+    public static uint Stride(int parts) => (SharedStart - 0x800) / (uint)Math.Max(parts, 1);
+
+    /// <summary>
+    /// The parts (1-based, of <paramref name="parts"/>) a joined plugin has records of: each part's FormIDs are a range of
+    /// its own (<see cref="PartStart"/>), so a part whose range holds none wasn't joined (it failed). Only the plugin's own
+    /// records count, and not the shared band (<see cref="SharedStart"/>).
+    /// </summary>
+    public static HashSet<int> PartsPresent(string plugin, int parts)
+    {
+        using var s = new FileStream(plugin, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20);
+        var (_, subs) = ReadTes4(s);
+        uint own = (uint)subs.Count(x => x.Type == "MAST");
+        var present = new HashSet<int>();
+        var h = new byte[HeaderSize];
+        long p = s.Position, end = s.Length;
+        while (p < end)
+        {
+            s.Position = p;
+            s.ReadExactly(h);
+            uint size = BitConverter.ToUInt32(h, 4);
+            if (h[0] == 'G' && h[1] == 'R' && h[2] == 'U' && h[3] == 'P') { p += HeaderSize; continue; }   // into the group
+            uint id = BitConverter.ToUInt32(h, 12);
+            if (id >> 24 == own && (id & 0xFFFFFF) is var local && local >= 0x800 && local < SharedStart)
+                present.Add((int)((local - 0x800) / Stride(parts)) + 1);
+            p += HeaderSize + size;
+        }
+        return present;
+    }
 
     /// <summary>Makes <paramref name="mod"/> part <paramref name="part"/> of <paramref name="parts"/>: its FormIDs start in its range.</summary>
     public static void PreparePart(SkyrimMod mod, int part, int parts) => mod.ModHeader.Stats.NextFormID = PartStart(part, parts);
@@ -31,12 +73,25 @@ public static class PluginMerger
     /// <summary>Writes a part with exactly <paramref name="masters"/> as its masters (so every part's FormIDs mean the same).</summary>
     public static void WritePart(SkyrimMod mod, string path, ModKey[] masters, int part, int parts)
     {
+        // References held by scripts, quests and lists persistent, in their worldspace's persistent cell (HeldReferences).
+        HeldReferences.Prepare(mod, Console.WriteLine);
         uint end = PartStart(part, parts) + Stride(parts);
         if (mod.ModHeader.Stats.NextFormID >= end)
             throw new InvalidOperationException($"part {part} of {parts} ran out of FormIDs ({mod.ModHeader.Stats.NextFormID:X6} >= {end:X6}): use more parts");
+        // Every link to this plugin or one of its masters: named here when not, as Mutagen's writer says only "Could not
+        // map FormKey to a master index" (2026-10-25, part 24 of Daggerfall Dungeons.esm).
+        var allowed = masters.Append(mod.ModKey).ToHashSet();
+        var stray = mod.EnumerateMajorRecords()
+            .SelectMany(r => r.EnumerateFormLinks().Where(l => !l.IsNull && !allowed.Contains(l.FormKey.ModKey)).Select(l => (Record: r, Link: l)))
+            .Take(12).ToList();
+        if (stray.Count > 0)
+            throw new InvalidOperationException($"part {part} of {parts} links to plugins that aren't its masters: "
+                + string.Join("; ", stray.Select(s => $"{s.Record.FormKey} {s.Record.GetType().Name} {s.Record.EditorID} -> {s.Link.FormKey} ({s.Link.Type.Name})")));
         mod.ModHeader.MasterReferences.Clear();
         foreach (var m in masters) mod.ModHeader.MasterReferences.Add(new MasterReference { Master = m });
         TopicSubtypes.Fill(mod);
+        HavokSettle.Apply(mod, Path.GetDirectoryName(Path.GetFullPath(path)), Console.WriteLine);
+        InteriorBounds.Apply(mod, Console.WriteLine);
         mod.WriteToBinary(path, new BinaryWriteParameters
         {
             MastersListContent = MastersListContentOption.NoCheck,
@@ -55,10 +110,10 @@ public static class PluginMerger
 
     /// <summary>
     /// Record types written compressed, as Skyrim's own plugins store them (zlib, flag 0x40000, the data's size first):
-    /// navmeshes and land. The joined Daggerfall Towns.esm reached 2,065 MB on 2026-10-13, 1,176 MB of it navmeshes,
+    /// navmeshes, land, cells and people (<see cref="PluginCompression.Types"/>). The joined Daggerfall Towns.esm reached 2,065 MB on 2026-10-13, 1,176 MB of it navmeshes,
     /// past the 2 GB that Mutagen (and Skyrim's plugin reading, safely) can take.
     /// </summary>
-    static readonly HashSet<string> Compressed = ["NAVM", "LAND"];
+    static readonly HashSet<string> Compressed = PluginCompression.Types;
     const uint CompressedFlag = 0x00040000;
     sealed class Grp(byte[] header, int type, uint label) : Node
     {
@@ -70,7 +125,8 @@ public static class PluginMerger
     const int HeaderSize = 24;
 
     /// <summary>Merges <paramref name="parts"/> (in order) into <paramref name="outPath"/>; returns the records written.</summary>
-    public static long Merge(IReadOnlyList<string> parts, string outPath, bool master = true)
+    /// <param name="unpack">Write every compressed record uncompressed instead (a load test of a plugin past 2 GB).</param>
+    public static long Merge(IReadOnlyList<string> parts, string outPath, bool master = true, bool unpack = false)
     {
         if (parts.Count == 0) throw new ArgumentException("no parts");
         var streams = parts.Select(p => new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16)).ToList();
@@ -95,7 +151,7 @@ public static class PluginMerger
                 var nodes = ReadNodes(s, f, s.Position, s.Length);
                 if (top is null) top = nodes; else MergeInto(top, nodes);
             }
-            Pack(top!, streams);
+            if (unpack) Unpack(top!, streams); else Pack(top!, streams);
             foreach (var n in top!) Measure(n);
             long count = top.Sum(Count);
 
@@ -119,6 +175,46 @@ public static class PluginMerger
         var (tes4, subs) = ReadTes4(s);
         var nodes = ReadNodes(s, 0, s.Position, s.Length)
             .Where(n => n is not Grp { Type: 0 } g || !dropTypes.Contains(Encoding.ASCII.GetString(BitConverter.GetBytes(g.Label)))).ToList();
+        foreach (var n in nodes) Measure(n);
+        long count = nodes.Sum(Count);
+        uint nextId = subs.FirstOrDefault(x => x.Type == "HEDR") is { } h ? BitConverter.ToUInt32(h.Data, 8) : 0;
+        using var output = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
+        WriteTes4(output, tes4, subs, count, nextId, new SortedSet<uint>(), (BitConverter.ToUInt32(tes4, 8) & 1) != 0);
+        var buffer = new byte[1 << 20];
+        foreach (var n in nodes) Write(output, n, [s], buffer);
+        return count;
+    }
+
+    /// <summary>
+    /// A copy of a plugin without its records of the given types wherever they are, in groups or under a cell (NAVM in
+    /// the cells' children, NAVI at the top: the overland's navmeshes made again over the foliage, DfFoliage), and
+    /// without the groups that leaves empty. Returns the records and groups written.
+    /// </summary>
+    public static long DropRecords(string plugin, string outPath, IReadOnlySet<string> types)
+    {
+        using var s = new FileStream(plugin, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+        var (tes4, subs) = ReadTes4(s);
+        var type = new byte[4];
+        List<Node> Keep(List<Node> nodes)
+        {
+            var kept = new List<Node>();
+            foreach (var n in nodes)
+            {
+                if (n is Rec r)
+                {
+                    s.Position = r.Offset;
+                    s.ReadExactly(type);
+                    if (!types.Contains(Encoding.ASCII.GetString(type))) kept.Add(r);
+                }
+                else if (n is Grp g)
+                {
+                    g.Children = Keep(g.Children);
+                    if (g.Children.Count > 0) kept.Add(g);
+                }
+            }
+            return kept;
+        }
+        var nodes = Keep(ReadNodes(s, 0, s.Position, s.Length));
         foreach (var n in nodes) Measure(n);
         long count = nodes.Sum(Count);
         uint nextId = subs.FirstOrDefault(x => x.Type == "HEDR") is { } h ? BitConverter.ToUInt32(h.Data, 8) : 0;
@@ -251,6 +347,33 @@ public static class PluginMerger
             if (batch.Count == Batch) Flush();
         }
         Flush();
+    }
+
+    /// <summary>The inverse of <see cref="Pack"/>: every compressed record inflated and its flag cleared.</summary>
+    static void Unpack(List<Node> top, List<FileStream> streams)
+    {
+        var recs = new List<Rec>();
+        void Collect(Node n) { if (n is Rec r) recs.Add(r); else foreach (var c in ((Grp)n).Children) Collect(c); }
+        foreach (var n in top) Collect(n);
+        var h = new byte[HeaderSize];
+        foreach (var r in recs.OrderBy(r => r.File).ThenBy(r => r.Offset))
+        {
+            var s = streams[r.File];
+            s.Position = r.Offset;
+            s.ReadExactly(h);
+            if ((BitConverter.ToUInt32(h, 8) & CompressedFlag) == 0) continue;
+            var bytes = new byte[r.Length];
+            Buffer.BlockCopy(h, 0, bytes, 0, HeaderSize);
+            s.ReadExactly(bytes, HeaderSize, (int)r.Length - HeaderSize);
+            uint size = BitConverter.ToUInt32(bytes, HeaderSize);
+            var plain = new byte[HeaderSize + size];
+            Buffer.BlockCopy(h, 0, plain, 0, HeaderSize);
+            using (var z = new System.IO.Compression.ZLibStream(new MemoryStream(bytes, HeaderSize + 4, bytes.Length - HeaderSize - 4), System.IO.Compression.CompressionMode.Decompress))
+                z.ReadExactly(plain, HeaderSize, (int)size);
+            BitConverter.TryWriteBytes(plain.AsSpan(4, 4), size);
+            BitConverter.TryWriteBytes(plain.AsSpan(8, 4), BitConverter.ToUInt32(h, 8) & ~CompressedFlag);
+            r.Packed = plain;
+        }
     }
 
     static long Measure(Node n)

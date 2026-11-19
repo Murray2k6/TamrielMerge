@@ -14,6 +14,8 @@ public sealed class Tes3Ref
     public string? DoorDestinationCell;
     public int LockLevel;
     public string? Key, Trap, Owner, OwnerFaction, Global, Soul;
+    /// <summary>INDX: the rank of OwnerFaction from which its members may take the object (-1: none given).</summary>
+    public int OwnerRank = -1;
     public int Count = 1;
     public bool Deleted;
     /// <summary>MVRF: a reference moved here from another cell.</summary>
@@ -88,6 +90,7 @@ public sealed class Tes3Cell
                 case "ANAM": r.Owner = f.Text; break;
                 case "CNAM": r.OwnerFaction = f.Text; break;
                 case "BNAM": r.Global = f.Text; break;
+                case "INDX": r.OwnerRank = f.Int(); break;
                 case "XSOL": r.Soul = f.Text; break;
                 case "NAM9": r.Count = f.Int(); break;
                 case "DELE": r.Deleted = true; break;

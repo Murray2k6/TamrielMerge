@@ -21,7 +21,7 @@ namespace TamrielMerge.Skyrim;
 /// speaker's social group say, a "don't know" line of that group.</item>
 /// </list>
 /// </summary>
-public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
+public sealed class TownTalk(SkyrimMod mod, DfText text)
 {
     static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
     static readonly FormKey PlayerRef = Sk(0x14);
@@ -68,6 +68,10 @@ public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
 
     /// <summary>The Skyrim faction townsfolk of a Daggerfall faction belong to, if any were enlisted.</summary>
     public Faction? FactionOf(int dfId) => dfFactions.GetValueOrDefault(dfId);
+    /// <summary>The tone global and the five groups' reaction globals (TalkTone.Globals; Daggerfall.esm's for a town part):
+    /// with them the "where is" answers come in the tone's three phrasings and the tone topics are built.</summary>
+    public (FormKey Tone, FormKey[] Reacts)? ToneGlobals { get; set; }
+
     /// <summary>The player's standing with a Daggerfall faction (DFReact_&lt;id&gt;), if any of its people were enlisted.</summary>
     public Global? ReactionOf(int dfId) => reactions.GetValueOrDefault(dfId);
 
@@ -178,9 +182,20 @@ public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
         var none = List("DFTalkNoDoors", []);
         foreach (var t in towns)
         {
-            string id = t.World.EditorID!;
+            // The location's own name (its EditorID after "DFLoc"): every town stands in the one overland now.
+            string id = t.Location.EditorID!["DFLoc".Length..];
             foreach (var (type, _) in Kinds)
-                byKind.Add(t.DoorsByType.TryGetValue(type, out var ds) && ds.Count > 0 ? List($"DFTalk{id}Doors{type}", ds.Select(d => d.FormKey)).FormKey : none.FormKey);
+                byKind.Add(t.DoorsByType.TryGetValue(type, out var ds) && ds.Count > 0 ? List($"DFTalk{id}Doors{type}", ds.SelectMany(DoorPosition)).FormKey : none.FormKey);
+        }
+        // A door's x and y as two globals: all "Where is" reads of it, and they take no reference handle.
+        IEnumerable<FormKey> DoorPosition(PlacedObject door)
+        {
+            foreach (float v in new[] { door.Placement!.Position.X, door.Placement.Position.Y })
+            {
+                var g = new GlobalFloat(mod) { Data = v };
+                mod.Globals.Add(g);
+                yield return g.FormKey;
+            }
         }
         static ScriptObjectProperty Obj(string name, FormKey k) => new() { Name = name, Object = k.ToLink<ISkyrimMajorRecordGetter>() };
         static ScriptObjectListProperty Objs(string name, IEnumerable<FormKey> keys)
@@ -208,6 +223,7 @@ public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
 
         BuildGreetings();
         BuildWhereIs(present, direction);
+        if (ToneGlobals is { } toneGlobals) BuildToneTopics(toneGlobals);
         BuildNews();
         if (shopkeepers is not null) BuildBarter(shopkeepers);
         if (tavernKeepers is not null) BuildRooms(tavernKeepers);
@@ -278,8 +294,9 @@ public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
         mod.DialogBranches.Add(branch);
         var barter = Topic("DFTalkBarter", "Let me see your wares.", branch, DialogTopic.SubtypeEnum.Custom, DialogTopic.CategoryEnum.Topic);
         branch.StartingTopic = barter.ToNullableLink<IDialogTopicGetter>();
-        // Daggerfall's shops keep 6:00-18:00, and shut on Sun's Rest (20 Sun's Height).
-        var open = Line("Take a look.", [InFaction(shopkeepers), Cond(new GetCurrentTimeConditionData(), CompareOperator.GreaterThanOrEqualTo, 6), Cond(new GetCurrentTimeConditionData(), CompareOperator.LessThan, 18),
+        // Open while the keeper's own shop is (its vendor hours, the building's: TownShops.Hours), and shut on Sun's Rest
+        // (20 Sun's Height). Until 2026-11-04 every keeper kept 6:00-18:00 here, taverns and temples too.
+        var open = Line("Take a look.", [InFaction(shopkeepers), Cond(new GetOffersServicesNowConditionData(), CompareOperator.EqualTo, 1),
             Global(GameMonth, CompareOperator.NotEqualTo, 6, or: true), Global(GameDay, CompareOperator.NotEqualTo, 20)], random: false);
         open.VirtualMachineAdapter = new DialogResponsesAdapter
         {
@@ -369,13 +386,14 @@ public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
         mod.DialogBranches.Add(branch);
         var whereIs = Topic("DFTalkWhereIs", "Where is...", branch, DialogTopic.SubtypeEnum.Custom, DialogTopic.CategoryEnum.Topic);
         branch.StartingTopic = whereIs.ToNullableLink<IDialogTopicGetter>();
-        var ask = Line("What are you looking for?", [InFaction(dfFactions.Values.First())], random: false);
-        // Only Daggerfall townsfolk answer: any of the social group factions.
-        ask.Conditions.Clear();
+        // Only Daggerfall townsfolk answer: any of the social group factions (not one of the people enlisted here: a part
+        // of Daggerfall Towns.esm whose towns' interiors are all built by other parts has none, and its "where is" failed
+        // on an empty list, 2026-10-25, part 46 of 84).
+        var ask = Line("What are you looking for?", [], random: false);
         for (int g = 0; g < 5; g++) ask.Conditions.Add(Cond(GroupCondition(g), CompareOperator.EqualTo, 1, or: g < 4));
         ask.VirtualMachineAdapter = new DialogResponsesAdapter
         {
-            Scripts = [new ScriptEntry { Name = "TMDfWhereIs", Properties = [new ScriptObjectProperty { Name = "Talk", Object = quest.ToLink<ISkyrimMajorRecordGetter>() }] }],
+            Scripts = [new ScriptEntry { Name = "TMDfWhereIs", Properties = [new ScriptObjectProperty { Name = "Talk", Object = quest!.ToLink<ISkyrimMajorRecordGetter>() }] }],
             ScriptFragments = new ScriptFragments
             {
                 ExtraBindDataVersion = 2,
@@ -392,6 +410,32 @@ public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
             var choice = Topic($"DFTalkWhereIs{type}", char.ToUpperInvariant(label[0]) + label[1..], branch, DialogTopic.SubtypeEnum.Custom, DialogTopic.CategoryEnum.Topic);
             ask.LinkTo.Add(choice.ToLink<IDialogTopicGetter>());
             var has = Global(present[k], CompareOperator.EqualTo, 1);
+            if (ToneGlobals is { } tone)
+            {
+                // By the speaker's social group and how the player's tone lands with it (TalkTone: DFTalkReact<g> 0, 1,
+                // 2, rolled as the question is asked): Daggerfall's three phrasings of "don't know" (as often as the
+                // group's odds) and of the answer, whose %hnt is the way there (7333).
+                for (int g = 0; g < 5; g++)
+                    for (int r = 0; r < 3; r++)
+                    {
+                        var group = Cond(GroupCondition(g), CompareOperator.EqualTo, 1);
+                        var react = Global(tone.Reacts[g], CompareOperator.EqualTo, r);
+                        foreach (var line in text[TalkTone.DirectionAnswers[3 * g + r]].Take(8))
+                            choice.Responses.Add(Line(Say(line, label), [has, group, react, Cond(new GetRandomPercentConditionData(), CompareOperator.GreaterThanOrEqualTo, KnowChance[g])]));
+                        foreach (var line in text[TalkTone.DirectionAnswers[15 + 3 * g + r]].Take(6))
+                        {
+                            if (!line.Contains("%hnt"))
+                            {
+                                choice.Responses.Add(Line(Say(line, label), [has, group, react]));
+                                continue;
+                            }
+                            for (int d = 0; d < 8; d++)
+                                foreach (var hint in directionLines.Take(3))
+                                    choice.Responses.Add(Line(Say(line.Replace("%hnt2", "%hnt").Replace("%hnt", hint), label, Directions[d]), [has, group, react, Global(direction[k], CompareOperator.EqualTo, d)]));
+                        }
+                    }
+                continue;
+            }
             // Not known: a "don't know" line of the speaker's social group, as often as Daggerfall's odds.
             for (int g = 0; g < 5; g++)
                 foreach (var line in text[DontKnow[g]])
@@ -400,6 +444,39 @@ public sealed class TownTalk(SkyrimMod mod, DfText text, DfFactions factions)
             for (int d = 0; d < 8; d++)
                 foreach (var line in directionLines)
                     choice.Responses.Add(Line(Say(line, label, Directions[d]), [has, Global(direction[k], CompareOperator.EqualTo, d)]));
+        }
+    }
+
+    /// <summary>The three tones as topics the player opens with (Daggerfall's greetings by tone, 7215-7217), answered
+    /// with the townsfolk's replies to each (7218-7220); the response's script keeps the tone (TMDfTalkTone).</summary>
+    void BuildToneTopics((FormKey Tone, FormKey[] Reacts) tone)
+    {
+        var branch = new DialogBranch(mod) { EditorID = "DFTalkToneBranch", Quest = quest!.ToLink<IQuestGetter>(), Category = DialogBranch.CategoryType.Player, Flags = DialogBranch.Flag.TopLevel };
+        mod.DialogBranches.Add(branch);
+        string[] openers = ["Hail to thee", "Greetings to you", "Listen up"];
+        for (int t = 0; t < 3; t++)
+        {
+            var greeting = text[TalkTone.Greetings[t]].FirstOrDefault(l => !l.Contains('%')) ?? openers[t];
+            var topic = Topic($"DFTalkTone{TalkTone.Names[t]}", Say(greeting) + $" ({TalkTone.Names[t].ToLowerInvariant()})", branch, DialogTopic.SubtypeEnum.Custom, DialogTopic.CategoryEnum.Topic);
+            if (t == 0) branch.StartingTopic = topic.ToNullableLink<IDialogTopicGetter>();
+            var conds = new List<ConditionFloat>();
+            for (int g = 0; g < 5; g++) conds.Add(Cond(GroupCondition(g), CompareOperator.EqualTo, 1, or: g < 4));
+            // Not the tone in use already.
+            conds.Add(Global(tone.Tone, CompareOperator.NotEqualTo, t));
+            foreach (var reply in text[TalkTone.Replies[t]])
+            {
+                var line = Line(Say(reply), conds, random: true);
+                line.VirtualMachineAdapter = new DialogResponsesAdapter
+                {
+                    Scripts = [new ScriptEntry { Name = "TMDfTalkTone", Properties = [new ScriptIntProperty { Name = "Tone", Data = t }] }],
+                    ScriptFragments = new ScriptFragments
+                    {
+                        ExtraBindDataVersion = 2, FileName = "TMDfTalkTone",
+                        OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfTalkTone", FragmentName = "Fragment_End" },
+                    },
+                };
+                topic.Responses.Add(line);
+            }
         }
     }
 

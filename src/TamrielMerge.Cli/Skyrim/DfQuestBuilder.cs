@@ -204,8 +204,16 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         // ring's power taken, the change ended), for "cure lycanthropy".
         if (masters[0].Quests.FirstOrDefault(q => q.VirtualMachineAdapter?.Scripts.Any(s => s.Name == "CompanionsHousekeepingScript") == true) is { } housekeeping)
             props.Add(Obj("WerewolfCure", housekeeping.FormKey));
-        props.Add(Obj("Lycanthropy", DfDiseases.Lycanthropy(mod, masters[0], diseases).FormKey));
+        var lycanthropy = DfDiseases.Lycanthropy(mod, masters[0], diseases);
+        props.Add(Obj("Lycanthropy", lycanthropy.FormKey));
+        props.Add(Obj("Vampirism", DfDiseases.Vampirism(mod, masters[0], diseases, lycanthropy, Spells, factions, DfText.Load(arena2), Machine!.FormKey).FormKey));
         if (sound is not null) props.Add(Obj("QuestSound", sound.FormKey));
+        // The talk's tone (TalkTone): the tone global, the five groups' reactions, the tone modifiers.
+        var tone = TalkTone.Globals(mod, null);
+        props.Add(Obj("TalkTone", tone.Tone));
+        props.Add(Objs("TalkReacts", tone.Reacts));
+        props.Add(Ints("EtiquetteMods", TalkTone.EtiquetteMods));
+        props.Add(Ints("StreetwiseMods", TalkTone.StreetwiseMods));
         props.AddRange(Summoning());
         // The sounds quests play ("play sound N": DAGGER.SND's record N), as Daggerfall's own sounds.
         var soundIds = quests.SelectMany(q => q.Ops).Where(o => o.Code is 0x3C or 0x54 && o.ArgCount > 1).Select(o => o.Args[1].Int).Distinct().Order().ToList();
@@ -216,8 +224,11 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             props.Add(Objs("DfSounds", madeSounds.Select(m => m.Marker)));
         }
         Machine.Aliases.Add(new QuestAlias { ID = 0, Name = "Player", ForcedReference = new FormLinkNullable<IPlacedGetter>(PlayerRef) });
+        // The name tags that carry an ended quest's rumour and its questor's answer (TMDfQuestMachine.Afterword).
+        foreach (var (id, name) in new[] { (1u, "Afterword"), (2u, "QuestorWord") })
+            Machine.Aliases.Add(new QuestAlias { ID = id, Name = name, Flags = QuestAlias.Flag.Optional | QuestAlias.Flag.AllowReserved | QuestAlias.Flag.AllowReuseInQuest });
         // "add face" is Daggerfall Unity's HUD faces only (TMDfQuestMachine.Face): no one is made to follow.
-        Machine.NextAliasID = 1;
+        Machine.NextAliasID = 3;
         Machine.VirtualMachineAdapter = new QuestAdapter
         {
             Scripts = [new ScriptEntry { Name = "TMDfQuestMachine", Properties = [.. props] }, Law()],
@@ -234,6 +245,7 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             rec.VirtualMachineAdapter!.Scripts[0].Properties.Add(Obj("Machine", Machine.FormKey));
 
         BuildWorkTopic(groupFactions);
+        BuildAfterwordTopics(groupFactions);
         Console.WriteLine($"Quests: {built.Count} Daggerfall quests, {Messages} messages, {Objectives} log entries, {Topics} topics"
             + (items.Missing.Count > 0 ? $"; items without a stand-in: {string.Join(", ", items.Missing)}" : "")
             + (Problems.Count > 0 ? $"; problems: {string.Join("; ", Problems.Take(5))}" : ""));
@@ -453,7 +465,7 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
                     Properties =
                     [
                         Ints("Ids", all.Select(f => f.Id)), Ints("Parents", all.Select(f => f.Parent)), Ints("Kind", all.Select(f => (int)f.Type)),
-                        Ints("GGroup", all.Select(f => f.GGroup)), Ints("Region", all.Select(f => f.Region)),
+                        Ints("GGroup", all.Select(f => f.GGroup)), Ints("Region", all.Select(f => f.Region)), Ints("Power", all.Select(f => f.Power)),
                         Ints("Allies", all.SelectMany(f => Enumerable.Range(0, 3).Select(i => Pad(f.Allies, i)))),
                         Ints("Enemies", all.SelectMany(f => Enumerable.Range(0, 3).Select(i => Pad(f.Enemies, i)))),
                         Strs("Names", all.Select(f => f.Name)), Objs("React", all.Select(f => FactionRecords(mod, f).React.FormKey)),
@@ -485,6 +497,8 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
     /// <summary>The dress by social group: commoners, merchants, scholars, nobility, underworld.</summary>
     static readonly int[] DressBySGroup = [0, 1, 2, 3, 0];
     const int FacesPerDress = 2, NamesPerRace = 12;
+    /// <summary>The first log message's stage (TMDfQuest.LogStage): its whole text as the stage's log entry.</summary>
+    const int LogStage = 1000;
 
     /// <summary>Daggerfall names per race and sex for quest people, NamesPerRace each, (race * 2 + female) * NamesPerRace + i.</summary>
     List<string> PersonNames()
@@ -548,17 +562,69 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         mod.DialogBranches.Add(branch);
         var topic = NewTopic("DFQuestWork", "Do you have any work for me?", Machine!, branch);
         branch.StartingTopic = topic.ToNullableLink<IDialogTopicGetter>();
-        var line = Line("Let me think.", AnyTownsperson(groups));
-        line.VirtualMachineAdapter = new DialogResponsesAdapter
+        // By the tone's reaction with the speaker's social group (TalkTone, rolled as the question is asked): refused
+        // (8075, no offer follows), else the offer (Daggerfall's 8076/8077 name a questor and a place the offer itself
+        // shows here).
+        var tone = TalkTone.Globals(mod, null);
+        var text = DfText.Load(arena2);
+        var refusals = text[TalkTone.WorkAnswers[0]].Where(l => !l.Contains('%')).Take(8).ToList();
+        if (refusals.Count == 0) refusals = ["I haven't heard of any work at all, no."];
+        for (int g = 0; g < groups.Count && g < 5; g++)
         {
-            Scripts = [new ScriptEntry { Name = "TMDfQuestTopic", Properties = [Obj("Machine", Machine!.FormKey), Int("Service", 0)] }],
-            ScriptFragments = new ScriptFragments
+            ConditionFloat Group() { var d = new GetInFactionConditionData(); d.Faction = new FormLinkOrIndex<IFactionGetter>(d, groups[g].FormKey); return Cond(d, CompareOperator.EqualTo, 1); }
+            ConditionFloat React(int r) { var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, tone.Reacts[g]); return Cond(d, CompareOperator.EqualTo, r); }
+            foreach (var refusal in refusals)
             {
-                ExtraBindDataVersion = 2, FileName = "TMDfQuestTopic",
-                OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfQuestTopic", FragmentName = "Fragment_End" },
-            },
-        };
-        topic.Responses.Add(line);
+                var no = Line(refusal, [Group(), React(0)], random: true);
+                no.VirtualMachineAdapter = new DialogResponsesAdapter
+                {
+                    Scripts = [new ScriptEntry { Name = "TMDfQuestTopic", Properties = [Obj("Machine", Machine!.FormKey), Int("Service", 0)] }],
+                    ScriptFragments = new ScriptFragments
+                    {
+                        ExtraBindDataVersion = 2, FileName = "TMDfQuestTopic",
+                        OnBegin = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfQuestTopic", FragmentName = "Fragment_Begin" },
+                    },
+                };
+                topic.Responses.Add(no);
+            }
+            ConditionFloat ReactAtLeast(int r) { var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, tone.Reacts[g]); return Cond(d, CompareOperator.GreaterThanOrEqualTo, r); }
+            var line = Line("Let me think.", [Group(), ReactAtLeast(1)]);
+            line.VirtualMachineAdapter = new DialogResponsesAdapter
+            {
+                Scripts = [new ScriptEntry { Name = "TMDfQuestTopic", Properties = [Obj("Machine", Machine!.FormKey), Int("Service", 0)] }],
+                ScriptFragments = new ScriptFragments
+                {
+                    ExtraBindDataVersion = 2, FileName = "TMDfQuestTopic",
+                    OnBegin = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfQuestTopic", FragmentName = "Fragment_Begin" },
+                    OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = "TMDfQuestTopic", FragmentName = "Fragment_End" },
+                },
+            };
+            topic.Responses.Add(line);
+        }
+    }
+
+    /// <summary>What is said after a quest ends (Daggerfall Unity TombstoneQuest): "Have you heard any rumors?" to any
+    /// townsperson tells an ended quest's rumour (1006/1007) the machine picked when the talk began, and "About that
+    /// task..." to its questor gets their answer (1008/1009); the texts ride the Afterword and QuestorWord aliases'
+    /// name tags.</summary>
+    void BuildAfterwordTopics(List<Faction> groups)
+    {
+        ConditionFloat Ready(string variable)
+        {
+            var d = new GetVMQuestVariableConditionData { VariableName = $"::{variable}_var" };
+            d.Quest = new FormLinkOrIndex<IQuestGetter>(d, Machine!.FormKey);
+            return Cond(d, CompareOperator.EqualTo, 1);
+        }
+        var rumours = new DialogBranch(mod) { EditorID = "DFQuestAfterwordBranch", Quest = Machine!.ToLink<IQuestGetter>(), Category = DialogBranch.CategoryType.Player, Flags = DialogBranch.Flag.TopLevel };
+        mod.DialogBranches.Add(rumours);
+        var rumourTopic = NewTopic("DFQuestAfterwordRumors", "Have you heard any rumors?", Machine!, rumours);
+        rumours.StartingTopic = rumourTopic.ToNullableLink<IDialogTopicGetter>();
+        rumourTopic.Responses.Add(Line("<Alias=Afterword>", [Ready("AfterwordReady"), .. AnyTownsperson(groups)]));
+        var questor = new DialogBranch(mod) { EditorID = "DFQuestQuestorWordBranch", Quest = Machine!.ToLink<IQuestGetter>(), Category = DialogBranch.CategoryType.Player, Flags = DialogBranch.Flag.TopLevel };
+        mod.DialogBranches.Add(questor);
+        var questorTopic = NewTopic("DFQuestQuestorWord", "About that task...", Machine!, questor);
+        questor.StartingTopic = questorTopic.ToNullableLink<IDialogTopicGetter>();
+        questorTopic.Responses.Add(Line("<Alias=QuestorWord>", [Ready("QuestorWordReady")]));
     }
 
     DialogTopic NewTopic(string edid, string name, Quest owner, DialogBranch branch)
@@ -792,7 +858,9 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
                 Messages++;
             }
 
-        // The log: one objective per log message (what it names shown once it is: LogRevealFirst / LogRevealCount).
+        // The log: one objective per log message (what it names shown once it is: LogRevealFirst / LogRevealCount), its
+        // first sentence (QuestText.Headline: the HUD shows an objective on one line), and the whole message as the log
+        // entry of its own stage (LogStage + its index: TMDfQuest.ShowLog), which the journal shows wrapped.
         var logRevealFirst = new List<int>();
         var logRevealCount = new List<int>();
         for (int i = 0; i < logIds.Count; i++)
@@ -801,7 +869,8 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             logRevealFirst.Add(revealKeys.Count);
             logRevealCount.Add(text.Length > 0 ? tokens.Named.Count : 0);
             if (text.Length > 0) revealKeys.AddRange(tokens.Named);
-            rec.Objectives.Add(new QuestObjective { Index = (ushort)i, DisplayText = text, Targets = [] });
+            rec.Objectives.Add(new QuestObjective { Index = (ushort)i, DisplayText = QuestText.Headline(text), Targets = [] });
+            if (text.Length > 0) rec.Stages.Add(new QuestStage { Index = (ushort)(LogStage + i), LogEntries = [new QuestLogEntry { Entry = text }] });
             Objectives++;
         }
 
@@ -844,12 +913,21 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
         for (int p = 0; p < q.Places.Count && p < 20; p++) About(p, 2, p, q.Places[p].Text1, q.Places[p].Text2);
         for (int p = 0; p < q.People.Count && p < 20; p++) About(20 + p, 1, p, q.People[p].Text1, q.People[p].Text2);
         for (int p = 0; p < q.Items.Count && p < 20; p++) About(40 + p, 0, p, q.Items[p].Text1, 0);
-        if (rumorIds.Count > 0)
+        // "Rumors during quest" (1005) is told while the quest runs (stage RunningStage, 50); "rumor mill" messages from
+        // their "rumor" op's stage. After the quest its rumour and the questor's answer (1006-1009) pass to the machine
+        // as plain text (TMDfQuest.Afterword fills the name tags in), since a stopped quest's dialogue is gone.
+        var during = q.Messages.GetValueOrDefault(1005) ?? [];
+        if (rumorIds.Count > 0 || during.Count > 0)
         {
             var branch = new DialogBranch(mod) { EditorID = $"{edid}RumorsBranch", Quest = rec.ToLink<IQuestGetter>(), Category = DialogBranch.CategoryType.Player, Flags = DialogBranch.Flag.TopLevel };
             mod.DialogBranches.Add(branch);
             var topic = NewTopic($"{edid}Rumors", "Have you heard any rumors?", rec, branch);
             branch.StartingTopic = topic.ToNullableLink<IDialogTopicGetter>();
+            if (during.Count > 0)
+            {
+                stages.Add(50);
+                foreach (var l in during) topic.Responses.Add(Line(Text(l), [StageDone(rec, 50), .. AnyTownsperson(groups)], random: true));
+            }
             for (int r = 0; r < rumorIds.Count; r++)
             {
                 stages.Add(200 + r);
@@ -857,7 +935,11 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
                     topic.Responses.Add(Line(Text(l), [StageDone(rec, 200 + r), .. AnyTownsperson(groups)], random: true));
             }
         }
+        string Plain(string raw) => Text(raw).Replace("<Alias=Player>", "%pcn").Replace("<Alias=T", "<T");
+        List<string> After(int id) => [.. (q.Messages.GetValueOrDefault(id) ?? []).Select(Plain)];
+        var afterwords = new[] { ("AfterRumorSuccess", After(1007)), ("AfterRumorFailure", After(1006)), ("AfterQuestorSuccess", After(1008)), ("AfterQuestorFailure", After(1009)) };
         foreach (int s in stages) rec.Stages.Add(new QuestStage { Index = (ushort)s, LogEntries = [] });
+        rec.Stages.Sort((x, y) => x.Index.CompareTo(y.Index));
 
         // Name tags, now that every text is converted.
         for (int k = 0; k < tokens.List.Count; k++) rec.Aliases.Add(Optional(Tokens.TagName(k)));
@@ -883,6 +965,8 @@ public sealed class DfQuestBuilder(SkyrimMod mod, string arena2, IReadOnlyList<I
             Ints("FoeType", q.Foes.Select(f => f.Type)), Ints("FoeCount", q.Foes.Select(f => f.Count)),
             Objs("FoeBase", q.Foes.Select(f => Foe?.Invoke(f.Type) ?? FormKey.Null)),
             Objs("Msgs", msgRecs), Ints("MsgIds", msgIds), Ints("LogIds", logIds), Ints("RumorIds", rumorIds),
+            Strs(afterwords[0].Item1, afterwords[0].Item2), Strs(afterwords[1].Item1, afterwords[1].Item2),
+            Strs(afterwords[2].Item1, afterwords[2].Item2), Strs(afterwords[3].Item1, afterwords[3].Item2),
             Ints("MsgRevealFirst", revealFirst), Ints("MsgRevealCount", revealCount), Ints("LogRevealFirst", logRevealFirst), Ints("LogRevealCount", logRevealCount),
             Ints("RevealKeys", revealKeys),
             Ints("TokenKind", tokens.List.Select(t => t.Kind)), Ints("TokenIndex", tokens.List.Select(t => t.Index)), Ints("TokenMode", tokens.List.Select(t => t.Mode)),

@@ -67,6 +67,14 @@ public sealed partial class ObPluginBuilder
 
     static readonly FormKey DoorOpenSound = Sk(0x0BFBE8), DoorCloseSound = Sk(0x0BFBE9), SwingOpenSound = Sk(0x05B0F3), SwingCloseSound = Sk(0x05B134);
     readonly Dictionary<FormKey, Activator?> swingDoors = new();
+    /// <summary>Door bases whose model was raised to stand on its foot, by how far the foot was from the old origin.</summary>
+    readonly Dictionary<FormKey, float> doorFoot = new();
+    public int SwingingDoorsPlaced { get; private set; }
+    /// <summary>Inner doors given Oblivion's rule for people and doors (TMObDoor).</summary>
+    public int InnerDoorsWatched { get; private set; }
+    /// <summary>The inner doors placed (Skyrim doors: gates, cell doors, rooms' doors), whose doorways their interior's
+    /// navmesh keeps to the frame (<see cref="Doorways"/>).</summary>
+    readonly System.Collections.Concurrent.ConcurrentDictionary<FormKey, byte> innerDoors = new();
 
     /// <param name="solid">Whether the navmesh goes around it (a load door; not a door that opens by itself).</param>
     Door? LoadDoor(Ob.IDoorGetter d, string edid, bool solid = true)
@@ -74,6 +82,8 @@ public sealed partial class ObPluginBuilder
         if (d.Model?.File is not { Length: > 0 } file || IsMarker(file)) return null;
         var mesh = Mesh(file);
         if (mesh is null) return null;
+        // Its origin at its foot, where Skyrim's people look for a door to open (ObDoorFoot).
+        (mesh, float foot) = DoorAtFoot(mesh);
         var door = new Door(mod)
         {
             EditorID = edid,
@@ -84,6 +94,7 @@ public sealed partial class ObPluginBuilder
         };
         if (d.Name is { Length: > 0 } n) door.Name = n;
         mod.Doors.Add(door);
+        if (foot != 0) doorFoot[door.FormKey] = foot;
         // A door that opens by itself stands open as often as closed: the navmesh goes through it, as through swing
         // doors.
         if (solid) meshByBase[door.FormKey] = mesh;
@@ -173,6 +184,9 @@ public sealed partial class ObPluginBuilder
         {
             StartMarker.Placement = placement;
             persistentCell.Persistent.Add(StartMarker);
+            // Oblivion's scripts name it too (CharacterGen's stage 5 moves the player to it; unregistered, that
+            // property was left empty: "cannot be moved to a None object's location", 2026-11-12).
+            placedBySource[r.FormKey] = StartMarker;
             return StartMarker;
         }
         var rec = records.GetValueOrDefault(r.Base.FormKey);
@@ -183,9 +197,11 @@ public sealed partial class ObPluginBuilder
         }
         // Oblivion's prisons: Skyrim prison markers, for the lands' jails (ObCrime).
         if (rec?.EditorID == "PrisonMarker") return PlacePrisonMarker(r, cell, persistentCell);
+        // Oblivion's map markers (every city, settlement, ruin, cave, camp...): Skyrim's, for the map and fast travel.
+        if (rec?.EditorID == "MapMarker") return PlaceMapMarker(r, persistentCell);
         float scale = r.Scale ?? 1;
         FormKey baseKey;
-        bool isDoor = false;
+        bool isDoor = false, innerDoor = false;
         switch (rec)
         {
             case Ob.ITreeGetter tree:
@@ -193,6 +209,16 @@ public sealed partial class ObPluginBuilder
                 baseKey = t.Tree; scale *= t.Scale;
                 break;
             case Ob.IDoorGetter door when r.TeleportDestination is null && !OpensByItself(door):
+                // A Skyrim door with a swing of its own (people open it); the script-swung activator only where its
+                // model couldn't be given one.
+                if (SwingingDoor(door.FormKey) is { } swinging)
+                {
+                    baseKey = swinging.FormKey;
+                    if (doorFoot.TryGetValue(baseKey, out float swingFoot)) { placement = AtFoot(placement, swingFoot, scale); DoorsFooted++; }
+                    SwingingDoorsPlaced++;
+                    innerDoor = true;
+                    break;
+                }
                 if (SwingDoor(door.FormKey) is not { } swing) return null;
                 baseKey = swing.FormKey;
                 break;
@@ -201,7 +227,8 @@ public sealed partial class ObPluginBuilder
                 // cell doors, secret doors: a Skyrim door plays their Open and Close, as vanilla MineSecretDoor01).
                 if (!bases.TryGetValue(door.FormKey, out var known)) bases[door.FormKey] = known = LoadDoor(door, "OB" + Sanitize(door.EditorID ?? door.FormKey.ID.ToString("X6")), solid: r.TeleportDestination is not null);
                 if (known is null) return null;
-                baseKey = known.FormKey; isDoor = r.TeleportDestination is not null;
+                baseKey = known.FormKey; isDoor = r.TeleportDestination is not null; innerDoor = !isDoor;
+                if (doorFoot.TryGetValue(baseKey, out float foot)) { placement = AtFoot(placement, foot, scale); DoorsFooted++; }
                 break;
             default:
                 if (Base(r.Base.FormKey) is not { } b)
@@ -222,13 +249,28 @@ public sealed partial class ObPluginBuilder
             Scale = MathF.Abs(scale - 1) > 0.001f ? scale : null,
             ItemCount = r.Count is > 1 && records.GetValueOrDefault(r.Base.FormKey) is { } br && IsItem(br) ? r.Count : null,
         };
-        ApplyLock(r, placed);
+        ApplyLock(r, placed, innerDoor);
+        if (innerDoor)
+        {
+            // Oblivion's rule for people and doors (TMObDoor): Skyrim's people don't open these by themselves.
+            placed.VirtualMachineAdapter ??= new VirtualMachineAdapter();
+            placed.VirtualMachineAdapter.Scripts.Add(new ScriptEntry { Name = "TMObDoor" });
+            InnerDoorsWatched++;
+            innerDoors[placed.FormKey] = 0;
+        }
+        if (OwnerOf(r.Owner.FormKey, r.FactionRank, !r.GlobalVariable.IsNull, cell: false) is { } owner)
+        {
+            placed.Owner.SetTo(owner.Owner);
+            placed.FactionRank = owner.Rank;
+        }
+        if (PathLinked().Contains(r.FormKey)) placedPathLinked[r.FormKey] = placed;
         if (isDoor)
         {
             placed.SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
             persistentCell.Persistent.Add(placed);
             placedDoors[r.FormKey] = placed;
             sourceDoors[r.FormKey] = r;
+            placedOf[r.FormKey] = placed;
             if (scriptRefs.Contains(r.FormKey)) placedBySource[r.FormKey] = placed;
         }
         else if (!PlaceForScripts(r.FormKey, placed, cell, persistentCell)) cell.Temporary.Add(placed);
@@ -246,6 +288,48 @@ public sealed partial class ObPluginBuilder
     /// <summary>Trigger boxes placed for Oblivion's trigger shapes (<see cref="PlaceTriggers"/>), the references whose
     /// model has one, and some whose script listens for none.</summary>
     public int TriggersPlaced { get; private set; }
+    /// <summary>Oblivion's map markers placed as Skyrim's (fast travel; the ones Oblivion shows from the start keep that).</summary>
+    public int MapMarkersPlaced { get; private set; }
+
+    /// <summary>
+    /// A map marker reference (base MapMarker, XMRK: name, kind, visible from the start / can be travelled to) as
+    /// Skyrim's (base MapMarker 0x10, MapMarker data), persistent in the worldspace's cell as Morrowind's towns'
+    /// are (MwPluginBuilder). Oblivion's kinds map onto Skyrim's icons by name where Skyrim has the kind (Camp,
+    /// Cave, City, Mine, Landmark, Settlement); its Ayleid and fort ruins are Skyrim's Nordic ruins and forts,
+    /// taverns settlements, Daedric shrines shrines, Oblivion gates and plain doors landmarks.
+    /// </summary>
+    PlacedObject? PlaceMapMarker(Ob.IPlacedObjectGetter r, Cell persistentCell)
+    {
+        if (r.MapMarker is not { } mm || r.Location is null) return null;
+        string kind = $"{mm.Types}";
+        string flags = $"{mm.Flags}";
+        var type = kind switch
+        {
+            "ElvenRuin" => MapMarker.MarkerType.NordicRuins,
+            "FortRuin" => MapMarker.MarkerType.Fort,
+            "Tavern" => MapMarker.MarkerType.Settlement,
+            "DaedricShrine" => MapMarker.MarkerType.Shrine,
+            "OblivionGate" or "Door" or "None" => MapMarker.MarkerType.Landmark,
+            _ => Enum.TryParse<MapMarker.MarkerType>(kind, out var same) ? same : MapMarker.MarkerType.Landmark,
+        };
+        var placed = new PlacedObject(mod)
+        {
+            EditorID = "OBMapMarker" + Sanitize(r.EditorID ?? r.FormKey.ID.ToString("X6")),
+            Base = new FormKey(ModKey.FromFileName("Skyrim.esm"), 0x10).ToNullableLink<IPlaceableObjectGetter>(),
+            Placement = new Placement { Position = r.Location.Position, Rotation = r.Location.Rotation },
+            SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400,
+            MapMarker = new MapMarker
+            {
+                Name = mm.Name ?? "",
+                Type = type,
+                Flags = (flags.Contains("Visible") ? MapMarker.Flag.Visible : 0) | (flags.Contains("CanTravelTo") ? MapMarker.Flag.CanTravelTo : 0),
+            },
+        };
+        persistentCell.Persistent.Add(placed);
+        if (scriptRefs.Contains(r.FormKey)) placedBySource[r.FormKey] = placed;
+        MapMarkersPlaced++;
+        return placed;
+    }
     public int TriggerShapesSeen { get; private set; }
     public List<string> TriggerUnheard { get; } = [];
 
@@ -286,12 +370,17 @@ public sealed partial class ObPluginBuilder
         foreach (var (lo, hi) in boxes)
         {
             var centre = System.Numerics.Vector3.Transform((lo + hi) / 2 * scale, m) + pos;
-            var half = (hi - lo) / 2 * scale;
+            // The whole box: the record's bounds here are its full size (the file holds half of them: measured
+            // 2026-11-15 on HearthFires.esm, file 44 x 160 x 24 against 88 x 320 x 48 here). Given half sizes until
+            // then, every trigger was half as big each way as Oblivion's: the prison cell's "stand by the window"
+            // zone, 534 x 53 x 380 along the back wall, came out 267 x 27 x 190 and only its far corner was in the
+            // cell (user: "it does not matter where on the wall you stand, the marker is wrong in the prison").
+            var size = (hi - lo) * scale;
             var box = new PlacedObject(mod)
             {
                 Base = triggerBase.ToNullableLink<IPlaceableObjectGetter>(),
                 Placement = new Placement { Position = new P3Float(centre.X, centre.Y, centre.Z), Rotation = pl.Rotation },
-                Primitive = new PlacedPrimitive { Type = PlacedPrimitive.TypeEnum.Box, Bounds = new P3Float(half.X, half.Y, half.Z), Color = System.Drawing.Color.FromArgb(0, 204, 76, 51), Unknown = 0.15f },
+                Primitive = new PlacedPrimitive { Type = PlacedPrimitive.TypeEnum.Box, Bounds = new P3Float(size.X, size.Y, size.Z), Color = System.Drawing.Color.FromArgb(0, 204, 76, 51), Unknown = 0.15f },
                 VirtualMachineAdapter = new VirtualMachineAdapter
                 {
                     Scripts = [new ScriptEntry { Name = "TMObTrigger", Properties = [new ScriptObjectProperty { Name = "Owner", Object = owner.ToLink<ISkyrimMajorRecordGetter>() }] }],
@@ -303,6 +392,74 @@ public sealed partial class ObPluginBuilder
     }
 
     /// <summary>Every interior cell of the active plugins.</summary>
+    // ---- linked path points ----
+
+    Keyword? pathCutKeyword;
+    HashSet<FormKey>? pathLinked;
+    readonly Dictionary<FormKey, PlacedObject> placedPathLinked = new();
+
+    /// <summary>Path points switched off by a script (PlacePathCuts), and the references they hang on.</summary>
+    public int PathCutsPlaced { get; private set; }
+    public int PathCutOwners { get; private set; }
+
+    /// <summary>The keyword linking a reference to its navmesh-cutting boxes (TMObState.LinkedPathPoints follows it).</summary>
+    Keyword PathCutKeyword()
+    {
+        if (pathCutKeyword is null) { pathCutKeyword = new Keyword(mod) { EditorID = "OBPathCut" }; mod.Keywords.Add(pathCutKeyword); }
+        return pathCutKeyword;
+    }
+
+    /// <summary>The references some cell's path grid links points to (PGRL), over every cell of the plugins.</summary>
+    HashSet<FormKey> PathLinked()
+    {
+        if (pathLinked is not null) return pathLinked;
+        pathLinked = [];
+        foreach (var m in Merge())
+            foreach (var map in m.Header.PathGrid?.PointToReferenceMappings ?? [])
+                pathLinked.Add(map.Reference.FormKey);
+        return pathLinked;
+    }
+
+    /// <summary>
+    /// Oblivion's linked path points (a path grid's PGRL: the points a gate, a bridge or a rock fall stands on, which
+    /// its script switches off with DisableLinkedPathPoints so nobody walks through it, and on again). Skyrim has no path
+    /// grid and its own function of that name only returns; what it has for the purpose is the navmesh-cutting box (a
+    /// CollisionMarker primitive on the collision layer L_NAVCUT, 49: 439 in Skyrim.esm, vanilla-primitives), which
+    /// cuts the navmesh while it is enabled. Each linked point is one, off to begin with (Oblivion's points are on),
+    /// chained to its reference by OBPathCut links; TMObState.LinkedPathPoints enables them to switch the points off.
+    /// </summary>
+    void PlacePathCuts(Ob.ICellGetter? source, Cell persistentCell)
+    {
+        if (source?.PathGrid is not { PointToReferenceMappings.Count: > 0 } grid) return;
+        // (A grid that maps points to references has its points; none, and every mapping is out of range.)
+        var points = grid.PointToPointConnections ?? [];
+        foreach (var map in grid.PointToReferenceMappings)
+        {
+            if (!placedPathLinked.TryGetValue(map.Reference.FormKey, out var owner)) continue;
+            PlacedObject last = owner;
+            int made = 0;
+            foreach (int i in map.Points.Select(p => (int)p).Distinct())
+            {
+                if (i < 0 || i >= points.Count) continue;
+                var at = points[i].Point;
+                var box = new PlacedObject(mod)
+                {
+                    Base = new FormLinkNullable<IPlaceableObjectGetter>(Sk(0x21)),   // CollisionMarker
+                    // The box stands on the point: half a person's height each way from 64 above it.
+                    Placement = new Placement { Position = new P3Float(at.X, at.Y, at.Z + 64), Rotation = new P3Float(0, 0, 0) },
+                    Primitive = new PlacedPrimitive { Type = PlacedPrimitive.TypeEnum.Box, Bounds = new P3Float(112, 112, 160), Color = System.Drawing.Color.FromArgb(0, 204, 76, 51), Unknown = 0.15f },
+                    CollisionLayer = 49,
+                    SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)(0x400 | 0x800),   // persistent, initially disabled
+                };
+                persistentCell.Persistent.Add(box);
+                last.LinkedReferences.Add(new LinkedReferences { KeywordOrReference = PathCutKeyword().ToLink<IKeywordLinkedReferenceGetter>(), Reference = box.ToLink<IPlacedGetter>() });
+                last = box;
+                made++;
+            }
+            if (made > 0) { PathCutsPlaced += made; PathCutOwners++; }
+        }
+    }
+
     public int BuildAllInteriors()
     {
         int n = 0;
@@ -318,6 +475,7 @@ public sealed partial class ObPluginBuilder
                 if (r is Ob.IPlacedObjectGetter o) Place(o, cell, cell);
                 else PlaceActor(r, cell, cell);
             }
+            PlacePathCuts(m.Header, cell);
             if (BeginNavmesh(cell, m.Header, background: true) is { } job) inHand.Enqueue(job);
             while (inHand.Count > most) FinishNavmesh(inHand.Dequeue());
             AddInteriorCell(cell);
@@ -334,7 +492,15 @@ public sealed partial class ObPluginBuilder
         {
             EditorID = "OB" + Sanitize(source.EditorID ?? source.FormKey.ID.ToString("X6")),
             Name = source.Name,
-            Flags = Cell.Flag.IsInteriorCell | (source.Flags is { } f && f.HasFlag(Ob.Cell.Flag.HasWater) ? Cell.Flag.HasWater : 0),
+            // "Public place": an owned inn, shop or hall anyone may enter. Without it Skyrim takes the player for a
+            // trespasser there (seen in game 2026-11-09: The Feed Bag's innkeeper at noon said only "it looks like you've
+            // wandered into a restricted area"; its converted cell had the interior flag alone and its owner).
+            Flags = Cell.Flag.IsInteriorCell | (source.Flags is { } f && f.HasFlag(Ob.Cell.Flag.HasWater) ? Cell.Flag.HasWater : 0)
+                // Every interior, not only Oblivion's "public place" ones: in Oblivion an owned place is trespassed only by
+                // getting in through a locked door, so an open shop or house by day is no trespass, flagged public or not
+                // (Jensine's shop isn't: DATA 0x01; in game she said only the trespass line). Skyrim counts every owned
+                // interior that isn't public as trespass at once. Not carried: trespass after picking a lock.
+                | Cell.Flag.PublicArea,
             LightingTemplate = LightingTemplate.ToLink<ILightingTemplateGetter>(),
             Lighting = Lighting(source.Lighting),
             WaterHeight = source.WaterHeight,
@@ -343,7 +509,36 @@ public sealed partial class ObPluginBuilder
         };
         // A water that hurts (lava) as lava that hurts (HurtingWater).
         if (!source.Water.IsNull && HurtingWater(source.Water.FormKey) is { } lava) cell.Water.SetTo(lava);
+        // Its owner (a house, a shop, a guild hall): what is in it is theirs, as in Oblivion.
+        if (OwnerOf(source.Owner.FormKey, source.FactionRank, !source.GlobalVariable.IsNull, cell: true) is { } owner)
+        {
+            cell.Owner.SetTo(owner.Owner);
+            if (owner.Rank is { } rank) cell.FactionRank = rank;
+        }
         return cell;
+    }
+
+    /// <summary>References and interior cells given their owner (2026-11-05, user: "theres no ownership by npcs etc for
+    /// objects that can be picked up", "for any game"): Oblivion's person or faction (with the rank from which its members
+    /// may take freely), as Skyrim's ownership. One whose ownership has a global (Oblivion's rented beds and rooms, free
+    /// while it is set) is left unowned, as Skyrim's ownership has no global to free it by.</summary>
+    public int OwnedRefs { get; private set; }
+    public int OwnedCells { get; private set; }
+    public int OwnershipByGlobalLeft { get; private set; }
+
+    (FormKey Owner, int? Rank)? OwnerOf(FormKey? obOwner, int? rank, bool byGlobal, bool cell)
+    {
+        if (obOwner is not { IsNull: false } key) return null;
+        if (byGlobal) { OwnershipByGlobalLeft++; return null; }
+        FormKey? to = records.GetValueOrDefault(key) switch
+        {
+            Ob.INpcGetter => (Actor(key) as INpcGetter)?.FormKey,
+            Ob.IFactionGetter => ObFaction(key)?.FormKey,
+            _ => null,
+        };
+        if (to is null) return null;
+        if (cell) OwnedCells++; else OwnedRefs++;
+        return (to.Value, records.GetValueOrDefault(key) is Ob.IFactionGetter ? rank : null);
     }
 
     // ---- water ----
@@ -389,7 +584,7 @@ public sealed partial class ObPluginBuilder
         landTextures[obTexture] = null;
         if (records.GetValueOrDefault(obTexture) is not Ob.ILandTextureGetter lt || lt.Icon is not { Length: > 0 } icon) return null;
         string file = icon.StartsWith("landscape", StringComparison.OrdinalIgnoreCase) ? icon : @"landscape\" + icon;
-        var diffuse = meshes.Textures.Ensure(file);
+        var diffuse = meshes.Textures.EnsureLand(file);
         if (diffuse is null) return null;
         var set = new TextureSet(mod)
         {
@@ -449,7 +644,7 @@ public sealed partial class ObPluginBuilder
 
     /// <summary>An Oblivion LAND as a Skyrim one: the raw height, normal and colour grids (same layout) and the texture
     /// layers (alpha entries: vertex index, opacity).</summary>
-    Landscape? ConvertLand(Ob.ILandscapeGetter land)
+    Landscape? ConvertLand(Ob.ILandscapeGetter land, int cx, int cy)
     {
         if (land.VertexHeightMap is not { } vhgt || vhgt.Length < 4 + 33 * 33) return null;
         var bytes = vhgt.ToArray();
@@ -478,25 +673,169 @@ public sealed partial class ObPluginBuilder
                 for (int x = 0; x < 33; x++)
                     l.VertexColors[x, y] = new P3UInt8(c[(y * 33 + x) * 3], c[(y * 33 + x) * 3 + 1], c[(y * 33 + x) * 3 + 2]);
         }
-        foreach (var layer in land.Layers)
-        {
-            if (LandTexture(layer.Header.Texture.FormKey) is not { } tex) continue;
-            var header = new LayerHeader { Texture = tex.ToLink<ILandscapeTextureGetter>(), Quadrant = (Quadrant)(int)layer.Header.Quadrant, LayerNumber = layer.Header.LayerNumber };
-            if (layer is Ob.IAlphaLayerGetter alpha)
-            {
-                var al = new AlphaLayer { Header = header, AlphaLayerData = [] };
-                if (alpha.AlphaLayerData is { } data)
-                {
-                    var d = data.ToArray();
-                    for (int i = 0; i + 8 <= d.Length; i += 8)
-                        al.AlphaLayerData.Add(new AlphaLayerData { Position = BitConverter.ToUInt16(d, i), Opacity = BitConverter.ToSingle(d, i + 4) });
-                }
-                l.Layers.Add(al);
-            }
-            else l.Layers.Add(new BaseLayer { Header = header });
-        }
+        AddLayers(l, land, cx, cy);
         l.IsCompressed = true;
         return l;
+    }
+
+    /// <summary>A land quadrant's grounds as Oblivion has them: its base (null key: none, the default ground) and its
+    /// alpha layers in their order, each with its strength at the quadrant's 17x17 vertices. A texture laid twice is
+    /// one ground (its strengths added); a texture without a file is left out.</summary>
+    sealed class LandQuad
+    {
+        public FormKey Base = FormKey.Null;
+        public List<(FormKey Texture, float[] Opacity)> Alphas = [];
+        /// <summary>Each ground's share of each vertex: the alpha layers' strengths, the base the rest.</summary>
+        public Dictionary<FormKey, float[]> Shares()
+        {
+            var shares = new Dictionary<FormKey, float[]>();
+            var rest = new float[289];
+            Array.Fill(rest, 1f);
+            foreach (var (t, o) in Alphas)
+            {
+                if (t == Base) continue;   // the base's own texture laid over itself
+                shares[t] = o;
+                for (int i = 0; i < 289; i++) rest[i] -= o[i];
+            }
+            for (int i = 0; i < 289; i++) rest[i] = Math.Max(0, rest[i]);
+            shares[Base] = rest;
+            return shares;
+        }
+    }
+
+    LandQuad?[] LandQuads(Ob.ILandscapeGetter land)
+    {
+        var quads = new LandQuad?[4];
+        foreach (var layer in land.Layers)
+        {
+            // (Every layer of Oblivion's land has its header: one without names no quadrant, as one out of range.)
+            if (layer.Header is not { } header) continue;
+            int q = (int)header.Quadrant;
+            if (q < 0 || q > 3) continue;
+            var key = header.Texture.FormKey;
+            bool laid = LandTexture(key) is not null;
+            var quad = quads[q] ??= new LandQuad();
+            if (layer is Ob.IAlphaLayerGetter alpha)
+            {
+                if (!laid || alpha.AlphaLayerData is not { } data) continue;
+                int found = quad.Alphas.FindIndex(a => a.Texture == key);
+                var o = found >= 0 ? quad.Alphas[found].Opacity : new float[289];
+                if (found < 0) quad.Alphas.Add((key, o));
+                var d = data.ToArray();
+                for (int i = 0; i + 8 <= d.Length; i += 8)
+                    if (BitConverter.ToUInt16(d, i) is var pos && pos < 289) o[pos] = Math.Min(1f, o[pos] + BitConverter.ToSingle(d, i + 4));
+            }
+            else if (laid) quad.Base = key;
+        }
+        return quads;
+    }
+
+    /// <summary>The grounds each world quadrant of the worldspace being built lays (six at most), with how much of the
+    /// quadrant each covers; by world quadrant (two a cell each way).</summary>
+    readonly Dictionary<(int, int), Dictionary<FormKey, float>> landKept = [];
+    /// <summary>The grounds each world quadrant holds past its six, which it cannot lay.</summary>
+    readonly Dictionary<(int, int), HashSet<FormKey>> landDropped = [];
+    public int LandCrowdedQuadrants { get; private set; }
+    public int LandVerticesRestood { get; private set; }
+    public int LandNothingShared { get; private set; }
+
+    /// <summary>Before a worldspace's lands are converted: which six grounds each of its quadrants keeps.</summary>
+    void PrepareLands(IEnumerable<(Ob.ILandscapeGetter Land, int X, int Y)> lands)
+    {
+        landKept.Clear();
+        landDropped.Clear();
+        foreach (var (land, x, y) in lands)
+        {
+            var quads = LandQuads(land);
+            for (int q = 0; q < 4; q++)
+            {
+                if (quads[q] is not { } quad) continue;
+                var totals = quad.Shares().ToDictionary(kv => kv.Key, kv => kv.Value.Sum()).Where(kv => kv.Value > 0.004f || kv.Key == quad.Base)
+                    .OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key.ToString(), StringComparer.Ordinal).ToList();
+                if (totals.Count > 6) LandCrowdedQuadrants++;
+                landKept[(x * 2 + (q & 1), y * 2 + (q >> 1))] = totals.Take(6).ToDictionary(kv => kv.Key, kv => kv.Value);
+                if (totals.Count > 6) landDropped[(x * 2 + (q & 1), y * 2 + (q >> 1))] = [.. totals.Skip(6).Select(kv => kv.Key)];
+            }
+        }
+    }
+
+    /// <summary>
+    /// A land's texture layers. Skyrim lays six textures a quadrant where Oblivion lays nine, and 28,003 of Cyrodiil's
+    /// 82,628 quadrants hold more than six (measured on the converted plugin, 2026-11-12): the layers past the sixth
+    /// were lost, and what one quadrant lost its neighbour might keep, a straight seam along their edge. A quadrant
+    /// keeps its six commonest grounds; a vertex holding a ground that a quadrant it lies on does not lay (its own,
+    /// or on an edge a neighbour's) gives that ground's share to its others, or, having no other, takes the commonest
+    /// ground all those quadrants lay; so both sides of an edge draw the same ground. Every other vertex keeps
+    /// Oblivion's own strengths.
+    /// </summary>
+    void AddLayers(Landscape l, Ob.ILandscapeGetter land, int cx, int cy)
+    {
+        var quads = LandQuads(land);
+        for (int q = 0; q < 4; q++)
+        {
+            if (quads[q] is not { } quad) continue;
+            int qx = cx * 2 + (q & 1), qy = cy * 2 + (q >> 1);
+            if (!landKept.TryGetValue((qx, qy), out var kept)) continue;
+            var shares = quad.Shares();
+            // The base: none where Oblivion has none (the default ground cannot be a layer); else Oblivion's own if
+            // kept, else the commonest kept.
+            FormKey baseKey = kept.ContainsKey(FormKey.Null) && shares.ContainsKey(FormKey.Null) ? FormKey.Null
+                : kept.ContainsKey(quad.Base) ? quad.Base : kept.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key.ToString(), StringComparer.Ordinal).First().Key;
+            var order = quad.Alphas.Select(a => a.Texture).Where(t => t != baseKey && kept.ContainsKey(t)).ToList();
+            if (quad.Base != baseKey && kept.ContainsKey(quad.Base) && !quad.Base.IsNull) order.Insert(0, quad.Base);
+            var written = order.ToDictionary(t => t, _ => new float[289]);
+            var here = new Dictionary<FormKey, float>();
+            for (int ly = 0; ly < 17; ly++)
+                for (int lx = 0; lx < 17; lx++)
+                {
+                    int i = ly * 17 + lx;
+                    // A ground is lost to this vertex when this quadrant does not keep it, or a quadrant the vertex
+                    // also lies on holds it past its six. (Not when a neighbour simply never laid it: Oblivion's own
+                    // lands differ along many edges, and those are left as they are; counting them, the first build
+                    // changed 389,341 vertices, 131,806 of them with no ground in common.)
+                    var sharing = new List<Dictionary<FormKey, float>> { kept };
+                    var lost = new List<HashSet<FormKey>>();
+                    for (int oy = ly == 0 ? -1 : 0; oy <= (ly == 16 ? 1 : 0); oy++)
+                        for (int ox = lx == 0 ? -1 : 0; ox <= (lx == 16 ? 1 : 0); ox++)
+                            if ((ox != 0 || oy != 0) && landDropped.TryGetValue((qx + ox, qy + oy), out var gone))
+                            { lost.Add(gone); if (landKept.TryGetValue((qx + ox, qy + oy), out var theirs)) sharing.Add(theirs); }
+                    bool Allowed(FormKey t) { if (!kept.ContainsKey(t)) return false; foreach (var g in lost) if (g.Contains(t)) return false; return true; }
+                    here.Clear();
+                    float sum = 0, held = 0;
+                    bool whole = baseKey == quad.Base;
+                    foreach (var (t, o) in shares)
+                    {
+                        if (o[i] <= 0.004f) continue;
+                        sum += o[i];
+                        if (Allowed(t)) { here[t] = o[i]; held += o[i]; } else whole = false;
+                    }
+                    if (whole)
+                    {
+                        // Nothing of this vertex is lost: Oblivion's own strengths.
+                        foreach (var (t, o) in quad.Alphas) if (written.TryGetValue(t, out var w)) w[i] = o[i];
+                        continue;
+                    }
+                    if (held > 0) { foreach (var (t, v) in here) if (written.TryGetValue(t, out var w)) w[i] = v / held; }
+                    else
+                    {
+                        var common = kept.Keys.Where(Allowed).ToList();
+                        if (common.Count == 0) { common = [.. kept.Keys]; LandNothingShared++; }
+                        var stand = common.OrderByDescending(t => sharing.Sum(s => s.GetValueOrDefault(t))).ThenBy(t => t.ToString(), StringComparer.Ordinal).First();
+                        if (written.TryGetValue(stand, out var w)) w[i] = 1;
+                    }
+                    LandVerticesRestood++;
+                }
+            if (!baseKey.IsNull) l.Layers.Add(new BaseLayer { Header = new LayerHeader { Texture = LandTexture(baseKey)!.ToLink<ILandscapeTextureGetter>(), Quadrant = (Quadrant)q } });
+            ushort number = 0;
+            foreach (var t in order)
+            {
+                var al = new AlphaLayer { Header = new LayerHeader { Texture = LandTexture(t)!.ToLink<ILandscapeTextureGetter>(), Quadrant = (Quadrant)q, LayerNumber = number }, AlphaLayerData = [] };
+                var w = written[t];
+                for (int i = 0; i < 289; i++)
+                    if (w[i] > 0.004f) al.AlphaLayerData.Add(new AlphaLayerData { Position = (ushort)i, Opacity = Math.Min(w[i], 1f) });
+                if (al.AlphaLayerData.Count > 0) { number++; l.Layers.Add(al); }
+            }
+        }
     }
 
     // ---- worldspaces ----
@@ -534,13 +873,14 @@ public sealed partial class ObPluginBuilder
             var water = new Dictionary<Cell, float>(ReferenceEqualityComparer.Instance);
             var top = new Cell(mod) { Flags = tamriel.TopCell?.Flags ?? 0, SkyrimMajorRecordFlags = tamriel.TopCell?.SkyrimMajorRecordFlags ?? 0, Persistent = [], Temporary = [] };
             Cell CellAt((int X, int Y) g) => cells.TryGetValue(g, out var c) ? c : cells[g] = new Cell(mod) { Grid = new CellGrid { Point = new P2Int(g.X, g.Y) }, Flags = Cell.Flag.HasWater, Persistent = [], Temporary = [] };
+            PrepareLands((byWorld.GetValueOrDefault(key) ?? []).Where(m => !m.IsPersistentCell && m.Header.Grid is not null && m.Land is not null).Select(m => (m.Land!, m.Header.Grid!.Value.X, m.Header.Grid!.Value.Y)));
             foreach (var m in byWorld.GetValueOrDefault(key) ?? [])
             {
                 Cell? cell = null;
                 if (!m.IsPersistentCell && m.Header.Grid is { } grid)
                 {
                     cell = CellAt((grid.X, grid.Y));
-                    if (m.Land is { } land && ConvertLand(land) is { } converted) cell.Landscape = converted;
+                    if (m.Land is { } land && ConvertLand(land, grid.X, grid.Y) is { } converted) cell.Landscape = converted;
                     if (m.Header.WaterHeight is { } wh) cell.WaterHeight = wh;
                     if (m.Header.Flags is { } hf && hf.HasFlag(Ob.Cell.Flag.HasWater)) water[cell] = m.Header.WaterHeight ?? 0;
                     if (m.Header.Regions is { Count: > 0 } rs) cellRegions.Add((cell, rs.Select(r => r.FormKey)));
@@ -553,6 +893,7 @@ public sealed partial class ObPluginBuilder
                     if (r is Ob.IPlacedObjectGetter o) Place(o, target, top);
                     else PlaceActor(r, target, top);
                 }
+                PlacePathCuts(m.Header, top);
             }
             if (cells.Count == 0) { cells[(0, 0)] = CellAt((0, 0)); }
             // Its water: lava where Oblivion's hurts (HurtingWater), else Skyrim's.
@@ -598,7 +939,7 @@ public sealed partial class ObPluginBuilder
             mod.Worldspaces.Add(ws);
             worldspaces[key] = ws;
             AddRegions(key, ws, cellRegions);
-            navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod);
+            navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod) { FloorFit = 8 };
             var loadDoorSet = placedDoors.Values.ToHashSet();
             // A city (a child worldspace: Anvil, Bravil, the Imperial City's districts...): a marker in the middle of
             // its doors, for the dangers of the night in town (TMNightDanger finds OBTownCentres by name).
@@ -677,7 +1018,8 @@ public sealed partial class ObPluginBuilder
 
     /// <summary>
     /// The worldspace's Oblivion regions as Skyrim regions: the same areas (Oblivion's region points are in world
-    /// units, as Skyrim's are) and weather chances, each Oblivion weather as the nearest Skyrim one by name; the
+    /// units, as Skyrim's are) and weather chances, each Oblivion weather as its own converted record (ObWeather:
+    /// Oblivion's colours, fog, clouds, sounds), the nearest Skyrim one by name only where Oblivion has no data; the
     /// Oblivion planes' storms are Helgen's dragon-attack sky. Each cell lists its regions, as in Oblivion. Based on a
     /// vanilla region record so its header is valid.
     /// </summary>
@@ -700,7 +1042,8 @@ public sealed partial class ObPluginBuilder
             region.Weather!.Weathers = [];
             foreach (var w in src.Weather?.Weathers ?? [])
             {
-                if (w.Chance <= 0 || WeatherFor(w.Weather.FormKey) is not { } sky) continue;
+                // Oblivion's own weather record (ObWeather); the vanilla look-alike by name only where it has no data.
+                if (w.Chance <= 0 || (ObWeather(w.Weather.FormKey)?.FormKey ?? WeatherFor(w.Weather.FormKey)) is not { } sky) continue;
                 var existing = region.Weather.Weathers.FirstOrDefault(x => x.Weather.FormKey == sky);
                 if (existing is not null) existing.Chance += w.Chance;
                 else region.Weather.Weathers.Add(new WeatherType { Weather = new FormLink<IWeatherGetter>(sky), Chance = w.Chance });
@@ -708,7 +1051,8 @@ public sealed partial class ObPluginBuilder
             if (region.Weather.Weathers.Count == 0) region.Weather = null;
             foreach (var area in src.Areas)
             {
-                var points = area.RegionPoints.Select(p => new P2Float(p.X, p.Y)).ToList();
+                // (An area without points has fewer than three: left out, as one too small.)
+                var points = (area.RegionPoints ?? []).Select(p => new P2Float(p.X, p.Y)).ToList();
                 if (points.Count >= 3) region.RegionAreas.Add(new RegionArea { EdgeFallOff = area.EdgeFallOff ?? 0, RegionPointListData = [.. points] });
             }
             regions[src.FormKey] = region;
@@ -724,6 +1068,7 @@ public sealed partial class ObPluginBuilder
 
     static readonly ModKey SkyrimKey = ModKey.FromFileName("Skyrim.esm"), DragonbornKey = ModKey.FromFileName("Dragonborn.esm");
 
+    /// <summary>The fallback: a vanilla weather chosen by the Oblivion weather's name, for one with no record data.</summary>
     FormKey? WeatherFor(FormKey obWeather)
     {
         string id = obWeathers!.GetValueOrDefault(obWeather)?.EditorID ?? "";
@@ -761,6 +1106,12 @@ public sealed partial class ObPluginBuilder
         foreach (var p in placed)
         {
             if (p.Placement is not { } pl || !meshByBase.TryGetValue(p.Base.FormKey, out var mesh)) continue;
+            // What gives way isn't in the way: a wall, gate or bridge a script moves aside (an activator whose model
+            // has a move from one state to another: "Forward", "Open") is walked through once moved, as a door is, and
+            // Oblivion's path grid runs through it. With its collision in the navmesh's input the navmesh ended at it
+            // for good: the Emperor's party had no way through the prison's secret wall after Captain Renault opened it
+            // (seen in game 2026-11-14: the opening held at stage 19, the party turned back to the cell gate).
+            if (GivesWay(p.Base.FormKey, mesh)) { Interlocked.Increment(ref SolidsGivingWay); continue; }
             float sc = p.Scale ?? 1;
             var m = TamrielMerge.Skyrim.SkyrimRotation.Matrix(pl.Rotation);
             var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
@@ -772,6 +1123,14 @@ public sealed partial class ObPluginBuilder
             }
         }
     }
+
+    /// <summary>Placed things left out of the navmesh's input because they give way (<see cref="GivesWay"/>).</summary>
+    public int SolidsGivingWay;
+
+    /// <summary>Whether a placed thing is moved aside by a script: an activator (or a moving static) whose model has
+    /// a sequence that ends (not a loop: a wheel turning stays where it is).</summary>
+    bool GivesWay(FormKey baseKey, ObMeshConverter.Result mesh) =>
+        (mod.Activators.ContainsKey(baseKey) || mod.MoveableStatics.ContainsKey(baseKey)) && mesh.Sequences.Any(q => !q.Loop);
 
     /// <summary>Each base object's collision: whether its winding can be trusted (worked out once).</summary>
     readonly Dictionary<FormKey, bool> trustedWinding = new();
@@ -792,7 +1151,7 @@ public sealed partial class ObPluginBuilder
     List<(System.Numerics.Vector3[] Points, System.Numerics.Vector3 Normal)> InvisibleFloor(Cell cell, Ob.ICellGetter? source, out string how, bool wide = false)
     {
         // The cell's pathgrid, if it has one.
-        var grid = source?.PathGrid?.PointToPointConnections.ToList() ?? [];
+        var grid = source?.PathGrid?.PointToPointConnections?.ToList() ?? [];
         var points = grid.Select(g => new System.Numerics.Vector3(g.Point.X, g.Point.Y, g.Point.Z)).ToList();
         var links = new List<(int, int)>();
         for (int i = 0; i < grid.Count; i++)
@@ -898,7 +1257,7 @@ public sealed partial class ObPluginBuilder
             FlooredInteriors.Add($"{cell.EditorID} ({how0})");
             floored = true;
         }
-        navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod);
+        navmeshes ??= new Skyrim.Navmesh.NavmeshBuilder(mod) { FloorFit = 8 };
         var job = new NavJob
         {
             Cell = cell, Source = source, Solid = solid, TurnedUp = turnedUp, SolidOwn = solidOwn, Floored = floored,
@@ -911,8 +1270,36 @@ public sealed partial class ObPluginBuilder
         if (level is not null && !cell.Water.IsNull && hurtingWaters.Values.Any(w => w is not null && w.FormKey == cell.Water.FormKey)) HazardCells++;
         job.Underwater = level is { } wl ? p => p.Z < wl : null;
         job.Pending = navmeshes.BeginInterior(cell, solid, turnedUp, job.LoadDoors, cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null,
-            job.Actors, null, job.Underwater, background);
+            job.Actors, null, job.Underwater, background, Doorways(cell));
         return job;
+    }
+
+    /// <summary>
+    /// The doorways of an interior's inner doors (<see cref="Skyrim.Navmesh.NavmeshBuilder.Doorway"/>): each door's
+    /// bounds where it stands, across its width as they are (and a little: the frame stops the floor anyway) and a step
+    /// through it on either side (the agent's radius and a little), from its foot down to a stair's climb below and up
+    /// to a knee above. Skyrim's people go through an inner door only when the navmesh under it is as wide as it.
+    /// </summary>
+    List<Skyrim.Navmesh.NavmeshBuilder.Doorway> Doorways(Cell cell)
+    {
+        const float Across = 8, Through = 32, Below = 64, Above = 48;
+        var list = new List<Skyrim.Navmesh.NavmeshBuilder.Doorway>();
+        foreach (var p in cell.Persistent.Concat(cell.Temporary).OfType<PlacedObject>())
+        {
+            if (!innerDoors.ContainsKey(p.FormKey) || p.Placement is not { } pl || !mod.Doors.TryGetValue(p.Base.FormKey, out var door) || door.ObjectBounds is not { } b) continue;
+            float sc = p.Scale ?? 1;
+            // The door's width runs along its bounds' longer side; through it, the shorter.
+            bool wideOnX = b.Second.X - b.First.X >= b.Second.Y - b.First.Y;
+            float x0 = b.First.X - (wideOnX ? Across : Through), x1 = b.Second.X + (wideOnX ? Across : Through);
+            float y0 = b.First.Y - (wideOnX ? Through : Across), y1 = b.Second.Y + (wideOnX ? Through : Across);
+            var m = TamrielMerge.Skyrim.SkyrimRotation.Matrix(pl.Rotation);
+            var pos = new System.Numerics.Vector3(pl.Position.X, pl.Position.Y, pl.Position.Z);
+            var corners = new[] { (x0, y0), (x1, y0), (x1, y1), (x0, y1) }
+                .Select(c => System.Numerics.Vector3.Transform(new System.Numerics.Vector3(c.Item1, c.Item2, 0) * sc, m) + pos)
+                .Select(w => new System.Numerics.Vector2(w.X, w.Y)).ToArray();
+            list.Add(new(corners, pl.Position.Z - Below, pl.Position.Z + Above));
+        }
+        return list;
     }
 
     /// <summary>An interior's navmesh finished (in the order begun): a floor of its own when it had nothing to walk on, and
@@ -948,13 +1335,16 @@ public sealed partial class ObPluginBuilder
                     FlooredInteriors.Add($"{cell.EditorID} ({how})");
                     try
                     {
-                        made = navmeshes.BuildInterior(cell, solid, turnedUp, loadDoors,
+                        // (Made by BeginNavmesh before this navmesh was begun.)
+                        made = navmeshes!.BuildInterior(cell, solid, turnedUp, loadDoors,
                             cell.Persistent.Contains(StartMarker) ? StartMarker.Placement!.Position : null, actors, underwater: underwater);
                         break;
                     }
                     catch (InvalidOperationException again) when (again.Message.StartsWith("no floor to walk on")) { }
                 }
-                r = made ?? throw e;
+                // Still nothing to walk on: the first failure, as it was thrown.
+                if (made is null) throw;
+                r = made;
             }
             Navmeshes++;
             NavmeshTriangles += r.Triangles;
@@ -987,7 +1377,9 @@ public sealed partial class ObPluginBuilder
             placed.TeleportDestination = new TeleportDestination { Door = partner.ToLink<IPlacedObjectGetter>(), Position = dest.Position, Rotation = dest.Rotation };
             linked++;
         }
-        // Doors linked here and any other without a door triangle get theirs now.
+        // Doors linked here and any other without a door triangle get theirs now. (Doors that lead nowhere get none, as
+        // in Skyrim.esm: none of its 1,577 inner doors is among its navmeshes' door triangles or the navmesh map's
+        // linked doors; the navmesh just runs on under them. Measured with nav-inner-doors, 2026-11-15.)
         DoorTrianglesAdded = navmeshes?.AddMissingDoorTriangles(mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells)) ?? 0;
         return (linked, unlinked);
     }

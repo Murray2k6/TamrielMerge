@@ -34,11 +34,20 @@ ObjectReference[] Property DDoor Auto
 ObjectReference[] Property DStart Auto
 ObjectReference[] Property DSpawn Auto
 ObjectReference[] Property DItem Auto
+ObjectReference[] Property DHeld Auto
+{Magically held doors a quest's transfer into the dungeon opens (Castle Daggerfall's foyer), with DHeldDungeon the
+dungeon each is in.}
+Int[] Property DHeldDungeon Auto
+ObjectReference[] Property DSpawnAll Auto
+{Every quest spawn marker of each dungeon in the dungeon's order, with DSpawnDungeon the dungeon each is in ("transfer
+pc inside _place_ marker N" takes the N-th).}
+Int[] Property DSpawnDungeon Auto
 Int[] Property IFaction Auto
 Actor[] Property IRef Auto
 
 Event OnInit()
-  RegisterForSingleUpdate(2.0)
+  ; Spread out: all 95 lists registering in one moment put the game over its 100 waiting scripts (2026-11-09).
+  RegisterForSingleUpdate(Utility.RandomFloat(1.0, 5.0))
 EndEvent
 
 Event OnUpdate()

@@ -10,7 +10,13 @@ Float Property RopeLength = 300.0 Auto
 {How far the rope hangs below its top (its origin).}
 
 Event OnActivate(ObjectReference akActionRef)
-  If akActionRef == Game.GetPlayer() && Mover
-    Mover.Swing(Self, Landings, RopeLength)
+  If akActionRef != Game.GetPlayer() || !Mover
+    Return
   EndIf
+  If !Landings || Landings.Length < 6
+    ; The build found no two landings for this rope (2026-10-29: 11 of 29): said, rather than nothing.
+    Debug.Notification("The rope leads nowhere you can reach from here.")
+    Return
+  EndIf
+  Mover.Swing(Self, Landings, RopeLength)
 EndEvent

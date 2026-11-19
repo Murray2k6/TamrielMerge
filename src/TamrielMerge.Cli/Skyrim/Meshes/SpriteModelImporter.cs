@@ -31,16 +31,71 @@ public sealed class SpriteModelImporter(SkyrimMod mod, string modOutDir, string 
     /// 604, one at a time that was most of a batch's first minutes), their records then added one by one in the
     /// models' order, so the plugin comes out the same as one made in turn.
     /// </summary>
+    /// <summary>The list of the models imported into an output (Meshes\TamrielMerge\DF\Models\models.json: each one's
+    /// sprite, kind, mesh path and bounds): a later conversion into the same output adds the statics from it without the
+    /// model maker's work folder, which the conversion removes when it is done.</summary>
+    public static string ManifestPath(string outDir) => Path.Combine(outDir, "Meshes", "TamrielMerge", "DF", "Models", "models.json");
+
+    /// <summary>Paint: the cutout rule its texture was painted by (the model's "reprojected" file, reproject.py).</summary>
+    /// <summary>Foliage: the realistic plant it is (FoliageModels: models/&lt;uid&gt;/&lt;n&gt;), null for a model made from its sprite.</summary>
+    sealed record Entry(string Name, int Archive, int Record, string Kind, string Mesh, float[] Min, float[] Max, string? Paint = null, string? Foliage = null);
+
+    /// <summary>reproject.py's CUTOUT_RULE: foliage painted by any other (2026-11-02: side faces cut away, the holes in
+    /// trees) is painted again.</summary>
+    public const string CutoutRule = "facing 0.6";
+
+    /// <summary>Whether the models an earlier conversion put in <paramref name="outDir"/> are painted as now: every plant
+    /// and tree by <see cref="CutoutRule"/> (a manifest from before has none, and its textures have the holes).</summary>
+    public static bool ManifestCurrent(string outDir)
+    {
+        try
+        {
+            var entries = System.Text.Json.JsonSerializer.Deserialize<Entry[]>(File.ReadAllText(ManifestPath(outDir))) ?? [];
+            // ... and each sprite the plant the foliage mapping names now (a changed mapping is imported anew).
+            return entries.Where(e => e.Kind is "Plant" or "Tree").All(e => e.Paint == CutoutRule || e.Foliage is not null)
+                && entries.All(e => e.Foliage == FoliageRel(e.Name)) && SpriteModels.Targets.All(t => FoliageRel(t.Name) is null || entries.Any(e => e.Name == t.Name));
+        }
+        catch (Exception e) when (e is IOException or System.Text.Json.JsonException) { return false; }
+    }
+
+    static string? PaintOf(string dir) =>
+        File.Exists(Path.Combine(dir, "reprojected")) ? File.ReadAllText(Path.Combine(dir, "reprojected")).Trim() : null;
+
+    /// <summary>The models an earlier conversion imported into <paramref name="fromDir"/> (its manifest), as statics
+    /// of this plugin; none without a manifest. A model whose mesh file is gone is left out (its stand-in stays).</summary>
+    public Dictionary<(int Archive, int Record), Made> ImportFromManifest(string fromDir, List<string> problems)
+    {
+        var made = new Dictionary<(int, int), Made>();
+        string manifest = ManifestPath(fromDir);
+        if (!File.Exists(manifest)) return made;
+        Entry[] entries;
+        try { entries = System.Text.Json.JsonSerializer.Deserialize<Entry[]>(File.ReadAllText(manifest)) ?? []; }
+        catch (System.Text.Json.JsonException e) { problems.Add($"{manifest}: {e.Message}"); return made; }
+        var byName = SpriteModels.Targets.ToDictionary(t => t.Name);
+        foreach (var e in entries)
+        {
+            if (!byName.TryGetValue(e.Name, out var t) || Rejected.Contains(t.Name)) continue;
+            if (!File.Exists(Path.Combine(fromDir, "Meshes", e.Mesh))) { problems.Add($"{e.Name}: {e.Mesh} is gone from {fromDir}"); continue; }
+            made[(t.Archive, t.Record)] = AddStatic(t, e.Mesh, new Vector3(e.Min[0], e.Min[1], e.Min[2]), new Vector3(e.Max[0], e.Max[1], e.Max[2]));
+        }
+        return made;
+    }
+
     public Dictionary<(int Archive, int Record), Made> ImportAll(string workDir, List<string> problems)
     {
         var made = new Dictionary<(int, int), Made>();
+        var entries = new List<Entry>();
         var targets = new List<(SpriteModels.Target T, string Dir)>();
         foreach (var t in SpriteModels.Targets)
         {
             string dir = Path.Combine(workDir, "models", t.Name);
-            if (!File.Exists(Path.Combine(dir, "mesh.obj")) || !File.Exists(Path.Combine(dir, "texture.png"))) continue;
-            if (Fidelity(dir) is { } score && score < MinFidelity) continue;   // TripoSR couldn't make it: the stand-in stays
-            if (Rejected.Contains(t.Name)) continue;
+            // A realistic plant for it (FoliageModels) whatever the model made from it; else that model, when there is one.
+            if (FoliageModels.PlantFor(t.Name) is null)
+            {
+                if (!File.Exists(Path.Combine(dir, "mesh.obj")) || !File.Exists(Path.Combine(dir, "texture.png"))) continue;
+                if (Fidelity(dir) is { } score && score < MinFidelity) continue;   // TripoSR couldn't make it: the stand-in stays
+                if (Rejected.Contains(t.Name)) continue;
+            }
             targets.Add((t, dir));
         }
         var files = new (string MeshRel, Vector3 Min, Vector3 Max)?[targets.Count];
@@ -56,6 +111,13 @@ public sealed class SpriteModelImporter(SkyrimMod mod, string modOutDir, string 
             var t = targets[i].T;
             var (meshRel, min, max) = files[i]!.Value;
             made[(t.Archive, t.Record)] = AddStatic(t, meshRel, min, max);
+            entries.Add(new Entry(t.Name, t.Archive, t.Record, t.Kind.ToString(), meshRel, [min.X, min.Y, min.Z], [max.X, max.Y, max.Z], PaintOf(targets[i].Dir), FoliageRel(t.Name)));
+        }
+        if (entries.Count > 0)
+        {
+            string manifest = ManifestPath(modOutDir);
+            Directory.CreateDirectory(Path.GetDirectoryName(manifest)!);
+            File.WriteAllText(manifest, System.Text.Json.JsonSerializer.Serialize(entries, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
         return made;
     }
@@ -75,8 +137,21 @@ public sealed class SpriteModelImporter(SkyrimMod mod, string modOutDir, string 
             System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var s) ? s : null;
 
     /// <summary>A model's mesh and textures written (safe to run for several models at once): its mesh path and bounds.</summary>
+    /// <summary>The plant a sprite is mapped to (models/&lt;uid&gt;/&lt;n&gt;), or null.</summary>
+    static string? FoliageRel(string sprite) => FoliageModels.PlantFor(sprite) is { } d ? Path.GetFileName(Path.GetDirectoryName(d)) + "/" + Path.GetFileName(d) : null;
+
     (string MeshRel, Vector3 Min, Vector3 Max) MakeFiles(SpriteModels.Target t, string dir)
     {
+        // A realistic plant instead (FoliageModels): as tall as the sprite stands, no wider than a quarter more than it.
+        if (FoliageModels.PlantFor(t.Name) is { } plantDir)
+        {
+            var sprite = DfTexture.Load(arena2, t.Archive)!.Image(t.Record);
+            string rel = $@"TamrielMerge\DF\Models\{t.Name}.nif";
+            string stem = Path.GetFileName(Path.GetDirectoryName(plantDir)) + "_" + Path.GetFileName(plantDir);
+            var (fmin, fmax) = FoliageModels.Write(plantDir, modOutDir, rel, stem, sprite.WorldSize.Height * BlockMeshBuilder.Scale,
+                sprite.WorldSize.Width * BlockMeshBuilder.Scale * 1.25f, t.Kind == SpriteModels.Kind.Tree, NiflyLock);
+            return (rel, fmin, fmax);
+        }
         var (verts, uvs, normals, tris) = ReadObj(Path.Combine(dir, "mesh.obj"));
         if (verts.Count > 65535) throw new InvalidDataException($"{verts.Count} vertices (a NIF shape holds 65535)");
         // TripoSR (x towards the viewer, y across, z up) -> Skyrim (x across, y away, z up): a turn about z.
@@ -95,6 +170,20 @@ public sealed class SpriteModelImporter(SkyrimMod mod, string modOutDir, string 
         for (int i = 0; i < verts.Count; i++) verts[i] = (verts[i] + shift) * s;
         min = verts.Aggregate(Vector3.Min);
         max = verts.Aggregate(Vector3.Max);
+        // No wider than the sprite (user, 2026-10-25: "the trees and buildings were merging on each other"): the model
+        // maker gives crowns more spread than the picture has (a tree 836 units across from a sprite much narrower),
+        // and town blocks place them as close to their houses as Daggerfall's flats. Narrowed across, both ways alike.
+        float width = image.WorldSize.Width * BlockMeshBuilder.Scale;
+        float spread = MathF.Max(max.X - min.X, max.Y - min.Y);
+        if (width > 1 && spread > width)
+        {
+            float k = width / spread;
+            for (int i = 0; i < verts.Count; i++) verts[i] = new Vector3(verts[i].X * k, verts[i].Y * k, verts[i].Z);
+            // Normals of a mesh narrowed across lean up less: scaled inversely, then made unit again.
+            for (int i = 0; i < normals.Count; i++) normals[i] = Vector3.Normalize(new Vector3(normals[i].X / k, normals[i].Y / k, normals[i].Z));
+            min = verts.Aggregate(Vector3.Min);
+            max = verts.Aggregate(Vector3.Max);
+        }
 
         // Collision follows the model's own shape: its simplified collision mesh (collision.obj), placed exactly as the
         // visible mesh, one convex slab per triangle. Trees stand on a trunk column instead, so their crowns can be

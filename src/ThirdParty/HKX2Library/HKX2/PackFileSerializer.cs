@@ -13,7 +13,8 @@ namespace HKX2
         private List<GlobalFixup> _globalFixups = new();
 
         private Dictionary<IHavokObject, uint> _globalLookup = new(ReferenceEqualityComparer.Instance);
-        public HKXHeader _header;
+        // set by Serialize before anything reads it
+        public HKXHeader _header = null!;
 
         private List<LocalFixup> _localFixups = new();
         private List<Queue<Action>> _localWriteQueues = new();
@@ -110,7 +111,8 @@ namespace HKX2
                     sq = _serializationQueues.Last();
                 }
 
-                if (sq.Count == 0) continue;
+                // Last() of a list that only ever holds new queues: never null
+                if (sq!.Count == 0) continue;
 
                 var obj = sq.Dequeue();
                 _currentSerializationQueue = _serializationQueues.Count - 1;
@@ -184,7 +186,8 @@ namespace HKX2
                         databw.Pad(16);
                     }
 
-                    if (q.Count == 0)
+                    // Last() of a list that only ever holds new queues: never null
+                    if (q!.Count == 0)
                     {
                         _currentLocalWriteQueue = _localWriteQueues.Count - 1;
                         continue;

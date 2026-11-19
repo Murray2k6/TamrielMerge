@@ -33,8 +33,12 @@ FormList Property Diseases Auto
 {Daggerfall's 17 diseases in its order (DfDiseases), which its monsters' hits give.}
 Spell Property Paralysis Auto
 {SPELLS.STD 66, Paralysis: what spiders and giant scorpions cast on a hit.}
-Spell Property Vampirism Auto
-{The vampirism a vampire's hit may give (Skyrim's Sanguinare Vampiris: a vampire after three days, as Daggerfall's).}
+FormList Property Vampirism Auto
+{Daggerfall's vampirism (DfDiseases.Vampirism): the infection, then the curse.}
+GlobalVariable Property FedDay Auto
+{DFVampireFedDay: the game day a vampire last fed (a weapon hit on one of Daggerfall's actors).}
+String Property HungryText Auto
+{TEXT.RSC 36: a vampire unfed for a day can't rest.}
 FormList Property Lycanthropy Auto
 {The lycanthropy a werewolf's (0) or wereboar's (1) hit may give.}
 Float Property SpecialInfectionChance = 0.6 Auto
@@ -258,7 +262,7 @@ Function MonsterHit(Actor attacker, Int mobile)
     EndIf
   ElseIf mobile == 6 || mobile == 20
     ; Spider, giant scorpion: unless the player is already paralysed, it casts Paralysis (SPELLS.STD 66) on them.
-    If Paralysis && PlayerRef.GetActorValue("Paralysis") <= 0.0
+    If Paralysis && PlayerRef.GetActorValue("Paralysis") <= 0.0 && !IsVampire()
       Paralysis.Cast(attacker, PlayerRef)
     EndIf
   ElseIf mobile == 9 || mobile == 14
@@ -288,9 +292,10 @@ Function MonsterHit(Actor attacker, Int mobile)
   ElseIf mobile == 28 || mobile == 30
     ; Vampire, vampire ancient: vampirism 0.6%, else plague 2%.
     Float roll = Utility.RandomFloat(0.0, 100.0)
-    If roll <= SpecialInfectionChance && Vampirism
-      If !PlayerRef.HasSpell(Vampirism)
-        PlayerRef.AddSpell(Vampirism, False)
+    If roll <= SpecialInfectionChance && Vampirism && Vampirism.GetSize() > 1
+      Spell infection = Vampirism.GetAt(0) as Spell
+      If infection && !PlayerRef.HasSpell(infection) && !IsVampire()
+        PlayerRef.AddSpell(infection, False)
       EndIf
     ElseIf roll <= 2.0
       Int[] plague = new Int[1]
@@ -494,11 +499,35 @@ ObjectReference Function SpawnSpot(Float near, Float far)
   Return PlayerRef
 EndFunction
 
+; One of Daggerfall's vampires (TMDfVampirism on the player).
+Bool Function IsVampire()
+  Return Vampirism && Vampirism.GetSize() > 1 && PlayerRef.HasSpell(Vampirism.GetAt(1) as Spell)
+EndFunction
+
+; A vampire's weapon hit on one of Daggerfall's actors (TMDfSenses.OnHit): fed, sated for a day.
+Function PlayerStruck()
+  If FedDay && IsVampire()
+    FedDay.SetValue(Utility.GetCurrentGameTime())
+  EndIf
+EndFunction
+
+; A vampire a day and more past its last feeding (VampirismEffect: not sated).
+Bool Function VampireHungry()
+  Return FedDay && IsVampire() && Utility.GetCurrentGameTime() - FedDay.GetValue() >= 1.0
+EndFunction
+
 Event OnMenuOpen(String asMenuName)
   If asMenuName == "Sleep/Wait Menu"
     If EnemiesNearby(True)
       Input.TapKey(1)   ; closed, as Escape would
       Debug.MessageBox("There are enemies nearby.")
+    ElseIf VampireHungry()
+      Input.TapKey(1)
+      If HungryText != ""
+        Debug.MessageBox(HungryText)
+      Else
+        Debug.MessageBox("You must feed before you can rest.")
+      EndIf
     Else
       restStart = Utility.GetCurrentGameTime()
     EndIf

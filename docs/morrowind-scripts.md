@@ -107,7 +107,7 @@ A journal's index is a global of its own (`MWJournalIndex<journal>`): Journal an
 and the dialogue's journal conditions read it, so a journal can go back to a lower index as Morrowind's can (a quest's
 stage can't be undone). Journal also adds the entry: the quest's stage (its log entry) the first time; when the journal
 returns to an entry it already had, that entry is shown again as the quest's objective (every entry is also an
-objective of its quest) until the journal moves on. SetJournalIndex sets the index only, without an entry, as in
+objective of its quest, its first sentence: Skyrim.QuestText.Headline, as the HUD shows an objective on one line) until the journal moves on. SetJournalIndex sets the index only, without an entry, as in
 Morrowind. The dialogue's fixed result set (TMMwInfo, for results without a compiled script) sets the global too.
 
 ## Functions
@@ -154,14 +154,14 @@ arguments) map to Papyrus and SKSE. Where Skyrim has no counterpart the nearest 
 | PlayBink | Morrowind's own Bink video, copied to Data\Video\TamrielMerge_MW_… |
 | PlayGroup, LoopGroup | the model's sequence of that name on objects; on people, Skyrim's nearest idle for knockouts |
 | ChangeWeather, GetCurrentWeather | Morrowind's own weather records (MWWeather*, docs/morrowind-weather.md); GetCurrentWeather is the weather's place in MWWeatherList (Morrowind's numbering), Skyrim's classification for another world's weather |
-| BecomeWerewolf, UndoWerewolf, IsWerewolf, GetWerewolfKills | Skyrim's beast form (its change spell, its shift-back timer, its race, its stat) |
+| BecomeWerewolf, UndoWerewolf, IsWerewolf, GetWerewolfKills | Skyrim's beast form (its change spell, its shift-back timer, its race); the kills are MWWerewolfKills (people killed in the form, set to 0 at each change, as Morrowind's engine does), and the change's engine side (Morrowind's attributes at the fWereWolf* values, the witnesses, PCKnownWerewolf) is TMMwAfflictions (docs/script-gaps.md M73) |
 | HasSoulGem, RemoveSoulGem, AddSoulGem | Skyrim's soul gems hold a size, not a creature: filled gems carried; Morrowind's gem as Skyrim's filled gem of that size |
 | MenuMode, GetSecondsPassed, Random, GetSquareRoot, Xbox | Utility.IsInMenuMode, the time since the script last ran, RandomInt, Math.Sqrt, 0 |
 | StreamMusic | the track (Morrowind's MP3 decoded and encoded as xWMA into Data\Music\TamrielMerge\MW) as a music type of its own that plays it once, at once, over the place's music (MusicType.Add; then the place's music resumes). A file the game doesn't have (GnisisWarpDoor's conantheme.mp3) does nothing, as in Morrowind |
 | WakeUpPC | the sleep menu closed partway through the rest (see Events) |
 | HitOnMe, HitAttemptOnMe | the weapon of the last OnHit, once (HitAttemptOnMe: blocked hits too; Skyrim reports no misses) |
 | AddTopic, ClearInfoActor, ModRegion, Fall, ForceRun/Jump, SetWerewolfAcrobatics, TurnMoon…, console commands | nothing to do in Skyrim (its converted topics need no unlocking, its actors fall and run by themselves): kept as comments, counted as translated |
-| OnPCSoulGemUse, OnRepair, RepairedOnMe, GetPCInJail, GetPCTraveling | Skyrim has no event or state for them: always false |
+| OnPCSoulGemUse, OnRepair, RepairedOnMe | Skyrim has no event or state for them: always false (GetPCInJail reads TMMwLaw's InJail and GetPCTraveling the travel state since the law and travel were built) |
 
 The original scripts' slips are read as Morrowind's compiler read them: `if doonce = 0`, `<==`, IDs with hyphens
 (`Ingred_Hackle-Lo_Leaf_01`), `"Torasa Aram". == 2` (a missing variable: 0), an extra endif (ignored), an elseif left
@@ -194,3 +194,16 @@ Not checked in the game yet: everything above is verified by compiling and by th
 particular WakeUpPC's way of closing the sleep menu (the menu's own onCancelPress, through SKSE's UI.Invoke) is Skyrim
 interface code the game may refuse while the sleep runs, and no script of the game streams a track that exists, so
 StreamMusic's conversion is exercised only by mods.
+
+## 2026-11-05: the prison ship, menus and cut-outs
+
+- The prison ship's scripts ran to their end in the user's play test (a save's script data: Jiub's and the guard's
+  state -1), but Jiub's waking line came under the fade and Skyrim's race menu, shown on arrival. A new game begun
+  with Morrowind's opening now holds the race menu for Morrowind's own: the dock guard's EnableRaceMenu
+  (CharGenRaceNPC) calls TMMwScript.RaceMenu, which shows it (TMStoryOrder.ShowHeldRaceMenu). Otherwise
+  EnableRaceMenu does nothing, the character made at the journey's start.
+- GetSecondsPassed: a script that returns while a menu is open ("if ( MenuMode == 1 ) return") counts at most half a
+  second of a gap between its runs, so a menu's time isn't added to its timers at once.
+- Blended surfaces with a cut-out texture (MwTextures.IsCutout: over 10% clear, over 20% opaque, under 40% in between;
+  source alpha over its inverse only) are alpha-tested at 128 with depth writes, both sides, as Skyrim's foliage:
+  698 shapes of the 67 tree and plant models; of 137 glass, water, smoke and effect models only a lattice window.

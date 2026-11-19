@@ -194,9 +194,11 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
         WriteStatements(body, script.Body, 1);
 
         bool polls = kind == Kind.Global || kind == Kind.Object && NeedsPolling(script.Body);
-        // Morrowind runs its scripts every frame: the next one (Papyrus sends an update no sooner than the frame after
-        // it is due), asked for once a run is over.
-        const float interval = 0.01f;
+        // Morrowind runs its scripts every frame; here a tenth of a second, asked for once a run is over. Asked for every
+        // frame (0.01), the 1,114 scripts kept Papyrus behind for good (2026-11-02, a user's log: suspended stacks 428 to
+        // 7,663 in ten minutes, every Morrowind person's greeting and topics running seconds to minutes late). Their timers
+        // and movement go by the time that passed (GetSecondsPassed), so they keep their pace.
+        const float interval = 0.1f;
 
         // Properties the events need, before the events are written and the properties listed.
         if (kind == Kind.Object)
@@ -275,6 +277,16 @@ public sealed partial class MwPapyrus(MwPapyrus.IWorld world)
                 tick.AppendLine("  __dt = 0.0");
                 tick.AppendLine("  If __last >= 0.0 && __lastLoads == loads && now > __last");
                 tick.AppendLine("    __dt = now - __last");
+                // A script that returns while a menu is open (Morrowind's "if ( MenuMode == 1 ) return", as Jiub's and
+                // the prison ship guard's) never counts a menu's time there; here the first run after the menu was given
+                // all of it (the race menu's 8 s at once, 2026-11-05). A gap longer than a run's usual (0.3 s) is a menu
+                // or a pause: half a second of it at most.
+                if (body.ToString().Contains("Utility.IsInMenuMode()", StringComparison.Ordinal))
+                {
+                    tick.AppendLine("    If __dt > 0.5");
+                    tick.AppendLine("      __dt = 0.5");
+                    tick.AppendLine("    EndIf");
+                }
                 tick.AppendLine("  EndIf");
                 tick.AppendLine("  __last = now");
                 tick.AppendLine("  __lastLoads = loads");

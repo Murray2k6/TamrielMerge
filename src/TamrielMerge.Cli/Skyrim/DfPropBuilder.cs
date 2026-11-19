@@ -21,7 +21,7 @@ namespace TamrielMerge.Skyrim;
 /// </summary>
 /// <param name="fixedKeys">In Daggerfall.esm, each base at 0xE00000 + its model number: a record numbered in the
 /// running order would renumber everything built after it, which the plugins built on it and saves refer to.</param>
-public sealed class DfPropBuilder(SkyrimMod mod, ISkyrimModGetter skyrim, string modOutDir, PropReplacer props, bool fixedKeys = false)
+public sealed class DfPropBuilder(SkyrimMod mod, string modOutDir, PropReplacer props, bool fixedKeys = false)
 {
     readonly Dictionary<uint, (FormKey Base, bool Furniture)> bases = new();
 
@@ -52,7 +52,7 @@ public sealed class DfPropBuilder(SkyrimMod mod, ISkyrimModGetter skyrim, string
     (FormKey Base, bool Furniture)? Base(uint id, DfModel model, FormKey skyrimBase, Matrix4x4 m, PropReplacer.Placement? sky)
     {
         if (bases.TryGetValue(id, out var hit)) return hit;
-        var record = skyrim.EnumerateMajorRecords().FirstOrDefault(r => r.FormKey == skyrimBase);
+        var record = props.Record(skyrimBase);
         if (record is null) return null;
         string rel = Path.Combine("TamrielMerge", "Props", $"{id}.nif");
         string full = Path.Combine(modOutDir, "Meshes", rel);
@@ -109,13 +109,73 @@ public sealed class DfPropBuilder(SkyrimMod mod, ISkyrimModGetter skyrim, string
 
     static short C(float v) => (short)Math.Clamp(MathF.Round(v), short.MinValue, short.MaxValue);
 
-    /// <summary>The Skyrim furniture's marker block, copied as it is into the prop's mesh (built in the same space).</summary>
+    /// <summary>How far over its seat Skyrim's furniture has a sitting position (CommonBench01 30 to 33.8, the bar stool
+    /// 47 to 49.4).</summary>
+    const float SeatAbove = 3;
+
+    /// <summary>
+    /// The Skyrim furniture's marker block into the prop's mesh (built in the same space), each sitting position at the
+    /// height of the Daggerfall seat under it (its highest upward face there, 15-90 up, plus <see cref="SeatAbove"/>):
+    /// Daggerfall's seats aren't the stand-in's height (a bench's 44 against CommonBench01's 30, a stool's 36 against the
+    /// bar stool's 47), and sitters sank into benches or sat on air (2026-11-04).
+    /// </summary>
     void AddMarkers(string nifPath, FormKey skyrimBase)
     {
         if (props.FurnitureMarkerBlock(skyrimBase) is not nifly.NiExtraData markers) return;
         using var nif = new nifly.NifFile();
         if (nif.Load(nifPath) != 0) return;
-        nif.AssignExtraData(nif.GetRootNode(), BlockMeshBuilder.Owned(markers));
+        var block = BlockMeshBuilder.Owned(markers);
+        if (block is nifly.BSFurnitureMarker furniture)
+        {
+            var seats = new List<Vector3[]>();
+            foreach (var shape in nif.GetShapes())
+            {
+                var v = nif.GetVertsForShape(shape);
+                using var tris = new nifly.vectorTriangle();
+                shape.GetTriangles(tris);
+                foreach (var t in tris)
+                {
+                    Vector3[] p = [new(v[t.p1].x, v[t.p1].y, v[t.p1].z), new(v[t.p2].x, v[t.p2].y, v[t.p2].z), new(v[t.p3].x, v[t.p3].y, v[t.p3].z)];
+                    var n = Vector3.Cross(p[1] - p[0], p[2] - p[0]);
+                    if (n.LengthSquared() > 1e-6f && Vector3.Normalize(n).Z > 0.7f) seats.Add(p);
+                }
+            }
+            foreach (var slot in NiflyRaw.Elements<nifly.FurniturePosition>(furniture.positions, 24))
+            {
+                if (slot.animationType == 2) continue;   // lying (a bed's): left as it is
+                if (SeatTop(seats, slot.offset.x, slot.offset.y) is { } top) slot.offset = new nifly.Vector3(slot.offset.x, slot.offset.y, top + SeatAbove);
+            }
+        }
+        nif.AssignExtraData(nif.GetRootNode(), block);
         nif.Save(nifPath);
+    }
+
+    /// <summary>The top of the seat under (x, y): the highest upward face 15-90 up there, else within 6 or 12 units.</summary>
+    internal static float? SeatTop(List<Vector3[]> seats, float x, float y)
+    {
+        foreach (float r in new[] { 0f, 6f, 12f })
+        {
+            float? best = null;
+            for (int k = 0; k < (r == 0 ? 1 : 8); k++)
+            {
+                float px = x + r * MathF.Cos(k * MathF.PI / 4), py = y + r * MathF.Sin(k * MathF.PI / 4);
+                foreach (var t in seats)
+                {
+                    if (!Inside(px, py, t)) continue;
+                    var n = Vector3.Cross(t[1] - t[0], t[2] - t[0]);
+                    float z = t[0].Z - ((px - t[0].X) * n.X + (py - t[0].Y) * n.Y) / n.Z;
+                    if (z is >= 15 and <= 90 && (best is null || z > best)) best = z;
+                }
+            }
+            if (best is not null) return best;
+        }
+        return null;
+    }
+
+    static bool Inside(float x, float y, Vector3[] t)
+    {
+        float D(Vector3 a, Vector3 b) => (b.X - a.X) * (y - a.Y) - (b.Y - a.Y) * (x - a.X);
+        float d1 = D(t[0], t[1]), d2 = D(t[1], t[2]), d3 = D(t[2], t[0]);
+        return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
     }
 }

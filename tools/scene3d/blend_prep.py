@@ -53,6 +53,8 @@ def main():
 
     names = scene["meshes"]
     used = {i["mesh"] for i in scene["instances"]}
+    # The world's distant view (scene.json "lod": its LOD land and objects past the land).
+    used.update(i["mesh"] for i in scene.get("lod") or [])
     # The town's people: their parts, standing and at each step of the walk.
     for person in scene.get("people", []):
         used.update(person["parts"])

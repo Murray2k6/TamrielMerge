@@ -81,7 +81,17 @@ public static class CreatureLooks
                 : tx?.Base is not null && mat is { } m && Vector3.Distance(m.Diffuse, Vector3.One) > 0.004f ? Enumerable.Repeat(new Vector4(m.Diffuse, 1), d.Vertices.Length).ToArray() : null;
             bool skTinted = (sh.shaderFlags2 & 0x20) != 0;
             var skColors = nif.GetColorsForShape(b)?.Select(c => new Vector4(c.r, c.g, c.b, c.a)).ToList() ?? [];
+            // A shape written as parts (CreatureRig.SplitWideMeshes: "<shape> [part k]") has the vertices its triangles use
+            // in each part: each part vertex's colour one of Morrowind's.
+            var parts = bodyShapes.Where(p => p.name.get().StartsWith(want + " [part ", StringComparison.Ordinal)).ToList();
             if ((tint is not null) != skTinted) Differs("tint", tint is null ? "none" : "vertex colours", skTinted ? "vertex colours" : "none");
+            else if (tint is not null && parts.Count > 0)
+            {
+                var all = skColors.Concat(parts.SelectMany(p => nif.GetColorsForShape(p)?.Select(c => new Vector4(c.r, c.g, c.b, c.a)) ?? [])).ToList();
+                float worstPart = all.Count == 0 ? float.MaxValue : all.Max(c => tint.Min(t => Vector4.Distance(c, t)));
+                if (worstPart > 1.5f / 255) Differs("vertex colours", $"{tint.Length}", all.Count == 0 ? "none" : $"a part's up to {worstPart * 255:F1}/255 off");
+                else notes.Add($"tinted in {parts.Count + 1} parts ({worstPart * 255:F2}/255)");
+            }
             else if (tint is not null)
             {
                 float worst = skColors.Count == tint.Length ? tint.Select((c, i) => Vector4.Distance(c, skColors[i])).Max() : float.MaxValue;

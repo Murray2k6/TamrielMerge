@@ -148,14 +148,55 @@ public static class MwCreatureCheck
         var results = new List<Result>();
         string folder = Path.Combine(skyrimDataDir, CreatureRig.MeshFolder(id));
         using var body = new SkyrimBody(folder, id);
-        int bodyShapes = body.ShapeNames.Count(n => !n.EndsWith("[emit]") && !n.Contains(" [tint "));
+        // A shape on more bones than one holds is written as parts ("<shape> [part k]", CreatureRig.SplitWideMeshes): its
+        // first part where the shape is, the others after; each part has the vertices its triangles use.
+        var partsOf = new Dictionary<int, List<int>>();
+        for (int i = 0; i < body.ShapeNames.Count; i++)
+            if (body.ShapeNames[i].Contains(" [part ") && body.ShapeNames.IndexOf(CreatureRig.PartOf(body.ShapeNames[i])) is >= 0 and var b)
+                (partsOf.TryGetValue(b, out var l) ? l : partsOf[b] = [b]).Add(i);
+        int bodyShapes = body.ShapeNames.Count(n => !n.EndsWith("[emit]") && !n.Contains(" [tint ") && !n.Contains(" [part "));
         if (bodyShapes != shapes.Count)
             say($"  shapes: Morrowind {shapes.Count}, Skyrim {bodyShapes} (and {body.ShapeNames.Count - bodyShapes} particle emitter meshes)");
         for (int i = 0; i < Math.Min(shapes.Count, body.ShapeVertexCounts.Count); i++)
         {
             int mw = nif.Get<NiTriShapeData>(shapes[i].Data)!.Vertices.Length, sk = body.ShapeVertexCounts[i];
             int mwTris = nif.Get<NiTriShapeData>(shapes[i].Data)!.Triangles.Length / 3;
-            if (mw != sk || mwTris != body.ShapeTriangleCounts[i]) say($"  {shapes[i].Name}: Morrowind {mw} vertices {mwTris} triangles, Skyrim {sk} vertices {body.ShapeTriangleCounts[i]} triangles");
+            if (partsOf.TryGetValue(i, out var parts))
+            {
+                // Its parts' triangles together are the shape's (their vertices are matched to Morrowind's by place below).
+                int skTris = parts.Sum(p => body.ShapeTriangleCounts[p]);
+                if (mwTris != skTris) say($"  {shapes[i].Name}: Morrowind {mwTris} triangles, Skyrim {skTris} in {parts.Count} parts");
+            }
+            else if (mw != sk || mwTris != body.ShapeTriangleCounts[i]) say($"  {shapes[i].Name}: Morrowind {mw} vertices {mwTris} triangles, Skyrim {sk} vertices {body.ShapeTriangleCounts[i]} triangles");
+        }
+        // Each part's vertex -> the Morrowind vertex it is (the nearest in the first frame compared: a part's vertices are
+        // the shape's own, in order); a vertex no triangle uses is in no part, and stands as Morrowind's.
+        var partVertex = new Dictionary<int, List<(int Part, int J, int I)>>();
+        Vector3[][] Merged(Vector3[][] reference, Vector3[][] ours)
+        {
+            foreach (var (s, parts) in partsOf)
+            {
+                if (s >= reference.Length) continue;
+                if (!partVertex.TryGetValue(s, out var map))
+                {
+                    map = partVertex[s] = [];
+                    foreach (int p in parts)
+                        for (int j = 0; j < ours[p].Length; j++)
+                        {
+                            int bestI = 0; float bestD = float.MaxValue;
+                            for (int i = 0; i < reference[s].Length; i++)
+                            {
+                                float d = Vector3.DistanceSquared(reference[s][i], ours[p][j]);
+                                if (d < bestD) { bestD = d; bestI = i; }
+                            }
+                            map.Add((p, j, bestI));
+                        }
+                }
+                var merged = (Vector3[])reference[s].Clone();
+                foreach (var (p, j, i) in map) merged[i] = ours[p][j];
+                ours[s] = merged;
+            }
+            return ours;
         }
         // The particle arrays' emitter meshes: each point where Morrowind emits from (between a node of the emitter's subtree
         // and its parent, MwCreatureSource.EmitterPoints), every frame, against Morrowind's posed nodes.
@@ -202,7 +243,7 @@ public static class MwCreatureCheck
                 float frameWorst = 0;
                 float t = Math.Min(start + f / anim.Fps, stop);
                 var reference = Morrowind(t, start, source == ownSource);
-                var ours = body.Pose(anim, f);
+                var ours = Merged(reference, body.Pose(anim, f));
                 // Each tinted shape's copy showing now stands for it.
                 foreach (var (si, (copies, colourAt)) in tints)
                 {

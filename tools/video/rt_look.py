@@ -37,8 +37,10 @@ MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
 
 
 def gpu_temperature():
+    """This process's card (TM_GPU, when the converter gave it one of several), else the first."""
     try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+        gpu = os.environ.get("TM_GPU", "")
+        out = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"] + ([f"--id={gpu}"] if gpu else []),
                              capture_output=True, text=True, timeout=10).stdout.strip().splitlines()
         return int(out[0]) if out else None
     except Exception:
@@ -337,11 +339,22 @@ def main():
     ap.add_argument("--light", default="auto", choices=["torch", "auto"])
     ap.add_argument("--test")
     ap.add_argument("--shadows", action="store_true")
+    ap.add_argument("--shard", default="0/1", help="i/n: this process relights the i-th of n runs of the frames (one process a graphics card) and doesn't encode")
+    ap.add_argument("--encode-only", action="store_true", help="every run relit already (by the shards): only the movie")
     a = ap.parse_args()
     global SHADOWS
     SHADOWS = a.shadows
     files = frames_of(a.frames)
     fps = len(files) / wav_seconds(a.audio)
+    shard, shards = (int(x) for x in a.shard.split("/"))
+    if shards > 1 and not a.encode_only:
+        # A run of frames in order (the depth is smoothed over time; a run starts as a cut does), this card's share.
+        per = (len(files) + shards - 1) // shards
+        process(files[shard * per:(shard + 1) * per], os.path.join(a.work, "frames"), a.light)
+        return
+    if a.encode_only:
+        remaster.encode(os.path.join(a.work, "frames"), os.path.dirname(os.path.abspath(a.audio)), fps, os.path.abspath(a.out))
+        return
     if a.test:
         s, n = map(int, a.test.split(":"))
         part = files[s:s + n]

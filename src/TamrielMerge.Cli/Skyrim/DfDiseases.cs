@@ -117,6 +117,92 @@ public static class DfDiseases
         return list;
     }
 
+    /// <summary>
+    /// Daggerfall's vampirism (DFVampirism, made once): the infection (a disease spell running TMDfVampirismInfection:
+    /// the dream the next day, the death after three, two weeks in a shallow grave, waking at a cemetery of the region)
+    /// and the curse (an ability running TMDfVampirism, with Skyrim's disease resistance at 100), in that order.
+    /// Daggerfall Unity VampirismInfection / VampirismEffect (MIT): the clan is the infecting region's province's
+    /// (FACTION.TXT "vam"), and each clan has its spells (SPELLS.STD). Makes the globals DFVampireClan (the clan's
+    /// faction, 0 none), DFVampireFedDay (the game day of the last feeding) and DFPreventSpawns (shared with the
+    /// overland's encounters), and tells the lycanthropy infections of it (not caught by a vampire).
+    /// </summary>
+    public static FormList Vampirism(SkyrimMod mod, ISkyrimModGetter skyrim, FormList diseases, FormList lycanthropy, IReadOnlyDictionary<int, Spell>? spells,
+        DfFactions factions, DfText? text, FormKey machine)
+    {
+        if (mod.FormLists.FirstOrDefault(f => f.EditorID == "DFVampirism") is { } made) return made;
+        var prevent = PreventSpawns(mod);
+        var clan = new GlobalShort(mod) { EditorID = "DFVampireClan", Data = 0 };
+        mod.Globals.Add(clan);
+        var fed = new GlobalFloat(mod) { EditorID = "DFVampireFedDay", Data = 0f };
+        mod.Globals.Add(fed);
+        // Each region's clan: its province's "vam" (0 where the province names none: the script takes the Vraseth).
+        var regionClan = Enumerable.Range(0, DfLocations.RegionNames.Length).Select(r => factions.RegionFaction(r, DfFactionType.Province)?.Vam ?? 0).ToList();
+        // The clans' spells (VampirismEffect.AssignVampireSpells): common to all, then by clan.
+        (int Clan, int[] Ids)[] clanSpells =
+        [
+            (0, [4, 90, 91]), (150, [85]), (151, [20, 33]), (152, [64]), (153, [23, 6]), (154, [94]), (155, [50]), (156, [17]), (158, [11, 12, 13]),
+        ];
+        var spellForms = new ScriptObjectListProperty { Name = "ClanSpells" };
+        var spellClans = new ScriptIntListProperty { Name = "ClanOf" };
+        int missing = 0;
+        foreach (var (c, ids) in clanSpells)
+            foreach (int id in ids)
+            {
+                if (spells?.GetValueOrDefault(id) is not { } sp) { missing++; continue; }
+                spellForms.Objects.Add(new ScriptObjectProperty { Object = sp.ToLink<ISkyrimMajorRecordGetter>() });
+                spellClans.Data.Add(c);
+            }
+        string Line(int id) => text?[id] is { Count: > 0 } lines ? lines[0].Replace("%pcn", "").Trim() : "";
+        var infScript = new ScriptEntry { Name = "TMDfVampirismInfection" };
+        var infection = Make(mod, "DFVampirismInfection", "Vampirism", "", SpellType.Disease, infScript, hostile: true);
+        var curseScript = new ScriptEntry { Name = "TMDfVampirism" };
+        var curse = Make(mod, "DFVampirism", "Vampire", "You are a vampire.", SpellType.Ability, curseScript, hostile: false);
+        // Immune to disease: Skyrim's own resistance at 100 (its diseases); the script sheds Daggerfall's.
+        if (skyrim.MagicEffects.FirstOrDefault(e => e.EditorID == "AbResistDisease") is { } resist)
+            curse.Effects.Add(new Effect { BaseEffect = resist.ToNullableLink<IMagicEffectGetter>(), Data = new EffectData { Magnitude = 100 } });
+        ScriptObjectProperty Obj(string name, FormKey key) => new() { Name = name, Object = key.ToLink<ISkyrimMajorRecordGetter>() };
+        var inf = infScript.Properties;
+        inf.Add(Obj("Infection", infection.FormKey));
+        inf.Add(Obj("Curse", curse.FormKey));
+        inf.Add(Obj("Lycanthropy", lycanthropy.FormKey));
+        if (skyrim.Spells.FirstOrDefault(s => s.EditorID == "WerewolfChange") is { } beast) inf.Add(Obj("BeastForm", beast.FormKey));
+        inf.Add(Obj("Machine", machine));
+        inf.Add(Obj("PreventSpawns", prevent.FormKey));
+        inf.Add(Obj("VampireClan", clan.FormKey));
+        inf.Add(Obj("FedDay", fed.FormKey));
+        inf.Add(new ScriptIntListProperty { Name = "RegionClan", Data = [.. regionClan] });
+        inf.Add(new ScriptStringProperty { Name = "TurnText", Data = Line(401) });
+        var cur = curseScript.Properties;
+        cur.Add(Obj("Curse", curse.FormKey));
+        if (spells?.GetValueOrDefault(66) is { } paralysis) cur.Add(Obj("Paralysis", paralysis.FormKey));
+        cur.Add(Obj("Diseases", diseases.FormKey));
+        cur.Add(Obj("VampireClan", clan.FormKey));
+        cur.Add(Obj("FedDay", fed.FormKey));
+        cur.Add(spellForms);
+        cur.Add(spellClans);
+        cur.Add(Obj("Machine", machine));
+        // Not caught by a vampire: the lycanthropy infections look at the curse.
+        foreach (var kind in new[] { "Werewolf", "Wereboar" })
+            if (mod.MagicEffects.FirstOrDefault(e => e.EditorID == $"DFLycanthropyInfection{kind}Effect")?.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == "TMDfLycanthropyInfection") is { } ls)
+                ls.Properties.Add(Obj("VampireCurse", curse.FormKey));
+        var list = new FormList(mod) { EditorID = "DFVampirism" };
+        list.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(infection.FormKey));
+        list.Items.Add(new FormLink<ISkyrimMajorRecordGetter>(curse.FormKey));
+        mod.FormLists.Add(list);
+        Console.WriteLine($"Vampirism: {spellClans.Data.Count} clan spells ({missing} missing), {regionClan.Count(c => c > 0)} of {regionClan.Count} regions with a clan");
+        return list;
+    }
+
+    /// <summary>The global whatever moves time on sets so the overland's encounters skip that block (DFPreventSpawns,
+    /// made once: a vampire's turning, the overland quest).</summary>
+    public static Global PreventSpawns(SkyrimMod mod)
+    {
+        if (mod.Globals.FirstOrDefault(g => g.EditorID == "DFPreventSpawns") is { } made) return made;
+        var prevent = new GlobalShort(mod) { EditorID = "DFPreventSpawns", Data = 0 };
+        mod.Globals.Add(prevent);
+        return prevent;
+    }
+
     static Spell Make(SkyrimMod mod, string id, string name, string description, SpellType type, ScriptEntry script, bool hostile)
     {
         var effect = new MagicEffect(mod)

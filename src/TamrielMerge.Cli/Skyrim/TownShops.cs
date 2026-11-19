@@ -121,7 +121,9 @@ public sealed class TownShops(SkyrimMod mod, ISkyrimModGetter skyrim)
         interior.Persistent.Add(chest);
         var vendor = NewFaction("DFShop" + shopId, keeper.Name + "'s shop");
         vendor.Flags |= Faction.FactionFlag.Vendor;
-        vendor.VendorValues = new VendorValues { StartHour = 6, EndHour = 18, Radius = 0 };        vendor.VendorBuySellList = new FormLinkNullable<IFormListGetter>(t.Items);
+        var (opens, closes) = Hours(type);
+        vendor.VendorValues = new VendorValues { StartHour = (byte)opens, EndHour = (byte)closes, Radius = 0 };
+        vendor.VendorBuySellList = new FormLinkNullable<IFormListGetter>(t.Items);
         vendor.MerchantContainer = chest.ToNullableLink<IPlacedObjectGetter>();
         keeper.Npc.Factions.Add(new RankPlacement { Faction = vendor.ToLink<IFactionGetter>(), Rank = 0 });
         keeper.Npc.Factions.Add(new RankPlacement { Faction = Shopkeepers.ToLink<IFactionGetter>(), Rank = 0 });
@@ -134,6 +136,20 @@ public sealed class TownShops(SkyrimMod mod, ISkyrimModGetter skyrim)
         }
         Shops++;
         return keeper;
+    }
+
+    /// <summary>
+    /// The hours a building's keeper trades (Daggerfall Unity PlayerActivate.openHours/closeHours, as TMDfStreetDoor's
+    /// door keeps them; 0-24 for always): until 2026-11-04 every keeper, tavern and temple ones too, kept 6:00-18:00 and
+    /// said "We're closed" in an open tavern at night or an alchemist's at 20:00 (user: "npcs kick you out of certain
+    /// ones that you are suppose to go in like inns").
+    /// </summary>
+    internal static (int Open, int Close) Hours(DfBuildingType t)
+    {
+        int[] open = [7, 8, 9, 8, 0, 9, 10, 10, 9, 6, 9, 11, 9, 9, 0, 0, 10];
+        int[] close = [22, 16, 19, 15, 24, 21, 19, 20, 18, 23, 23, 23, 20, 20, 24, 24, 16];
+        int i = (int)t;
+        return i >= 0 && i < open.Length ? (open[i], close[i]) : (6, 18);
     }
 
     /// <summary>Who keeps a shop: the person dressed as a merchant, barkeep or smith, else the first in the room.</summary>

@@ -95,8 +95,31 @@ public static class TopicSubtypes
     /// <summary>The subtype whose code is <paramref name="code"/>.</summary>
     public static DialogTopic.SubtypeEnum? Of(string code) => Codes.FirstOrDefault(kv => kv.Value == code) is { Value: not null } kv ? kv.Key : null;
 
+    /// <summary>
+    /// A topic only a script says (Actor.Say: Morrowind's script lines and barks, Oblivion's conversations, Redguard's
+    /// lines) is a shared-info topic of the Misc tab. Measured 2026-11-09: all 6,503 Custom topics of Skyrim.esm belong
+    /// to a branch (the player's menu), and the topics its scripts say are Misc ones (C00VilkasTrainingQuestObserveCombat,
+    /// dunIronbindSalmaObserveZkey...). In game, Jiub's "You better do what they say." as a Custom topic without a
+    /// branch (of the Topic tab or the Misc tab) was never begun by Say (its begin fragment never ran); as shared info
+    /// it was begun, held for its recording's 2.5 s, subtitled and heard (the recording found in the captured sound at 76
+    /// times the background). Shared info is the kind the engine never says by itself.
+    /// </summary>
+    static void SaidByScripts(ISkyrimMod mod)
+    {
+        var inMenus = mod.DialogBranches.Select(b => b.StartingTopic.FormKey)
+            .Concat(mod.DialogTopics.SelectMany(t => t.Responses).SelectMany(r => r.LinkTo.Select(l => l.FormKey))).ToHashSet();
+        foreach (var topic in mod.DialogTopics)
+        {
+            if (topic.Subtype != DialogTopic.SubtypeEnum.Custom || !topic.Branch.IsNull || inMenus.Contains(topic.FormKey)) continue;
+            if (topic.Category is not (DialogTopic.CategoryEnum.Topic or DialogTopic.CategoryEnum.Misc)) continue;
+            topic.Category = DialogTopic.CategoryEnum.Misc;
+            topic.Subtype = DialogTopic.SubtypeEnum.SharedInfo;
+        }
+    }
+
     public static void Fill(ISkyrimMod mod)
     {
+        SaidByScripts(mod);
         foreach (var topic in mod.DialogTopics)
         {
             if (!Codes.TryGetValue(topic.Subtype, out var code))

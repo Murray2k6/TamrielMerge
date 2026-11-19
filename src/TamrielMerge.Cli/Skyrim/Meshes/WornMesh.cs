@@ -61,13 +61,15 @@ public sealed class WornShape
     public byte AlphaThreshold;
     /// <summary>A copy of a vanilla body or hands shape (the wearer's skin, drawn where the armour leaves it bare).</summary>
     public bool IsSkin;
+    /// <summary>Hair (shader type 6): the colour the shader tints it (0-1), as a face file's hair carries its person's.</summary>
+    public Vector3? HairTint;
 
     public WornShape With(Vector3[]? v = null, Vector3[]? n = null) => new()
     {
         Name = Name, V = v ?? V, N = n ?? N, Uv = Uv, Tris = Tris, Weights = Weights, Textures = Textures, ShaderType = ShaderType,
         Flags1 = Flags1, Flags2 = Flags2, Glossiness = Glossiness, SpecularStrength = SpecularStrength, Alpha = Alpha,
         SubsurfaceRolloff = SubsurfaceRolloff, RimlightPower = RimlightPower, BacklightPower = BacklightPower, SpecularColor = SpecularColor,
-        Emissive = Emissive, EmissiveMultiple = EmissiveMultiple, Clamp = Clamp, AlphaFlags = AlphaFlags, AlphaThreshold = AlphaThreshold, IsSkin = IsSkin,
+        Emissive = Emissive, EmissiveMultiple = EmissiveMultiple, Clamp = Clamp, AlphaFlags = AlphaFlags, AlphaThreshold = AlphaThreshold, IsSkin = IsSkin, HairTint = HairTint,
     };
 }
 
@@ -531,120 +533,164 @@ public static class WornMesh
     /// to those bones (skin-to-bone = the bone's bind inverted) with one dismember partition, <paramref name="partition"/>
     /// (the biped slot). nifly isn't thread-safe: callers serialise writes.
     /// </summary>
-    public static void Write(string path, IReadOnlyList<WornShape> shapes, BindSkeleton skeleton, int partition)
+    /// <param name="faceFile">A face file (facegendataacegeom) or a head part's model: its shapes are written as
+    /// BSDynamicTriShape, as Skyrim's own are (a plain BSTriShape among a face file's crashed the game, 2026-11-14).</param>
+    /// <param name="faceGeom">A person's own face file (facegendata\facegeom\plugin\id.nif), laid out as Skyrim's own
+    /// are (0001414A.NIF read 2026-11-15): a BSFadeNode root, the bones under it, then a node "BSFaceGenNiNodeSkinned"
+    /// that holds the shapes and is what their skins hang from.</param>
+    public static void Write(string path, IReadOnlyList<WornShape> shapes, BindSkeleton skeleton, int partition, bool faceFile = false, bool faceGeom = false)
     {
         using var nif = new NifFile();
         nif.Create(NiVersion.getSSE());
         var hdr = nif.GetHeader();
+        if (faceGeom)
+        {
+            var fade = BlockMeshBuilder.Owned(new BSFadeNode());
+            fade.name = new NiStringRef(Path.GetFileName(path).ToUpperInvariant());
+            hdr.ReplaceBlock(hdr.GetBlockID(nif.GetRootNode()), fade);
+        }
         var root = nif.GetRootNode();
-        root.name = new NiStringRef(Path.GetFileName(path));
+        if (!faceGeom) root.name = new NiStringRef(Path.GetFileName(path));
         var used = shapes.SelectMany(s => s.Weights.SelectMany(w => w.Select(x => x.Bone))).Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(skeleton.Has).OrderBy(b => b, StringComparer.OrdinalIgnoreCase).ToList();
         // Bone nodes by block ID (taken at once: nifly's wrappers of new blocks mustn't be kept).
         var nodes = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
         foreach (var b in used) nodes[b] = hdr.GetBlockID(BlockMeshBuilder.Owned(nif.AddNode(b, ToTransform(skeleton.World[b]), root)));
+        uint faceNode = faceGeom ? hdr.GetBlockID(BlockMeshBuilder.Owned(nif.AddNode("BSFaceGenNiNodeSkinned", ToTransform(Matrix4x4.Identity), root))) : uint.MaxValue;
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in shapes)
         {
-            if (s.V.Length == 0 || s.V.Length > 65535 || s.Tris.Length < 3) continue;
-            using var vv = new vectorVector3(); using var uu = new vectorVector2(); using var nn = new vectorVector3(); using var tt = new vectorTriangle();
-            foreach (var p in s.V) vv.Add(new nifly.Vector3(p.X, p.Y, p.Z));
-            for (int i = 0; i < s.V.Length; i++) { var t = i < s.Uv.Length ? s.Uv[i] : Vector2.Zero; uu.Add(new nifly.Vector2(t.X, t.Y)); }
-            bool hasNormals = s.N.Length == s.V.Length;
-            if (hasNormals) foreach (var p in s.N) nn.Add(new nifly.Vector3(p.X, p.Y, p.Z));
-            for (int t = 0; t + 2 < s.Tris.Length; t += 3) tt.Add(new Triangle((ushort)s.Tris[t], (ushort)s.Tris[t + 1], (ushort)s.Tris[t + 2]));
             string name = s.Name;
-            for (int k = 2; !names.Add(name); k++) name = $"{s.Name}:{k}";
-            // nifly's wrappers of blocks it made may think they own them: never let a finalizer free one.
-            var shape = BlockMeshBuilder.Owned(hasNormals ? nif.CreateShapeFromData(name, vv, tt, uu, nn) : nif.CreateShapeFromData(name, vv, tt, uu));
-            if (!hasNormals) nif.CalcNormalsForShape(shape);
-            for (int k = 0; k < s.Textures.Length; k++) if (s.Textures[k].Length > 0) nif.SetTextureSlot(shape, s.Textures[k], (uint)k);
-            nif.CalcTangentsForShape(shape);
-            // Shader first (the skinning steps below rebuild blocks the shape points at).
-            if (nif.GetShader(shape) is not { } shader) { nif.DeleteShape(shape); continue; }
-            BlockMeshBuilder.Owned(shader);
-            uint shaderId = hdr.GetBlockID(shader);
-            if (s.AlphaFlags is { } af) nif.AssignAlphaProperty(shape, BlockMeshBuilder.Owned(new nifly.NiAlphaProperty { flags = af, threshold = s.AlphaThreshold }));
-            BlockMeshBuilder.EditBlock<BSLightingShaderProperty>(nif, shaderId, sp =>
-            {
-                if (s.ShaderType != 0) sp.SetShaderType(s.ShaderType);
-                sp.shaderFlags1 = s.Flags1 | 0x2u;   // always skinned
-                sp.shaderFlags2 = s.Flags2;
-                sp.glossiness = s.Glossiness;
-                sp.specularStrength = s.SpecularStrength;
-                sp.specularColor = new nifly.Vector3(s.SpecularColor.X, s.SpecularColor.Y, s.SpecularColor.Z);
-                sp.alpha = s.Alpha;
-                sp.emissiveColor = new nifly.Vector3(s.Emissive.X, s.Emissive.Y, s.Emissive.Z);
-                sp.emissiveMultiple = s.EmissiveMultiple;
-                sp.textureClampMode = (TexClampMode)s.Clamp;
-                if (s.IsSkin) { sp.subsurfaceRolloff = s.SubsurfaceRolloff; sp.rimlightPower = s.RimlightPower; sp.backlightPower = s.BacklightPower; }
-            });
-
-            // Skinning: the bones this shape uses, each bound at its bind pose.
-            var shapeBones = s.Weights.SelectMany(w => w.Select(x => x.Bone)).Distinct(StringComparer.OrdinalIgnoreCase).Where(nodes.ContainsKey).ToList();
-            if (shapeBones.Count == 0) { nif.DeleteShape(shape); continue; }
-            var slot = shapeBones.Select((b, i) => (b, i)).ToDictionary(x => x.b, x => x.i, StringComparer.OrdinalIgnoreCase);
-            nif.CreateSkinning(shape);
-            using (var ids = new vectorint()) { foreach (var b in shapeBones) ids.Add((int)nodes[b]); nif.SetShapeBoneIDList(shape, ids); }
-            nif.SetShapeTransformGlobalToSkin(shape, ToTransform(Matrix4x4.Identity));
-            var inverse = new Matrix4x4[shapeBones.Count];
-            for (int i = 0; i < shapeBones.Count; i++)
-            {
-                Matrix4x4.Invert(skeleton.World[shapeBones[i]], out inverse[i]);
-                nif.SetShapeTransformSkinToBone(shape, (uint)i, ToTransform(inverse[i]));
-            }
-            for (int v = 0; v < s.V.Length; v++)
-            {
-                using var bids = new vectoruchar(); using var ws = new vectorfloat();
-                foreach (var (b, w) in s.Weights[v]) if (slot.TryGetValue(b, out int bi) && w > 0) { bids.Add((byte)bi); ws.Add(w); }
-                if (bids.Count == 0) { bids.Add(0); ws.Add(1); }
-                nif.SetShapeVertWeights(name, (ushort)v, bids, ws);
-            }
-            // The skin data's per-bone weights and bounds (in the bone's own space).
-            uint skinId = shape.SkinInstanceRef().index;
-            if (skinId != uint.MaxValue)
-            {
-                uint dataId;
-                using (var cache = new niflycpp.BlockCache(nif.GetHeader())) dataId = cache.EditableBlockById<NiSkinInstance>(skinId)?.dataRef.index ?? uint.MaxValue;
-                if (dataId != uint.MaxValue)
-                    BlockMeshBuilder.EditBlock<NiSkinData>(nif, dataId, sd =>
-                    {
-                        sd.hasVertWeights = 1;
-                        var boneList = sd.bones;
-                        for (int i = 0; i < shapeBones.Count && i < boneList.Count; i++)
-                        {
-                            var bd = boneList[i];
-                            var list = new vectorSkinWeight();
-                            var pts = new List<Vector3>();
-                            for (int v = 0; v < s.V.Length; v++)
-                                foreach (var (b, w) in s.Weights[v])
-                                    if (w > 0 && slot.TryGetValue(b, out int bi) && bi == i)
-                                    {
-                                        list.Add(new SkinWeight { index = (ushort)v, weight = w });
-                                        pts.Add(Vector3.Transform(s.V[v], inverse[i]));
-                                    }
-                            bd.vertexWeights = list;
-                            bd.numVertices = (ushort)list.Count;
-                            var c = pts.Count > 0 ? pts.Aggregate(Vector3.Zero, (a, p) => a + p) / pts.Count : Vector3.Zero;
-                            bd.bounds = new BoundingSphere { center = new nifly.Vector3(c.X, c.Y, c.Z), radius = pts.Count > 0 ? pts.Max(p => Vector3.Distance(p, c)) : 0 };
-                            boneList[i] = bd;
-                        }
-                        sd.bones = boneList;
-                    });
-            }
-            nif.UpdateSkinPartitions(shape);
-            using (var parts = new NiVectorBSDismemberSkinInstancePartitionInfo())
-            using (var triParts = new vectorint())
-            {
-                parts.push_back(new BSDismemberSkinInstance.PartitionInfo { partID = (ushort)partition, flags = PartitionFlags.PF_EDITOR_VISIBLE | PartitionFlags.PF_START_NET_BONESET });
-                for (int t = 0; t < s.Tris.Length / 3; t++) triParts.Add(0);
-                nif.SetShapePartitions(shape, parts, triParts, true);
-            }
-            nif.UpdateSkinPartitions(shape);
-
+            for (int k = 2; names.Contains(name); k++) name = $"{s.Name}:{k}";
+            if (AddShape(nif, nodes, s, name, skeleton, partition, faceFile, faceNode)) names.Add(name);
         }
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         if (nif.Save(path) != 0) throw new IOException($"nifly failed to save {path}");
+    }
+
+    /// <summary>
+    /// One shape added to a NIF as <see cref="Write"/> makes them: a BSTriShape skinned to the bone nodes in
+    /// <paramref name="nodes"/> (name to block ID) at the skeleton's bind pose, one dismember partition. False when the
+    /// shape has nothing to draw or none of its bones is among the nodes.
+    /// </summary>
+    public static bool AddShape(NifFile nif, Dictionary<string, uint> nodes, WornShape s, string name, BindSkeleton skeleton, int partition, bool dynamic = false, uint parentNode = uint.MaxValue)
+    {
+        var hdr = nif.GetHeader();
+        if (s.V.Length == 0 || s.V.Length > 65535 || s.Tris.Length < 3) return false;
+        using var vv = new vectorVector3(); using var uu = new vectorVector2(); using var nn = new vectorVector3(); using var tt = new vectorTriangle();
+        foreach (var p in s.V) vv.Add(new nifly.Vector3(p.X, p.Y, p.Z));
+        for (int i = 0; i < s.V.Length; i++) { var t = i < s.Uv.Length ? s.Uv[i] : Vector2.Zero; uu.Add(new nifly.Vector2(t.X, t.Y)); }
+        bool hasNormals = s.N.Length == s.V.Length;
+        if (hasNormals) foreach (var p in s.N) nn.Add(new nifly.Vector3(p.X, p.Y, p.Z));
+        for (int t = 0; t + 2 < s.Tris.Length; t += 3) tt.Add(new Triangle((ushort)s.Tris[t], (ushort)s.Tris[t + 1], (ushort)s.Tris[t + 2]));
+        // nifly's wrappers of blocks it made may think they own them: never let a finalizer free one.
+        var shape = BlockMeshBuilder.Owned(hasNormals ? nif.CreateShapeFromData(name, vv, tt, uu, nn) : nif.CreateShapeFromData(name, vv, tt, uu));
+        if (!hasNormals) nif.CalcNormalsForShape(shape);
+        if (dynamic && hasNormals)
+        {
+            // A face file's shape: the same geometry as a BSDynamicTriShape in the plain shape's place (its block
+            // number, so the node's child and the shader it was given stay), before anything else is hung on it.
+            uint shapeId = hdr.GetBlockID(shape);
+            uint shaderOf = shape.ShaderPropertyRef().index;
+            var dyn = BlockMeshBuilder.Owned(new BSDynamicTriShape());
+            dyn.Create(NiVersion.getSSE(), vv, tt, uu, nn);
+            dyn.name = new NiStringRef(name);
+            dyn.SetShaderPropertyRef(shaderOf);
+            hdr.ReplaceBlock(shapeId, dyn);
+            shape = dyn;
+        }
+        for (int k = 0; k < s.Textures.Length; k++) if (s.Textures[k].Length > 0) nif.SetTextureSlot(shape, s.Textures[k], (uint)k);
+        nif.CalcTangentsForShape(shape);
+        // Shader first (the skinning steps below rebuild blocks the shape points at).
+        if (nif.GetShader(shape) is not { } shader) { nif.DeleteShape(shape); return false; }
+        BlockMeshBuilder.Owned(shader);
+        uint shaderId = hdr.GetBlockID(shader);
+        if (s.AlphaFlags is { } af) nif.AssignAlphaProperty(shape, BlockMeshBuilder.Owned(new nifly.NiAlphaProperty { flags = af, threshold = s.AlphaThreshold }));
+        BlockMeshBuilder.EditBlock<BSLightingShaderProperty>(nif, shaderId, sp =>
+        {
+            if (s.ShaderType != 0) sp.SetShaderType(s.ShaderType);
+            sp.shaderFlags1 = s.Flags1 | 0x2u;   // always skinned
+            sp.shaderFlags2 = s.Flags2;
+            sp.glossiness = s.Glossiness;
+            sp.specularStrength = s.SpecularStrength;
+            sp.specularColor = new nifly.Vector3(s.SpecularColor.X, s.SpecularColor.Y, s.SpecularColor.Z);
+            sp.alpha = s.Alpha;
+            sp.emissiveColor = new nifly.Vector3(s.Emissive.X, s.Emissive.Y, s.Emissive.Z);
+            sp.emissiveMultiple = s.EmissiveMultiple;
+            sp.textureClampMode = (TexClampMode)s.Clamp;
+            if (s.IsSkin) { sp.subsurfaceRolloff = s.SubsurfaceRolloff; sp.rimlightPower = s.RimlightPower; sp.backlightPower = s.BacklightPower; }
+            if (s.HairTint is { } tint) sp.hairTintColor = new nifly.Vector3(tint.X, tint.Y, tint.Z);
+        });
+
+        // Skinning: the bones this shape uses, each bound at its bind pose.
+        var shapeBones = s.Weights.SelectMany(w => w.Select(x => x.Bone)).Distinct(StringComparer.OrdinalIgnoreCase).Where(nodes.ContainsKey).ToList();
+        if (shapeBones.Count == 0) { nif.DeleteShape(shape); return false; }
+        var slot = shapeBones.Select((b, i) => (b, i)).ToDictionary(x => x.b, x => x.i, StringComparer.OrdinalIgnoreCase);
+        nif.CreateSkinning(shape);
+        using (var ids = new vectorint()) { foreach (var b in shapeBones) ids.Add((int)nodes[b]); nif.SetShapeBoneIDList(shape, ids); }
+        nif.SetShapeTransformGlobalToSkin(shape, ToTransform(Matrix4x4.Identity));
+        var inverse = new Matrix4x4[shapeBones.Count];
+        for (int i = 0; i < shapeBones.Count; i++)
+        {
+            Matrix4x4.Invert(skeleton.World[shapeBones[i]], out inverse[i]);
+            nif.SetShapeTransformSkinToBone(shape, (uint)i, ToTransform(inverse[i]));
+        }
+        for (int v = 0; v < s.V.Length; v++)
+        {
+            using var bids = new vectoruchar(); using var ws = new vectorfloat();
+            foreach (var (b, w) in s.Weights[v]) if (slot.TryGetValue(b, out int bi) && w > 0) { bids.Add((byte)bi); ws.Add(w); }
+            if (bids.Count == 0) { bids.Add(0); ws.Add(1); }
+            nif.SetShapeVertWeights(name, (ushort)v, bids, ws);
+        }
+        // The skin data's per-bone weights and bounds (in the bone's own space).
+        uint skinId = shape.SkinInstanceRef().index;
+        if (skinId != uint.MaxValue)
+        {
+            uint dataId;
+            using (var cache = new niflycpp.BlockCache(nif.GetHeader())) dataId = cache.EditableBlockById<NiSkinInstance>(skinId)?.dataRef.index ?? uint.MaxValue;
+            if (dataId != uint.MaxValue)
+                BlockMeshBuilder.EditBlock<NiSkinData>(nif, dataId, sd =>
+                {
+                    sd.hasVertWeights = 1;
+                    var boneList = sd.bones;
+                    for (int i = 0; i < shapeBones.Count && i < boneList.Count; i++)
+                    {
+                        var bd = boneList[i];
+                        var list = new vectorSkinWeight();
+                        var pts = new List<Vector3>();
+                        for (int v = 0; v < s.V.Length; v++)
+                            foreach (var (b, w) in s.Weights[v])
+                                if (w > 0 && slot.TryGetValue(b, out int bi) && bi == i)
+                                {
+                                    list.Add(new SkinWeight { index = (ushort)v, weight = w });
+                                    pts.Add(Vector3.Transform(s.V[v], inverse[i]));
+                                }
+                        bd.vertexWeights = list;
+                        bd.numVertices = (ushort)list.Count;
+                        var c = pts.Count > 0 ? pts.Aggregate(Vector3.Zero, (a, p) => a + p) / pts.Count : Vector3.Zero;
+                        bd.bounds = new BoundingSphere { center = new nifly.Vector3(c.X, c.Y, c.Z), radius = pts.Count > 0 ? pts.Max(p => Vector3.Distance(p, c)) : 0 };
+                        boneList[i] = bd;
+                    }
+                    sd.bones = boneList;
+                });
+        }
+        nif.UpdateSkinPartitions(shape);
+        using (var parts = new NiVectorBSDismemberSkinInstancePartitionInfo())
+        using (var triParts = new vectorint())
+        {
+            parts.push_back(new BSDismemberSkinInstance.PartitionInfo { partID = (ushort)partition, flags = PartitionFlags.PF_EDITOR_VISIBLE | PartitionFlags.PF_START_NET_BONESET });
+            for (int t = 0; t < s.Tris.Length / 3; t++) triParts.Add(0);
+            nif.SetShapePartitions(shape, parts, triParts, true);
+        }
+        nif.UpdateSkinPartitions(shape);
+        if (parentNode != uint.MaxValue)
+        {
+            // Under the given node, which is also what its skin hangs from (a face file's "BSFaceGenNiNodeSkinned").
+            nif.SetParentNode(shape, (NiNode)hdr.GetBlockById(parentNode));
+            uint instance = shape.SkinInstanceRef().index;
+            if (instance != uint.MaxValue) BlockMeshBuilder.EditBlock<BSDismemberSkinInstance>(nif, instance, si => si.targetRef.index = parentNode);
+        }
+        return true;
     }
 }
 
@@ -759,6 +805,27 @@ public sealed class SkyrimCharacterAssets(string skyrimData)
         }
     }
 
+    /// <summary>
+    /// A race kind's head model in bind space ("" the human and elf one, "orc", "khajiit", "argonian"; the plain head
+    /// when the kind's own isn't there), and it as a surface to fit hair and helmets outside of.
+    /// </summary>
+    public IReadOnlyList<WornShape> Head(bool female, string kind = "")
+    {
+        string sex = female ? "female" : "male";
+        string path = $@"meshes\actors\character\character assets\{sex}head{kind}.nif";
+        if (parts.TryGetValue(path, out var hit)) return hit;
+        var bytes = Read(path) ?? (kind.Length > 0 ? null : throw new FileNotFoundException(path));
+        if (bytes is null) return parts[path] = Head(female).ToList();
+        var skeleton = Skeleton(female);
+        return parts[path] = WithNif(bytes, nif => WornMesh.ReadSkinned(nif, skeleton));
+    }
+
+    public WornSurface HeadSurface(bool female, string kind = "")
+    {
+        string key = $"head{kind}|{female}";
+        return surfaces.TryGetValue(key, out var s) ? s : surfaces[key] = new WornSurface(FaceGeomHair.HeadOf(Head(female, kind)));
+    }
+
     public const string MaleSkeleton = @"meshes\actors\character\character assets\skeleton.nif";
     public const string FemaleSkeleton = @"meshes\actors\character\character assets female\skeleton_female.nif";
 
@@ -773,7 +840,9 @@ public sealed class SkyrimCharacterAssets(string skyrimData)
     /// <summary>The naked body, hands or feet ("body", "hands", "feet") at a weight (0 thin, 1 heavy), in bind space.</summary>
     public IReadOnlyList<WornShape> Naked(string part, bool female, int weight)
     {
-        string path = $@"meshes\actors\character\character assets\{(female ? "female" : "male")}{part}_{weight}.nif";
+        // The head has one model for both weights (malehead.nif, femalehead.nif).
+        string path = part == "head" ? $@"meshes\actors\character\character assets\{(female ? "female" : "male")}head.nif"
+            : $@"meshes\actors\character\character assets\{(female ? "female" : "male")}{part}_{weight}.nif";
         if (parts.TryGetValue(path, out var hit)) return hit;
         var bytes = Read(path) ?? throw new FileNotFoundException(path);
         var skeleton = Skeleton(female);

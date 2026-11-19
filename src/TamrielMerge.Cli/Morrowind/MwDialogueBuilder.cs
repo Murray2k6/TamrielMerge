@@ -58,7 +58,7 @@ public sealed partial class MwPluginBuilder
         {
             string title = r.Text;
             if (title.Length == 0) continue;
-            faction.Ranks.Add(new Rank { Number = n++, Title = new GenderedItem<Mutagen.Bethesda.Strings.TranslatedString>(title, title) });
+            faction.Ranks.Add(new Rank { Number = n++, Title = new GenderedItem<Mutagen.Bethesda.Strings.TranslatedString?>(title, title) });
         }
         // FADT: attributes (8), ranks (10 x 20), skills (7 x 4), then flags: 1 = hidden from the player (not joinable).
         if (rec.Get("FADT") is { Data.Length: >= 240 } fadt && (fadt.Int(236) & 1) != 0) faction.Flags |= Faction.FactionFlag.HiddenFromPC;
@@ -86,7 +86,8 @@ public sealed partial class MwPluginBuilder
         // Globals have their own namespace: Tribunal has globals named like scripts (scriptWorld keeps them).
         if (!world.Objects.TryGetValue(id, out var rec) || rec.Type != "GLOB")
             if (scriptWorld?.Globals.TryGetValue(id, out rec) != true) return globals[id] = null;
-        var g = new GlobalFloat(mod) { EditorID = "MWGlobal" + Sanitize(id), Data = rec.Get("FLTV")?.Float() ?? 0 };
+        // (Found by one lookup or the other: the record is there.)
+        var g = new GlobalFloat(mod) { EditorID = "MWGlobal" + Sanitize(id), Data = rec!.Get("FLTV")?.Float() ?? 0 };
         mod.Globals.Add(g);
         return globals[id] = g;
     }
@@ -117,6 +118,12 @@ public sealed partial class MwPluginBuilder
             npc.Factions.Add(new RankPlacement { Faction = (moneyChangers ??= Skyrim.CoinTrade.Tag(mod, "MWMoneyChangers", "Money changers")).ToLink<IFactionGetter>(), Rank = 0 });
         // Trainers (AIDT services 0x4000): taught by MwLevelling.BuildTrainers.
         if (rec.Get("AIDT") is { Data.Length: >= 12 } trains && (trains.Int(8) & 0x4000) != 0) trainerNpcs.Add((npc, rec.Id));
+        // Vendors (AIDT barter services 0x1-0x2000): their shops are built by MwVendors.FinishVendors.
+        MakeVendor(npc, rec);
+        // The repair service (AIDT 0x20000): the Repair topic (MwWear).
+        MakeRepairer(npc, rec);
+        // Enchanters and spellmakers (AIDT 0x10000, 0x8000): their services are MwEnchanters'.
+        MakeEnchanter(npc, rec);
         string who = ((rec.Str("CNAM") ?? "") + " " + (rec.Str("ANAM") ?? "")).ToLowerInvariant();
         // Guards may doze on night watch (TMNightDanger), and are the law's: Skyrim's guards of Morrowind's crime faction.
         if (who.Contains("guard"))
@@ -150,9 +157,14 @@ public sealed partial class MwPluginBuilder
         topicNames = dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Topic).Select(t => t.Name).OrderByDescending(n => n.Length).ToList();
         foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Journal)) Journal(topic);
         foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Topic)) Topic(topic, greeting: false);
-        foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Greeting)) Topic(topic, greeting: true);
+        // In Morrowind's order: Greeting 0 is tried first, Greeting 9 last.
+        foreach (var topic in dialogueData.Topics.Values.Where(t => t.Type == MwDialogue.TopicType.Greeting).OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase)) Topic(topic, greeting: true);
         Persuasion();
         CompanionShare();
+        BuildTravel();
+        BarterTopic();
+        RepairTopic();
+        EnchantingTopics();
         FinishTopicLearning();
         // Money changers (CoinTrade): the faction is shared with the people who join it, made now or later.
         moneyChangers ??= Skyrim.CoinTrade.Tag(mod, "MWMoneyChangers", "Money changers");
@@ -278,7 +290,7 @@ public sealed partial class MwPluginBuilder
         {
             EditorID = "MWCompanionShare",
             Name = name,
-            Quest = dialogueQuest.ToNullableLink<IQuestGetter>(),
+            Quest = dialogueQuest!.ToNullableLink<IQuestGetter>(),
             Branch = branch.ToNullableLink<IDialogBranchGetter>(),
             Priority = 50,
             Category = DialogTopic.CategoryEnum.Topic,
@@ -361,13 +373,19 @@ public sealed partial class MwPluginBuilder
             });
             // The same entry as an objective, shown when the journal goes back to it (TMMwScript.Journal): Morrowind adds
             // the entry again; a stage already done can't be set again.
-            quest.Objectives.Add(new QuestObjective { Index = index, DisplayText = text, Targets = [] });
+            // Its first sentence (Skyrim.QuestText.Headline: the HUD shows an objective on one line); the whole entry is the log's.
+            quest.Objectives.Add(new QuestObjective { Index = index, DisplayText = Skyrim.QuestText.Headline(text), Targets = [] });
         }
         mod.Quests.Add(quest);
         journals[topic.Name] = quest;
     }
 
-    /// <summary>A topic (top-level player topic) or the greetings (Hello), with their choices' child topics.</summary>
+    /// <summary>
+    /// A topic (top-level player topic) with its choices' child topics, or a greeting (a Hello said once the conversation
+    /// has begun). Seen in game 2026-11-09 with Morrowind.seq in place (SeqFile): Fargoth said "I don't know you. What do
+    /// you want?", the topic menu opened, and Latest rumors taught Solstheim. Without that file no greeting was said and
+    /// no menu opened; a blocking branch for the greetings said them and ended the conversation there.
+    /// </summary>
     void Topic(MwDialogue.Topic topic, bool greeting)
     {
         string edid = (greeting ? "MWHello" : "MWTopic") + Sanitize(topic.Name);
@@ -387,7 +405,7 @@ public sealed partial class MwPluginBuilder
             branch = new DialogBranch(mod)
             {
                 EditorID = edid + "Branch",
-                Quest = dialogueQuest.ToLink<IQuestGetter>(),
+                Quest = dialogueQuest!.ToLink<IQuestGetter>(),
                 Category = DialogBranch.CategoryType.Player,
                 Flags = DialogBranch.Flag.TopLevel,
                 StartingTopic = main.ToNullableLink<IDialogTopicGetter>(),
@@ -447,7 +465,7 @@ public sealed partial class MwPluginBuilder
         var branch = new DialogBranch(mod)
         {
             EditorID = edid + "Branch",
-            Quest = dialogueQuest.ToLink<IQuestGetter>(),
+            Quest = dialogueQuest!.ToLink<IQuestGetter>(),
             Category = DialogBranch.CategoryType.Player,
             Flags = DialogBranch.Flag.Blocking,
             StartingTopic = forceGreet.ToNullableLink<IDialogTopicGetter>(),
@@ -502,6 +520,7 @@ public sealed partial class MwPluginBuilder
                 }
                 child = new DialogTopic(mod)
                 {
+                    // (The greetings share one topic: their choices are named by their own Morrowind topic.)
                     EditorID = $"{owner.EditorID}Choice{number}_{children.Count}",
                     Name = text,
                     Quest = dialogueQuest!.ToNullableLink<IQuestGetter>(),
@@ -985,8 +1004,10 @@ public sealed partial class MwPluginBuilder
                 }, Holds(c.Compare, 0, c.Value));
             case "40": return AnySpell(MwSpellIds(r => SpellType(r) == 3), c.Compare, c.Value);   // a common disease
             case "41": return AnySpell(MwSpellIds(r => SpellType(r) == 2), c.Compare, c.Value);   // a blight disease
-            case "58": return AnySpell(MwSpellIds(r => HasEffect(r, CorprusEffect)), c.Compare, c.Value);
-            case "60": return AnySpell(MwSpellIds(r => HasEffect(r, VampirismEffect)), c.Compare, c.Value);
+            // 58 PCCorprus, 60 PCVampire: the effect's magnitude on the player (OpenMW filter.cpp), i.e. an ability or disease
+            // carrying it (the corprus disease, "vampire sun damage"); a cast spell's passing effect (the ash curses') isn't it.
+            case "58": return AnySpell(MwSpellIds(r => SpellType(r) != 0 && HasEffect(r, CorprusEffect)), c.Compare, c.Value);
+            case "60": return AnySpell(MwSpellIds(r => SpellType(r) != 0 && HasEffect(r, VampirismEffect)), c.Compare, c.Value);
             // 39 expelled from the speaker's faction (none: not expelled).
             case "39":
                 return BySpeakerFaction(info, f =>

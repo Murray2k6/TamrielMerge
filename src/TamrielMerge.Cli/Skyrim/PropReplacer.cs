@@ -96,7 +96,7 @@ public sealed class PropReplacer
     /// BSFurnitureMarkerNode), to put into another mesh built in the same space; null when it has none.</summary>
     public nifly.NiObject? FurnitureMarkerBlock(FormKey key)
     {
-        var record = skyrim.EnumerateMajorRecords().FirstOrDefault(r => r.FormKey == key);
+        var record = Record(key);
         string? path = (record as IModeledGetter)?.Model?.File.DataRelativePath.Path;
         if (path is null) return null;
         path = path.Replace('/', '\\');
@@ -145,9 +145,26 @@ public sealed class PropReplacer
     readonly ISkyrimModGetter skyrim;
     public ISkyrimModGetter Skyrim => skyrim;
 
+    /// <summary>
+    /// Skyrim's record with that FormKey, or null: found through a link cache made once, each answer kept (2026-11-02: every
+    /// prop and piece of clutter looked its record up by reading through Skyrim.esm's records from the start, 10 of a
+    /// dungeon part's 79 seconds of laying out). Any thread.
+    /// </summary>
+    public Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter? Record(FormKey key)
+    {
+        lock (records) if (records.TryGetValue(key, out var known)) return known;
+        var found = links.Value.TryResolve<ISkyrimMajorRecordGetter>(key, out var record) ? record : null;
+        lock (records) records[key] = found;
+        return found;
+    }
+
+    readonly Dictionary<FormKey, Mutagen.Bethesda.Plugins.Records.IMajorRecordGetter?> records = [];
+    readonly Lazy<Mutagen.Bethesda.Plugins.Cache.ILinkCache> links;
+
     public PropReplacer(ISkyrimModGetter skyrim, string skyrimData)
     {
         this.skyrim = skyrim;
+        links = new(() => skyrim.ToUntypedImmutableLinkCache(), LazyThreadSafetyMode.ExecutionAndPublication);
         meshArchives = Directory.GetFiles(skyrimData, "Skyrim - Meshes*.bsa").Select(p => Archive.CreateReader(GameRelease.SkyrimSE, p)).ToArray();
     }
 
@@ -243,7 +260,7 @@ public sealed class PropReplacer
         if (skyrimShapes.TryGetValue(key, out var shape)) return shape;
         // Not Skyrim's and not registered (AddShape): no shape, rather than failing the dungeon (2026-10-17: Daggerfall's
         // own items on dungeon floors failed 18% of the dungeons when their clutter was settled).
-        if (skyrim.EnumerateMajorRecords().FirstOrDefault(r => r.FormKey == key) is { } record) return SkyrimShape(record);
+        if (Record(key) is { } record) return SkyrimShape(record);
         lock (skyrimShapes) return skyrimShapes[key] = (Vector3.Zero, Vector3.Zero, Vector2.Zero);
     }
 
@@ -268,8 +285,11 @@ public sealed class PropReplacer
                 (min, max) = (obMin, obMax);
             // Or the right size in the wrong place (a transform the reader missed: HumanSkullStatic sits 17-32 below
             // its origin by the record, the mesh read put it at 0-15, and caged skulls hung under their cages).
+            // Not furniture: its record's bounds take in the room the one sitting uses (CommonBench01's reach 73 in front
+            // of a 30-deep bench), so by them a Daggerfall bench was set 29 units off the seat its markers are for, chairs
+            // 26.5 with the sitter in the backrest (2026-11-04, user: "benches npcs clip through when sitting").
             var shift = Vector3.Abs((min + max) / 2 - (obMin + obMax) / 2);
-            if (obSize.X > 1 && obSize.Y > 1 && obSize.Z > 1 && (shift.X > MathF.Max(8, obSize.X / 4) || shift.Y > MathF.Max(8, obSize.Y / 4) || shift.Z > MathF.Max(8, obSize.Z / 4)))
+            if (record is not IFurnitureGetter && obSize.X > 1 && obSize.Y > 1 && obSize.Z > 1 && (shift.X > MathF.Max(8, obSize.X / 4) || shift.Y > MathF.Max(8, obSize.Y / 4) || shift.Z > MathF.Max(8, obSize.Z / 4)))
                 (min, max) = (obMin, obMax);
             float threshold = min.Z + (max.Z - min.Z) * 0.7f;
             var high = verts.Where(v => v.Z >= threshold).ToList();

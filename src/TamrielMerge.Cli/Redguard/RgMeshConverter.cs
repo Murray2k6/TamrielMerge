@@ -51,7 +51,13 @@ public sealed class RgMeshConverter(RgArt art)
     /// <param name="Path">The model, or "" when it is all water.</param>
     /// <param name="Water">Flat water faces (Skyrim model space, facing up), for Skyrim water in their place.</param>
     /// <param name="Falls">Steep water faces (falling water), for Skyrim's waterfall sheet in their place.</param>
-    public sealed record Result(string Path, Vector3 Min, Vector3 Max, List<Vector3[]> Solid, int Faces, List<Vector3[]> Water, List<Vector3[]> Falls);
+    /// <param name="Walk">What its navmesh is made from (2026-11-06: Redguard's dungeons came out in pieces, 204 in the
+    /// catacombs and 117 of 162 interior people apart from every load door): its collision's stairs as ramps (as the player
+    /// walks them: Redguard's risers of 16-32 units sat on Recast's 32-unit step), and for a prop that moves (a door, a gate,
+    /// a lift) only its level faces, so a door shut where the map leaves it doesn't cut the way, and a lift's floor stays.
+    /// Null: <paramref name="Solid"/>.</param>
+    public sealed record Result(string Path, Vector3 Min, Vector3 Max, List<Vector3[]> Solid, int Faces, List<Vector3[]> Water, List<Vector3[]> Falls,
+        List<Vector3[]>? Walk = null);
 
     /// <summary>
     /// Redguard's water images (bank, image), left out of the models and replaced by Skyrim's water (user, 2026-10-09:
@@ -61,20 +67,31 @@ public sealed class RgMeshConverter(RgArt art)
     /// </summary>
     public static readonly HashSet<(int Bank, int Image)> WaterImages = [(134, 6), (302, 0), (267, 4), (165, 0), (47, 0), (3, 0), (3, 1)];
 
+    /// <summary>Models shown with their frames playing over and over (a gull's wings, the parrot on its perch), one
+    /// set of shapes per frame shown in its turn (NiVisController, as the menu's flyby): Skyrim's BSTriShape has no vertex
+    /// animation. User, 2026-11-10: "the seaguls in redguard act weird" (one rigid frame slid along by its script).</summary>
+    public static readonly HashSet<string> Looping = new(StringComparer.OrdinalIgnoreCase) { "SEAGA001", "PRRTA001" };
+    /// <summary>Frames a second: Redguard's tick (12.14 a second, the rate its scripts count animation frames in).</summary>
+    public const float FrameRate = 12.14f;
+
     /// <param name="moving">A variant whose collision moves with the object (keyframed), for scripted props.</param>
     /// <param name="itemMass">A loose item's variant (_item): a dynamic box body of this mass instead of fixed collision.</param>
     /// <param name="collide">False: no collision (a rope the player swings on).</param>
     public Result? Convert(RgModel model, string name, string palette, string modOutDir, bool moving = false, float? itemMass = null, bool collide = true)
     {
         var verts = model.Vertices.Select(RgSpace.Dir).ToList();
+        var firstVerts = verts;
         // Face normals (Skyrim space) and, per vertex, the faces using it, for smoothing.
-        var faceNormals = model.Faces.Select(f =>
+        List<Vector3> FaceNormals() => model.Faces.Select(f =>
         {
             var n = Vector3.Zero;
             for (int t = 1; t + 1 < f.Vertices.Length; t++)
                 n += Vector3.Cross(verts[f.Vertices[t]] - verts[f.Vertices[0]], verts[f.Vertices[t + 1]] - verts[f.Vertices[0]]);
             return n.LengthSquared() > 1e-10f ? Vector3.Normalize(n) : Vector3.UnitZ;
         }).ToList();
+        var faceNormals = FaceNormals();
+        var firstNormals = faceNormals;
+        int frames = Looping.Contains(name) ? 1 + model.Frames.Count : 1;
         var facesOf = new Dictionary<int, List<int>>();
         for (int f = 0; f < model.Faces.Count; f++)
             foreach (var v in model.Faces[f].Vertices.Distinct())
@@ -128,8 +145,14 @@ public sealed class RgMeshConverter(RgArt art)
             hdr.ReplaceBlock(hdr.GetBlockID(nif.GetRootNode()), fade);
             var root = nif.GetRootNode();
             int shapeNo = 0;
+            float loop = frames / FrameRate;
+            for (int frame = 0; frame < frames; frame++)
+            {
+            if (frame > 0) { verts = model.Frames[frame - 1].Select(RgSpace.Dir).ToList(); faceNormals = FaceNormals(); }
             foreach (var (tex, faces) in groups)
             {
+                // Corners stored whole textures away brought back first (RgModel.Unwrap), once a model.
+                if (frame == 0) foreach (int f in faces) RgModel.Unwrap(model, model.Faces[f], tex.Width, tex.Height);
                 using var vv = new vectorVector3();
                 using var uv = new vectorVector2();
                 using var nn = new vectorVector3();
@@ -150,7 +173,7 @@ public sealed class RgMeshConverter(RgArt art)
                     }
                     for (int k = 1; k + 1 < face.Vertices.Length; k++)
                         tris.Add(new Triangle(start, (ushort)(start + k), (ushort)(start + k + 1)));
-                    if (!tex.Alpha) solid.Add((face.Vertices.Select(i => verts[i]).ToArray(), faceNormals[f], new BlockMeshBuilder.Tex("", "", false)));
+                    if (!tex.Alpha && frame == 0) solid.Add((face.Vertices.Select(i => verts[i]).ToArray(), faceNormals[f], new BlockMeshBuilder.Tex("", "", false)));
                 }
                 if (tris.Count == 0) continue;
                 var shape = nif.CreateShapeFromData($"{name}_{shapeNo++}", vv, tris, uv, nn);
@@ -167,16 +190,46 @@ public sealed class RgMeshConverter(RgArt art)
                     s.specularStrength = 0.3f;
                     s.textureClampMode = TexClampMode.WRAP_S_WRAP_T;
                 });
+                if (frames == 1) continue;
+                // Shown for its tick of the loop.
+                uint shapeId = hdr.GetBlockID(shape);
+                var vis = new NiBoolData();
+                vis.data.SetInterpolationType(NiKeyType.CONST_KEY);
+                NifKeys.Add(vis.data, 0, frame == 0);
+                if (frame > 0) NifKeys.Add(vis.data, frame / FrameRate, true);
+                if (frame < frames - 1) NifKeys.Add(vis.data, (frame + 1) / FrameRate, false);
+                NifKeys.Add(vis.data, loop, frame == 0);
+                uint visData = hdr.AddBlock(BlockMeshBuilder.Owned(vis));
+                var visInterp = new NiBoolInterpolator { boolValue = 2 };
+                visInterp.dataRef.index = visData;
+                uint visInterpId = hdr.AddBlock(BlockMeshBuilder.Owned(visInterp));
+                var visCtlr = new NiVisController { flags = 0x48, frequency = 1, phase = 0, startTime = 0, stopTime = loop };
+                visCtlr.targetRef.index = shapeId;
+                visCtlr.interpolatorRef.index = visInterpId;
+                uint visCtlrId = hdr.AddBlock(BlockMeshBuilder.Owned(visCtlr));
+                bool hidden = frame != 0;
+                BlockMeshBuilder.EditBlock<BSTriShape>(nif, shapeId, t =>
+                {
+                    t.controllerRef.index = visCtlrId;
+                    if (hidden) t.flags |= 1;
+                });
             }
+            }
+            verts = firstVerts; faceNormals = firstNormals;
             if (itemMass is float mass && verts.Count > 0)
                 BlockMeshBuilder.AddDynamicCollision(nif, root, verts.Aggregate(Vector3.Min), verts.Aggregate(Vector3.Max), mass, BlockMeshBuilder.WoodMaterial);
             else if (collide && solid.Count > 0) BlockMeshBuilder.AddCollision(nif, root, moving ? solid : BlockMeshBuilder.StairCollision(solid), moving);
-            BlockMeshBuilder.AddBsxFlags(nif, root);
+            // Animated (bit 0), so the scene runs the frames' controllers.
+            BlockMeshBuilder.AddBsxFlags(nif, root, frames > 1 ? 11 : 10);
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
             if (nif.Save(outPath) != 0) throw new IOException($"nifly failed to save {outPath}");
         }
         var all = verts.Count > 0 ? verts : [Vector3.Zero];
+        // A rope (no collision) and a loose item (it can be pushed and taken) leave the navmesh as it is.
+        var walk = !collide || itemMass is not null ? [] : moving
+            ? solid.Where(s => MathF.Abs(s.N.Z) > 0.7f).Select(s => s.Pts).ToList()
+            : BlockMeshBuilder.StairCollision(solid).Select(s => s.Pts).ToList();
         return new Result(rel, all.Aggregate(new Vector3(float.MaxValue), Vector3.Min), all.Aggregate(new Vector3(float.MinValue), Vector3.Max),
-            solid.Select(s => s.Pts).ToList(), model.Faces.Count, water, falls);
+            solid.Select(s => s.Pts).ToList(), model.Faces.Count, water, falls, walk);
     }
 }

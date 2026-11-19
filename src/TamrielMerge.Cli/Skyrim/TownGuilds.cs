@@ -18,7 +18,7 @@ namespace TamrielMerge.Skyrim;
 /// with Daggerfall's 28-day rule; the Thieves Guild and Dark Brotherhood invite. Reputation is the player's standing
 /// with the guild (DFReact_&lt;id&gt;, TownTalk).
 /// </summary>
-public sealed class TownGuilds(SkyrimMod mod, ISkyrimModGetter skyrim, DfText text, DfFactions factions)
+public sealed class TownGuilds(SkyrimMod mod, ISkyrimModGetter skyrim, DfText text)
 {
     static FormKey Sk(uint id) => new(ModKey.FromFileName("Skyrim.esm"), id);
     static readonly FormKey PlayerRef = Sk(0x14);

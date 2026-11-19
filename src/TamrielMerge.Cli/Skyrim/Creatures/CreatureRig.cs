@@ -459,14 +459,20 @@ public sealed class CreatureRig
     void WriteBody(string path, string dataDir, string id)
     {
         using var nif = new NifFile();
-        nif.CreateNamedBSFadeNode(NiVersion.getSSE(), id);
+        // A plain NiNode root, as vanilla's creature bodies and our worn meshes have: under a BSFadeNode root the game
+        // draws nothing of a skinned body (seen in game 2026-11-09: imp, bat, guar, scorpion and lich all invisible, their
+        // skeletons and behaviour working; with only the root's type changed to NiNode the imp and the bat drew).
+        nif.Create(NiVersion.getSSE());
+        nif.GetRootNode().name = new NiStringRef(id);
         var hdr = nif.GetHeader();
         var nodes = AddBones(nif);
         var restWorld = RestWorld();
         string texDir = Path.Combine(dataDir, TextureFolder(id));
         Directory.CreateDirectory(texDir);
+        SplitWideMeshes();
         var meshIds = new uint[Meshes.Count];
         var madeTextures = new Dictionary<(string?, string, string), string?>();
+        var shapeNames = new HashSet<string>(StringComparer.Ordinal);
         for (int mi = 0; mi < Meshes.Count; mi++)
         {
             var m = Meshes[mi];
@@ -479,11 +485,17 @@ public sealed class CreatureRig
                 nn.Add(new nifly.Vector3(m.N[i].X, m.N[i].Y, m.N[i].Z));
             }
             foreach (var t in m.Tris) tt.Add(new Triangle((ushort)t[0], (ushort)t[1], (ushort)t[2]));
-            string shapeName = FileSafe($"{id}_{m.Name}");
+            // nifly finds a shape by its name when it sets weights: a name another shape already has (the bear's two
+            // "Tri bearclaw_L07") put the second one's weights on the first and left it on none (2026-11-06). Such a
+            // shape is skinned under a name of its own and gets its real name back after.
+            string realName = FileSafe($"{id}_{m.Name}");
+            string shapeName = shapeNames.Add(realName) ? realName : $"{realName} #{mi}";
+            shapeNames.Add(shapeName);
             var shape = nif.CreateShapeFromData(shapeName, vv, tt, uu, nn);
             meshIds[mi] = hdr.GetBlockID(shape);
-            // A tint copy (MwCreatureSource: "<shape> [tint k]") draws with its shape's own textures, made once.
-            string texStem = FileSafe($"{id}_{System.Text.RegularExpressions.Regex.Replace(m.Name, @" \[tint \d+\]$", "")}");
+            // A tint copy (MwCreatureSource: "<shape> [tint k]") or a part (SplitWideMeshes: "<shape> [part k]") draws with
+            // its shape's own textures, made once.
+            string texStem = FileSafe($"{id}_{PartOf(m.Name)}");
             string? Made(string? source, string suffix)
             {
                 var key = (source, texStem, suffix);
@@ -577,16 +589,26 @@ public sealed class CreatureRig
                     sd.bones = boneList;
                 });
             }
-            nif.UpdateSkinPartitions(shape);
+            // The body part (one partition, 32: the body), then the partitions the game skins with: each one's bones, its
+            // vertices' weights and bone indices, its triangles. In that order: SetDefaultPartition puts back a bare
+            // partition (vertices only, no bones), and called after the update it left every creature body with nothing
+            // to skin it, so the game drew none of them (2026-11-06, user: "bats and imps in daggerfall as for scorpions";
+            // nif-partitions: 0 bones in all 100 creature models, where vanilla's 4,054 have 1 to 60).
             nif.SetDefaultPartition(shape);
+            SplitPartitions(nif, shape, m, slot);
             // Not drawn (Morrowind's hidden emitter shapes: a particle array still emits from it); flagged last, once skinned.
             if (m.Hidden) BlockMeshBuilder.EditBlock<BSTriShape>(nif, meshIds[mi], s => s.flags |= 1);
+            if (shapeName != realName) BlockMeshBuilder.EditBlock<BSTriShape>(nif, meshIds[mi], s => s.name = new NiStringRef(realName));
         }
         var boneIds = nodes.Select(n => hdr.GetBlockID(n)).ToArray();
         foreach (var extra in BodyExtras) extra(nif, dataDir, boneIds, meshIds);
         if (Looks.Count > 0) AddLooks(nif, id, meshIds);
         if (BodyExtras.Count > 0 || Looks.Count > 0) BlockMeshBuilder.AddBsxFlags(nif, nif.GetRootNode(), 1);   // animated: its effects run
         nif.Save(path);
+        // Read back: a body the game can't skin is drawn as nothing, so it is an error here, not a creature.
+        var (_, partitionIssues) = CreatureBones.Partitions(path);
+        if (partitionIssues.Count > 0)
+            throw new InvalidDataException($"{Path.GetFileName(path)}: its skin partitions can't draw it: {string.Join("; ", partitionIssues.Take(4))}");
     }
 
     /// <summary>
@@ -685,6 +707,148 @@ public sealed class CreatureRig
         graph.name = new NiStringRef("BGED");
         graph.behaviorGraphFile = new NiStringRef(LookProject(id));
         nif.AssignExtraData(root, graph);
+    }
+
+    /// <summary>The most bones one skin partition holds: the most any of vanilla Skyrim SE's 4,054 skinned actor models
+    /// uses (nif-partitions, 2026-11-06: 23 models at 60, none above; the game skins a partition's bones at once).</summary>
+    public const int MaxPartitionBones = 60;
+
+    /// <summary>The most bones one shape can be skinned to: its vertices name their bones in one byte each (the shared
+    /// vertex data's bone numbers), so bone 256 came out as bone 0 (2026-11-06: 16 Morrowind creatures whose heads morph,
+    /// a morph bone for each set of vertices moving alike: the goblin's head on 262 bones).</summary>
+    public const int MaxShapeBones = 256;
+
+    /// <summary>A mesh name without what <see cref="SplitWideMeshes"/> and MwCreatureSource's tint copies add to it
+    /// (" [part k]", " [tint k]"): the shape it came from.</summary>
+    public static string PartOf(string name) => System.Text.RegularExpressions.Regex.Replace(name, @"( \[(tint|part) \d+\])+$", "");
+
+    /// <summary>
+    /// Each mesh skinned to more than <see cref="MaxShapeBones"/> bones as parts that each stay within it: triangles in the
+    /// order of their bones, each into the part it adds the fewest bones to; a part has the vertices its triangles use
+    /// (their positions, normals, UVs, weights, colours as the mesh's) and the mesh's textures and look. The first part
+    /// stays where the mesh was (what the particle systems and looks name), the others ("&lt;name&gt; [part k]") are added
+    /// after the meshes, and every look animating the mesh animates them too.
+    /// </summary>
+    void SplitWideMeshes()
+    {
+        int count = Meshes.Count;
+        for (int mi = 0; mi < count; mi++)
+        {
+            var m = Meshes[mi];
+            int meshBones = m.Weights.SelectMany(w => w.Select(p => p.Bone)).Distinct().Count();
+            if (meshBones <= MaxShapeBones) continue;
+            var triBones = m.Tris.Select(t => t.SelectMany(v => m.Weights[v].Select(p => p.Bone)).Distinct().Order().ToArray()).ToArray();
+            static int Compare(int[] a, int[] b)
+            {
+                for (int i = 0; i < Math.Min(a.Length, b.Length); i++) if (a[i] != b[i]) return a[i].CompareTo(b[i]);
+                return a.Length.CompareTo(b.Length);
+            }
+            var order = Enumerable.Range(0, m.Tris.Length).ToArray();
+            Array.Sort(order, (x, y) => Compare(triBones[x], triBones[y]));
+            var partBones = new List<HashSet<int>>();
+            var partTris = new List<List<int>>();
+            foreach (int t in order)
+            {
+                int best = -1, bestAdded = int.MaxValue;
+                for (int p = 0; p < partBones.Count && bestAdded > 0; p++)
+                {
+                    int added = triBones[t].Count(b => !partBones[p].Contains(b));
+                    if (partBones[p].Count + added <= MaxShapeBones && added < bestAdded) { best = p; bestAdded = added; }
+                }
+                if (best < 0) { partBones.Add([]); partTris.Add([]); best = partBones.Count - 1; }
+                partBones[best].UnionWith(triBones[t]);
+                partTris[best].Add(t);
+            }
+            var tracksOf = Looks.Values.Select(l => (Look: l, Tracks: l.Tracks.Where(tr => tr.Mesh == mi).ToList())).Where(x => x.Tracks.Count > 0).ToList();
+            for (int p = 0; p < partTris.Count; p++)
+            {
+                var tris = partTris[p].Order().ToList();
+                var verts = tris.SelectMany(t => m.Tris[t]).Distinct().Order().ToArray();
+                var newIndex = new Dictionary<int, int>();
+                for (int i = 0; i < verts.Length; i++) newIndex[verts[i]] = i;
+                var look = m.Look is { Colors: { } colors } ? m.Look with { Colors = verts.Select(v => colors[v]).ToArray() } : m.Look;
+                var part = m with
+                {
+                    Name = p == 0 ? m.Name : $"{m.Name} [part {p + 1}]",
+                    V = verts.Select(v => m.V[v]).ToArray(),
+                    N = verts.Select(v => m.N[v]).ToArray(),
+                    Uv = verts.Select(v => m.Uv[v]).ToArray(),
+                    Weights = verts.Select(v => m.Weights[v]).ToArray(),
+                    Tris = tris.Select(t => m.Tris[t].Select(v => newIndex[v]).ToArray()).ToArray(),
+                    SkinToBone = m.SkinToBone?.Where(kv => partBones[p].Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value),
+                    Look = look,
+                };
+                if (p == 0) { Meshes[mi] = part; continue; }
+                int at = Meshes.Count;
+                Meshes.Add(part);
+                foreach (var (l, tracks) in tracksOf)
+                    foreach (var tr in tracks) l.Tracks.Add(tr with { Mesh = at });
+            }
+            Console.WriteLine($"  {m.Name}: {meshBones} bones, written as {partTris.Count} shapes of at most {MaxShapeBones} ({string.Join(", ", partBones.Select(b => b.Count))})");
+        }
+    }
+
+    /// <summary>
+    /// The shape's skin partitions built from its weights (NiSkinPartition: each partition's bones, its vertices' weights
+    /// and bone indices, its triangles; what the game skins the body with). A body whose triangles reach more bones than
+    /// <see cref="MaxPartitionBones"/> is cut into partitions of the body part that each stay within it, the first starting
+    /// the body part's set as vanilla's split bodies do: triangles in the order of the bones they use (so a strand of hair,
+    /// a finger, keeps together), each put in the partition it adds the fewest bones to, a new one when none can take it
+    /// (the lamia's 174-bone body: 351 partitions taken in the file's order). <paramref name="slot"/>: rig bone -> the
+    /// shape's bone index.
+    /// </summary>
+    static void SplitPartitions(NifFile nif, NiShape shape, Mesh m, IReadOnlyDictionary<int, int> slot)
+    {
+        using var tris = new vectorTriangle();
+        shape.GetTriangles(tris);
+        var triBones = new int[tris.Count][];
+        var allBones = new HashSet<int>();
+        for (int t = 0; t < tris.Count; t++)
+        {
+            var tri = tris[t];
+            triBones[t] = new[] { (int)tri.p1, tri.p2, tri.p3 }.SelectMany(v => m.Weights[v].Where(w => w.W > 0).Select(w => slot[w.Bone])).Distinct().Order().ToArray();
+            if (triBones[t].Length > MaxPartitionBones)
+                throw new InvalidDataException($"{m.Name}: a triangle weighted to {triBones[t].Length} bones, more than a partition holds ({MaxPartitionBones})");
+            allBones.UnionWith(triBones[t]);
+        }
+        var triPart = new int[tris.Count];
+        var partBones = new List<HashSet<int>>();
+        if (allBones.Count > MaxPartitionBones)
+        {
+            static int Compare(int[] a, int[] b)
+            {
+                for (int i = 0; i < Math.Min(a.Length, b.Length); i++) if (a[i] != b[i]) return a[i].CompareTo(b[i]);
+                return a.Length.CompareTo(b.Length);
+            }
+            var order = Enumerable.Range(0, tris.Count).ToArray();
+            Array.Sort(order, (x, y) => Compare(triBones[x], triBones[y]));
+            foreach (int t in order)
+            {
+                int best = -1, bestAdded = int.MaxValue;
+                for (int p = 0; p < partBones.Count && bestAdded > 0; p++)
+                {
+                    int added = triBones[t].Count(b => !partBones[p].Contains(b));
+                    if (partBones[p].Count + added <= MaxPartitionBones && added < bestAdded) { best = p; bestAdded = added; }
+                }
+                if (best < 0) { partBones.Add([]); best = partBones.Count - 1; }
+                partBones[best].UnionWith(triBones[t]);
+                triPart[t] = best;
+            }
+        }
+        if (partBones.Count > 1)
+        {
+            using var parts = new NiVectorBSDismemberSkinInstancePartitionInfo();
+            using var triParts = new vectorint();
+            for (int p = 0; p < partBones.Count; p++)
+                parts.push_back(new BSDismemberSkinInstance.PartitionInfo
+                {
+                    partID = 32,
+                    flags = p == 0 ? PartitionFlags.PF_EDITOR_VISIBLE | PartitionFlags.PF_START_NET_BONESET : PartitionFlags.PF_EDITOR_VISIBLE,
+                });
+            foreach (int p in triPart) triParts.Add(p);
+            nif.SetShapePartitions(shape, parts, triParts, true);
+        }
+        nif.UpdateSkinPartitions(shape);
     }
 
     /// <summary>The block ID of the shape's NiSkinData (through its skin instance), or null.</summary>

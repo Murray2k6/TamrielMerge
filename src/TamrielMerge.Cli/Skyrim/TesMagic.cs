@@ -69,6 +69,10 @@ public sealed class TesMagic
     /// <summary>The game's own look for an effect (set by the game's builder), applied when its magic effect is made.</summary>
     public Func<TesEffect, EffectLook?>? Look { get; set; }
 
+    /// <summary>Fills a scripted effect's script properties as the effect is made (the script's name, its entry):
+    /// Morrowind's afflictions (MwAfflictions.AfflictionProperties).</summary>
+    public Action<string, ScriptEntry>? ScriptProperties { get; set; }
+
     public TesMagic(SkyrimMod mod, ISkyrimModGetter skyrim, string prefix)
     {
         this.mod = mod;
@@ -189,7 +193,7 @@ public sealed class TesMagic
         "COCR" => "CommandCreature", "COHU" => "CommandHumanoid",
         "DSPL" => "Dispel", "DTCT" => "DetectAnimal", "RFLC" => "Reflect", "REDG" => "ReflectDamage", "SABS" => "SpellAbsorption",
         "STRP" => "Soultrap", "TELE" => "Telekinesis", "TURN" => "TurnUndead", "DIAR" => "DisintegrateArmor", "DIWE" => "DisintegrateWeapon",
-        "STMA" => "StuntedMagicka", "REAN" => "Reanimate",
+        "STMA" => "StuntedMagicka", "REAN" => "Reanimate", "SUDG" => "SunDamage", "VAMP" => "Vampirism",
         _ when code.StartsWith('Z') => "Summon",
         _ when code.StartsWith("BW") => "BoundWeapon",
         "BABO" => "BoundBoots", "BACU" => "BoundCuirass", "BAGA" => "BoundGloves", "BAGR" => "BoundGreaves", "BAHE" => "BoundHelm", "BASH" => "BoundShield",
@@ -329,6 +333,16 @@ public sealed class TesMagic
                 return new("Silence", "Silence", Peak, ActorValue.MagickaRateMult, I, ActorValue.ResistMagic, Role.Debuff, 100);
             case "StuntedMagicka":
                 return new("StuntedMagicka", "Stunted Magicka", Peak, ActorValue.MagickaRateMult, D, none, Role.Debuff, 100);
+            // Morrowind's afflictions (MwAfflictions.cs): the Vampirism effect marks the vampire (the dialogue's PCVampire,
+            // the look); Sun Damage burns outdoors by the sun (OpenMW spelleffects.cpp: the magnitude a second, scaled by
+            // the sun risen and the weather's glare); Corprus lands its spell's attribute effects a day at a time (OpenMW
+            // activespells.cpp, 24 hours). Oblivion's vampirism is built apart (docs/script-gaps.md O63).
+            case "Vampirism" when prefix == "MW":
+                return new("Vampirism", "Vampirism", MagicEffectArchetype.TypeEnum.Script, none, mysticism, none, Role.Special, 0, "WaterbreathingFFSelf", Script: "TMMwVampirism");
+            case "SunDamage" when prefix == "MW":
+                return new("SunDamage", "Sun Damage", MagicEffectArchetype.TypeEnum.Script, none, D, none, Role.Harm, m, "WaterbreathingFFSelf", Script: "TMMwSunDamage");
+            case "Corprus" when prefix == "MW":
+                return new("Corprus", "Corprus", MagicEffectArchetype.TypeEnum.Script, none, D, none, Role.Harm, 0, "WaterbreathingFFSelf", Script: "TMMwCorprus");
             case "CalmHumanoid": case "CalmCreature": case "CommandCreature": case "CommandHumanoid":
                 return new("Calm", n.StartsWith("Command") ? "Command" : "Calm", MagicEffectArchetype.TypeEnum.Calm, ActorValue.Aggression, I, ActorValue.ResistMagic,
                     Role.Special, Level(m), "InfluenceAggDownFFAimed", Keep: true);
@@ -372,8 +386,13 @@ public sealed class TesMagic
                     Role.Special, 0, "WaterbreathingFFSelf", Script: "TMTesInterventionEffect");
             case "BoundCuirass": case "BoundHelm": case "BoundBoots": case "BoundShield": case "BoundGloves": case "BoundGreaves": case "BoundArmor":
             {
-                // Skyrim has no bound armour: Skyrim's Daedric piece, worn while the effect lasts (TMTesBoundArmor).
-                // A piece Skyrim hasn't got (greaves) is its protection instead.
+                // Skyrim has no bound armour: a piece worn while the effect lasts (TMTesBoundArmor). The game's own
+                // piece where its effect names one (Oblivion's MGEF associated item: its bound cuirass, the Mythic Dawn
+                // assassins' robe and hood, MYTH and MYHL), else Skyrim's Daedric piece. A piece neither has (greaves)
+                // is its protection instead.
+                if (e.Assoc is { } own)
+                    return new($"{n}Own{own.ID:X6}", n switch { "BoundGloves" => "Bound Gauntlets", "BoundHelm" => "Bound Helm", "BoundArmor" => "Bound Armor", _ => "Bound " + n[5..] },
+                        MagicEffectArchetype.TypeEnum.Script, none, C, none, Role.Special, 0, "BoundSwordFFSelf", Script: "TMTesBoundArmor", Assoc: own, KeepDelivery: true);
                 if (BoundPiece(n) is { } piece)
                     return new($"{n}Piece", n switch { "BoundGloves" => "Bound Gauntlets", "BoundHelm" => "Bound Helm", _ => "Bound " + n[5..] },
                         MagicEffectArchetype.TypeEnum.Script, none, C, none, Role.Special, 0, "BoundSwordFFSelf", Script: "TMTesBoundArmor", Assoc: piece, KeepDelivery: true);
@@ -499,6 +518,7 @@ public sealed class TesMagic
                 entry.Properties.Add(new ScriptObjectProperty { Name = "Markers", Object = (p.Key == "DivineIntervention" ? DivineMarkers : AlmsiviMarkers).ToLink<ISkyrimMajorRecordGetter>() });
                 entry.Properties.Add(new ScriptObjectProperty { Name = "WorldSpot", Object = WorldSpot.ToLink<ISkyrimMajorRecordGetter>() });
             }
+            ScriptProperties?.Invoke(script, entry);
             m.VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [entry] };
         }
         else if (p.Assoc is { } a)

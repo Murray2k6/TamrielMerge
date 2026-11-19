@@ -5,4 +5,9 @@ TMDfTalk Property Talk Auto
 
 Function Fragment_Begin(ObjectReference akSpeakerRef)
   Talk.UpdateDirections()
+  ; The tone's reactions for a "where is" question (its modifier 5: TalkTone).
+  TMDfQuestMachine m = Quest.GetQuest("DFQuestMachine") as TMDfQuestMachine
+  If m
+    m.RollTalk(5)
+  EndIf
 EndFunction

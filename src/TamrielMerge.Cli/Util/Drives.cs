@@ -28,27 +28,19 @@ public static class Drives
     }
 
     /// <summary>
-    /// Where to build output meant for <paramref name="outDir"/>: <paramref name="outDir"/> itself unless it is on a hard
-    /// disk and a solid-state drive has <paramref name="needBytes"/> free beyond its <see cref="Reserve"/>; then a folder on that drive:
-    /// in the user's own temp folder when it is there, else at the drive's root. Null for "build in place".
+    /// Where to build output meant for <paramref name="outDir"/>: the build folder the user chose (the app's Options or
+    /// paths.json: <see cref="Paths.Build"/>), whatever drive it is on, else <paramref name="outDir"/> itself (null: "build
+    /// in place"). Until 2026-10-28 a hard-disk output was staged on a solid-state drive found by itself (the user's temp
+    /// folder or a drive's root); the user: "the tool needs to convert on any drive letter that a user has", "it only
+    /// made the folder and went back to d" - everything now goes where the output is pointed unless a build folder says
+    /// otherwise. <paramref name="needBytes"/> and <paramref name="name"/> are kept for the callers.
     /// </summary>
     public static string? FastStaging(string outDir, long needBytes, string name)
     {
-        string outRoot = Path.GetPathRoot(Path.GetFullPath(outDir)) ?? "";
-        if (Seeks(outRoot) != true) return null;
-        string userTemp = Path.GetFullPath(Path.GetTempPath());
-        string userRoot = Path.GetPathRoot(userTemp) ?? "";
-        var best = DriveInfo.GetDrives()
-            .Where(d => d.DriveType == DriveType.Fixed && d.IsReady && !string.Equals(d.Name, outRoot, StringComparison.OrdinalIgnoreCase))
-            .Where(d => Seeks(d.Name) == false && d.AvailableFreeSpace >= needBytes + Reserve(d.Name))
-            // The user's own drive first (their temp folder), then the one with the most room.
-            .OrderByDescending(d => string.Equals(d.Name, userRoot, StringComparison.OrdinalIgnoreCase))
-            .ThenByDescending(d => d.AvailableFreeSpace)
-            .FirstOrDefault();
-        if (best is null) return null;
-        return string.Equals(best.Name, userRoot, StringComparison.OrdinalIgnoreCase)
-            ? Path.Combine(userTemp, name)
-            : Path.Combine(best.Name, name);
+        _ = needBytes; _ = name;
+        if (Paths.Build is { } chosen)
+            return string.Equals(Path.GetFullPath(chosen).TrimEnd('\\'), Path.GetFullPath(outDir).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ? null : chosen;
+        return null;
     }
 
     /// <summary>
@@ -68,9 +60,10 @@ public static class Drives
     /// </summary>
     public static string? ExistingStaging(string name)
     {
-        var places = new List<string> { Path.Combine(Path.GetFullPath(Path.GetTempPath()), name) };
-        places.AddRange(DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed && d.IsReady && Seeks(d.Name) == false).Select(d => Path.Combine(d.Name, name)));
-        return places.FirstOrDefault(p => Directory.Exists(p) && Directory.EnumerateFileSystemEntries(p).Any());
+        _ = name;
+        // Only the build folder the user chose: a stopped build is wherever the output or that folder is (since
+        // 2026-10-28 nothing is staged elsewhere by itself).
+        return Paths.Build is { } chosen && Directory.Exists(chosen) && Directory.EnumerateFileSystemEntries(chosen).Any() ? chosen : null;
     }
 
     /// <summary>Free bytes on the drive holding <paramref name="path"/>.</summary>
@@ -83,6 +76,28 @@ public static class Drives
     public static int MoveInto(string from, string to, Action<double>? progress = null)
     {
         if (!Directory.Exists(from)) return 0;
+        // On one volume a folder that isn't in the output yet moves whole, a rename (530,880 files moved one by one
+        // took 7.9 minutes on 2026-11-05).
+        int whole = 0;
+        if (string.Equals(Path.GetPathRoot(Path.GetFullPath(from)), Path.GetPathRoot(Path.GetFullPath(to)), StringComparison.OrdinalIgnoreCase))
+        {
+            Directory.CreateDirectory(to);
+            void MoveFolders(string src, string dst)
+            {
+                foreach (var dir in Directory.GetDirectories(src))
+                {
+                    string target = Path.Combine(dst, Path.GetFileName(dir));
+                    if (!Directory.Exists(target) && !File.Exists(target))
+                    {
+                        int n = Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories).Count();
+                        try { Directory.Move(dir, target); whole += n; continue; }
+                        catch (IOException) { }
+                    }
+                    MoveFolders(dir, target);
+                }
+            }
+            MoveFolders(from, to);
+        }
         var files = Directory.GetFiles(from, "*", SearchOption.AllDirectories);
         for (int i = 0; i < files.Length; i++)
         {
@@ -94,7 +109,7 @@ public static class Drives
         foreach (var dir in Directory.GetDirectories(from, "*", SearchOption.AllDirectories).OrderByDescending(d => d.Length))
             if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
         if (!Directory.EnumerateFileSystemEntries(from).Any()) Directory.Delete(from);
-        return files.Length;
+        return files.Length + whole;
     }
 
     [StructLayout(LayoutKind.Sequential)]

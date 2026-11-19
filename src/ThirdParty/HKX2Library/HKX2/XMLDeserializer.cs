@@ -11,13 +11,24 @@ namespace HKX2
 {
     public class XmlDeserializer
     {
-        public XDocument _xdoc;
-        private HKXHeader _header;
+        // set by Deserialize before anything reads them
+        public XDocument _xdoc = null!;
+        private HKXHeader _header = null!;
         // store deserialized
-        private Dictionary<string, IHavokObject> _objectsNameMap;
-        private Dictionary<string, XElement> _nameXEleMap;
+        private Dictionary<string, IHavokObject> _objectsNameMap = null!;
+        private Dictionary<string, XElement> _nameXEleMap = null!;
 
         private bool _ignoreNonFatalError;
+
+        // A missing attribute failed here with a NullReferenceException before (Attribute(name).Value); it still does,
+        // now naming the attribute and line.
+        private static string AttributeValue(XElement element, string name)
+        {
+            var attribute = element.Attribute(name);
+            if (attribute is null)
+                throw new NullReferenceException($"Xml element '{element.Name}' has no '{name}' attribute at Line: {((IXmlLineInfo)element).LineNumber}");
+            return attribute.Value;
+        }
 
         public IHavokObject Deserialize(Stream stream, HKXHeader header, bool ignoreNonFatalError = false)
         {
@@ -36,12 +47,12 @@ namespace HKX2
             // collect nodes
             foreach (var item in hksection.Elements())
             {
-                var name = item.Attribute("name").Value;
+                var name = AttributeValue(item, "name");
                 _nameXEleMap.Add(name, item);
             }
 
-            var testnode = _nameXEleMap.First(item => item.Value.Attribute("class").Value == "hkRootLevelContainer").Value;
-            var rootrefName = testnode.Attribute("name").Value;
+            var testnode = _nameXEleMap.First(item => AttributeValue(item.Value, "class") == "hkRootLevelContainer").Value;
+            var rootrefName = AttributeValue(testnode, "name");
             var testobj = ConstructVirtualClass<hkRootLevelContainer>(testnode);
             _objectsNameMap.Add(rootrefName, testobj);
 
@@ -54,18 +65,18 @@ namespace HKX2
 
         private IHavokObject ConstructVirtualClass<T>(XElement xElement) where T : IHavokObject
         {
-            var name = xElement.Attribute("name").Value;
+            var name = AttributeValue(xElement, "name");
 
-            if (_objectsNameMap.TryGetValue(name, out IHavokObject value))
+            if (_objectsNameMap.TryGetValue(name, out IHavokObject? value))
             {
                 return value;
             }
 
-            var hkClassName = xElement.Attribute("class").Value;
+            var hkClassName = AttributeValue(xElement, "class");
             var hkClass = System.Type.GetType($@"HKX2.{hkClassName}");
             if (hkClass is null) throw new Exception($@"Havok class type '{hkClassName}' not found!");
 
-            var ret = (IHavokObject)Activator.CreateInstance(hkClass);
+            var ret = (IHavokObject?)Activator.CreateInstance(hkClass);
             if (ret is null) throw new Exception($@"Failed to Activator.CreateInstance({hkClass})");
 
             if (ret.GetType().IsAssignableTo(typeof(T)))
@@ -82,7 +93,7 @@ namespace HKX2
             {
                 name = name[2..];
             }
-            var eles = element.Elements("hkparam").Where(e => e.Attribute("name").Value == name);
+            var eles = element.Elements("hkparam").Where(e => AttributeValue(e, "name") == name);
             if (!eles.Any())
             {
                 return null;
@@ -154,10 +165,10 @@ namespace HKX2
             if (refName == "null")
                 return default;
 
-            if (_objectsNameMap.TryGetValue(refName, out IHavokObject value))
+            if (_objectsNameMap.TryGetValue(refName, out IHavokObject? value))
                 return (T)value;
 
-            if (!_nameXEleMap.TryGetValue(refName, out XElement refEle))
+            if (!_nameXEleMap.TryGetValue(refName, out XElement? refEle))
                 throw new Exception($"Reference symbol '{refName}' not found. Make sure it defined somewhere. at Line {((IXmlLineInfo)element)?.LineNumber ?? -1}, Property: {name}");
 
             T ret = (T)ConstructVirtualClass<T>(refEle);
@@ -246,7 +257,9 @@ namespace HKX2
             // if ele exist it is and '\u2400' return null (cstring)
             // if not exist it is SERIALIZE_IGNORED flag (null)
             var ele = GetPropertyElement(element, name);
-            if (ele is null || ele.Value == "\u2400") return null;
+            // null is returned as it always has been; the generated classes keep these in non-nullable string members,
+            // and XmlSerializer.WriteString and PackFileSerializer.WriteCString/WriteStringPointer take null back
+            if (ele is null || ele.Value == "\u2400") return null!;
             return ele.Value.Trim();
         }
 

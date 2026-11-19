@@ -146,15 +146,20 @@ public static class WaterSurface
             if (poly.Length < 3 || vv.Count + poly.Length > 65000) continue;
             var n = Vector3.Cross(poly[1] - poly[0], poly[2] - poly[0]);
             n = n.LengthSquared() > 1e-8f ? Vector3.Normalize(n) : Vector3.UnitX;
-            // Across the fall: horizontal and in the face; down the fall: world z.
+            // Across the fall: horizontal and in the face; down the fall: the way down in the face (world z on a
+            // sheer fall; on a stream's slope the distance along the slope. By z alone the picture was stretched
+            // along a gentle slope until nothing of it showed: Redguard's streams, 2026-11-12).
             var across = Vector3.Cross(Vector3.UnitZ, n);
             across = across.LengthSquared() > 1e-6f ? Vector3.Normalize(across) : Vector3.UnitX;
+            var up = Vector3.Cross(n, across);
+            up = up.LengthSquared() > 1e-6f ? Vector3.Normalize(up) : Vector3.UnitZ;
+            if (up.Z < 0) up = -up;
             ushort start = (ushort)vv.Count;
             foreach (var p in poly)
             {
                 vv.Add(new nifly.Vector3(p.X, p.Y, p.Z));
                 nn.Add(new nifly.Vector3(n.X, n.Y, n.Z));
-                uv.Add(new nifly.Vector2(Vector3.Dot(p, across) / 200f, -p.Z / 200f));
+                uv.Add(new nifly.Vector2(Vector3.Dot(p, across) / 200f, -Vector3.Dot(p, up) / 200f));
             }
             for (int k = 1; k + 1 < poly.Length; k++) tris.Add(new Triangle(start, (ushort)(start + k), (ushort)(start + k + 1)));
         }

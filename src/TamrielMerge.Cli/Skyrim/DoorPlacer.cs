@@ -40,38 +40,49 @@ public static class DoorPlacer
     /// <summary>Daggerfall Unity's starting-lock table (index = high nibble of the trigger/lock field).</summary>
     static readonly byte[] LockValues = [0x00, 0x02, 0x04, 0x06, 0x08, 0x0A, 0x0C, 0x0E, 0x10, 0x12, 0x14, 0x19, 0x1E, 0x32, 0x80, 0xFF];
 
-    public static PlacedObject Place(SkyrimMod mod, DfRdbObject o, Vector3 blockOrigin, DfModel model)
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<SkyrimMod, Dictionary<uint, Door>> made = new();
+    // Skyrim's wooden door sounds (DRSWoodImperialSingle01Open and Close).
+    static readonly FormKey OpenSound = Sk(0x5B0F3), CloseSound = Sk(0x5B134);
+
+    /// <summary>
+    /// The door as Daggerfall's own model, where Daggerfall put it (2026-11-10, user: "some doors arent against walls",
+    /// "can we use daggerfalls doors instead of a skyrim one?"; `door-walls` on Privateer's Hold measured the Skyrim door
+    /// that stood in for it against the walls beside each doorway). One Door record per door model, its mesh the model
+    /// in its own space with its origin on the hinge (BuildMovingModel: its collision goes with it), swung by TMDfDoor.
+    /// </summary>
+    public static PlacedObject Place(SkyrimMod mod, DfRdbObject o, Vector3 blockOrigin, DfModel model, string modOutDir)
     {
-        // The panel is the model's bounding box: its thinnest horizontal axis is the way the door faces.
-        var min = model.Min; var max = model.Max;
-        float ex = max.X - min.X, ez = max.Z - min.Z, height = max.Y - min.Y;
-        var localNormal = ex < ez ? Vector3.UnitX : Vector3.UnitZ;
-        float width = MathF.Max(ex, ez);
-        var baseCentre = new Vector3((min.X + max.X) / 2, min.Y, (min.Z + max.Z) / 2);
-        var m = DfDungeon.ObjectTransform(o, blockOrigin);
-        var centre = Vector3.Transform(baseCentre, m);
-        var n = Vector3.TransformNormal(localNormal, m);
-        var facing = Vector3.Normalize(new Vector3(n.X, n.Z, 0)); // Skyrim horizontal
-        float heading = MathF.Atan2(facing.X, facing.Y);
-
-        bool isDouble = o.Tag == "DDR";
-        float scale = isDouble
-            ? Math.Clamp(width * BlockMeshBuilder.Scale / DoubleWidth, 0.6f, 2f)
-            : Math.Clamp(height * BlockMeshBuilder.Scale / SingleHeight, 0.6f, 2f);
-        // Skyrim's door leaf sits off its origin along local Y (single -72, double +264); shift the origin so the
-        // leaf lands in the doorway. Local +Y points along the facing after the heading turn.
-        float offset = (isDouble ? DoubleLeafOffset : -SingleLeafOffset) * scale;
-        var sky = new Vector3(centre.X, centre.Z, centre.Y) * BlockMeshBuilder.Scale;
-        var position = sky - facing * offset;
-        // The door's own floor on Daggerfall's (centre is the bottom of the Daggerfall door).
-        position.Z -= (isDouble ? DoubleBottom : SingleBottom) * scale;
-
+        var doors = made.GetOrCreateValue(mod);
+        if (!doors.TryGetValue(o.ModelId, out var baseDoor))
+        {
+            string rel = Path.Combine("TamrielMerge", "Dungeons", "Doors", $"{o.ModelId}.nif");
+            BlockMeshBuilder.BuildMovingModel(model, Path.Combine(modOutDir, "Meshes", rel));
+            Vector3 L(Vector3 df) => new(df.X * BlockMeshBuilder.Scale, df.Z * BlockMeshBuilder.Scale, df.Y * BlockMeshBuilder.Scale);
+            var min = L(model.Min); var max = L(model.Max);
+            var entry = new ScriptEntry { Name = "TMDfDoor" };
+            entry.Properties.Add(new ScriptObjectProperty { Name = "OpenSound", Object = new FormLink<ISkyrimMajorRecordGetter>(OpenSound) });
+            entry.Properties.Add(new ScriptObjectProperty { Name = "CloseSound", Object = new FormLink<ISkyrimMajorRecordGetter>(CloseSound) });
+            baseDoor = new Door(mod)
+            {
+                EditorID = $"DFDoor{o.ModelId}",
+                Name = "Door",
+                Model = new Model { File = rel },
+                ObjectBounds = new ObjectBounds
+                {
+                    First = new P3Int16((short)MathF.Floor(MathF.Min(min.X, max.X)), (short)MathF.Floor(MathF.Min(min.Y, max.Y)), (short)MathF.Floor(MathF.Min(min.Z, max.Z))),
+                    Second = new P3Int16((short)MathF.Ceiling(MathF.Max(min.X, max.X)), (short)MathF.Ceiling(MathF.Max(min.Y, max.Y)), (short)MathF.Ceiling(MathF.Max(min.Z, max.Z))),
+                },
+                VirtualMachineAdapter = new VirtualMachineAdapter { Scripts = [entry] },
+            };
+            mod.Doors.Add(baseDoor);
+            doors[o.ModelId] = baseDoor;
+        }
+        var (position, angles) = ActionObjectBuilder.Pose(DfDungeon.ObjectTransform(o, blockOrigin));
         var door = new PlacedObject(mod)
         {
-            Base = (isDouble ? DoubleDoor : SingleDoor).ToNullableLink<IPlaceableObjectGetter>(),
-            Placement = new Placement { Position = new P3Float(position.X, position.Y, position.Z), Rotation = new P3Float(0, 0, heading) },
+            Base = baseDoor.ToNullableLink<IPlaceableObjectGetter>(),
+            Placement = new Placement { Position = position, Rotation = new P3Float(angles.X, angles.Y, angles.Z) },
         };
-        if (Math.Abs(scale - 1) > 0.01f) door.Scale = scale;
         if (LockFor(o) is { } level)
         {
             door.Lock = new LockData { Level = level };

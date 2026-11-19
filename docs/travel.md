@@ -7,6 +7,11 @@ sail in real time); "remember we need the era to be labled with the destination"
 
 ## What the player gets
 
+Skyrim's map fast travel works in the Iliac Bay too (user, 2026-11-02: "enable fast travel in daggerfall again"; it was
+off from 2026-10-27): to each location's map marker, the time passing as Daggerfall's travel takes it (TMTravel), and not
+with enemies nearby (TMDfSensesControl). Its towns can be travelled to from the start, as Daggerfall's travel map
+allows; other places once found.
+
 The Tamriel menu's **Travel** tab (TMTravel, `TamrielMerge Travel.esp`):
 
 1. **Worlds**: every converted world in the user's conversion, each labelled with its time's era and year ("3E 427")
@@ -64,6 +69,10 @@ passage 25 per 24 sea pixels and one. Only the Iliac Bay has Daggerfall's climat
   placed in the converted Tamriel worldspace at the same spots; a walled city is one destination at its converted gate;
   by county (the nearest city). 49 towns, 8 counties.
 - **Vvardenfell**: the converted Morrowind.esm's town map markers, by the region of their cells. 95 towns, 15 regions.
+  Each marker (where fast travel sets the player down) stands where Morrowind sets travellers down in that town: the
+  silt strider, boat or guild guide destination nearest its middle (25 towns), else the door exit nearest it (64), else
+  the middle on the land (6) (MwPluginBuilder.TownArrivals; check with `mw-town-arrivals`). Before 2026-11-03 they
+  stood at the middle at the town's average height: 36 of 95 more than 50 units under the land.
 - **Stros M'Kai**: its converter makes no town map markers; not in travel yet (a small island in four worldspaces).
 
 ## The physics box (TamrielMergeSeamless)

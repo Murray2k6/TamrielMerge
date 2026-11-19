@@ -4,8 +4,9 @@ and probes are tools held in the hand; an attempt's chance is
   (0.2 Agility + 0.1 Luck + Security) x quality x fatigue term - lock level        (picking, fPickLockMult -1)
   (0.2 Agility + 0.1 Luck + Security) x quality x fatigue term                     (disarming, fTrapCostMult 0)
 with fatigue term 1.25 - 0.5 x (1 - stamina fraction); nothing at or below 0 can be tried. Every attempt wears the
-tool by one use; a worn-out tool breaks. Skyrim's Lockpicking stands for Security. Skyrim has no attributes, so
-Agility and Luck are a typical Morrowind character's: 40, Agility rising by one a level.}
+tool by one use; a worn-out tool breaks. Skyrim's Lockpicking stands for Security; Agility and Luck are the player's
+Morrowind attributes (TMMwState, stats 3 and 7), or a typical character's (40, Agility rising by one a level) when the
+state quest isn't there.}
 
 FormList Property Picks Auto
 Float[] Property PickQuality Auto
@@ -13,6 +14,8 @@ Int[] Property PickUses Auto
 FormList Property Probes Auto
 Float[] Property ProbeQuality Auto
 Int[] Property ProbeUses Auto
+TMMwState Property MwState Auto
+{The attributes (MWScriptState).}
 
 Int[] pickLeft
 Int[] probeLeft
@@ -23,12 +26,19 @@ Event OnInit()
 EndEvent
 
 Float Function Skill(Actor player)
-  Float agility = 40.0 + player.GetLevel()
-  If agility > 100.0
-    agility = 100.0
+  Float agility
+  Float luck = 40.0
+  If MwState
+    agility = MwState.GetStat(player, 3, -1)
+    luck = MwState.GetStat(player, 7, -1)
+  Else
+    agility = 40.0 + player.GetLevel()
+    If agility > 100.0
+      agility = 100.0
+    EndIf
   EndIf
   Float fatigue = 1.25 - 0.5 * (1.0 - player.GetActorValuePercentage("Stamina"))
-  Return (0.2 * agility + 0.1 * 40.0 + player.GetActorValue("Lockpicking")) * fatigue
+  Return (0.2 * agility + 0.1 * luck + player.GetActorValue("Lockpicking")) * fatigue
 EndFunction
 
 ; One attempt at a lock with the pick in hand; True when it opened.

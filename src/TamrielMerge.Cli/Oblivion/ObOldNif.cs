@@ -18,6 +18,24 @@ public sealed partial class ObMeshConverter
     /// has no user version or export info.</summary>
     const string OlderHeader = "NetImmerse File Format, Version 10.0.1.0\n";
 
+    /// <summary>A shape of an old model, in the model's space, for readers outside the mesh converter (creature parts).</summary>
+    internal sealed record OldPart(string Name, List<V3> Verts, List<V3> Normals, List<Vector2> Uvs, List<(ushort, ushort, ushort)> Tris, string? Texture, ushort? AlphaFlags, byte AlphaThreshold, float Glossiness, float Alpha, V3 Emissive);
+
+    /// <summary>An old model's shapes, or null when it doesn't read; and the bone its "Prn" string names (the reader above keeps
+    /// no extra data, and every string in these files is length-prefixed).</summary>
+    internal static (List<OldPart> Parts, string? Prn)? OldParts(byte[] bytes)
+    {
+        if (ReadOldNif(bytes) is not { } pieces) return null;
+        string? prn = null;
+        for (int i = 0; i + 11 < bytes.Length && prn is null; i++)
+            if (bytes[i] == 3 && bytes[i + 1] == 0 && bytes[i + 2] == 0 && bytes[i + 3] == 0 && bytes[i + 4] == (byte)'P' && bytes[i + 5] == (byte)'r' && bytes[i + 6] == (byte)'n')
+            {
+                int n = BitConverter.ToInt32(bytes, i + 7);
+                if (n > 0 && n < 64 && i + 11 + n <= bytes.Length) prn = Encoding.ASCII.GetString(bytes, i + 11, n);
+            }
+        return (pieces.Select(p => new OldPart(p.Name, p.Verts, p.Normals, p.Uvs, p.Tris, p.Texture, p.AlphaFlags, p.AlphaThreshold, p.Glossiness, p.Alpha, p.Emissive)).ToList(), prn);
+    }
+
     internal static bool IsOldNif(byte[] b) => b.Length > OldHeader.Length && Encoding.ASCII.GetString(b, 0, OldHeader.Length) is OldHeader or OlderHeader;
 
     sealed class OldReader(byte[] b)

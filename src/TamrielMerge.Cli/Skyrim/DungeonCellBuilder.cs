@@ -19,7 +19,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
 {
     DfPropBuilder? propBuilder;
     /// <summary>Daggerfall's furniture and props as their own objects with the Skyrim stand-ins' use.</summary>
-    internal DfPropBuilder PropBuilder => propBuilder ??= new DfPropBuilder(mod, props.Skyrim, modOutDir, props, FixedPropKeys);
+    internal DfPropBuilder PropBuilder => propBuilder ??= new DfPropBuilder(mod, modOutDir, props, FixedPropKeys);
 
     /// <summary>Daggerfall.esm: prop bases at fixed numbers, so none renumbers what is built after it.</summary>
     public bool FixedPropKeys { get; init; }
@@ -111,9 +111,9 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     public List<(DfLocation Location, Built Built)> BuiltDungeons { get; } = [];
 
     /// <summary>A quest marker flat as a persistent XMarker in the cell, remembered in <see cref="QuestMarkers"/>.</summary>
-    void AddQuestMarker(Cell cell, P3Float at, bool item)
+    void AddQuestMarker(Cell cell, P3Float at, bool item, FormKey? key = null)
     {
-        var marker = new PlacedObject(mod)
+        var marker = new PlacedObject(key ?? mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
         {
             Base = XMarkerHeading.ToNullableLink<IPlaceableObjectGetter>(),
             Placement = new Placement { Position = at, Rotation = new P3Float(0, 0, 0) },
@@ -157,6 +157,8 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     readonly Dictionary<string, Static> blockStatics = new();
     readonly DfTextureExport textureExport = new(arena2, modOutDir);
     readonly Dictionary<string, DfDungeonBlock> blockCache = new();
+    /// <summary>Each block's solid polygons and action solids, at the block's own origin.</summary>
+    readonly Dictionary<string, List<(Vector3[] Points, Vector3 Normal)>> blockSolids = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Ordinary creature placements (for procedural creatures): the reference, its cell, its habitat.</summary>
     public List<(PlacedNpc Ref, Cell Cell, string Habitat)> CreatureSpots { get; } = [];
@@ -176,7 +178,17 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
     public sealed record Built(Cell Cell, PlacedObject StartMarker, PlacedObject InteriorDoor, PlacedObject ExteriorDoor, Navmesh.NavmeshBuilder.PendingInterior NavmeshWork, IReadOnlyDictionary<string, int> Fixtures)
     {
         public Navmesh.NavmeshBuilder.Result Navmesh => NavmeshWork.Finish();
+        /// <summary>Magically held doors a quest's transfer into the dungeon must open (<see cref="HeldDoorRecords"/>).</summary>
+        public IReadOnlyList<PlacedObject> HeldDoors { get; init; } = [];
     }
+
+    /// <summary>
+    /// Castle Daggerfall's foyer doors (block S0000160.RDB, records 22818 and 22866: DOR model 55004, lock index 15,
+    /// magically held): a quest that moves the player into the castle leaves them behind those doors, so the transfer
+    /// opens them (Daggerfall Unity's special case; its issue 1584). The records are Daggerfall Unity's LoadIDs
+    /// 29331574 and 29331622 less the block's place in BLOCKS.BSA (29,308,756), measured.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, int[]> HeldDoorRecords = new Dictionary<string, int[]>(StringComparer.OrdinalIgnoreCase) { ["S0000160.RDB"] = [22818, 22866] };
 
     /// <summary>
     /// Each dungeon's navmesh made on a worker thread while the next dungeons are laid out (the dungeon batches: the
@@ -235,7 +247,129 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         return stat;
     }
 
-    public Built Build(DfLocation location, Worldspace overland, P3Float exteriorPosition)
+    readonly Dictionary<string, (List<BlockMeshBuilder.ShapeTexture> Shapes, Vector3 Min, Vector3 Max)> blockShapes = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, Static> swappedStatics = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<(int, int), TextureSet?> swapSets = new();
+    DfWorldMap? worldMap;
+
+    /// <summary>Dungeon blocks placed in their dungeon's own textures (another static of the block's mesh), and placed as made.</summary>
+    public int BlocksSwapped { get; private set; }
+    public int BlocksAsMade { get; private set; }
+    /// <summary>Swaps left out: the dungeon's archive hasn't the record the block's texture is (the block's own stays).</summary>
+    public int SwapsMissing { get; private set; }
+
+    /// <summary>
+    /// A dungeon's block in the dungeon's textures (<see cref="DungeonTextureTable"/>, from its location's ID and climate):
+    /// the block's static when the table leaves it as made, else a static of the same mesh whose alternate textures give
+    /// each swapped shape the dungeon's texture. The mesh stays one per block for every dungeon.
+    /// </summary>
+    Static BlockStatic(DfDungeonBlock block, DfLocation location)
+    {
+        var plain = BlockStatic(block);
+        var climate = (worldMap ??= DfWorldMap.Load(arena2)).ClimateAt(location.PixelX, location.PixelY);
+        var table = DungeonTextureTable.Classic(location.LocationId, climate);
+        int climateBase = DungeonTextureTable.ClimateBase(climate);
+        if (!blockShapes.TryGetValue(block.Name, out var described))
+            blockShapes[block.Name] = described = BlockMeshBuilder.Describe(block, models);
+        var swaps = new List<(BlockMeshBuilder.ShapeTexture Shape, int To)>();
+        foreach (var shape in described.Shapes)
+        {
+            if (shape.Archive < 0) continue;
+            int to = DungeonTextureTable.Apply(shape.Archive, table, climateBase);
+            if (to != shape.Archive) swaps.Add((shape, to));
+        }
+        if (swaps.Count == 0) { BlocksAsMade++; return plain; }
+        string edid = $"DFDunBlk{Path.GetFileNameWithoutExtension(block.Name)}S{string.Join("_", swaps.Select(w => w.To))}";
+        if (!swappedStatics.TryGetValue(edid, out var stat))
+        {
+            var alternates = new ExtendedList<AlternateTexture>();
+            foreach (var (shape, to) in swaps)
+                if (SwapSet(to, shape.Record) is { } set)
+                    alternates.Add(new AlternateTexture { Name = shape.Name, Index = shape.Index, NewTexture = set.ToLink() });
+                else SwapsMissing++;
+            if (alternates.Count == 0) stat = plain;
+            else
+            {
+                stat = new Static(mod)
+                {
+                    EditorID = edid,
+                    Model = new Model { File = Path.Combine("TamrielMerge", "Dungeons", Path.ChangeExtension(block.Name, ".nif")), AlternateTextures = alternates },
+                    ObjectBounds = new ObjectBounds
+                    {
+                        First = new P3Int16((short)described.Min.X, (short)described.Min.Y, (short)described.Min.Z),
+                        Second = new P3Int16((short)described.Max.X, (short)described.Max.Y, (short)described.Max.Z),
+                    },
+                };
+                mod.Statics.Add(stat);
+            }
+            swappedStatics[edid] = stat;
+        }
+        if (stat == plain) BlocksAsMade++; else BlocksSwapped++;
+        return stat;
+    }
+
+    /// <summary>A texture set of a Daggerfall texture (its DDS exported with the others), for a swapped shape; null when the
+    /// archive hasn't that record.</summary>
+    TextureSet? SwapSet(int archive, int record)
+    {
+        if (swapSets.TryGetValue((archive, record), out var hit)) return hit;
+        TextureSet? set = null;
+        if (DfTexture.Load(arena2, archive) is { } tex && record < tex.Count)
+        {
+            static string InTextures(string p) => p.StartsWith(@"textures\", StringComparison.OrdinalIgnoreCase) ? p[@"textures\".Length..] : p;
+            set = new TextureSet(mod)
+            {
+                EditorID = $"DFDunTex{archive}_{record}",
+                Diffuse = InTextures(textureExport.Ensure(archive, record).Path),
+                NormalOrGloss = InTextures(DfTextureExport.FlatNormal),
+            };
+            mod.TextureSets.Add(set);
+        }
+        return swapSets[(archive, record)] = set;
+    }
+
+    /// <summary>
+    /// Every block <paramref name="locations"/>' dungeons are made of, its model and static made now (Daggerfall.esm's
+    /// build): the dungeon and town parts then take them from it (<see cref="MasterStatics"/>) instead of each making its
+    /// own (2026-11-02: each of the 40 dungeon parts made and wrote the models of every block it used, 38 of a part's 79
+    /// seconds of laying out, and each added its own copies of the same statics). Returns the blocks made.
+    /// </summary>
+    public int PrebuildBlocks(IEnumerable<DfLocation> locations)
+    {
+        int made = 0;
+        foreach (var name in locations.SelectMany(l => l.DungeonBlocks).Select(b => b.BlockName).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            if (blockStatics.ContainsKey(name)) continue;
+            BlockStatic(blockCache.TryGetValue(name, out var b) ? b : blockCache[name] = DfDungeonBlock.Load(blocksBsa, name));
+            made++;
+        }
+        return made;
+    }
+
+    /// <summary>Where a dungeon's door stands on the overland (its position, turn and size) and where someone coming out
+    /// of it is set down, facing away from it.</summary>
+    public sealed record Entrance(P3Float Position, float Heading, float? Scale, P3Float Arrival, float ArrivalHeading);
+
+    /// <summary>A door standing on open ground, facing south: set down 160 units in front of it, on the ground there.</summary>
+    public Entrance OpenGround(P3Float p) =>
+        new(p, 0, null, new P3Float(p.X, p.Y - 160, MathF.Max(p.Z, GroundAt?.Invoke(p.X, p.Y - 160) ?? p.Z) + 16), MathF.PI);
+
+    /// <summary>
+    /// A dungeon's door in its Daggerfall entrance surface on the overland (a town's castle gate, a ruin's door), set into
+    /// it as a street door is (<see cref="SurfaceDoor"/>): <paramref name="origin"/> the block's frame (Daggerfall units),
+    /// <paramref name="shift"/> where that block space stands (Skyrim units).
+    /// </summary>
+    internal Entrance SurfaceEntrance(DfTownLayout.DoorSurface s, Vector3 origin, Vector3 shift)
+    {
+        var (door, arrival, arrivalHeading) = SurfaceDoor(s, origin, ExitDoor, persistent: false);
+        var p = door.Placement!.Position;
+        return new Entrance(new P3Float(p.X + shift.X, p.Y + shift.Y, p.Z + shift.Z), door.Placement.Rotation.Z, door.Scale,
+            new P3Float(arrival.X + shift.X, arrival.Y + shift.Y, arrival.Z + shift.Z), arrivalHeading);
+    }
+
+    public Built Build(DfLocation location, Worldspace overland, P3Float exteriorPosition) => Build(location, overland, OpenGround(exteriorPosition));
+
+    public Built Build(DfLocation location, Worldspace overland, Entrance entrance)
     {
         var dungeon = DfDungeon.Load(location, blocksBsa, blockCache);
         string id = LocationPlacer.Sanitize(location.Name);
@@ -253,6 +387,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         var fixtures = new LightFixturePlacer(arena2, dungeon.Polygons(models));
         var fixtureCounts = new Dictionary<string, int>();
         var placedProps = new List<PlacedObject>();
+        var heldDoors = new List<PlacedObject>();
         var surfaceCandles = new List<PlacedObject>();
         var spriteClutter = new List<PlacedObject>();
         var spriteRiders = new Dictionary<PlacedObject, List<PlacedObject>>();
@@ -286,7 +421,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
             var origin = DfDungeon.BlockOrigin(placement);
             cell.Temporary.Add(new PlacedObject(mod)
             {
-                Base = BlockStatic(block).ToNullableLink<IPlaceableObjectGetter>(),
+                Base = BlockStatic(block, location).ToNullableLink<IPlaceableObjectGetter>(),
                 Placement = new Placement { Position = ToSkyrim(origin), Rotation = new P3Float(0, 0, 0) },
             });
             float? water = WaterLevel(block);
@@ -504,12 +639,23 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
                 }
                 else if (o.Type == DfRdbObjectType.Model && BlockMeshBuilder.IsDoor(o) && models.TryGetValue(o.ModelId, out var doorModel))
                 {
-                    var door = DoorPlacer.Place(mod, o, origin, doorModel);
+                    var door = DoorPlacer.Place(mod, o, origin, doorModel, modOutDir);
+                    bool held = HeldDoorRecords.TryGetValue(block.Name, out var heldRecords) && heldRecords.Contains(o.RecordOffset);
+                    if (held)
+                    {
+                        heldDoors.Add(door);
+                        actions.KeepPersistent.Add(door);
+                        fixtureCounts["held door (opened by a transfer)"] = fixtureCounts.GetValueOrDefault("held door (opened by a transfer)") + 1;
+                    }
                     if (o.Action is not null)
                     {
                         actions.AttachToDoor(door, o, index, origin);
                         cell.Persistent.Add(door);
                         fixtureCounts["door with action"] = fixtureCounts.GetValueOrDefault("door with action") + 1;
+                    }
+                    else if (held)
+                    {
+                        cell.Persistent.Add(door);
                     }
                     else
                     {
@@ -553,6 +699,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
             int links = actions.LinkChains(cell, block, origin);
             if (links > 0) fixtureCounts["action chain links"] = fixtureCounts.GetValueOrDefault("action chain links") + links;
         }
+        if (actions.Unpersisted > 0) fixtureCounts["objects not persistent"] = actions.Unpersisted;
         if (actions.Sounded > 0) fixtureCounts["action sounds"] = actions.Sounded;
         if (actions.DoorNotices > 0) fixtureCounts["door notices"] = actions.DoorNotices;
         if (actions.Trespasses > 0) fixtureCounts["door trespass checks"] = actions.Trespasses;
@@ -589,16 +736,16 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         {
             EditorID = "DFEntranceDoor" + id,
             Base = ExitDoor.ToNullableLink<IPlaceableObjectGetter>(),
-            Placement = new Placement { Position = exteriorPosition, Rotation = new P3Float(0, 0, 0) },
+            Placement = new Placement { Position = entrance.Position, Rotation = new P3Float(0, 0, entrance.Heading) },
+            Scale = entrance.Scale,
             SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)PersistentFlag,
         };
-        // Arrive a little in front of each door (doors face -Y in their own frame).
+        // Arrive a little in front of each door.
         interiorDoor.TeleportDestination = new TeleportDestination
         {
             Door = exteriorDoor.ToLink<IPlacedObjectGetter>(),
-            Position = new P3Float(exteriorPosition.X, exteriorPosition.Y - 160,
-                MathF.Max(exteriorPosition.Z, GroundAt?.Invoke(exteriorPosition.X, exteriorPosition.Y - 160) ?? exteriorPosition.Z) + 16),
-            Rotation = new P3Float(0, 0, MathF.PI),
+            Position = entrance.Arrival,
+            Rotation = new P3Float(0, 0, entrance.ArrivalHeading),
         };
         exteriorDoor.TeleportDestination = new TeleportDestination
         {
@@ -615,9 +762,16 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         {
             var offset = ToSkyrim(DfDungeon.BlockOrigin(placement));
             var shift = new Vector3(offset.X, offset.Y, offset.Z);
-            walkable.AddRange(BlockMeshBuilder.SolidPolygons(block, models).Select(p => (p.Points.Select(v => v + shift).ToArray(), p.Normal)));
-            // Its platforms, lifts, drawbridges and raised floors where they rest.
-            walkable.AddRange(BlockMeshBuilder.ActionSolids(block, models).Select(p => (p.Points.Select(v => v + shift).ToArray(), p.Normal)));
+            // Its solid polygons and its platforms, lifts, drawbridges and raised floors where they rest: the same for
+            // every dungeon the block is in, so made once a block (2026-11-02: 4.9% of laying out).
+            if (!blockSolids.TryGetValue(block.Name, out var solids))
+                blockSolids[block.Name] = solids = [.. BlockMeshBuilder.SolidPolygons(block, models), .. BlockMeshBuilder.ActionSolids(block, models)];
+            foreach (var (points, normal) in solids)
+            {
+                var moved = new Vector3[points.Length];
+                for (int i = 0; i < points.Length; i++) moved[i] = points[i] + shift;
+                walkable.Add((moved, normal));
+            }
         }
         int settled = SettleProps(placedProps, walkable);
         if (settled > 0) fixtureCounts["props settled onto supports"] = settled;
@@ -676,7 +830,7 @@ public sealed partial class DungeonCellBuilder(SkyrimMod mod, string arena2, IRe
         if (!BackgroundNavmesh) nav.Finish();
 
         AddInteriorCell(cell);
-        var result = new Built(cell, newGameMarker, interiorDoor, exteriorDoor, nav, fixtureCounts);
+        var result = new Built(cell, newGameMarker, interiorDoor, exteriorDoor, nav, fixtureCounts) { HeldDoors = heldDoors };
         BuiltDungeons.Add((location, result));
         return result;
     }

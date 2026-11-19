@@ -73,43 +73,71 @@ def extract(args, src_dir):
     return fps
 
 
-def gpu_temperature():
-    """The GPU's temperature in C (nvidia-smi), or None."""
+def gpu_temperature(index=None):
+    """A GPU's temperature in C (nvidia-smi; index: that card, else this process's TM_GPU, else the first), or None."""
     try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+        gpu = str(index) if index is not None else os.environ.get("TM_GPU", "")
+        out = subprocess.run(["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"] + ([f"--id={gpu}"] if gpu else []),
                              capture_output=True, text=True, timeout=10).stdout.strip().splitlines()
         return int(out[0]) if out else None
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
 
 
-def cool_down(max_temp=78):
+def cool_down(max_temp=78, index=None):
     """Waits while the GPU is above max_temp (user, 2026-10-08: it overheated)."""
-    t = gpu_temperature()
+    t = gpu_temperature(index)
     while t is not None and t > max_temp:
         print(f"  GPU at {t} C, waiting to cool below {max_temp} C", flush=True)
         time.sleep(20)
-        t = gpu_temperature()
+        t = gpu_temperature(index)
 
 
 def upscale(src_dir, up_dir, size, device="cuda", model_path=MODEL, threads=0):
+    """Every frame upscaled by the model: on every graphics card the process sees at once (user, 2026-10-27: "the tool
+    also needs multi gpu support"), each card given a run of the frames and a copy of the model on a thread of its own;
+    the frames' reading and writing on the rest of the cores."""
     from spandrel import ModelLoader
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
     if device == "cpu" and threads:
         torch.set_num_threads(threads)
-    model = ModelLoader().load_from_file(model_path).model.to(device).eval()
-    dtype = torch.float16 if device == "cuda" else torch.float32
-    model = model.to(dtype)
+    devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())] if device == "cuda" else ["cpu"]
     os.makedirs(up_dir, exist_ok=True)
     frames = sorted(glob.glob(os.path.join(src_dir, "frame*.png")))
     todo = [f for f in frames if not os.path.exists(os.path.join(up_dir, os.path.basename(f)))]
-    print(f"{len(frames)} frames, {len(todo)} to upscale", flush=True)
-    start = time.time()
+    print(f"{len(frames)} frames, {len(todo)} to upscale on {', '.join(devices)}", flush=True)
+    if not todo:
+        return
     # Frames are read and decoded, and results encoded and written, on worker threads (CPU) while the model runs (GPU).
     from concurrent.futures import ThreadPoolExecutor
     workers = max(4, (os.cpu_count() or 8) - 2)
     pool = ThreadPoolExecutor(workers)
+    # A run of frames to a card (a repeated frame reuses the one before it within its run), the cards' runs the same
+    # length; one card: the whole list.
+    per = (len(todo) + len(devices) - 1) // len(devices)
+    runs = [todo[i * per:(i + 1) * per] for i in range(len(devices))]
+    progress = {"done": 0}
+    start = time.time()
+    lock = __import__("threading").Lock()
+
+    def on_card(dev, frames_here):
+        model = ModelLoader().load_from_file(model_path).model.to(dev).eval()
+        dtype = torch.float16 if dev.startswith("cuda") else torch.float32
+        model = model.to(dtype)
+        card = int(dev.split(":")[1]) if dev.startswith("cuda") else None
+        upscale_run(frames_here, up_dir, size, dev, dtype, model, pool, card, progress, lock, start, len(todo))
+
+    threads_ = [__import__("threading").Thread(target=on_card, args=(d, r)) for d, r in zip(devices, runs) if r]
+    for t in threads_:
+        t.start()
+    for t in threads_:
+        t.join()
+    pool.shutdown()
+
+
+def upscale_run(todo, up_dir, size, device, dtype, model, pool, card, progress, lock, start, total):
+    """One card's run of frames through its model."""
 
     def load(f):
         data = open(f, "rb").read()
@@ -140,8 +168,8 @@ def upscale(src_dir, up_dir, size, device="cuda", model_path=MODEL, threads=0):
     loaded = prefetch(todo)
     for i, (f, data) in enumerate(loaded, 1):
         dst = os.path.join(up_dir, os.path.basename(f))
-        if device == "cuda" and i % 25 == 0:
-            cool_down()
+        if card is not None and i % 25 == 0:
+            cool_down(index=card)
         if data == prev_bytes and prev_save is not None:
             # A repeated frame (Daggerfall's videos hold each picture for many frames): reuse its upscale.
             pending.append(pool.submit(copy, prev_out, dst, prev_save))
@@ -158,14 +186,16 @@ def upscale(src_dir, up_dir, size, device="cuda", model_path=MODEL, threads=0):
         prev_save = pool.submit(save, dst, out)
         pending.append(prev_save)
         prev_bytes, prev_out = data, dst
-        if i % 50 == 0 or i == len(todo):
-            rate = i / (time.time() - start)
-            print(f"  {i}/{len(todo)} ({rate:.2f}/s, about {(len(todo) - i) / max(rate, 1e-6) / 60:.0f} min left)", flush=True)
+        with lock:
+            progress["done"] += 1
+            done = progress["done"]
+        if done % 50 == 0 or done == total:
+            rate = done / (time.time() - start)
+            print(f"  {done}/{total} ({rate:.2f}/s, about {(total - done) / max(rate, 1e-6) / 60:.0f} min left)", flush=True)
         if len(pending) > 64:
             pending = [p for p in pending if not p.done()]
     for p in pending:
         p.result()
-    pool.shutdown()
 
 
 def resize(src_dir, up_dir, size):

@@ -209,6 +209,77 @@ namespace
         if (int n = TextAt(v)) std::fprintf(f, " \"%.*s\"", n, reinterpret_cast<const char*>(v));
     }
 
+    // The registers, the call stack, what the stack's first slots point at, and the modules, of a thread stopped at cx
+    // (the crashing one, or the main thread held while it hangs).
+    void WriteState(FILE* f, CONTEXT* cx, HANDLE thread)
+    {
+        std::fprintf(f, "Registers:\n");
+        struct { const char* n; DWORD64 v; } regs[] = {
+            { "RAX", cx->Rax }, { "RBX", cx->Rbx }, { "RCX", cx->Rcx }, { "RDX", cx->Rdx }, { "RSI", cx->Rsi }, { "RDI", cx->Rdi },
+            { "RBP", cx->Rbp }, { "RSP", cx->Rsp }, { "R8", cx->R8 }, { "R9", cx->R9 }, { "R10", cx->R10 }, { "R11", cx->R11 },
+            { "R12", cx->R12 }, { "R13", cx->R13 }, { "R14", cx->R14 }, { "R15", cx->R15 }, { "RIP", cx->Rip } };
+        for (auto& r : regs)
+        {
+            std::fprintf(f, "  %-3s %016llX", r.n, static_cast<unsigned long long>(r.v));
+            Describe(f, static_cast<std::uintptr_t>(r.v));
+            std::fputc('\n', f);
+        }
+
+        std::fprintf(f, "Call stack:\n");
+        HANDLE process = GetCurrentProcess();
+        static bool symbols = false;
+        if (!symbols) { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS); symbols = SymInitialize(process, nullptr, TRUE) != FALSE; }
+        CONTEXT walk = *cx;
+        STACKFRAME64 frame{};
+        frame.AddrPC.Offset = walk.Rip; frame.AddrPC.Mode = AddrModeFlat;
+        frame.AddrStack.Offset = walk.Rsp; frame.AddrStack.Mode = AddrModeFlat;
+        frame.AddrFrame.Offset = walk.Rbp; frame.AddrFrame.Mode = AddrModeFlat;
+        for (int i = 0; i < 48; ++i)
+        {
+            if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &walk, nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr)) break;
+            if (frame.AddrPC.Offset == 0) break;
+            char mod[512] = "?";
+            ModuleOf(static_cast<std::uintptr_t>(frame.AddrPC.Offset), mod, sizeof(mod));
+            std::fprintf(f, "  [%2d] %016llX %s", i, static_cast<unsigned long long>(frame.AddrPC.Offset), mod);
+            alignas(SYMBOL_INFO) char symbuf[sizeof(SYMBOL_INFO) + 256]{};
+            auto* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
+            sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+            sym->MaxNameLen = 255;
+            DWORD64 disp = 0;
+            if (symbols && SymFromAddr(process, frame.AddrPC.Offset, &disp, sym)) std::fprintf(f, " %s+%llX", sym->Name, static_cast<unsigned long long>(disp));
+            std::fputc('\n', f);
+        }
+
+        std::fprintf(f, "Stack (what its first slots point at):\n");
+        auto sp = reinterpret_cast<const std::uint64_t*>(cx->Rsp);
+        for (int i = 0; i < 128; ++i)
+        {
+            if (!Readable(sp + i, 8)) break;
+            std::uint64_t v = sp[i];
+            char buf[512];
+            char cls[256];
+            bool named = ModuleOf(static_cast<std::uintptr_t>(v), buf, sizeof(buf)) || ClassOf(static_cast<std::uintptr_t>(v), cls, sizeof(cls))
+                         || TextAt(static_cast<std::uintptr_t>(v)) > 0;
+            if (!named) continue;
+            std::fprintf(f, "  [RSP+%03X] %016llX", i * 8, static_cast<unsigned long long>(v));
+            Describe(f, static_cast<std::uintptr_t>(v));
+            std::fputc('\n', f);
+        }
+
+        std::fprintf(f, "Modules:\n");
+        HMODULE mods[512];
+        DWORD needed = 0;
+        if (EnumProcessModules(process, mods, sizeof(mods), &needed))
+            for (DWORD i = 0; i < needed / sizeof(HMODULE) && i < 512; ++i)
+            {
+                char path[MAX_PATH]{};
+                MODULEINFO mi{};
+                GetModuleFileNameA(mods[i], path, MAX_PATH);
+                GetModuleInformation(process, mods[i], &mi, sizeof(mi));
+                std::fprintf(f, "  %016llX %08lX %s\n", reinterpret_cast<unsigned long long>(mi.lpBaseOfDll), mi.SizeOfImage, path);
+            }
+    }
+
     void Report(EXCEPTION_POINTERS* ep, bool unhandled)
     {
         if (inReport || InterlockedIncrement(&reports) > 32) return;
@@ -230,75 +301,71 @@ namespace
                 std::fprintf(f, "%s address %016llX\n", er->ExceptionInformation[0] == 0 ? "reading" : er->ExceptionInformation[0] == 1 ? "writing" : "executing",
                              static_cast<unsigned long long>(er->ExceptionInformation[1]));
 
-            std::fprintf(f, "Registers:\n");
-            struct { const char* n; DWORD64 v; } regs[] = {
-                { "RAX", cx->Rax }, { "RBX", cx->Rbx }, { "RCX", cx->Rcx }, { "RDX", cx->Rdx }, { "RSI", cx->Rsi }, { "RDI", cx->Rdi },
-                { "RBP", cx->Rbp }, { "RSP", cx->Rsp }, { "R8", cx->R8 }, { "R9", cx->R9 }, { "R10", cx->R10 }, { "R11", cx->R11 },
-                { "R12", cx->R12 }, { "R13", cx->R13 }, { "R14", cx->R14 }, { "R15", cx->R15 }, { "RIP", cx->Rip } };
-            for (auto& r : regs)
-            {
-                std::fprintf(f, "  %-3s %016llX", r.n, static_cast<unsigned long long>(r.v));
-                Describe(f, static_cast<std::uintptr_t>(r.v));
-                std::fputc('\n', f);
-            }
-
-            std::fprintf(f, "Call stack:\n");
-            HANDLE process = GetCurrentProcess(), thread = GetCurrentThread();
-            static bool symbols = false;
-            if (!symbols) { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS); symbols = SymInitialize(process, nullptr, TRUE) != FALSE; }
-            CONTEXT walk = *cx;
-            STACKFRAME64 frame{};
-            frame.AddrPC.Offset = walk.Rip; frame.AddrPC.Mode = AddrModeFlat;
-            frame.AddrStack.Offset = walk.Rsp; frame.AddrStack.Mode = AddrModeFlat;
-            frame.AddrFrame.Offset = walk.Rbp; frame.AddrFrame.Mode = AddrModeFlat;
-            for (int i = 0; i < 48; ++i)
-            {
-                if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &walk, nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr)) break;
-                if (frame.AddrPC.Offset == 0) break;
-                char mod[512] = "?";
-                ModuleOf(static_cast<std::uintptr_t>(frame.AddrPC.Offset), mod, sizeof(mod));
-                std::fprintf(f, "  [%2d] %016llX %s", i, static_cast<unsigned long long>(frame.AddrPC.Offset), mod);
-                alignas(SYMBOL_INFO) char symbuf[sizeof(SYMBOL_INFO) + 256]{};
-                auto* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
-                sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-                sym->MaxNameLen = 255;
-                DWORD64 disp = 0;
-                if (symbols && SymFromAddr(process, frame.AddrPC.Offset, &disp, sym)) std::fprintf(f, " %s+%llX", sym->Name, static_cast<unsigned long long>(disp));
-                std::fputc('\n', f);
-            }
-
-            std::fprintf(f, "Stack (what its first slots point at):\n");
-            auto sp = reinterpret_cast<const std::uint64_t*>(cx->Rsp);
-            for (int i = 0; i < 128; ++i)
-            {
-                if (!Readable(sp + i, 8)) break;
-                std::uint64_t v = sp[i];
-                char buf[512];
-                char cls[256];
-                bool named = ModuleOf(static_cast<std::uintptr_t>(v), buf, sizeof(buf)) || ClassOf(static_cast<std::uintptr_t>(v), cls, sizeof(cls))
-                             || TextAt(static_cast<std::uintptr_t>(v)) > 0;
-                if (!named) continue;
-                std::fprintf(f, "  [RSP+%03X] %016llX", i * 8, static_cast<unsigned long long>(v));
-                Describe(f, static_cast<std::uintptr_t>(v));
-                std::fputc('\n', f);
-            }
-
-            std::fprintf(f, "Modules:\n");
-            HMODULE mods[512];
-            DWORD needed = 0;
-            if (EnumProcessModules(process, mods, sizeof(mods), &needed))
-                for (DWORD i = 0; i < needed / sizeof(HMODULE) && i < 512; ++i)
-                {
-                    char path[MAX_PATH]{};
-                    MODULEINFO mi{};
-                    GetModuleFileNameA(mods[i], path, MAX_PATH);
-                    GetModuleInformation(process, mods[i], &mi, sizeof(mi));
-                    std::fprintf(f, "  %016llX %08lX %s\n", reinterpret_cast<unsigned long long>(mi.lpBaseOfDll), mi.SizeOfImage, path);
-                }
+            WriteState(f, cx, GetCurrentThread());
             std::fclose(f);
         }
         LeaveCriticalSection(&writing);
         inReport = false;
+    }
+
+    // Hangs (2026-11-02: entering Oblivion's world froze the game, Windows closed it as "stopped interacting", and nothing
+    // was logged; only exceptions were): every second the game's window is asked for an answer; once it has given none for
+    // HangSeconds, the main thread is held a moment, its state written, and let go. Once a hang, until it answers again.
+    constexpr int HangSeconds = 15;
+    DWORD mainThreadId = 0;
+    HANDLE mainThread = nullptr;
+
+    BOOL CALLBACK FindGameWindow(HWND hwnd, LPARAM out)
+    {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) return TRUE;
+        *reinterpret_cast<HWND*>(out) = hwnd;
+        return FALSE;
+    }
+
+    void ReportHang(int seconds)
+    {
+        if (!mainThread || InterlockedIncrement(&reports) > 32) return;
+        if (SuspendThread(mainThread) == static_cast<DWORD>(-1)) return;
+        CONTEXT cx{};
+        cx.ContextFlags = CONTEXT_FULL;
+        bool got = GetThreadContext(mainThread, &cx) != FALSE;
+        EnterCriticalSection(&writing);
+        if (FILE* f = std::fopen(logPath.c_str(), "a"))
+        {
+            std::time_t now = std::time(nullptr);
+            char when[64];
+            std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+            char where[512] = "?";
+            if (got) ModuleOf(static_cast<std::uintptr_t>(cx.Rip), where, sizeof(where));
+            std::fprintf(f, "\n==== %s HANG: the game's window hasn't answered for %d s; the main thread (%lu) is at %s ====\n", when, seconds, mainThreadId, where);
+            if (got) WriteState(f, &cx, mainThread);
+            std::fclose(f);
+        }
+        LeaveCriticalSection(&writing);
+        ResumeThread(mainThread);
+    }
+
+    DWORD WINAPI Watch(LPVOID)
+    {
+        HWND window = nullptr;
+        int silent = 0;
+        bool reported = false;
+        for (;;)
+        {
+            Sleep(1000);
+            if (!window || !IsWindow(window))
+            {
+                window = nullptr;
+                EnumWindows(FindGameWindow, reinterpret_cast<LPARAM>(&window));
+                if (!window) continue;
+            }
+            DWORD_PTR result = 0;
+            if (SendMessageTimeoutA(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &result)) { silent = 0; reported = false; continue; }
+            silent += 2;   // the second slept and the one waited
+            if (silent >= HangSeconds && !reported) { ReportHang(silent); reported = true; }
+        }
     }
 
     LONG CALLBACK OnException(EXCEPTION_POINTERS* ep)
@@ -334,6 +401,15 @@ extern "C"
     {
         InitializeCriticalSection(&writing);
         logPath = PluginDirectory() + "TamrielMergeCrashLog.log";
+        // The last three runs' logs kept (.1 the last): a launch after a crash wiped its report (2026-11-02, an Oblivion
+        // crash's report gone 15 s later).
+        {
+            std::string base = PluginDirectory() + "TamrielMergeCrashLog";
+            DeleteFileA((base + ".3.log").c_str());
+            MoveFileExA((base + ".2.log").c_str(), (base + ".3.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+            MoveFileExA((base + ".1.log").c_str(), (base + ".2.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+            MoveFileExA(logPath.c_str(), (base + ".1.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+        }
         if (FILE* f = std::fopen(logPath.c_str(), "w"))
         {
             std::time_t now = std::time(nullptr);
@@ -346,6 +422,10 @@ extern "C"
         }
         vectored = AddVectoredExceptionHandler(1, OnException);
         previous = SetUnhandledExceptionFilter(OnUnhandled);
+        // SKSE loads its plugins on the game's main thread: the one a hang is in.
+        mainThreadId = GetCurrentThreadId();
+        mainThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, mainThreadId);
+        if (HANDLE watcher = CreateThread(nullptr, 0, Watch, nullptr, 0, nullptr)) CloseHandle(watcher);
         return vectored != nullptr;
     }
 }

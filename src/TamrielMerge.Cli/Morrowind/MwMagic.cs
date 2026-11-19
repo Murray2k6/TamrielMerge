@@ -27,7 +27,7 @@ public sealed partial class MwPluginBuilder
         {
             if (magic is not null) return magic;
             Vanilla<IWeaponGetter>("IronDagger");   // opens Skyrim.esm
-            return magic = new TesMagic(mod, skyrimEsm!, "MW") { Look = Look };
+            return magic = new TesMagic(mod, skyrimEsm!, "MW") { Look = Look, ScriptProperties = AfflictionProperties };
         }
     }
 
@@ -61,8 +61,14 @@ public sealed partial class MwPluginBuilder
         return weapon.FormKey;
     }
 
-    IEnumerable<TesEffect> EffectsOf(Tes3Record rec) =>
-        rec.All("ENAM").Select(e => TesMagic.FromMorrowind(e.Data, Associated)).OfType<TesEffect>();
+    IEnumerable<TesEffect> EffectsOf(Tes3Record rec)
+    {
+        // The corprus disease's Drain and Fortify Attribute effects land a day at a time through its Corprus effect's
+        // script (TMMwCorprus; OpenMW activespells.cpp), not as constant effects of the spell (MwAfflictions.cs).
+        bool corprus = IsCorprusDisease(rec);
+        return rec.All("ENAM").Select(e => TesMagic.FromMorrowind(e.Data, Associated)).OfType<TesEffect>()
+            .Where(e => !corprus || e.Name is not ("DrainAttribute" or "FortifyAttribute"));
+    }
 
     /// <summary>A Morrowind spell (SPDT: type 0 spell, 1 ability, 2 blight, 3 disease, 4 curse, 5 power; cost).</summary>
     Spell? MwSpell(string id)
@@ -70,7 +76,9 @@ public sealed partial class MwPluginBuilder
         if (spells.TryGetValue(id, out var hit)) return hit;
         spells[id] = null;
         if (!world.Objects.TryGetValue(id, out var rec) || rec.Type != "SPEL" || rec.Get("SPDT") is not { } d) return null;
-        var cast = d.Int(0) switch { 1 or 4 => TesCast.Ability, 2 or 3 => TesCast.Disease, 5 => TesCast.Power, _ => TesCast.Spell };
+        // Corprus is a blight no cure takes (OpenMW spells.cpp purgeBlightDisease spares a spell with the Corprus effect; only
+        // Divayth Fyr's result script removes it): an ability, which Skyrim's Cure Disease leaves alone (MwAfflictions.cs).
+        var cast = d.Int(0) switch { 1 or 4 => TesCast.Ability, 2 or 3 => IsCorprusDisease(rec) ? TesCast.Ability : TesCast.Disease, 5 => TesCast.Power, _ => TesCast.Spell };
         return spells[id] = Magic.Spell("MWSpell" + Sanitize(id), rec.Str("FNAM"), cast, EffectsOf(rec), d.Int(4));
     }
 

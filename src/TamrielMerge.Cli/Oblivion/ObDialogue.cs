@@ -83,11 +83,53 @@ public sealed partial class ObPluginBuilder
         foreach (var r in f.Ranks)
         {
             string title = r.Name?.Male ?? r.Name?.Female ?? "";
-            faction.Ranks.Add(new Rank { Number = n++, Title = new GenderedItem<Mutagen.Bethesda.Strings.TranslatedString>(title, r.Name?.Female ?? title) });
+            faction.Ranks.Add(new Rank { Number = n++, Title = new GenderedItem<Mutagen.Bethesda.Strings.TranslatedString?>(title, r.Name?.Female ?? title) });
         }
         if (f.Flags is { } obFlags && obFlags.HasFlag(Ob.Faction.FactionFlag.HiddenFromPlayer)) faction.Flags |= Faction.FactionFlag.HiddenFromPC;
         mod.Factions.Add(faction);
-        return obFactions[key] = faction;
+        obFactions[key] = faction;
+        // Oblivion's relations, each with Skyrim's combat reaction for its disposition modifier. Not a faction's to itself:
+        // Skyrim's members help each other unless that says otherwise, and written as neutral (Oblivion's MythicDawnCG is
+        // +100 to itself, BladesCG +50) nobody helped anybody, and the first ambush stood still after Captain Renault fell
+        // (run r109, 2026-11-17; with no relations at all, r106, the Blades and the assassins fought it out).
+        foreach (var rel in f.Relations)
+            if (rel.Target.FormKey != key && ObRelation(rel.Target.FormKey, rel.Modifier, f.EditorID ?? key.ToString()) is { } made) faction.Relations.Add(made);
+        return faction;
+    }
+
+    /// <summary>
+    /// An Oblivion faction's relation to a faction or a race (XNAM: the other's form and a disposition modifier) as
+    /// Skyrim's, whose people fight by combat reaction where Oblivion's fight when their disposition falls under their
+    /// aggression: -50 or worse an enemy, else neutral; the modifier kept. Not friend or ally for a liking: in Oblivion a
+    /// relation moves only disposition and a script's StartCombat fights whatever it is, while Skyrim's people don't
+    /// fight a friend at all (run r108, 2026-11-17: Oblivion's MythicDawnCG and BladesCG are +100 to each other, made
+    /// friends, and the first ambush never fought: the assassin who starts it with StartCombat stood by Captain Renault).
+    /// Members of one faction Skyrim makes allies itself. Until 2026-11-16 no relation was converted (282 of Oblivion.esm's
+    /// 476 factions have them), and the prison's Mythic Dawn assassin and Baurus stood side by side in the tunnel once
+    /// their scripted fight ended (run r106; Oblivion's EmperorFaction is -100 to MythicDawnCG). Races are Skyrim's of the
+    /// same name (as people's races are: ObContent).
+    /// </summary>
+    Relation? ObRelation(FormKey other, int modifier, string of)
+    {
+        IRelatableGetter? target = records.GetValueOrDefault(other) switch
+        {
+            // The player's faction is Skyrim's own, the one the player is in.
+            Ob.IFactionGetter pf when string.Equals(pf.EditorID, "PlayerFaction", StringComparison.OrdinalIgnoreCase) => Vanilla.Get<IFactionGetter>("PlayerFaction"),
+            Ob.IFactionGetter => ObFaction(other),
+            Ob.IRaceGetter race => Vanilla.Get<IRaceGetter>(Sanitize(race.EditorID ?? "") + "Race"),
+            _ => null,
+        };
+        if (target is null)
+        {
+            Problems.Add($"faction {of}: its relation to {other} ({records.GetValueOrDefault(other)?.GetType().Name ?? "missing"}) has nothing in Skyrim to point at");
+            return null;
+        }
+        return new Relation
+        {
+            Target = new FormLink<IRelatableGetter>(target.FormKey),
+            Modifier = modifier,
+            Reaction = modifier <= -50 ? CombatReaction.Enemy : CombatReaction.Neutral,
+        };
     }
 
     Class? ObClass(FormKey key)
@@ -97,7 +139,8 @@ public sealed partial class ObPluginBuilder
         var template = SkyrimEsm.Classes.FirstOrDefault(x => x.EditorID == "CombatWarrior1H") ?? SkyrimEsm.Classes.First();
         var cls = mod.Classes.DuplicateInAsNewRecord(template);
         cls.EditorID = "OBClass" + Sanitize(c.EditorID ?? key.ID.ToString("X6"));
-        cls.Name = c.Name ?? c.EditorID;
+        // (Nameless and without an EditorID it stays nameless: Mutagen's class name isn't marked as optional.)
+        cls.Name = c.Name ?? c.EditorID!;
         return obClasses[key] = cls;
     }
 
@@ -153,7 +196,13 @@ public sealed partial class ObPluginBuilder
             EditorID = "OBDialogue",
             Name = "Oblivion Dialogue",
             Flags = Quest.Flag.StartGameEnabled | Quest.Flag.AllowRepeatedStages,
-            Priority = 40,
+            // Above every quest with greetings: Skyrim's own (Skyrim.esm's Hello topics sit in quests of priority up to
+            // 95, 48 of them at 70) and Oblivion's barks (OBVoices, 70: its HELLO lines said in passing). A conversation's
+            // first line is the highest quest's that holds; at 40 the Emperor's greeting lost to those once he was one
+            // of Oblivion's people with a face of his own, and the conversation he walked up to open began with nothing
+            // of his (runs r84 to r86, 2026-11-15). Its lines are all held to Oblivion's people (a person's own, or
+            // OBPeople), so Skyrim's people are left as they were.
+            Priority = 100,
             Type = Quest.TypeEnum.Misc,
             Aliases = [new QuestAlias { ID = 0, Name = "Player", ForcedReference = new FormLinkNullable<IPlacedGetter>(PlayerRefKey) }],
             NextAliasID = 1,
@@ -190,6 +239,16 @@ public sealed partial class ObPluginBuilder
                     }
                 }
             }
+        // Oblivion looks through a topic's responses by their quests' priority, highest first, and in the file's order
+        // within one quest; Skyrim in the topic's order alone. Left in file order, the Emperor's own greeting (the
+        // Charactergen quest's, the 2,821st of GREETING's 3,826) lost to "What do you want?" and the opening held at
+        // stage 17 (seen in game 2026-11-14).
+        foreach (var entry in topics.Values)
+        {
+            var byPriority = entry.Items.OrderByDescending(x => x.Item.Quest.FormKeyNullable is { } qk && records.GetValueOrDefault(qk) is Ob.IQuestGetter q ? (int)(q.Data?.Priority ?? 0) : 0).ToList();
+            entry.Items.Clear();
+            entry.Items.AddRange(byPriority);
+        }
         var added = topics.Values.SelectMany(t => t.Items).SelectMany(i => i.Item.Topics.Select(x => x.FormKey)).ToHashSet();
         var choiceOnly = topics.Values.SelectMany(t => t.Items).SelectMany(i => i.Item.Choices.Select(x => x.FormKey)).Where(k => !added.Contains(k)).ToHashSet();
 
@@ -213,7 +272,20 @@ public sealed partial class ObPluginBuilder
                         r.Conditions.Insert(0, Cond(known, CompareOperator.EqualTo, 1, false, false));
                     }
                     // GREETING starts a conversation (a Hello said in passing is Oblivion's HELLO's, or nothing).
-                    if (string.Equals(topic.EditorID, "GREETING", StringComparison.OrdinalIgnoreCase)) r.Conditions.Insert(0, Skyrim.ForeignVoices.InConversation());
+                    // In a conversation, or as the speaker's own walk-up greeting is being opened (TMObGreet has it in
+                    // the OBGreetNow faction for the while): "in dialogue with the player" alone is not yet true every
+                    // time Skyrim picks a conversation's first line, and the Emperor's greeting was passed over in
+                    // about half the runs, leaving a menu with nothing of his to ask (seen in game 2026-11-14/15,
+                    // whatever the timing).
+                    if (string.Equals(topic.EditorID, "GREETING", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var inTalk = Skyrim.ForeignVoices.InConversation();
+                        inTalk.Flags |= Condition.Flag.OR;
+                        var greetNow = new GetInFactionConditionData();
+                        greetNow.Faction = new FormLinkOrIndex<IFactionGetter>(greetNow, GreetNowFaction().FormKey);
+                        r.Conditions.Insert(0, inTalk);
+                        r.Conditions.Insert(1, Cond(greetNow, CompareOperator.EqualTo, 1, false, false));
+                    }
                     responseTopics[r] = topic.EditorID ?? "";
                     skyTopic.Responses.Add(r);
                 }
@@ -223,22 +295,39 @@ public sealed partial class ObPluginBuilder
         }
         BuildBarks(topics);
         BuildConversations(topics);
-        Persuasion();
+        Persuasion(topics);
+        RepairTopic();
+        BarterTopic();
         // Money changers (CoinTrade): the faction is shared with the people who join it, made now or later.
         moneyChangers ??= Skyrim.CoinTrade.Tag(mod, "OBMoneyChangers", "Money changers");
         Skyrim.CoinTrade.AddExchange(mod, obDialogueQuest, moneyChangers.FormKey, story: 3, prefix: "OB", title: "Money changer", baseFee: 10);
+        // The people the quests need, kept alive (ObNeeded).
+        MarkNeeded();
+        // Oblivion's dialogue for Oblivion's people: every response made here that names no speaker (DialogueOwners).
+        Skyrim.DialogueOwners.Restrict(mod, ObPeople(), Console.WriteLine);
     }
 
     /// <summary>
-    /// Oblivion's persuasion (the Admire/Boast/Joke/Coerce wheel and bribes) as a "Persuasion" topic of choices: each
-    /// attempt succeeds on a roll (drawn by the response before it) under a chance set by the player's Speech, and
-    /// raises the speaker's disposition on success or lowers it a little on failure; a bribe needs the gold, takes it
-    /// and always works, raising disposition more for more gold. The wheel has no spoken lines, so the answers are short.
+    /// Oblivion's persuasion (the Admire/Boast/Joke/Coerce wheel and bribes) as a "Persuasion" topic of choices, spoken
+    /// with Oblivion's own persuasion responses (DialogType.Persuasion): PERSUASIONENTER opens it (by disposition),
+    /// each action answers with the speaker's own line of its reaction to it (ADMIRELOVE ... COERCEHATE: one loved, one
+    /// liked, one disliked, one hated, fixed per NPC; ObPersuasion keeps them as keywords the lines test), a bribe
+    /// with BRIBE's thanks for what the gold buys, and "That's all" closes with PERSUASIONEXIT by the last change and
+    /// the total (GetPersuasionNumber, GetTotalPersuasionNumber: OBPersuasionLast/Total). Skyrim has no wheel: each
+    /// action is asked once per persuasion at a medium wedge, and TMObPersuade changes disposition by Oblivion's rule
+    /// and its own settings (fPersuasionMod, fPersuasionReactionDislike, fPersuasionReactionHate from Oblivion.esm)
+    /// and trains Speechcraft. A bribe needs the gold, takes it and always works, raising disposition more for more gold.
     /// </summary>
-    void Persuasion()
+    void Persuasion(Dictionary<FormKey, (Ob.IDialogTopicGetter Topic, List<(Ob.IDialogItemGetter Item, Ob.IOblivionModGetter Source)> Items)> topics)
     {
-        var roll = new GlobalFloat(mod) { EditorID = "OBPersuasionRoll", Data = 50 };
-        mod.Globals.Add(roll);
+        var persuasion = topics.Values.Where(t => t.Topic.DialogType == Ob.DialogType.Persuasion && t.Topic.EditorID is not null)
+            .GroupBy(t => t.Topic.EditorID!.ToUpperInvariant()).ToDictionary(g => g.Key, g => g.SelectMany(t => t.Items).ToList());
+        List<(Ob.IDialogItemGetter Item, Ob.IOblivionModGetter Source)> Lines(string topic) => persuasion.GetValueOrDefault(topic) ?? [];
+        var last = PersuasionNumberGlobal(false);
+        var total = PersuasionNumberGlobal(true);
+        var asked = PersuasionActions.Select(a => { var g = new GlobalFloat(mod) { EditorID = "OBPersuaded" + a, Data = 0 }; mod.Globals.Add(g); return (Global)g; }).ToArray();
+        // Oblivion's own settings (Oblivion.esm: 0.3, -50, -150), the plugins' last value.
+        float persuasionMod = Gmst("fPersuasionMod", 0.3f), reactionDislike = Gmst("fPersuasionReactionDislike", -50f), reactionHate = Gmst("fPersuasionReactionHate", -150f);
         var branch = new DialogBranch(mod) { EditorID = "OBPersuasionBranch", Quest = obDialogueQuest!.ToLink<IQuestGetter>(), Category = DialogBranch.CategoryType.Player, Flags = DialogBranch.Flag.TopLevel };
         mod.DialogBranches.Add(branch);
         DialogTopic NewTopic(string edid, string name) => new(mod)
@@ -248,40 +337,46 @@ public sealed partial class ObPluginBuilder
         };
         var menu = NewTopic("OBPersuasion", "Persuasion");
         branch.StartingTopic = menu.ToNullableLink<IDialogTopicGetter>();
-        DialogResponses Line(string text, Emotion emotion, IEnumerable<ConditionFloat> conditions, int change, int gold)
+        // An Oblivion persuasion response as a line of these topics, on TMObPersuade (which extends the line script).
+        DialogResponses? Said(Ob.IDialogItemGetter item, Ob.IOblivionModGetter source, string topic, int action, int reaction, int gold, int up)
         {
-            var r = new DialogResponses(mod)
+            if (Response(item, source) is not { } r) return null;
+            responseTopics[r] = topic;
+            var entry = r.VirtualMachineAdapter!.Scripts.First(s => s.Name == LineScript);
+            entry.Name = PersuadeScript;
+            entry.Properties.Add(new ScriptIntProperty { Name = "PersuadeAction", Data = action });
+            entry.Properties.Add(new ScriptIntProperty { Name = "Reaction", Data = reaction });
+            entry.Properties.Add(new ScriptFloatProperty { Name = "PersuasionMod", Data = persuasionMod });
+            entry.Properties.Add(new ScriptFloatProperty { Name = "ReactionDislike", Data = reactionDislike });
+            entry.Properties.Add(new ScriptFloatProperty { Name = "ReactionHate", Data = reactionHate });
+            entry.Properties.Add(new ScriptObjectProperty { Name = "Last", Object = last.ToLink<ISkyrimMajorRecordGetter>() });
+            entry.Properties.Add(new ScriptObjectProperty { Name = "Total", Object = total.ToLink<ISkyrimMajorRecordGetter>() });
+            if (action is >= 0 and < 4) entry.Properties.Add(new ScriptObjectProperty { Name = "Asked", Object = asked[action].ToLink<ISkyrimMajorRecordGetter>() });
+            if (action == -1) entry.Properties.Add(new ScriptObjectListProperty { Name = "AskedAll", Objects = [.. asked.Select(g => new ScriptObjectProperty { Object = g.ToLink<ISkyrimMajorRecordGetter>() })] });
+            if (gold > 0)
             {
-                Responses = [new DialogResponse { Text = text, ResponseNumber = 1, Emotion = emotion, EmotionValue = 50 }],
-                Flags = new DialogResponseFlags(),
-                Conditions = [.. conditions],
-            };
-            var entry = new ScriptEntry { Name = InfoScript };
-            if (change != 0) entry.Properties.Add(new ScriptIntProperty { Name = "Disposition", Data = change });
-            if (gold > 0) entry.Properties.Add(new ScriptIntProperty { Name = "Gold", Data = gold });
-            entry.Properties.Add(new ScriptObjectProperty { Name = "Roll", Object = roll.ToLink<ISkyrimMajorRecordGetter>() });
-            r.VirtualMachineAdapter = new DialogResponsesAdapter
-            {
-                Scripts = [entry],
-                ScriptFragments = new ScriptFragments
-                {
-                    ExtraBindDataVersion = 2, FileName = InfoScript,
-                    OnEnd = new ScriptFragment { ExtraBindDataVersion = 1, ScriptName = InfoScript, FragmentName = "Fragment_End" },
-                },
-            };
+                entry.Properties.Add(new ScriptIntProperty { Name = "Gold", Data = gold });
+                entry.Properties.Add(new ScriptIntProperty { Name = "Disposition", Data = up });
+            }
+            r.VirtualMachineAdapter = LineAdapter(entry, PersuadeScript);
             return r;
         }
-        ConditionFloat Speech(int at)
+        // Oblivion's Random flag groups consecutive lines (the game picks one): each group ends where the flag does.
+        static void EndRandomGroups(List<DialogResponses> group)
         {
-            var d = new GetActorValueConditionData { ActorValue = ActorValue.Speech };
-            d.RunOnType = Condition.RunOnType.Reference;
-            d.Reference = new FormLink<ISkyrimMajorRecordGetter>(PlayerRefKey);
-            return new ConditionFloat { Data = d, CompareOperator = CompareOperator.GreaterThanOrEqualTo, ComparisonValue = at };
+            for (int i = 0; i < group.Count; i++)
+                if (group[i].Flags!.Flags.HasFlag(DialogResponses.Flag.Random) && (i == group.Count - 1 || !group[i + 1].Flags!.Flags.HasFlag(DialogResponses.Flag.Random)))
+                    group[i].Flags!.Flags |= DialogResponses.Flag.RandomEnd;
         }
-        ConditionFloat RollBelow(int chance)
+        ConditionFloat HasKeyword(Keyword k)
         {
-            var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, roll.FormKey);
-            return new ConditionFloat { Data = d, CompareOperator = CompareOperator.LessThan, ComparisonValue = Math.Clamp(chance, 5, 95) };
+            var d = new HasKeywordConditionData(); d.Keyword = new FormLinkOrIndex<IKeywordGetter>(d, k.FormKey);
+            return new ConditionFloat { Data = d, CompareOperator = CompareOperator.EqualTo, ComparisonValue = 1 };
+        }
+        ConditionFloat GlobalIs(Global g, float value)
+        {
+            var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, g.FormKey);
+            return new ConditionFloat { Data = d, CompareOperator = CompareOperator.EqualTo, ComparisonValue = value };
         }
         ConditionFloat HasGold(int gold)
         {
@@ -290,36 +385,104 @@ public sealed partial class ObPluginBuilder
             d.Reference = new FormLink<ISkyrimMajorRecordGetter>(PlayerRefKey);
             return new ConditionFloat { Data = d, CompareOperator = CompareOperator.GreaterThanOrEqualTo, ComparisonValue = gold };
         }
-        (int Speech, int Chance)[] bands = [(75, 80), (50, 60), (25, 45), (0, 30)];
-        (string Name, string Win, string Lose, int Up, int Down)[] wheel =
-        [
-            ("Admire", "That's kind of you to say.", "Flattery won't get you anywhere with me.", 8, -3),
-            ("Boast", "Impressive. I'll remember that.", "Is that so? I'm not impressed.", 8, -3),
-            ("Joke", "Ha! That's a good one.", "That isn't funny.", 8, -3),
-            ("Coerce", "All right, all right. No need for that.", "Are you threatening me?", 10, -6),
-        ];
         var choices = new List<DialogTopic>();
-        foreach (var (name, win, lose, up, down) in wheel)
+        // The four actions: the speaker's own line of its reaction to each, once per persuasion.
+        for (int a = 0; a < PersuasionActions.Length; a++)
         {
-            var choice = NewTopic("OBPersuade" + name, name);
-            foreach (var (speech, chance) in bands) choice.Responses.Add(Line(win, Emotion.Happy, [Speech(speech), RollBelow(chance)], up, 0));
-            choice.Responses.Add(Line(lose, Emotion.Anger, [], down, 0));
+            var choice = NewTopic("OBPersuade" + PersuasionActions[a], PersuasionActions[a]);
+            for (int reaction = 0; reaction < PersuasionReactionNames.Length; reaction++)
+            {
+                var group = new List<DialogResponses>();
+                foreach (var (item, source) in Lines(PersuasionActions[a].ToUpperInvariant() + PersuasionReactionNames[reaction].ToUpperInvariant()))
+                    if (Said(item, source, PersuasionActions[a] + PersuasionReactionNames[reaction], a, reaction, 0, 0) is { } r)
+                    {
+                        r.Conditions.Insert(0, GlobalIs(asked[a], 0));
+                        r.Conditions.Insert(0, HasKeyword(PersuasionKeyword(a, reaction)));
+                        group.Add(r);
+                    }
+                EndRandomGroups(group);
+                choice.Responses.AddRange(group);
+            }
+            if (choice.Responses.Count == 0) Problems.Add($"persuasion: Oblivion has no {PersuasionActions[a]} responses");
             choices.Add(choice);
         }
-        foreach (var (gold, up) in new[] { (10, 4), (100, 12), (1000, 30) })
+        // Bribes: Oblivion's thanks come in three groups by what the gold bought (its lines' GetTotalPersuasionNumber
+        // bands, 5/10/15: the Random lines of each band); here one group per tier of gold, which buys that much.
+        var bribeLines = new List<(DialogResponses Line, float Band)>();
+        foreach (var (item, source) in Lines("BRIBE"))
         {
+            if (Said(item, source, "Bribe", 4, 0, 0, 0) is not { } r) continue;
+            var bandConditions = r.Conditions.OfType<ConditionFloat>().Where(c => c.Data is GetGlobalValueConditionData g && g.Global.Link.FormKey == total.FormKey).ToList();
+            float band = bandConditions.Count > 0 ? bandConditions.Max(c => c.ComparisonValue) : 0;
+            foreach (var c in bandConditions) r.Conditions.Remove(c);
+            bribeLines.Add((r, band));
+        }
+        var tiers = new[] { (Gold: 10, Up: 4), (Gold: 100, Up: 12), (Gold: 1000, Up: 30) };
+        var bands = bribeLines.Select(b => b.Band).Distinct().OrderBy(b => b).ToList();
+        for (int t = 0; t < tiers.Length; t++)
+        {
+            var (gold, up) = tiers[t];
             var bribe = NewTopic($"OBPersuadeBribe{gold}", $"Bribe ({gold} gold)");
-            bribe.Responses.Add(Line("Well, I suppose I could use the coin.", Emotion.Happy, [HasGold(gold)], up, gold));
+            float band = bands.Count == 0 ? 0 : bands[Math.Min(t, bands.Count - 1)];
+            var group = bribeLines.Where(b => b.Band == band).Select(b => b.Line).ToList();
+            if (group.Count == 0) group = bribeLines.Select(b => b.Line).ToList();
+            foreach (var line in group)
+            {
+                // The line as a response of this tier (one DialogResponses can sit in one topic): the first tier keeps it.
+                var r = t == 0 ? line : line.Duplicate(mod.GetNextFormKey());
+                // The copy says the same recording (VoiceMap by the response's FormID).
+                if (t > 0 && VoiceMap.FirstOrDefault(v => v.Info == line.FormKey.ID) is { } voice) VoiceMap.Add(voice with { Info = r.FormKey.ID });
+                r.Conditions.Insert(0, HasGold(gold));
+                var entry = r.VirtualMachineAdapter!.Scripts.First(s => s.Name == PersuadeScript);
+                entry.Properties.Add(new ScriptIntProperty { Name = "Gold", Data = gold });
+                entry.Properties.Add(new ScriptIntProperty { Name = "Disposition", Data = up });
+                if (t > 0) responseTopics[r] = "Bribe";
+                bribe.Responses.Add(r);
+            }
+            EndRandomGroups(bribe.Responses.ToList());
+            if (bribe.Responses.Count == 0) Problems.Add("persuasion: Oblivion has no BRIBE responses");
             choices.Add(bribe);
         }
+        // Leaving: Oblivion's exit lines by how the persuasion went.
+        var done = NewTopic("OBPersuadeDone", "That's all.");
+        var exit = new List<DialogResponses>();
+        foreach (var (item, source) in Lines("PERSUASIONEXIT"))
+            if (Said(item, source, "PersuasionExit", -2, 0, 0, 0) is { } r) exit.Add(r);
+        EndRandomGroups(exit);
+        done.Responses.AddRange(exit);
+        if (done.Responses.Count == 0) done.Responses.Add(new DialogResponses(mod) { Responses = [new DialogResponse { Text = "", ResponseNumber = 1, Emotion = Emotion.Neutral, EmotionValue = 50 }], Flags = new DialogResponseFlags() });
         foreach (var c in choices)
-            foreach (var r in c.Responses) foreach (var other in choices) r.LinkTo.Add(other.ToLink<IDialogTopicGetter>());
-        var open = Line("", Emotion.Neutral, [], 0, 0);
-        foreach (var c in choices) open.LinkTo.Add(c.ToLink<IDialogTopicGetter>());
-        menu.Responses.Add(open);
+            foreach (var r in c.Responses)
+            {
+                foreach (var other in choices) r.LinkTo.Add(other.ToLink<IDialogTopicGetter>());
+                r.LinkTo.Add(done.ToLink<IDialogTopicGetter>());
+            }
+        // Entering: Oblivion's opening lines by disposition; each starts a persuasion (TMObPersuade resets it).
+        var enter = new List<DialogResponses>();
+        foreach (var (item, source) in Lines("PERSUASIONENTER"))
+            if (Said(item, source, "PersuasionEnter", -1, 0, 0, 0) is { } r) enter.Add(r);
+        EndRandomGroups(enter);
+        if (enter.Count == 0)
+        {
+            Problems.Add("persuasion: Oblivion has no PERSUASIONENTER responses (opened without a line)");
+            var open = new DialogResponses(mod) { Responses = [new DialogResponse { Text = "", ResponseNumber = 1, Emotion = Emotion.Neutral, EmotionValue = 50 }], Flags = new DialogResponseFlags() };
+            var entry = new ScriptEntry { Name = PersuadeScript };
+            entry.Properties.Add(new ScriptIntProperty { Name = "PersuadeAction", Data = -1 });
+            entry.Properties.Add(new ScriptObjectProperty { Name = "Last", Object = last.ToLink<ISkyrimMajorRecordGetter>() });
+            entry.Properties.Add(new ScriptObjectProperty { Name = "Total", Object = total.ToLink<ISkyrimMajorRecordGetter>() });
+            entry.Properties.Add(new ScriptObjectListProperty { Name = "AskedAll", Objects = [.. asked.Select(g => new ScriptObjectProperty { Object = g.ToLink<ISkyrimMajorRecordGetter>() })] });
+            open.VirtualMachineAdapter = LineAdapter(entry, PersuadeScript);
+            enter.Add(open);
+        }
+        foreach (var r in enter)
+        {
+            foreach (var c in choices) r.LinkTo.Add(c.ToLink<IDialogTopicGetter>());
+            menu.Responses.Add(r);
+        }
         mod.DialogTopics.Add(menu);
         foreach (var c in choices) mod.DialogTopics.Add(c);
-        DialogueTopics += choices.Count + 1;
+        mod.DialogTopics.Add(done);
+        DialogueTopics += choices.Count + 2;
     }
 
     void ConvertQuest(Ob.IQuestGetter q)
@@ -330,7 +493,10 @@ public sealed partial class ObPluginBuilder
             Name = q.Name,
             Priority = q.Data?.Priority ?? 50,
             Type = q.EditorID?.StartsWith("MQ", StringComparison.OrdinalIgnoreCase) == true ? Quest.TypeEnum.MainQuest : Quest.TypeEnum.Misc,
-            Flags = q.Data?.Flags.HasFlag(Ob.Quest.Flag.StartGameEnabled) == true ? Quest.Flag.StartGameEnabled : 0,
+            // Oblivion's own flags: started with the game, and whether a stage already done may be set again (its
+            // result running again), which Skyrim's quests have the same way.
+            Flags = (q.Data?.Flags.HasFlag(Ob.Quest.Flag.StartGameEnabled) == true ? Quest.Flag.StartGameEnabled : 0)
+                | (q.Data?.Flags.HasFlag(Ob.Quest.Flag.AllowRepeatedStages) == true ? Quest.Flag.AllowRepeatedStages : 0),
             Stages = [],
         };
         foreach (var s in q.Stages)
@@ -345,7 +511,11 @@ public sealed partial class ObPluginBuilder
                 {
                     Entry = e.Entry is { Length: > 0 } text ? text : null,
                     Flags = flags.Contains("Complet", StringComparison.OrdinalIgnoreCase) ? QuestLogEntry.Flag.CompleteQuest
-                        : flags.Contains("Fail", StringComparison.OrdinalIgnoreCase) ? QuestLogEntry.Flag.FailQuest : null,
+                        // Never without its flags field: that field is what makes the entry in the record. An entry with
+                        // neither text nor conditions was not written at all, and the fragment of its result script had
+                        // no entry to run on (seen 2026-11-12: Oblivion's opening stood still in the prison cell,
+                        // CharacterGen at stage 5 with its result script, which starts the tutorial quest, never run).
+                        : flags.Contains("Fail", StringComparison.OrdinalIgnoreCase) ? QuestLogEntry.Flag.FailQuest : (QuestLogEntry.Flag)0,
                 });
             }
             quest.Stages.Add(stage);
@@ -398,7 +568,7 @@ public sealed partial class ObPluginBuilder
                 var branch = new DialogBranch(mod)
                 {
                     EditorID = edid + "Branch",
-                    Quest = obDialogueQuest.ToLink<IQuestGetter>(),
+                    Quest = obDialogueQuest!.ToLink<IQuestGetter>(),
                     Category = DialogBranch.CategoryType.Player,
                     Flags = DialogBranch.Flag.TopLevel,
                     StartingTopic = t.ToNullableLink<IDialogTopicGetter>(),
@@ -441,7 +611,11 @@ public sealed partial class ObPluginBuilder
         if (flags.HasFlag(Ob.DialogItem.Flag.SayOnce)) r.Flags.Flags |= DialogResponses.Flag.SayOnce;
         if (flags.HasFlag(Ob.DialogItem.Flag.Random)) r.Flags.Flags |= DialogResponses.Flag.Random;
         foreach (var choice in item.Choices)
-            if (obTopics.TryGetValue(choice.FormKey, out var target)) r.LinkTo.Add(target.ToLink<IDialogTopicGetter>());
+            // The player's topics only: a conversation's links are TMObLine's (ConvLinks). Linked to here, a conversation
+            // topic counted as a menu's and stayed Misc/Custom, of which the game says nothing when a script asks
+            // (TopicSubtypes.SaidByScripts): no line of CharGenVoice ever began, the Emperor's "You ... I've seen you"
+            // and Glenroy's "Stand aside" among them (seen in game 2026-11-14).
+            if (obTopics.TryGetValue(choice.FormKey, out var target) && target.Category == DialogTopic.CategoryEnum.Topic) r.LinkTo.Add(target.ToLink<IDialogTopicGetter>());
         // TMObLine: the topics it gives the player once said (its Add Topics; a hidden topic it offers as a choice, which
         // the choice needs known), and its speaker talking. The regex's subset of its result script (Result) on it,
         // replaced by the whole script once that is compiled (ObResultScripts).
@@ -543,11 +717,33 @@ public sealed partial class ObPluginBuilder
             }
     }
 
+    Faction? greetNowFaction;
+
+    /// <summary>OBGreetNow: the faction an actor is in while its own walk-up greeting is being opened (TMObGreet puts
+    /// it in and takes it out), for the greetings' conditions. The actor's own mark: until 2026-11-15 it was one global
+    /// for everybody, which any actor's greeting package anywhere set to 1 (every GREETING line then counted as "being
+    /// opened", for everyone) and the first of them to end set back to 0 under the others.</summary>
+    Faction GreetNowFaction()
+    {
+        if (greetNowFaction is not null) return greetNowFaction;
+        greetNowFaction = new Faction(mod) { EditorID = "OBGreetNow", Name = "", Flags = Faction.FactionFlag.HiddenFromPC, Ranks = [] };
+        mod.Factions.Add(greetNowFaction);
+        return greetNowFaction;
+    }
+
     static ConditionFloat Cond(ConditionData data, CompareOperator op, float value, bool onTarget, bool or)
     {
         if (onTarget) data.RunOnType = Condition.RunOnType.Target;
         return new ConditionFloat { Data = data, CompareOperator = op, ComparisonValue = value, Flags = or ? Condition.Flag.OR : 0 };
     }
+
+    /// <summary>The operator that compares the other way about (a &gt; b as b &lt; a).</summary>
+    static CompareOperator Mirrored(CompareOperator op) => op switch
+    {
+        CompareOperator.GreaterThan => CompareOperator.LessThan, CompareOperator.LessThan => CompareOperator.GreaterThan,
+        CompareOperator.GreaterThanOrEqualTo => CompareOperator.LessThanOrEqualTo, CompareOperator.LessThanOrEqualTo => CompareOperator.GreaterThanOrEqualTo,
+        _ => op,
+    };
 
     static bool Holds(CompareOperator op, float lhs, float rhs) => op switch
     {
@@ -585,11 +781,17 @@ public sealed partial class ObPluginBuilder
         list ??= [];
         foreach (var c in conditions)
         {
-            var op = (CompareOperator)(int)c.CompareOperator;
+            // By name: Mutagen numbers Oblivion's operators otherwise than Skyrim's (its >= is 6, its < 8), and taken by
+            // number every >= became no operator at all and every < became == (2026-11-04: Ruma Camoran's "escort the
+            // player while MQ15 is under stage 75" and Ushnar's Skinned Hound's "follow the player while SE43 is under
+            // 200", both >= in Oblivion, had them follow the player across worlds from the start).
+            var op = Enum.Parse<CompareOperator>(c.CompareOperator.ToString());
             float value = c.ComparisonValue;
             bool target = c.Flags.HasFlag(Ob.Condition.Flag.RunOnTarget), or = c.Flags.HasFlag(Ob.Condition.Flag.OR);
             FormKey P1() => Resolve(source, (uint)c.FirstParameter);
             ConditionData? data = null;
+            // GetIsCurrentPackage's other copy of the package (the one on the actors' own lists, which they run).
+            Package? scheduledTwin = null;
             bool? unknownHolds = null;   // set when Skyrim can't test it: does it hold with Oblivion's usual value?
             switch (c.Function.ToString())
             {
@@ -597,9 +799,24 @@ public sealed partial class ObPluginBuilder
                     if (Actor(P1()) is Npc npc) { var d = new GetIsIDConditionData(); d.Object = new FormLinkOrIndex<IReferenceableObjectGetter>(d, npc.FormKey); data = d; }
                     else unknownHolds = Holds(op, 0, value);
                     break;
+                case "GetVampire":
+                    {
+                        // Skyrim's Vampire keyword: on the player's race while Oblivion's vampirism runs (TMObState.SetVampirism
+                        // gives the race's vampire look) and on Oblivion's vampire people (ObContent, ObVampirism).
+                        var d = new HasKeywordConditionData(); d.Keyword = new FormLinkOrIndex<IKeywordGetter>(d, VampireKeyword); data = d;
+                        break;
+                    }
                 case "GetIsRace":
                 case "GetPCIsRace":
-                    if (SkyrimRace(P1()) is { } race)
+                    // A stand-in race (Dremora, Golden Saint, Dark Seducer, Sheogorath, the vampires: RaceStandIns) is its
+                    // keyword on the converted actor (ObRaceKeywords), not the mortal race it wears, which Skyrim's own people have too.
+                    if (records.GetValueOrDefault(P1())?.EditorID is { } obRace && RaceStandIns.ContainsKey(obRace))
+                    {
+                        var d = new HasKeywordConditionData(); d.Keyword = new FormLinkOrIndex<IKeywordGetter>(d, RaceKeyword(obRace).FormKey);
+                        if (c.Function.ToString() == "GetPCIsRace") { d.RunOnType = Condition.RunOnType.Reference; d.Reference = new FormLink<ISkyrimMajorRecordGetter>(PlayerRefKey); target = false; }
+                        data = d;
+                    }
+                    else if (SkyrimRace(P1()) is { } race)
                     {
                         if (c.Function.ToString() == "GetIsRace") { var d = new GetIsRaceConditionData(); d.Race = new FormLinkOrIndex<IRaceGetter>(d, race.FormKey); data = d; }
                         else { var d = new GetPCIsRaceConditionData(); d.Race = new FormLinkOrIndex<IRaceGetter>(d, race.FormKey); data = d; }
@@ -681,7 +898,11 @@ public sealed partial class ObPluginBuilder
                     }
                 // Skyrim's own of the same name and meaning, on the same subject.
                 case "GetIsCurrentPackage":
-                    if (ObPackage(P1()) is { } pkg) { var d = new GetIsCurrentPackageConditionData(); d.Package = new FormLinkOrIndex<IPackageGetter>(d, pkg.FormKey); data = d; }
+                    if (ObPackage(P1()) is { } pkg)
+                    {
+                        var d = new GetIsCurrentPackageConditionData(); d.Package = new FormLinkOrIndex<IPackageGetter>(d, pkg.FormKey); data = d;
+                        if (ObScheduledPackage(P1()) is { } twin && twin.FormKey != pkg.FormKey) scheduledTwin = twin;
+                    }
                     else unknownHolds = Holds(op, 0, value);
                     break;
                 case "GetPCExpelled":
@@ -851,7 +1072,15 @@ public sealed partial class ObPluginBuilder
                 case "IsRidingHorse": data = new IsRidingMountConditionData(); break;
                 case "GetDead": data = new GetDeadConditionData(); break;
                 case "GetFriendHit": data = new GetFriendHitConditionData(); break;
-                case "GetIsCreature": data = new GetIsCreatureConditionData(); break;
+                case "GetIsCreature":
+                {
+                    // Skyrim's GetIsCreature always gives 0 (its engine no longer tells creatures from people), so every
+                    // Oblivion "is a creature" was false and every "isn't" true. A creature is an actor whose race isn't
+                    // a person's: without Skyrim's ActorTypeNPC keyword, the comparison mirrored about 1.
+                    var d = new HasKeywordConditionData(); d.Keyword = new FormLinkOrIndex<IKeywordGetter>(d, ActorTypeNpc); data = d;
+                    (op, value) = (Mirrored(op), 1 - value);
+                    break;
+                }
                 case "GetSitting": data = new GetSittingConditionData(); break;
                 case "IsRaining": data = new IsRainingConditionData(); break;
                 case "IsSnowing": data = new IsSnowingConditionData(); break;
@@ -860,7 +1089,13 @@ public sealed partial class ObPluginBuilder
                 case "GetClothingValue": data = new GetClothingValueConditionData(); break;
                 case "GetIsGhost": data = new GetIsGhostConditionData(); break;
                 case "GetIsAlerted": data = new GetIsAlertedConditionData(); break;
-                case "GetClassDefaultMatch": data = new GetClassDefaultMatchConditionData(); break;
+                case "GetClassDefaultMatch":
+                {
+                    // Skyrim's GetClassDefaultMatch does nothing and gives 0: a global that stays 0 in its place, so the
+                    // condition holds or fails in game as it always has.
+                    var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, ScriptGlobal("TMOB_ClassDefaultMatch").FormKey); data = d; target = false;
+                    break;
+                }
                 case "GetAlarmed": data = new GetAlarmedConditionData(); break;
                 case "IsTorchOut": data = new IsTorchOutConditionData(); break;
                 case "IsWeaponOut": data = new IsWeaponOutConditionData(); break;
@@ -890,10 +1125,25 @@ public sealed partial class ObPluginBuilder
                     break;
                 }
                 case "GetPersuasionNumber": case "GetTotalPersuasionNumber":
-                    unknownHolds = Holds(op, 0, value); break;
+                {
+                    // The last persuasion action's change and the persuasion's total (OBPersuasionLast/Total; TMObPersuade keeps them).
+                    var d = new GetGlobalValueConditionData(); d.Global = new FormLinkOrIndex<IGlobalGetter>(d, PersuasionNumberGlobal(c.Function.ToString() == "GetTotalPersuasionNumber").FormKey); data = d; target = false;
+                    break;
+                }
                 default: unknownHolds = true; break;   // thresholds and states Skyrim can't test pass
             }
-            if (data is not null) list.Add(Cond(data, op, value, target, or));
+            if (data is not null && scheduledTwin is { } other)
+            {
+                // Either copy is the package (2026-11-02: only the script copy was tested, false whenever the package came from
+                // the actor's own list: 113 of Oblivion's responses and 25 of its packages ask). "Is it": one OR the other;
+                // "isn't it": neither (AND). The second keeps the original's own link to what follows.
+                bool isIt = (op == CompareOperator.EqualTo && value == 1) || (op == CompareOperator.NotEqualTo && value == 0)
+                    || (op == CompareOperator.GreaterThan && value == 0) || (op == CompareOperator.GreaterThanOrEqualTo && value == 1);
+                var d2 = new GetIsCurrentPackageConditionData(); d2.Package = new FormLinkOrIndex<IPackageGetter>(d2, other.FormKey);
+                list.Add(Cond(data, op, value, target, isIt));
+                list.Add(Cond(d2, op, value, target, or));
+            }
+            else if (data is not null) list.Add(Cond(data, op, value, target, or));
             else
             {
                 if (c.Function.ToString() != "IsXBox") lock (ConditionsUntested) ConditionsUntested[c.Function.ToString()] = ConditionsUntested.GetValueOrDefault(c.Function.ToString()) + 1;

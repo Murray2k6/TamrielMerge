@@ -3,7 +3,8 @@ ScriptName TMDfTalk extends Quest
 compass direction to the nearest (0 north, 1 north-east ... 7 north-west), measured from where the player stands, or
 from the street door of the building they are in. Dialogue conditions read Present[i] and Direction[i].
 Towns: TownLocations lists each town's location; for town t and building kind k, DoorsByKind.GetAt(t * KindCount + k)
-is a FormList of that kind's street doors. Indoors (buildings share interiors between towns) the town and the
+is a FormList of that kind's street doors' positions, x then y, as globals (the doors themselves would each take a
+reference handle, 2026-11-01). Indoors (buildings share interiors between towns) the town and the
 starting point are the street door the player came in by (LastDoor, LastTown, set by TMDfStreetDoor).}
 
 FormList Property TownLocations Auto
@@ -15,7 +16,8 @@ Actor Property PlayerRef Auto
 ObjectReference Property LastDoor Auto Hidden
 Int Property LastTown = -1 Auto Hidden
 String[] Property CurrentNames Auto Hidden
-{The names the street door last entered gives the people of its interior, by their Index (TMDfOccupant).}
+{The names the street door last entered gives the people of its interior, by their Index (TMDfOccupant, which also
+keys each building's people by LastDoor).}
 Cell Property CurrentCell Auto Hidden
 {The interior those names are for.}
 
@@ -72,22 +74,29 @@ Function UpdateDirections()
     If origin
       FormList doors = DoorsByKind.GetAt(town * KindCount + k) as FormList
       Float best = -1.0
-      ObjectReference nearest = None
+      Float nearX = 0.0
+      Float nearY = 0.0
+      Float fromX = origin.GetPositionX()
+      Float fromY = origin.GetPositionY()
       Int i = 0
-      While doors && i < doors.GetSize()
-        ObjectReference d = doors.GetAt(i) as ObjectReference
-        Float dx = d.GetPositionX() - origin.GetPositionX()
-        Float dy = d.GetPositionY() - origin.GetPositionY()
+      Int count = 0
+      If doors
+        count = doors.GetSize()
+      EndIf
+      While i + 1 < count
+        Float dx = (doors.GetAt(i) as GlobalVariable).GetValue() - fromX
+        Float dy = (doors.GetAt(i + 1) as GlobalVariable).GetValue() - fromY
         Float dist = dx * dx + dy * dy
         If best < 0.0 || dist < best
           best = dist
-          nearest = d
+          nearX = dx
+          nearY = dy
         EndIf
-        i += 1
+        i += 2
       EndWhile
-      If nearest
+      If best >= 0.0
         Present[k].SetValue(1)
-        Direction[k].SetValue(Sector(nearest.GetPositionX() - origin.GetPositionX(), nearest.GetPositionY() - origin.GetPositionY()))
+        Direction[k].SetValue(Sector(nearX, nearY))
       EndIf
     EndIf
     k += 1

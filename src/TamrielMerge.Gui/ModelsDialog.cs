@@ -84,10 +84,10 @@ public sealed class ModelsDialog : Form
             t.ShowDialog(this);
             if (t.ModelChanged) { overrides = ModelCatalog.LoadOverrides(dir); list.Invalidate(); OnSelect(); }
         };
-        Shown += async (_, _) => await Load();
+        Shown += async (_, _) => await LoadModels();
     }
 
-    async Task Load()
+    async Task LoadModels()
     {
         status.Text = "Reading the converted plugins (the first time takes a minute)…";
         UseWaitCursor = true;

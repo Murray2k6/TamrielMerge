@@ -6,6 +6,15 @@ behaviour is chosen and said so beside it (docs/morrowind-scripts.md lists them)
 ; ---- the story ----
 
 ; Whether the player is in Morrowind's lands (a cell of Morrowind.esm): Morrowind's start scripts wait for it.
+; EnableRaceMenu: Skyrim's race menu, if the story held it back for Morrowind's own (a new game begun with Morrowind's
+; opening: TMStoryOrder.ShowHeldRaceMenu); otherwise nothing, the character made at the journey's start.
+Function RaceMenu() Global
+  TMStoryOrder story = Game.GetFormFromFile(0x0003372B, "Skyrim.esm") as TMStoryOrder
+  If story
+    story.ShowHeldRaceMenu()
+  EndIf
+EndFunction
+
 Bool Function InMorrowind() Global
   Actor player = Game.GetPlayer()
   Cell here = player.GetParentCell()
@@ -171,6 +180,15 @@ Function PositionAt(ObjectReference r, ObjectReference akAnchor, Float x, Float 
   r.SetAngle(0.0, 0.0, afDegrees)
 EndFunction
 
+; PositionCell to fixed coordinates in an interior: onto the converter's marker on the floor under them.
+Function PositionOn(ObjectReference r, ObjectReference akSpot, Float afDegrees) Global
+  If !r || !akSpot
+    Return
+  EndIf
+  r.MoveTo(akSpot, 0.0, 0.0, 0.0, False)
+  r.SetAngle(0.0, 0.0, afDegrees)
+EndFunction
+
 ; The marker to place things by: the one in the reference's own cell for an interior, the exterior's outside.
 ObjectReference Function AnchorFor(ObjectReference r, ObjectReference akExterior) Global
   If r && r.IsInInterior()
@@ -242,7 +260,8 @@ EndFunction
 
 ; Move / MoveWorld: units per second along an axis (the object's own, or the world's), glided over the time that passed.
 Function Move(ObjectReference r, String asAxis, Float afUnits, Float afSeconds, Bool abWorld) Global
-  If !r || afSeconds <= 0.0
+  ; Only while it is in the loaded world: TranslateTo on a reference with no 3D logs an error (as Rotate, below).
+  If !r || afSeconds <= 0.0 || !r.Is3DLoaded()
     Return
   EndIf
   Float d = afUnits * afSeconds
@@ -274,9 +293,20 @@ Function Move(ObjectReference r, String asAxis, Float afUnits, Float afSeconds, 
   r.TranslateTo(r.GetPositionX() + dx, r.GetPositionY() + dy, r.GetPositionZ() + dz, r.GetAngleX(), r.GetAngleY(), r.GetAngleZ(), speed + 1.0, 0.0)
 EndFunction
 
+; GetInterior: whether the object is in an interior; with no object (a global script), the player.
+Bool Function InInterior(ObjectReference r, ObjectReference akPlayer) Global
+  If r
+    Return r.IsInInterior()
+  EndIf
+  Return akPlayer && akPlayer.IsInInterior()
+EndFunction
+
 ; Rotate / RotateWorld: degrees per second about an axis.
 Function Rotate(ObjectReference r, String asAxis, Float afDegrees, Float afSeconds) Global
-  If !r || afSeconds <= 0.0
+  ; Only while it is in the loaded world: TranslateTo on a reference with no 3D logs an error, and Morrowind's scripts
+  ; turn their objects every frame wherever the player is (a user's report, 2026-11-02: TMMwScript.Rotate() errors over
+  ; and over in the Papyrus log through Morrowind's opening).
+  If !r || afSeconds <= 0.0 || !r.Is3DLoaded()
     Return
   EndIf
   Float d = afDegrees * afSeconds
@@ -346,6 +376,84 @@ Bool Function Touching(ObjectReference r, Actor akWho) Global
   EndIf
   Float reach = (r.GetWidth() + r.GetLength()) / 4.0 + 48.0
   Return r.GetDistance(akWho) <= reach
+EndFunction
+
+; GetStandingActor / GetCollidingActor: anyone on it (or touching it), the player or another actor of its cell
+; (SKSE's cell references, type 62: actors). Until 2026-11-10 only the player was looked at.
+Bool Function AnyoneOn(ObjectReference r, Bool abStanding) Global
+  If !r
+    Return False
+  EndIf
+  Actor player = Game.GetPlayer()
+  If abStanding && StandingOn(r, player) || !abStanding && Touching(r, player)
+    Return True
+  EndIf
+  Cell c = r.GetParentCell()
+  If !c
+    Return False
+  EndIf
+  Int n = c.GetNumRefs(62)
+  Int i = 0
+  While i < n
+    Actor a = c.GetNthRef(i, 62) as Actor
+    If a && a != player && !a.IsDead() && (abStanding && StandingOn(r, a) || !abStanding && Touching(r, a))
+      Return True
+    EndIf
+    i += 1
+  EndWhile
+  Return False
+EndFunction
+
+; HurtStandingActor / HurtCollidingActor: everyone on it (or touching it) loses that much health (lava, traps).
+Function HurtEveryone(ObjectReference r, Float afAmount, Bool abStanding) Global
+  If !r || afAmount <= 0.0
+    Return
+  EndIf
+  Actor player = Game.GetPlayer()
+  HurtTouching(r, player, afAmount, abStanding)
+  Cell c = r.GetParentCell()
+  If !c
+    Return
+  EndIf
+  Int n = c.GetNumRefs(62)
+  Int i = 0
+  While i < n
+    Actor a = c.GetNthRef(i, 62) as Actor
+    If a && a != player && !a.IsDead()
+      HurtTouching(r, a, afAmount, abStanding)
+    EndIf
+    i += 1
+  EndWhile
+EndFunction
+
+; DisablePlayerJumping / EnablePlayerJumping: Skyrim's controls have no jump switch of their own, but a jump of no
+; height is none: the jump's height setting (fJumpHeightMin, 76 in Skyrim) is put to 0 and back. Skyrim keeps a
+; game setting changed this way for the session only: a game loaded while jumping is off has it on again (Morrowind
+; switches it off only during the character's making).
+Function PlayerJumping(Bool abAllowed) Global
+  If abAllowed
+    Game.SetGameSettingFloat("fJumpHeightMin", 76.0)
+  Else
+    Game.SetGameSettingFloat("fJumpHeightMin", 0.0)
+  EndIf
+EndFunction
+
+Bool Function PlayerJumpingDisabled() Global
+  Return Game.GetGameSettingFloat("fJumpHeightMin") <= 0.0
+EndFunction
+
+; DisableVanityMode / EnableVanityMode: the idle camera that swings round a player left alone. Skyrim starts it after
+; fAutoVanityModeDelay seconds (120); a delay no one waits out keeps it off.
+Function VanityMode(Bool abAllowed) Global
+  If abAllowed
+    Game.SetGameSettingFloat("fAutoVanityModeDelay", 120.0)
+  Else
+    Game.SetGameSettingFloat("fAutoVanityModeDelay", 100000000.0)
+  EndIf
+EndFunction
+
+Bool Function VanityModeDisabled() Global
+  Return Game.GetGameSettingFloat("fAutoVanityModeDelay") > 1000000.0
 EndFunction
 
 Function HurtTouching(ObjectReference r, Actor akWho, Float afAmount, Bool abStanding) Global
@@ -503,14 +611,27 @@ Function SetAi(Actor a, String asWhich, Float afValue) Global
   a.EvaluatePackage()
 EndFunction
 
-; SayDone: a Morrowind person has said its line (TMMwSayLine marks it from its first word to its last); anyone else (a
-; line played as a sound) by the recording's length, the script's timer (afUntil).
+; SayDone: a Morrowind person has said its line (TMMwSayLine marks it from its first word to its last), or the
+; recording's own length is up (afUntil, from the file as the script was translated: with no voice file there, voices
+; not generated, the line's end is never marked, and the dock guard's CharGenRaceNPC kept the player's controls off for a
+; minute a line - a user, 2026-10-27), or a minute has passed in any case; anyone else (a line played as a sound) by the
+; recording's length alone.
 Bool Function SayDone(ObjectReference r, Float afUntil) Global
+  Float now = Utility.GetCurrentRealTime()
   TMMwActorAI mw = r as TMMwActorAI
   If mw
-    Return !mw.Saying || Utility.GetCurrentRealTime() - mw.SaidAt > 60.0
+    ; Never before the recording's length is up: the line begins some 0.7 s after Say (seen in game 2026-11-09: Say at
+    ; 274.13, its begin fragment at 274.80), and until then nothing is marked as being said - Jiub's script took that
+    ; for the line's end and ran through all his lines in two seconds. After it, the line's own end, at most 2 s more.
+    If afUntil > 0.0
+      If now < afUntil
+        Return False
+      EndIf
+      Return !mw.Saying || now >= afUntil + 2.0
+    EndIf
+    Return !mw.Saying || now - mw.SaidAt > 60.0
   EndIf
-  Return Utility.GetCurrentRealTime() >= afUntil
+  Return now >= afUntil
 EndFunction
 
 ; GetAttacked: Morrowind's people and creatures keep it (TMMwActorAI, Variable03: struck by the player, until the
@@ -650,8 +771,9 @@ Int Function WeaponType(Actor a) Global
 EndFunction
 
 ; GetArmorType part: what is worn on that part (0 helmet, 1 cuirass, 2/3 pauldrons, 4/5 greaves... 8 boots): -1 nothing,
-; 0 light, 1 medium, 2 heavy (Skyrim has no medium: light).
-Int Function ArmorType(Actor a, Int aiPart) Global
+; 0 light, 1 medium, 2 heavy. Skyrim has no medium class: Morrowind's medium pieces (by weight, as Morrowind classes them)
+; are the MWMediumArmor list's.
+Int Function ArmorType(Actor a, Int aiPart, FormList akMedium) Global
   If !a
     Return -1
   EndIf
@@ -668,6 +790,8 @@ Int Function ArmorType(Actor a, Int aiPart) Global
   Armor worn = a.GetWornForm(mask) as Armor
   If !worn
     Return -1
+  ElseIf akMedium && akMedium.HasForm(worn)
+    Return 1
   ElseIf worn.GetWeightClass() == 1
     Return 2
   ElseIf worn.GetWeightClass() == 0
@@ -825,6 +949,15 @@ EndFunction
 
 Function BecomeWerewolf(Actor a) Global
   If a && a == Game.GetPlayer() && !IsWerewolf(a)
+    ; The night's kills start at none (OpenMW NpcStats::setWerewolf) and the bounty is noted for the change's witnesses
+    ; (TMMwAfflictions, the player alias on MWAfflictions).
+    Quest afflictions = Quest.GetQuest("MWAfflictions")
+    If afflictions
+      TMMwAfflictions forms = afflictions.GetAlias(0) as TMMwAfflictions
+      If forms
+        forms.ChangeBegins()
+      EndIf
+    EndIf
     Spell change = Game.GetFormFromFile(0x092C48, "Skyrim.esm") as Spell
     If change
       change.Cast(a, a)
@@ -1057,10 +1190,27 @@ Function PlayGroup(ObjectReference r, String asGroup, Int aiMode = 0, Int aiLoop
     EndIf
     Return
   EndIf
-  r.PlayGamebryoAnimation(asGroup, True)
+  ; An object's own animation groups (banners, flags, machinery) aren't converted: Morrowind's models come over without
+  ; their keyframes (MwMeshConverter writes no controller manager), so PlayGamebryoAnimation could only fail, and it did,
+  ; many times a second (2026-11-02: 1,938 "has no animation controller manager" from MW_OutsideBanner in twelve minutes).
+  ; docs/script-gaps.md.
 EndFunction
 
 ; ChangeWeather region type: that weather now.
+; Disable/EnablePlayerMagic: the perk that puts every spell's cost out of reach, had or not.
+Function PlayerMagic(Perk akNoMagic, Bool abEnable) Global
+  Actor player = Game.GetPlayer()
+  If !akNoMagic
+    Return
+  EndIf
+  If abEnable
+    player.RemovePerk(akNoMagic)
+  ElseIf !player.HasPerk(akNoMagic)
+    player.AddPerk(akNoMagic)
+    player.InterruptCast()
+  EndIf
+EndFunction
+
 Function ChangeWeather(Weather akWeather) Global
   If akWeather
     akWeather.ForceActive(False)

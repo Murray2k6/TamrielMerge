@@ -165,6 +165,30 @@ public sealed partial class DungeonCellBuilder
         float heading = facingHeading - FrontTurn(doorBase);
         var wall = ToSkyrim(origin + s.Centre);
         float bottom = wall.Z - s.Height * BlockMeshBuilder.Scale / 2;
+        var arrivalAt = new P3Float(wall.X + facing.X * 110, wall.Y + facing.Y * 110, bottom + 8);
+        if (placeAs is { } scripted)
+        {
+            // Daggerfall's own door (2026-11-10, user: "some doors arent against walls", "can we use daggerfalls doors
+            // instead of a skyrim one?"): the door painted on the building's wall is the door. A Skyrim door model stood
+            // over it, as tall as the surface but its own width and depth, off the wall wherever the two differed. The
+            // scripted door is now a box over the surface, as wide as it and reaching its top (vanilla's click triggers:
+            // a box primitive on L_NONCOLLIDABLE, which the crosshair picks and nothing bumps into), standing at the
+            // surface's foot as the door model did.
+            var click = new PlacedObject(mod)
+            {
+                Base = scripted.ToNullableLink<IPlaceableObjectGetter>(),
+                Placement = new Placement { Position = new P3Float(wall.X + facing.X * 4, wall.Y + facing.Y * 4, bottom), Rotation = new P3Float(0, 0, facingHeading) },
+                SkyrimMajorRecordFlags = persistent ? (SkyrimMajorRecord.SkyrimMajorRecordFlag)PersistentFlag : 0,
+                Primitive = new PlacedPrimitive
+                {
+                    Type = PlacedPrimitive.TypeEnum.Box,
+                    Bounds = new P3Float(MathF.Max(s.Width * BlockMeshBuilder.Scale / 2, 24), 12, s.Height * BlockMeshBuilder.Scale),
+                    Color = System.Drawing.Color.FromArgb(0, 204, 76, 51), Unknown = 0.15f,
+                },
+                CollisionLayer = 15,
+            };
+            return (click, arrivalAt, facingHeading + MathF.PI);
+        }
         // Local (x, y) turns into world (x cos h + y sin h, -x sin h + y cos h); put the door's middle on the wall point.
         var local = new Vector2((min.X + max.X) / 2, (min.Y + max.Y) / 2) * scale;
         float c = MathF.Cos(heading), sn = MathF.Sin(heading);
@@ -195,10 +219,23 @@ public sealed partial class DungeonCellBuilder
         _ => 0,
     };
 
+    /// <summary>The FormIDs a shared interior's records take when other parts point at them (TownBuilder): its cell, and
+    /// its first quest spawn and item markers (QuestSites).</summary>
+    internal sealed record FixedKeys(FormKey Cell, FormKey FirstSpawn, FormKey FirstItem);
+
+    /// <summary>The block's own person flats, in its order: the people a building interior is made with (their Index is
+    /// their place here), and whether it has quest spawn and item markers.</summary>
+    internal static (List<DfRdbObject> People, bool Spawn, bool Item) InteriorContents(DfDungeonBlock block) =>
+        (block.Objects.Where(o => o.Type == DfRdbObjectType.Flat && o.RecordOffset < 0).ToList(),
+         block.Objects.Any(o => IsQuestMarker(o, QuestSpawnRecord)), block.Objects.Any(o => IsQuestMarker(o, QuestItemRecord)));
+
+    static bool IsQuestMarker(DfRdbObject o, int record) => o.Type == DfRdbObjectType.Flat && o.RecordOffset >= 0 && o.TextureArchive == EditorFlatArchive && o.TextureRecord == record;
+
     /// <summary>Builds one building's interior as an interior cell; the exits still need linking to the street.</summary>
-    internal BuiltInterior BuildBuildingInterior(string editorId, string name, DfDungeonBlock block, string meshKey, BlockMeshBuilder.Picker picker, FormKey exitDoor, FormKey? exitPlaceAs = null)
+    internal BuiltInterior BuildBuildingInterior(string editorId, string name, DfDungeonBlock block, string meshKey, BlockMeshBuilder.Picker picker, FormKey exitDoor, FormKey? exitPlaceAs = null, FixedKeys? keys = null)
     {
-        var cell = new Cell(mod)
+        bool spawnPlaced = false, itemPlaced = false;
+        var cell = new Cell(keys?.Cell ?? mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
         {
             EditorID = editorId,
             Name = name,
@@ -234,7 +271,11 @@ public sealed partial class DungeonCellBuilder
             if (o.Type == DfRdbObjectType.Flat && o.TextureArchive == EditorFlatArchive && o.TextureRecord is QuestSpawnRecord or QuestItemRecord)
             {
                 float floor = SurfaceY(floorPolys, o.Position.X, o.Position.Z, o.Position.Y + 16, above: false) ?? o.Position.Y;
-                AddQuestMarker(cell, new P3Float(pos.X, pos.Y, floor * BlockMeshBuilder.Scale + 8), o.TextureRecord == QuestItemRecord);
+                bool item = o.TextureRecord == QuestItemRecord;
+                // The first of each kind at its fixed FormID (the one QuestSites names), when the interior has them.
+                FormKey? fixedKey = keys is null ? null : item ? (itemPlaced ? null : keys.FirstItem) : (spawnPlaced ? null : keys.FirstSpawn);
+                if (item) itemPlaced = true; else spawnPlaced = true;
+                AddQuestMarker(cell, new P3Float(pos.X, pos.Y, floor * BlockMeshBuilder.Scale + 8), item, fixedKey);
                 Count("quest marker");
                 continue;
             }
@@ -291,7 +332,7 @@ public sealed partial class DungeonCellBuilder
             }
             else if (o.Type == DfRdbObjectType.Model && BlockMeshBuilder.IsDoor(o) && models.TryGetValue(o.ModelId, out var doorModel))
             {
-                cell.Temporary.Add(DoorPlacer.Place(mod, o, Vector3.Zero, doorModel));
+                cell.Temporary.Add(DoorPlacer.Place(mod, o, Vector3.Zero, doorModel, modOutDir));
                 Count("door");
             }
             else if (o.Type == DfRdbObjectType.Model && !models.ContainsKey(o.ModelId)) Count($"missing model {o.ModelId}");

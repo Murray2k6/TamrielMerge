@@ -12,6 +12,61 @@ automatically"; Util/Drives.cs):
   (`%TEMP%\TamrielMergeBuild`) when that drive qualifies, else `TamrielMergeBuild` at the root of the roomiest one.
 - Every file is still written in full; after the creature models the whole build is moved into `--out` one file at a
   time, so the hard disk writes each in one go.
+- Any drive (user, 2026-10-28: "the tool needs to convert on any drive letter that a user has"): the app's Options
+  hold the output folder (remembered between runs), the build folder (where a conversion is staged) and the temp
+  folder, each with Browse; they are TamrielMerge.settings.json's "output", "build" and "temp" in the working folder
+  (the repository, or the program's folder), which the converter reads at start (Util/Paths; a paths.json beside the
+  program is read only where the settings name no folder). Empty build and temp mean the output folder itself and a "TamrielMerge
+  Temp" folder beside it: everything goes where the output is pointed (user, 2026-10-28: "it only made the folder and
+  went back to d" - until then a hard-disk output was staged on a solid-state drive the tool found by itself, in the
+  user's temp folder or at a drive's root, and a configured build folder held every build whatever --out said). A
+  hard-disk output is slower; the log says so and names the Options to choose a build folder on a solid-state drive.
+- The sprite-model maker (Daggerfall's sprites as models) works in the temp folder, `TamrielMerge Temp\model3d`
+  (exported sprites, the job list, finished models, the outline check), not under tools (user, 2026-10-29: "the
+  model3d tool keeps its files after conversion is complete"). Models shipped with the tool (the release's
+  `tools\model3d\work\models`) seed it and stay where they are. The Daggerfall build imports the models into the
+  output and writes `Meshes\TamrielMerge\DF\Models\models.json` there (each model's sprite, kind, mesh and bounds);
+  at the end of the conversion the work folder is removed, and a later conversion into the same output takes the
+  statics from that manifest without making anything again (`Sprite models: ... from the earlier conversion`).
+- Setup's status lists what it can't download (user, 2026-10-29: "before the tool didnt install them all"): the
+  creatures' source models (each from its author's page, `tools\creatures\CREDITS.md`; the release carries them) and
+  the shipped sprite models. Everything else in tools comes from `setup` (ffmpeg, RAD Video Tools, Real-ESRGAN, the
+  Python environments, TripoSR, the depth and normals models, FFDec, Java, Blender, FluidSynth, WildMIDI, the
+  soundfont, the crash logger) or is made by runs (`lipcache`, `lipgen` slots); `tools\lhm` is a leftover nothing uses.
+- Nexus Mods login (user, 2026-11-02: "add a login to nexus button on the tool so it can log you in if you are missing
+  something too"; Setup/Nexus.cs, Gui/NexusLoginDialog.cs). At the top of the app's Tools box, "Log in to Nexus" opens
+  Nexus's API keys page (https://next.nexusmods.com/settings/api-keys) and a box to paste the personal API key. Nexus's
+  one-click login (its SSO) needs an application slug registered and approved by Nexus staff, which TamrielMerge
+  doesn't have, so the key is pasted by hand. It is checked with `GET https://api.nexusmods.com/v1/users/validate.json`
+  (headers `apikey`, `Application-Name: TamrielMerge`, `Application-Version`) and kept in TamrielMerge.settings.json as
+  "nexus", sealed with DPAPI for the Windows user (with extra entropy), never in plain text, never logged. "nexusUser"
+  and "nexusPremium" hold the name and account type for the line "Logged in to Nexus as NAME (premium/free)". Log out
+  deletes all three. The key is only sent to api.nexusmods.com: the download links it gets are signed CDN links fetched
+  without it. Nexus's rate limits are respected: each answer's `x-rl-hourly-remaining` / `x-rl-daily-remaining` are
+  kept, and once both are used up (or on a 429) the request stops with a message naming when to try again. A wrong or
+  revoked key (401), a refusal (403), a missing mod or file (404) and network failures come out as plain messages.
+  TamrielMerge does not register itself for nxm:// links: Mod Organizer 2 owns them.
+- Requirements published only on Nexus carry a Nexus source on their row (`Dependencies.Status.Source`: game domain,
+  mod id, and the rule picking the files, a regular expression on the name and/or Nexus's category). The first is
+  "Skyrim voice models (xVASynth)" (Setup/XvaSynthModels.cs): Skyrim SE mod 44184, category MAIN, installed into
+  `tools\xvasynth\models\skyrim` (`Dependencies.XvaModelDir`, where the voice generator's `tools\voice\xva.py` reads
+  them). The row counts the voice types the converter speaks that have a model by xva.py's own rule
+  (`sk_<voice type>.pt` or `<voice type>.pt`, with its `.json`): the voices of the converted dialogue
+  (`tools\voice\*-jobs.json`, each line's SpeakAs or VoiceType without its effect, recordings left out), the voices
+  cloned for it (`tools\voice\refs`) and the one voice per race and sex (`VanillaActors.RaceVoices`). On the 2026-11-02
+  tools folder that is 24 voice types, none with a model. Missing, the row has "Get from Nexus" ("Log in to Nexus first"
+  when logged out, which opens the login). The key is validated again first (Premium may have started or lapsed).
+  Premium: the mod's files are listed through the API, those the rule picks and still wanted (named for a missing voice
+  type, the longer name winning so "Female Even Toned" isn't taken for MaleEvenToned; else the packs not yet imported,
+  remembered in `nexus-files.json` beside the models) are downloaded into `tools\downloads\nexus`, unpacked (a .zip by
+  .NET, a .7z or .rar by the tool's 7-Zip), every `.json` naming the game skyrim with its `.pt` moved in with the files
+  named for it (`.hg.pt`, preview `.wav`), the archive deleted, and it stops as soon as every voice type has a model.
+  Free account: Nexus forbids API downloads for it, so the files page
+  (https://www.nexusmods.com/skyrimspecialedition/mods/44184?tab=files) opens in the browser, the log names the files
+  to download, and the Downloads folder (Windows' known folder, `SHGetKnownFolderPath`) is watched for 30 minutes:
+  each archive of the mod (Nexus names them `<file>-44184-<version>-<time>`), those already there included, is imported once whole (its size steady,
+  no `.part`/`.crdownload` beside it), the user's own file left where it is. "Stop getting from Nexus" ends either.
+  `setup` lists the missing voice models among what it can't install.
 - Room is left for Windows (user: "leave enough room for windows"): 32 GB stays free on Windows' own drive, 10 GB on any
   other. A drive is only chosen when the estimated build (`ConvertSize`: about 40 GB for Daggerfall, 6 Morrowind, 8
   Oblivion, 1 Redguard) fits beyond that; if the build grows past the estimate, what is staged is moved into `--out`
@@ -46,6 +101,71 @@ parts. The batches themselves run one at a time for memory.
   past the 2 GB Mutagen can read (the overland doors step failed on it); compressed it is 1,408 MB, and the dungeons
   536 MB -> 342 MB. Read back with Mutagen, the records, navmeshes and land are identical (`plugin-compare`).
   `plugin-compress --plugin FILE` does the same to an existing plugin.
+- Skyrim keeps at most 1,048,576 reference handles: every persistent reference takes one at load, and in a plugin
+  without the master flag every reference in its worldspaces does (a user's Daggerfall Towns.esm of 3,462,154
+  persistent references crashed the data load, 2026-10-27; a plain-ESP Creatures.esp of 537,318 references filled
+  the table). The conversion counts them for its plugins at the end (`handle-count --dir DIR` does it alone) and
+  fails past 700,000, leaving room for the game's own (58,125 in Skyrim and its DLCs) and other mods; the overland
+  rework took Towns.esm to 125,722 and the whole set to 320,313. Every plugin small enough is given the light (ESL)
+  flag (at most 4,096 new records with FormIDs up to 0xFFF, Skyrim 1.6.1130 and later; `light-flag --dir DIR` for an
+  existing output): Start, Travel, Progression, Menu, Overland Doors and the Creatures plugins; the world plugins hold
+  millions of records and stay full plugins. The light flag takes no load-order slot; it changes nothing about the
+  handles, which the master flag governs, so every converted plugin, the small .esp files too, carries the master flag
+  as well (set by its builder and again by the same pass; user 2026-10-28: "the other esps we have need to be esm's").
+- As few full plugins as the 2 GB Mutagen reads allows (user 2026-10-28: Skyrim's 254 slots): the land planned at 1.85 GB
+  a plugin (four for 1.39 million cells, 5,755 MB; six at 1.6 GB), the foliage at 15 million objects a plugin (two for
+  26.6 million; the FormIDs below the shared band bound it), a navmesh tile in one plugin up to 3,900 MB of raw parts
+  (about 1,770 MB merged; the first tile was 1,482 MB). With Daggerfall.esm, the towns and the dungeons Daggerfall is
+  10 to 11 full plugins (was 15 to 17), and the seven small ones are light. The pack step (below) takes it lower; going
+  past 2 GB a file (the engine's own ceiling is 4 GB a top-level group, and whether it loads a file between 2 and 4 GB
+  is untested: `plugin-decompress` makes a test file) would take it lower still.
+
+## The pack step
+
+User, 2026-10-29: "we can load so many esm files with skyrim and we need to find a workaround". The conversion's last
+step before the handle count and the flags (`pack-plugins --dir DIR [--budget MB] [--order A;B] [--plan]`, Skyrim/PluginPack,
+Skyrim/PluginMerger.Join; `--skip Pack` leaves it out) joins Daggerfall's world plugins into as few as stay under
+1,900 MB, the game seeing the same records. It comes last so every step before it reads the plugins by their usual names;
+what they made (Doors, Creatures, Travel...) is re-pointed with the rest.
+
+- It measures first: each plugin's size, records by type, masters and dependents, and every record two or more plugins
+  hold, from the record headers alone (15 million records in 3 to 28 s). All of it goes in `pack-report.txt`.
+- Two groups join when the size stays under the budget; their new records fit 16,775,168 FormIDs; at most one is frozen;
+  a place in the load order exists with every plugin after its masters (a third plugin between them is a cycle); and at
+  that place every contested record has the same winner. Of all pairs that may, the largest result under the budget
+  joins, and again until none may.
+- Frozen plugins keep their name and FormIDs and give a join its name: Daggerfall.esm and Daggerfall Towns.esm (script
+  properties hold their FormIDs and names as numbers and strings: FactionIds, TownIds) and any plugin with dialogue
+  (voice files are named by plugin and INFO FormID). Only the world plugins join: other plugins stay themselves, rewritten
+  when a master of theirs was folded.
+- A copy of a cell or worldspace equal to the winning one contests nothing (each plugin with something in a cell carries
+  one). Without that the worldspace and its persistent cell, two records of 15 million, stopped every join across the
+  world; with it the 10-25 output's contested records went from 384,772 to 7,698, and its plan from 4 plugins to 3.
+- A record's header FormID and the group labels named after records are changed in place; FormIDs inside a record are
+  found by Mutagen a record at a time (a 1.9 GB plugin never sits in memory as objects). A later copy replaces an earlier
+  one, cells' children join, and the navmesh map NAVI joins entry by entry. A folded plugin's FormIDs stay where free, else
+  take the first free from 0x800; an interior cell with a new FormID moves to its new block. A plugin whose name, masters
+  and FormIDs all stay is copied. Mutagen's writing isn't always its reading: 154 of Daggerfall.esm's armours and factions
+  came back changed, so outside the types proved to come back the same only the bytes that differ between Mutagen's
+  writing before and after the remap change. Joined cells keep land, navmeshes, references in that order: mixed, Mutagen
+  stops reading a cell's navmeshes at its first reference.
+- Results are written to `_pack` beside the plugins and read back against their sources before anything moves: each record
+  written the same as its source's with the links remapped (not Mutagen's Equals: 101 of 137 armours are unequal to
+  themselves by it), no FormID twice, record counts by type, as many dangling links as before, every navmesh edge link
+  on a navmesh, every door link on a record, every contested winner the same. Any failure leaves the build as it was
+  and the conversion carries on with the plugins unjoined.
+- `plugins.json` beside the plugins lists the final names in load order with their masters and what joined them. The install
+  reads it (`install`, and the convert's own list), the plugin lists are put in that order, and the app's parts need
+  nothing, as they list the names that are there. An earlier build's copies of a folded plugin are removed from the
+  output, and an install removes them from Data. `--resume` can't carry on from packed plugins and builds Daggerfall again.
+  Creature lists go with their plugin, in its new FormIDs.
+- Measured 2026-10-30. The 10-25 output (`--plan`, read only, 6 world plugins, 4,661 MB): into 3. Real pairs in a scratch
+  folder: Daggerfall.esm + Daggerfall Dungeons.esm, 2,454,644 records, 60,764 taking new FormIDs: 400 MB, 12 s to write and
+  16 s to check, 26,542 navmesh edge links and 4,235 door links all resolving, reference handles the same (112,832).
+  Daggerfall.esm + a land part from the build folder: 71,500 records, 55 MB. `pack-test --dir DIR` makes small plugins with a
+  navmesh linked each way, overrides, FormID collisions, a third plugin and the two refusals: 23 proofs pass. A whole
+  current build hasn't been packed yet: at this rate about half an hour, more for the navmeshes' compression, and with
+  about 15 GB in all 8 plugins is the floor at this budget.
 
 ## Towards a one-hour conversion
 
@@ -180,3 +300,35 @@ Proved on a small map (a full Daggerfall build takes 11 minutes and up to 20 GB)
 138 MB), the same 22,945 navmeshes, 1,296,003 triangles and 285,346 links as one plugin, 389 of them between cells of
 different plugins, none dangling, a map entry per navmesh, and joins 40 stand-in doors (20 in each plugin's cells)
 with OverlandDoorLinks; `plugin-check` finds 0 bad links in either land plugin and the doors plugins.
+
+## Reference handles and the user's mods (2026-11-01)
+
+The limit of 1,048,576 belongs to the whole load order, not to the converted plugins alone. `handle-count --load-order` counts every plugin switched on (Mod Organizer 2's selected profile when it has more on than Plugins.txt, with its mods' folders), and a conversion with `--install` reports it, warning past 850,000. `handle-count --why PLUGIN` says what a plugin's persistent references are; `--unneeded A;B` how many nothing points at.
+
+Measured on the install of 2026-11-01: 31 plugins, 321,188 handles (30.6%), 238,550 of them Daggerfall's: 84,104 street doors quests or "Where is" point at, 54,125 scripted dungeon objects, 41,652 quest markers, 15,251 map markers, 8,464 load doors. Nothing pointed at 57,812.
+
+Cut: "Where is" holds door positions as globals instead of doors (`TownTalk`, `TMDfTalk`); a dungeon object nothing in its cell points at is temporary (`ActionObjectBuilder.Unpersist`); a quest marker no quest took is temporary (`QuestSites`). Measured on real parts: dungeons part 1, 1,614 persistent against 2,383 a part before; towns part 3, no change (its 1,659 street doors are the quests' sites, `QuestSites.PerType`).
+
+Left: `BDoor`, `BSpawn` and `BItem` hold about 125,000 references for the quests. Cutting them means quests finding a building some other way.
+
+## Smaller plugins (2026-11-02)
+
+User: "is there a way to compress the esm's so the files are smaller but they hold everything still"; "as its converting". Every conversion does two things after the plugins are packed (`Skyrim/PluginCompression`, off with `--skip Compress`; the `install` command's `--no-compress`):
+
+- **Records compressed in the file.** Skyrim stores some records zlib-compressed (flag 0x40000, the data's size first); measured over Skyrim.esm, Update.esm and the three DLC, only four types: NAVM, LAND, CELL and NPC_. Those four are compressed in every converted plugin where it makes them smaller, the rest left byte for byte, and each rewritten plugin is checked against the original record by record (inflated where compressed) before it takes its place. The pack step's merger compressed only navmeshes and land, and only in what it joined: Oblivion.esm 844 MB -> 596 MB (32,720 navmeshes), Morrowind.esm 265 -> 192 MB, a few seconds each; Mutagen reads them the same (Oblivion's 14,122 persistent references counted alike). Dialogue (INFO, 2.46 million records in Daggerfall Towns.esm, 63% compressed) isn't: no plugin of Skyrim's compresses that type, so the game's reading it so is unproven.
+- **On the disk.** Windows' LZX file compression (as `compact /exe:lzx`; NTFS only), which every program reads through unchanged: the output's plugins once the build is in place, Data's after installing. Measured on copies: Daggerfall Towns.esm 8.0 to 1, Daggerfall Foliage.esm 4.9 to 1, plugins already compressed in the file 1.1 to 1.2. A file written again is stored plain again (the next install compresses it again). Its effect on Skyrim's loading time is not measured.
+
+What doesn't get smaller, and why the land, navmesh and foliage stay in several plugins: one plugin numbers at most 16,775,168 new records (foliage is 26.6 million), a top-level group holds at most 4 GB (its size field is 32 bits; Daggerfall's land is about 5.6 GB in one worldspace), and Mutagen reads at most 2 GB a plugin (the navmesh is 2.6 GB). Compression doesn't help with these: they count the records as they are.
+
+## Work kept between conversions (2026-11-04)
+
+User: "conversion takes to long" (the 2026-11-03 run: 13 h 39 min, 71 min of it paused; 1 h 36 min remaking the
+videos and 1 h 42 min the menu flyby, both the same as the last run's). Now:
+
+- **Videos** (`videos`): each finished video is kept in the tool's `out\video\work\done` with how it was made (`.made`:
+  remaster, GPU, ray-traced look, quest-video options) and copied into a new output instead of made again.
+- **Menu flyby** (`menu`): the flyby rendered before (each shot's upscaled frames in `out\menuart\intro\rt1440`) is packed
+  again rather than exported, rendered and upscaled anew; `convert --remake-menu` (or `menu --remake`) renders it again.
+  Its scenes' stamps name the plugins' and the converter's dates, so every conversion had rendered it all again.
+- **On-disk compression**: only files that shrink 15% or more (eight 1 MB samples deflated) get LZX; the land, navmesh
+  and Daggerfall.esm plugins (about 8.3 GB, 1.0-1.1 to 1, their records compressed already) are left as they are.

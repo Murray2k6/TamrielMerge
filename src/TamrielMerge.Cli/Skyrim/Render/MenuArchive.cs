@@ -42,6 +42,61 @@ public static class MenuArchive
         return removed;
     }
 
+    /// <summary>The menu's music (music\special): made on its own, apart from the flyby (everything else).</summary>
+    static bool IsMusic(string relative) => relative.Replace('/', '\\').StartsWith(@"music\special\", StringComparison.OrdinalIgnoreCase);
+
+    static bool IsMenuFile(string relative)
+    {
+        string rel = relative.Replace('/', '\\');
+        return Patterns.Contains(rel, StringComparer.OrdinalIgnoreCase)
+            || (rel.StartsWith(MenuBuilder.TextureDir + "\\", StringComparison.OrdinalIgnoreCase) && rel.EndsWith(".dds", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The menu's files loose in <paramref name="dir"/>, relative to it.</summary>
+    static List<string> Loose(string dir)
+    {
+        var files = Patterns.Where(p => File.Exists(Path.Combine(dir, p))).ToList();
+        string menuTextures = Path.Combine(dir, MenuBuilder.TextureDir);
+        if (Directory.Exists(menuTextures)) files.AddRange(Directory.EnumerateFiles(menuTextures, "*.dds").Select(f => Path.GetRelativePath(dir, f)));
+        return files;
+    }
+
+    /// <summary>
+    /// What an earlier menu archive (in <paramref name="earlierDirs"/>, first found first) holds that
+    /// <paramref name="outDir"/> has no new copy of, written out loose there to be packed again: the flyby as a whole (a run
+    /// without --gpu renders none) and the music as a whole, each only when none of it was made new, so an old frame never
+    /// joins a new render. 2026-10-24: a build staged on the solid-state drive packed the music alone, that archive replaced
+    /// the one in --out and in Data, and the menu lost its flyby. Returns what was taken from where.
+    /// </summary>
+    public static List<string> CarryEarlier(string outDir, IEnumerable<string> earlierDirs)
+    {
+        var loose = Loose(outDir);
+        bool needFlyby = !loose.Any(f => !IsMusic(f)), needMusic = !loose.Any(IsMusic);
+        var taken = new List<string>();
+        string stem = Path.GetFileNameWithoutExtension(PluginName);
+        // Its own folder's archive first (Build replaces it), then the others.
+        foreach (var dir in new[] { outDir }.Concat(earlierDirs).Select(d => Path.GetFullPath(d).TrimEnd('\\')).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!needFlyby && !needMusic) break;
+            var archives = new[] { stem + ".bsa", stem + " - Textures.bsa" }.Select(f => Path.Combine(dir, f)).Where(File.Exists).ToList();
+            var held = archives.SelectMany(a => Mutagen.Bethesda.Archives.Archive.CreateReader(Mutagen.Bethesda.GameRelease.SkyrimSE, a).Files).Where(f => IsMenuFile(f.Path)).ToList();
+            foreach (var (need, part, what) in new[] { (needFlyby, (Func<string, bool>)(p => !IsMusic(p)), "flyby"), (needMusic, IsMusic, "music") })
+            {
+                var files = held.Where(f => part(f.Path)).ToList();
+                if (!need || files.Count == 0) continue;
+                foreach (var f in files)
+                {
+                    string target = Path.Combine(outDir, f.Path.Replace('/', '\\'));
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    File.WriteAllBytes(target, f.GetBytes());
+                }
+                taken.Add($"the {what} ({files.Count} files) from {Path.Combine(dir, stem + ".bsa")}");
+                if (what == "flyby") needFlyby = false; else needMusic = false;
+            }
+        }
+        return taken;
+    }
+
     /// <summary>Packs the menu's files in <paramref name="outDir"/>; returns how many (0: nothing to pack, the plugin left as it was).</summary>
     public static int Build(string outDir)
     {
@@ -64,7 +119,7 @@ public static class MenuArchive
         BsaWriter.Write(Path.Combine(outDir, stem + ".bsa"), first);
         if (second.Count > 0) BsaWriter.Write(Path.Combine(outDir, stem + " - Textures.bsa"), second);
         var mod = new SkyrimMod(ModKey.FromFileName(PluginName), SkyrimRelease.SkyrimSE);
-        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
+        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small | SkyrimModHeader.HeaderFlag.Master;
         mod.WriteToBinary(Path.Combine(outDir, PluginName));
         foreach (var f in files) File.Delete(f);
         return files.Count;

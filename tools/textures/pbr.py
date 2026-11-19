@@ -98,7 +98,9 @@ def blur(a, r):
         return a
     out = a
     for axis in (0, 1):
-        pad = np.concatenate([np.take(out, range(-r, 0), axis=axis), out, np.take(out, range(0, r + 1), axis=axis)], axis=axis)
+        # Indices wrapped round the image, so a radius past its size works too (2026-11-02: a texture 4 pixels high and a
+        # radius of 8 failed with "index -8 is out of bounds", and that texture got no material maps).
+        pad = np.concatenate([np.take(out, range(-r, 0), axis=axis, mode="wrap"), out, np.take(out, range(0, r + 1), axis=axis, mode="wrap")], axis=axis)
         c = np.cumsum(pad, axis=axis)
         n = out.shape[axis]
         out = (np.take(c, range(2 * r + 1, 2 * r + 1 + n), axis=axis) - np.take(c, range(0, n), axis=axis)) / (2 * r + 1)

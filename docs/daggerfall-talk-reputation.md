@@ -61,3 +61,18 @@ Summarised from Daggerfall Unity's source (MIT; `Game/TalkManager.cs`, `Game/Pla
 - Named types (0, 2, 3, 5-16) take the town's MAPS.BSA building records of the same type in order (NameSeed,
   FactionId, Quality). Building key = (x<<16)+(y<<8)+recordIndex. Names: DFRandom.srand(NameSeed) then
   StoresA + type list / TavernsA+B / "The Bank of <region>" / guild = faction name / temple = faction's first child.
+
+## The tone (TalkTone, TMDfQuestMachine.RollTalk)
+
+Daggerfall Unity's GetReactionToPlayer_0_1_2 (TalkManager) and DaggerfallTalkWindow.TalkTone, read 2026-10-29. Three
+top-level topics on every talk quest open with Daggerfall's greetings by tone (TEXT.RSC 7215 polite, 7216 normal, 7217
+blunt, shown with the tone in brackets) and are answered with the townsfolk's replies to each (7218-7220); the response
+sets DFTalkTone (TMDfTalkTone). A question ("Where is...", "Do you have any work for me?") rolls, once a talk for each
+tone, reaction = Personality / 5 + the question's modifier (5 for a building, 0 for work) + 5 on an Etiquette (polite)
+or Streetwise (blunt) roll made or -10 failed, the skill tallied once a talk (TMDfSensesControl.Tally), then for each
+social group adds the tone's modifier (Etiquette {-10, 5, 10, 15, -15}, Streetwise {10, 5, -10, -15, 15} for commoners,
+merchants, scholars, nobility, underworld) and compares with the talk's roll of 0 to 20: under it 0, under it + 20 1,
+else 2, into DFTalkReact0-4. The "where is" answers come in those three phrasings (7250-7304 when the speaker doesn't
+know, as often as the group's odds; 7255-7289 when they do, the way there in %hnt from 7333); a refused "any work"
+(8075) has no offer after it. Daggerfall Unity's +20 band (classic +30) is kept. Not in: the tone's effect on the
+quests' "Tell me about" answers (their text is the quest's own) and the NPC-seeded roll (one random roll a talk here).

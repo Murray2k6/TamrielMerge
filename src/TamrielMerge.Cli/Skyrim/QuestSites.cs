@@ -84,12 +84,16 @@ public static class QuestSites
     /// <summary>The quests (none when there is nothing to register).</summary>
     public static List<Quest> Build(SkyrimMod mod, string part, FormKey machine, IReadOnlyList<Town> towns,
         IReadOnlyList<(DfLocation Location, DungeonCellBuilder.Built Built)> dungeons, IReadOnlyDictionary<Cell, List<(PlacedObject Marker, bool Item)>> markers,
-        IReadOnlyList<(int Faction, FormKey Ref)> individuals, Func<DfLocation, FormKey?> mapMarker)
+        IReadOnlyList<(int Faction, FormKey Ref)> individuals, Func<DfLocation, FormKey?> mapMarker,
+        IReadOnlyDictionary<FormKey, (FormKey Spawn, FormKey Item)>? otherPartsMarkers = null)
     {
         // Where each arrival marker is (the building interiors).
         var cellOf = new Dictionary<FormKey, Cell>();
         foreach (var cell in mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(s => s.Cells))
             foreach (var r in cell.Persistent) cellOf[r.FormKey] = cell;
+        List<FormKey> SpawnMarkersIn(Cell? cell) =>
+            cell is not null && markers.TryGetValue(cell, out var all) ? [.. all.Where(m => !m.Item).Select(m => m.Marker.FormKey)] : [];
+
         (FormKey Spawn, FormKey Item) MarkersIn(Cell? cell)
         {
             if (cell is null || !markers.TryGetValue(cell, out var list)) return (FormKey.Null, FormKey.Null);
@@ -112,7 +116,9 @@ public static class QuestSites
                     var arrival = doorProps.OfType<ScriptObjectProperty>().FirstOrDefault(p => p.Name == "Arrival")?.Object.FormKey ?? FormKey.Null;
                     // Daggerfall's name for the building (TownBuilder: DfBuildingNames), for the quests' text.
                     string name = doorProps.OfType<ScriptStringProperty>().FirstOrDefault(p => p.Name == "BuildingName")?.Data ?? "";
+                    // An interior another part builds: its markers by the FormIDs every part gives them (TownBuilder).
                     var (spawn, item) = MarkersIn(cellOf.GetValueOrDefault(arrival));
+                    if (!cellOf.ContainsKey(arrival) && otherPartsMarkers is not null && otherPartsMarkers.TryGetValue(arrival, out var theirs)) (spawn, item) = theirs;
                     list.Add(((int)type, door.FormKey, arrival, spawn, item, name));
                 }
             }
@@ -176,6 +182,13 @@ public static class QuestSites
                             Objs("DMap", ds.Select(d => mapMarker(d.Location) ?? FormKey.Null)),
                             Objs("DDoor", ds.Select(d => d.Built.ExteriorDoor.FormKey)), Objs("DStart", ds.Select(d => d.Built.StartMarker.FormKey)),
                             Objs("DSpawn", dMarkers.Select(m => m.Spawn)), Objs("DItem", dMarkers.Select(m => m.Item)),
+                            // Magically held doors a transfer into the dungeon opens (Castle Daggerfall's foyer), by dungeon.
+                            Objs("DHeld", ds.SelectMany(d => d.Built.HeldDoors.Select(h => h.FormKey))),
+                            Ints("DHeldDungeon", ds.SelectMany((d, i) => d.Built.HeldDoors.Select(_ => i))),
+                            // Every quest spawn marker of each dungeon, in the dungeon's order ("transfer pc inside _place_
+                            // marker N": Daggerfall Unity TeleportPc takes the N-th of the place's questSpawnMarkers).
+                            Objs("DSpawnAll", ds.SelectMany(d => SpawnMarkersIn(d.Built.Cell))),
+                            Ints("DSpawnDungeon", ds.SelectMany((d, i) => SpawnMarkersIn(d.Built.Cell).Select(_ => i))),
                             Ints("IFaction", ind.Select(i => i.Faction)), Objs("IRef", ind.Select(i => i.Ref)),
                         ],
                     },
@@ -184,6 +197,16 @@ public static class QuestSites
             mod.Quests.Add(q);
             quests.Add(q);
         }
+        // Quest markers no quest took: temporary (2026-11-01: 14,371 of 41,652 interior markers held a reference handle for
+        // nothing). Markers every part names by a shared FormID stay: another part's quests may take them.
+        var taken = quests.SelectMany(q => q.EnumerateFormLinks()).Where(l => !l.IsNull).Select(l => l.FormKey).ToHashSet();
+        foreach (var (cell, list) in markers)
+            foreach (var (marker, _) in list)
+                if (!taken.Contains(marker.FormKey) && marker.FormKey.ID < PluginMerger.SharedStart && cell.Persistent.Remove(marker))
+                {
+                    marker.SkyrimMajorRecordFlags &= ~(SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
+                    cell.Temporary.Add(marker);
+                }
         return quests;
     }
 }

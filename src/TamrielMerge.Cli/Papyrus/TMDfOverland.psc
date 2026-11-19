@@ -35,7 +35,9 @@ Float Property UnitsPerPixel = 2048.0 Auto
 Float Property MinutesPerPixel = 108.0 Auto
 String[] Property RegionNames Auto
 String[] Property RegionTowns Auto
-{Each region's towns, "|" between them, in the order of its RegionMarkers list.}
+{Each region's towns, "|" between them, in the order of its RegionMarkers list: in pieces, each region's first piece in
+RegionTownsFirst (TMStrings.Group; a save can't hold a script string of 4,096 characters).}
+Int[] Property RegionTownsFirst Auto
 FormList[] Property RegionMarkers Auto
 
 String Property MenuName = "CustomMenu" AutoReadOnly
@@ -188,7 +190,7 @@ Event OnTravel(String eventName, String what, Float number, Form sender)
     If r < 0 || r >= RegionNames.Length
       Return
     EndIf
-    String[] names = StringUtil.Split(RegionTowns[r], "|")
+    String[] names = TMStrings.Group(RegionTowns, RegionTownsFirst, r)
     UI.InvokeString(MenuName, "_root.ClearTravel", "")
     While i < names.Length
       ObjectReference marker = RegionMarkers[r].GetAt(i) as ObjectReference
@@ -214,7 +216,7 @@ Function Go(Int r, Int i)
   If !marker
     Return
   EndIf
-  String[] names = StringUtil.Split(RegionTowns[r], "|")
+  String[] names = TMStrings.Group(RegionTowns, RegionTownsFirst, r)
   Float hours = HoursTo(marker)
   Actor horse = None
   If PlayerRef.IsOnMount()

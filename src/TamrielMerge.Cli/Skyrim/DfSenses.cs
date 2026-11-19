@@ -142,14 +142,19 @@ public static class DfSenses
     /// <summary>What Daggerfall's monsters' hits give the player (Daggerfall Unity FormulaHelper.OnMonsterHit), on the
     /// control quest: its 17 diseases (and the monsters' lists of them), Paralysis (SPELLS.STD 66) for spiders and
     /// scorpions, vampirism and lycanthropy.</summary>
-    public static void SetHitData(Quest quest, FormList diseases, Spell? paralysis, ISpellGetter? vampirism, FormList? lycanthropy)
+    /// <param name="vampirism">Daggerfall's vampirism (DfDiseases.Vampirism): the infection, then the curse.</param>
+    /// <param name="fedDay">DFVampireFedDay: a vampire's weapon hits on Daggerfall's actors feed it (TMDfSenses.OnHit).</param>
+    /// <param name="hungryText">TEXT.RSC 36: a vampire that hasn't fed for a day can't rest.</param>
+    public static void SetHitData(Quest quest, FormList diseases, Spell? paralysis, FormList? vampirism, FormList? lycanthropy, Global? fedDay = null, string hungryText = "")
     {
         var props = quest.VirtualMachineAdapter!.Scripts.First(s => s.Name == ControlScript).Properties;
-        props.RemoveAll(p => p.Name is "Diseases" or "Paralysis" or "Vampirism" or "Lycanthropy" or "DiseaseListB" or "DiseaseListC");
+        props.RemoveAll(p => p.Name is "Diseases" or "Paralysis" or "Vampirism" or "Lycanthropy" or "DiseaseListB" or "DiseaseListC" or "FedDay" or "HungryText");
         props.Add(new ScriptObjectProperty { Name = "Diseases", Object = diseases.ToLink<ISkyrimMajorRecordGetter>() });
         if (paralysis is not null) props.Add(new ScriptObjectProperty { Name = "Paralysis", Object = paralysis.ToLink<ISkyrimMajorRecordGetter>() });
-        if (vampirism is not null) props.Add(new ScriptObjectProperty { Name = "Vampirism", Object = vampirism.FormKey.ToLink<ISkyrimMajorRecordGetter>() });
+        if (vampirism is not null) props.Add(new ScriptObjectProperty { Name = "Vampirism", Object = vampirism.ToLink<ISkyrimMajorRecordGetter>() });
         if (lycanthropy is not null) props.Add(new ScriptObjectProperty { Name = "Lycanthropy", Object = lycanthropy.ToLink<ISkyrimMajorRecordGetter>() });
+        if (fedDay is not null) props.Add(new ScriptObjectProperty { Name = "FedDay", Object = fedDay.ToLink<ISkyrimMajorRecordGetter>() });
+        if (hungryText != "") props.Add(new ScriptStringProperty { Name = "HungryText", Data = hungryText });
         props.Add(new ScriptIntListProperty { Name = "DiseaseListB", Data = [.. DfDiseases.ListB] });
         props.Add(new ScriptIntListProperty { Name = "DiseaseListC", Data = [.. DfDiseases.ListC] });
     }

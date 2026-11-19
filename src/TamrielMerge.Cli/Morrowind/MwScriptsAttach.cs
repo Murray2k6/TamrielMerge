@@ -32,6 +32,11 @@ public sealed partial class MwPluginBuilder
     readonly Dictionary<string, IPlaced> scriptPlaced = new(StringComparer.OrdinalIgnoreCase);
     readonly HashSet<IPlaced> scriptPersistent = [];
     readonly Dictionary<string, PlacedObject> anchors = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>PositionCell's fixed interior coordinates (spot:cell|x|y|z), by cell, and their markers on the floor.</summary>
+    readonly Dictionary<string, List<(string Id, System.Numerics.Vector3 At)>> spotsWanted = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, PlacedObject> spots = new(StringComparer.OrdinalIgnoreCase);
+    public int SpotsPlaced { get; private set; }
+    public int SpotsLanded { get; private set; }
     readonly HashSet<string> scriptedActivators = new(StringComparer.OrdinalIgnoreCase);
     readonly List<(DialogResponses Response, string Script, DialogResponsesAdapter? Fallback)> resultResponses = [];
     readonly Dictionary<string, PlacedObject> townMapMarkers = new(StringComparer.OrdinalIgnoreCase);
@@ -54,12 +59,23 @@ public sealed partial class MwPluginBuilder
         dialogueData ??= MwDialogue.Load(world.Plugins);
         scriptWorld = new MwScriptWorld(world, dialogueData, data);
         scriptSet = MwScriptSet.Translate(scriptWorld);
+        // Whom the records' own AI packages follow, lead or use: placed where a property can point at them too.
+        foreach (var rec in world.Objects.Values.Where(r => r.Type is "NPC_" or "CREA"))
+            foreach (var id in RecordPackageTargets(rec))
+                if (id.Length > 0 && !id.Equals("player", StringComparison.OrdinalIgnoreCase)) scriptRefIds.Add(id);
         foreach (var o in scriptSet.All)
             foreach (var p in o.Properties)
             {
                 var (kind, id) = SplitFill(p.Fill);
                 if (kind == "ref") scriptRefIds.Add(id);
                 if (kind == "anchor") anchorsWanted.Add(id);
+                if (kind == "spot" && id.Split('|') is [var spotCell, var sx, var sy, var sz])
+                {
+                    if (!spotsWanted.TryGetValue(spotCell, out var list)) spotsWanted[spotCell] = list = [];
+                    var at = new System.Numerics.Vector3(float.Parse(sx, System.Globalization.CultureInfo.InvariantCulture),
+                        float.Parse(sy, System.Globalization.CultureInfo.InvariantCulture), float.Parse(sz, System.Globalization.CultureInfo.InvariantCulture));
+                    if (!list.Any(s => s.Id == id)) list.Add((id, at));
+                }
             }
         foreach (var t in scriptSet.Objects)
             if (scriptWorld.Carriers.TryGetValue(t.ScriptId, out var carriers))
@@ -118,6 +134,50 @@ public sealed partial class MwPluginBuilder
         scriptPersistent.Add(marker);
     }
 
+    /// <summary>Each placed spot: Morrowind's coordinates, the marker's, and how much collision a standing Skyrim body
+    /// (radius 30, knee 30 to 130 over the feet) meets at each, with the ceiling over Morrowind's spot.</summary>
+    public IEnumerable<string> SpotReport()
+    {
+        foreach (var (cellName, wanted) in spotsWanted)
+            foreach (var (id, at) in wanted)
+            {
+                if (!spots.TryGetValue(id, out var marker) || !CellSolids.TryGetValue(cellName, out var solid)) continue;
+                var p = marker.Placement!.Position;
+                var landed = new System.Numerics.Vector3(p.X, p.Y, p.Z);
+                var (_, ceiling) = Clearance(solid, at);
+                yield return $"{cellName}: Morrowind {at} (body meets {BodyHits(at, solid)} collision points, ceiling {ceiling?.ToString("F0") ?? "none"}) -> marker {landed} (body meets {BodyHits(landed, solid)})";
+            }
+    }
+
+    /// <summary>
+    /// Markers for the scripts' PositionCell to fixed coordinates in this cell, where Morrowind's engine would set the
+    /// reference down: on the floor under them with room for Skyrim's body (<see cref="ClearSpot"/>), else the
+    /// coordinates themselves.
+    /// </summary>
+    void AddSpots(string cellName, Cell cell, List<System.Numerics.Vector3[]> solid)
+    {
+        if (!spotsWanted.TryGetValue(cellName, out var wanted)) return;
+        foreach (var (id, at) in wanted)
+        {
+            if (spots.ContainsKey(id)) continue;
+            var landed = ClearSpot(at, solid);
+            var p = landed ?? at;
+            var marker = new PlacedObject(mod)
+            {
+                EditorID = "MWScriptSpot" + Sanitize(cellName) + "_" + spots.Count,
+                Base = new FormLinkNullable<IPlaceableObjectGetter>(Sk(0x3B)),   // XMarker
+                Placement = new Placement { Position = new P3Float(p.X, p.Y, p.Z), Rotation = new P3Float(0, 0, 0) },
+                SkyrimMajorRecordFlags = (SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400,
+            };
+            cell.Persistent.Add(marker);
+            spots[id] = marker;
+            scriptPersistent.Add(marker);
+            SpotsPlaced++;
+            if (landed is { } l && System.Numerics.Vector3.Distance(l, at) > 1) SpotsLanded++;
+            if (landed is null) Problems.Add($"script position in {cellName} at {at}: no clear floor under it; kept as Morrowind has it");
+        }
+    }
+
     /// <summary>
     /// A response's result script as its fragment (MWR_…, which extends TMMwInfo so persuasion's properties still
     /// apply), remembered so it can fall back to TMMwInfo's fixed set if it doesn't compile.
@@ -158,6 +218,7 @@ public sealed partial class MwPluginBuilder
     /// of compiling (a test aid).</param>
     public int AttachScripts(Action<string>? progress = null, string? precompiled = null)
     {
+        FillRecordTargets();
         if (scriptSet is null || scriptWorld is null) return 0;
         string sourceDir = Path.Combine(modOutDir, "Source", "MWScripts");
         if (Directory.Exists(sourceDir)) Directory.Delete(sourceDir, true);
@@ -336,9 +397,12 @@ public sealed partial class MwPluginBuilder
             case "journal": return journals.GetValueOrDefault(id)?.FormKey;
             case "script": return globalScriptQuests.GetValueOrDefault(id)?.FormKey;
             case "anchor": return anchors.GetValueOrDefault(id)?.FormKey;
+            case "spot": return spots.GetValueOrDefault(id)?.FormKey;
             case "faction": return MwFaction(id)?.FormKey;
             case "spell": return MwSpell(id)?.FormKey;
             case "sound": return SoundMarkerFor(id, loop: false);
+            case "pitchsound" when id.Split('|', 2) is [var ps, var pid]: return SoundMarkerFor(pid, loop: false, int.Parse(ps, System.Globalization.CultureInfo.InvariantCulture));
+            case "pitchloopsound" when id.Split('|', 2) is [var pls, var plid]: return SoundMarkerFor(plid, loop: true, int.Parse(pls, System.Globalization.CultureInfo.InvariantCulture));
             case "loopsound": return SoundMarkerFor(id, loop: true);
             case "voice": return VoiceSound(id);
             case "race":
@@ -373,11 +437,29 @@ public sealed partial class MwPluginBuilder
                 return g.FormKey;
             }
             case "gen" when id == "MWCrimeFaction": return MwCrime.FormKey;
+            case "gen" when id == "MWNoMagicPerk":
+            {
+                // DisablePlayerMagic: every spell's cost out of reach while the perk is had (Skyrim's control switch for
+                // magic is fighting's too, which would take the player's weapons with it).
+                var perk = new Perk(mod) { EditorID = "MWNoMagicPerk", Name = "Morrowind magic disabled", Playable = false, Hidden = true, NumRanks = 1 };
+                perk.Effects.Add(new PerkEntryPointModifyValue
+                {
+                    EntryPoint = APerkEntryPointEffect.EntryType.ModSpellCost,
+                    PerkConditionTabCount = 2,
+                    Modification = PerkEntryPointModifyValue.ModificationType.Set,
+                    Value = 1000000,
+                });
+                mod.Perks.Add(perk);
+                return perk.FormKey;
+            }
+            case "gen" when id == "MWMediumArmor": return MediumArmorList().FormKey;
             case "gen" when id == "MWWerewolfKills": return WerewolfKillsGlobal().FormKey;
             case "gen" when id == "MWLoadCount": return LoadCountGlobal().FormKey;
             case "law": return LawQuest().FormKey;
             case "ai": return AiQuest().FormKey;
+            case "regionweather": return RegionWeatherQuest().FormKey;
             case "state": return StateQuest().FormKey;
+            case "travel": return TravelQuest().FormKey;
             case "jindex": return journals.ContainsKey(id) ? JournalIndexGlobal(id).FormKey : null;
             case "topic": return IsTopic(id) ? TopicKnown(id).FormKey : null;
             case "music": return StreamedMusic(id);
@@ -423,11 +505,21 @@ public sealed partial class MwPluginBuilder
 
     /// <summary>A Morrowind sound (its descriptor, <see cref="Sound"/>) as the SoundMarker Papyrus plays; looping ones
     /// on a copy of Skyrim's looping test descriptor.</summary>
-    FormKey? SoundMarkerFor(string soundId, bool loop)
+    FormKey? SoundMarkerFor(string soundId, bool loop, int shift = 0)
     {
-        string key = (loop ? "loop:" : "") + soundId;
+        string key = (loop ? "loop:" : "") + (shift != 0 ? shift + "|" : "") + soundId;
         if (soundMarkers.TryGetValue(key, out var hit)) return hit;
         if (Sound(soundId) is not { } descriptor) return soundMarkers[key] = null;
+        if (shift != 0)
+        {
+            // PlaySound3DVP's and PlayLoopSound3DVP's pitch: the sound again with its frequency shifted by that much
+            // (Skyrim's scripts can't set a playing sound's pitch; a sound record's frequency shift is in percent).
+            var pitched = mod.SoundDescriptors.DuplicateInAsNewRecord(descriptor);
+            pitched.EditorID = descriptor.EditorID + (shift < 0 ? "PitchM" : "PitchP") + Math.Abs(shift);
+            pitched.PercentFrequencyShift = (sbyte)shift;
+            descriptor = pitched;
+            PitchedSounds++;
+        }
         if (loop)
         {
             var looping = mod.SoundDescriptors.DuplicateInAsNewRecord(skyrimEsm!.SoundDescriptors.First(d => d.EditorID == "tstLoopMonoLPSD"));
@@ -551,6 +643,9 @@ public sealed partial class MwPluginBuilder
         return topic.FormKey;
     }
 
+    /// <summary>Sounds made again at a script's pitch (for the build's summary).</summary>
+    public int PitchedSounds;
+
     Quest? aiQuest;
 
     /// <summary>
@@ -593,6 +688,15 @@ public sealed partial class MwPluginBuilder
         }
         aiQuest.NextAliasID = next;
         entry.Properties.Add(new ScriptObjectProperty { Name = "XMarker", Object = new FormLink<ISkyrimMajorRecordGetter>(Sk(0x3B)) });
+        // Morrowind's Idle2 to Idle9 (UESP AIWander: looking around, looking behind, scratching the head, shifting
+        // clothing on the shoulder, rubbing the hands, looking at the fingers furtively, deep thought, reaching for a
+        // weapon) as the nearest of Skyrim's one-shot idles: IdleLookFar, IdleExamine, IdleScratch, IdleWipeBrow,
+        // IdleWarmHandsStanding, IdleNervous, IdleStudy, IdleHandsBehindBack (EditorIDs and FormIDs from sk-records).
+        var idles = new ScriptObjectListProperty { Name = "WanderIdles" };
+        foreach (uint idle in new uint[] { 0x075C62, 0x075C3D, 0x0A67E2, 0x0977EC, 0x0E8642, 0x10ACB1, 0x0977ED, 0x0B240A })
+            idles.Objects.Add(new ScriptObjectProperty { Object = new FormLink<ISkyrimMajorRecordGetter>(Sk(idle)) });
+        entry.Properties.Add(idles);
+        entry.Properties.Add(new ScriptFloatProperty { Name = "IdleChanceMultiplier", Data = world.Settings.TryGetValue("fIdleChanceMultiplier", out var icm) && icm.Get("FLTV") is { } icf ? icf.Float() : 0.75f });
         aiQuest.VirtualMachineAdapter = new QuestAdapter { Scripts = [entry] };
         return aiQuest;
     }
@@ -715,8 +819,10 @@ public sealed partial class MwPluginBuilder
         entry.Properties.Add(reqList);
         entry.Properties.Add(lowList);
         entry.Properties.Add(highList);
-        entry.Properties.Add(new ScriptStringProperty { Name = "FactionRanks", Data = ranks.ToString() });
-        entry.Properties.Add(new ScriptStringProperty { Name = "FactionReactions", Data = reactions.ToString() });
+        // In pieces under Skyrim.ScriptStrings.Limit, each ending after a ";" (a save can't hold a script string of 4,096
+        // characters: the 4,207 of FactionRanks crashed loading one, 2026-11-05).
+        entry.Properties.Add(new ScriptStringListProperty { Name = "FactionRanks", Data = [.. Skyrim.ScriptStrings.Chunks(ranks.ToString(), ';')] });
+        entry.Properties.Add(new ScriptStringListProperty { Name = "FactionReactions", Data = [.. Skyrim.ScriptStrings.Chunks(reactions.ToString(), ';')] });
         // Where the player's Morrowind skills live (TMMwState.PlayerSkill): Skyrim's own skill, or the progression's.
         entry.Properties.Add(new ScriptStringListProperty { Name = "PlayerSkillAv", Data = [.. PlayerSkillSources.Select(s => s.Av)] });
         entry.Properties.Add(new ScriptStringListProperty { Name = "PlayerSkillId", Data = [.. PlayerSkillSources.Select(s => s.Id)] });

@@ -15,7 +15,7 @@ The app's **Mod organizer…** (TamrielMerge.Gui/PartsDialog.cs) switches Tamrie
 | Main menu and music | TamrielMerge Menu.esp (+ archive) |
 | Remade models | TamrielMerge Models.esp |
 | Creatures | TamrielMerge - Creatures.esp |
-| Creature models | Daggerfall / Redguard / Morrowind / Oblivion Creatures.esp (one per game) |
+| Creature models | Daggerfall / Redguard / Morrowind / Oblivion Creatures.esm (one per game) |
 
 Switching a part unticks or ticks its plugins in Skyrim's own Plugins.txt and, when Mod Organizer 2 manages the game, its
 selected profile (Setup/PluginList.cs; MO2 must be closed). Nothing is deleted from the game folder. A part's files are

@@ -123,7 +123,7 @@ public sealed partial class RgPluginBuilder
         if (item <= 0) return RgPapyrus.Category.Native;
         var d = defs.FirstOrDefault(x => x.Id == item);
         if (d is null) return RgPapyrus.Category.Approximate;
-        return d.Type is 1 or 3 || Drinks.Contains(d.UseScript) ? RgPapyrus.Category.Native : RgPapyrus.Category.Approximate;
+        return d.Type is 1 or 3 || Drinks.Contains(d.UseScript) || HandTwinIds.Contains(item) ? RgPapyrus.Category.Native : RgPapyrus.Category.Approximate;
     }
 
     void TranslateScripts(Action<string>? log)
@@ -408,12 +408,18 @@ public sealed partial class RgPluginBuilder
         var state = new ScriptEntry { Name = "TMRgState" };
         state.Properties.Add(ObjProp("Flags", flagsList.FormKey));
         state.Properties.Add(ObjProp("Items", itemList?.FormKey));
+        state.Properties.Add(ObjProp("HandTwins", handTwinList?.FormKey));
+        // The gremlin's body: Skyrim's Riekling (Dragonborn), the nearest small creature with a body the player can wear.
+        if (vanilla.Get<IRaceGetter>("DLC2RieklingRace") is { } riekling) state.Properties.Add(ObjProp("GremlinRace", riekling.FormKey));
+        else Problems.Add("Dragonborn's DLC2RieklingRace not found: no gremlin body");
         state.Properties.Add(ObjProp("Sounds", soundsList.FormKey));
         state.Properties.Add(new ScriptFloatListProperty { Name = "EffectSeconds", Data = [.. soundBaseSeconds] });
         state.Properties.Add(new ScriptIntListProperty { Name = "SoundKeys", Data = [.. soundKeys] });
         state.Properties.Add(new ScriptIntListProperty { Name = "SoundRates", Data = [.. soundRates] });
         state.Properties.Add(new ScriptFloatListProperty { Name = "SoundSeconds", Data = [.. soundSeconds] });
         state.Properties.Add(new ScriptFloatListProperty { Name = "SoundReach", Data = [.. soundReach] });
+        state.Properties.Add(new ScriptIntListProperty { Name = "EffectLoops", Data = [.. soundBaseLoops] });
+        state.Properties.Add(new ScriptIntListProperty { Name = "SoundLoops", Data = [.. soundLoops] });
         state.Properties.Add(ObjProp("Lines", linesList.FormKey));
         if (mod.Quests.Contains(logQuest!)) state.Properties.Add(ObjProp("LogQuest", logQuest!.FormKey));
         state.Properties.Add(ObjProp("Fireball", Sk(0x07E56D)));   // TrapFirebolt01
@@ -513,6 +519,18 @@ public sealed partial class RgPluginBuilder
             var entry = Entry(o, scene, obj.Script, shell: false);
             if (kind == ObjectReferenceKind.Actor && TalksIn(scene, obj.Script)) entry.Properties.Add(new ScriptBoolProperty { Name = "Talks", Data = true });
             if (objectLights.TryGetValue((sceneName, index), out var light)) entry.Properties.Add(ObjProp("MyLight", light.FormKey));
+            else if (ScriptLight(scene, obj.Script) is { } sl)
+            {
+                // A script's own light (Light(radius, intensity): fireflies, the observatory's consoles, the laser):
+                // placed off at the object, with the radius and brightness the script's first call gives, flickering
+                // when it calls LightFlicker; Light() turns it on, LightOff off.
+                var placed = PlaceLight(scene, 0xFFD090, Math.Clamp(sl.Radius, 64, 2048), At(scene, obj.Position), negative: sl.Intensity < 0,
+                    fade: Math.Clamp(Math.Abs(sl.Intensity) / 56f, 0.25f, 2.5f), flicker: sl.Flicker);
+                placed.MajorRecordFlagsRaw |= (int)SkyrimMajorRecord.SkyrimMajorRecordFlag.InitiallyDisabled;
+                objectLights[(sceneName, index)] = placed;
+                entry.Properties.Add(ObjProp("MyLight", placed.FormKey));
+                ScriptLightsPlaced++;
+            }
             // Locations: the start, then RALC's offsets.
             var offsets = scene.Script.LocationOffsets.GetValueOrDefault(obj.Script) ?? [];
             if (offsets.Count > 0)
@@ -533,6 +551,7 @@ public sealed partial class RgPluginBuilder
             ScriptsAttached++;
         }
         foreach (var failure in CompileFailures.Take(40)) Problems.Add("script compile: " + failure);
+        if (CompileFailures.Count > 40) Problems.Add($"script compile: {CompileFailures.Count - 40} more failures (scripts-compile.txt has them all)");
         log?.Invoke($"scripts: {ScriptsWritten} written, {ScriptsCompiled} compiled ({CompileErrors} compiler errors, {CompileWarnings} warnings this compile: scripts-compile.txt), {ScriptsAttached} attached ({ScriptsIdle} with nothing for Skyrim to do left off); {linesList.Items.Count} lines, {sfxMarkers.Count(kv => kv.Value is not null)} sound effects ({SoundVariants} more ways scripts play them, {SoundsLooping} looping, {SoundsSilent} silent plays, {SoundsPastBank} past the bank playing nothing as in Redguard); {MenuPagesMade} more menu pages for menus of more than nine items; {shellRequests.Count} OpenShell programs");
     }
 
@@ -549,6 +568,20 @@ public sealed partial class RgPluginBuilder
     static ScriptObjectProperty ObjProp(string name, FormKey? key) => new() { Name = name, Object = key is { } k ? new FormLink<ISkyrimMajorRecordGetter>(k) : new FormLink<ISkyrimMajorRecordGetter>() };
 
     /// <summary>A script's entry with the properties of its object in its scene.</summary>
+    /// <summary>Lights placed for scripts that call Light(radius, intensity) on an object that has none of its own.</summary>
+    public int ScriptLightsPlaced { get; private set; }
+
+    /// <summary>The light a script asks for: its first Light(radius, intensity) call with constant arguments, and
+    /// whether it calls LightFlicker (census 2026-10-29: Light(312, 56) 27, (316, 10) 12, (256, 100) 2, 6 more pairs).</summary>
+    (int Radius, int Intensity, bool Flicker)? ScriptLight(Scene scene, string actor)
+    {
+        int light = Fn("Light"), flicker = Fn("LightFlicker");
+        var call = scene.Script.Calls.FirstOrDefault(c => c.Function == light && c.Actor.Equals(actor, StringComparison.OrdinalIgnoreCase) && c.Args.Length >= 2 && c.Args[0] is int && c.Args[1] is int);
+        if (call is null) return null;
+        bool flickers = scene.Script.Calls.Any(c => c.Function == flicker && c.Actor.Equals(actor, StringComparison.OrdinalIgnoreCase));
+        return (call.Args[0]!.Value, call.Args[1]!.Value, flickers);
+    }
+
     ScriptEntry Entry(RgPapyrus.Output o, Scene scene, string actor, bool shell)
     {
         var entry = new ScriptEntry { Name = o.ScriptName };
@@ -609,6 +642,9 @@ public sealed partial class RgPluginBuilder
             }
         }
         if (o.ByFunction.ContainsKey("PlayerHanging")) entry.Properties.Add(new ScriptBoolProperty { Name = "Hangable", Data = true });
+        // An indoor scene's move to the origin (CentreInteriors), for the positions the script works out as it runs.
+        if (scene.Offset.X != 0) entry.Properties.Add(new ScriptFloatProperty { Name = "OffX", Data = scene.Offset.X });
+        if (scene.Offset.Y != 0) entry.Properties.Add(new ScriptFloatProperty { Name = "OffY", Data = scene.Offset.Y });
         return entry;
     }
 
@@ -851,12 +887,12 @@ public sealed partial class RgPluginBuilder
                     double v = Math.Clamp(e.BaseVolume + off, 0, 127);
                     if (v <= 0) return null;
                     var m = SoundFor(edid, rel, "AudioCategorySFX", loop, Sk(0x07EDCA), (float)(20 * Math.Log10(127 / v)));   // SOMStereo: centred
-                    lastSeconds = length; lastReach = 0f;
+                    lastSeconds = length; lastReach = 0f; lastLoop = loop ? 1 : 0;
                     return m;
                 }
                 if (OutputFor(off) is not { } output) return null;
                 var placed = SoundFor(edid, rel, "AudioCategorySFX", loop, output.Model.FormKey, output.StaticDb);
-                lastSeconds = length; lastReach = output.Reach;
+                lastSeconds = length; lastReach = output.Reach; lastLoop = loop ? 1 : 0;
                 return placed;
             }
             catch (Exception ex) { Problems.Add($"sound effect {i}: {ex.Message}"); return null; }
@@ -864,11 +900,14 @@ public sealed partial class RgPluginBuilder
         // The base entries by effect index (FlatSound(n, 0, 0): an effect a variable names may be any); Papyrus arrays
         // hold 128, MAIN.SFX's 118 effects fit.
         var baseSeconds = new List<float>();
+        var baseLoops = new List<int>();
+        var loops = new List<int>();
         for (int i = 0; i < sfx.Effects.Count; i++)
         {
-            lastSeconds = 0f;
+            lastSeconds = 0f; lastLoop = 0;
             SoundMarker? marker = used.Contains(i) || variablePlays > 0 && sfx.Effects[i].Length > 0 ? Make(i, SoundFlat, 0, 0) : null;
             baseSeconds.Add(marker is null ? 0f : lastSeconds);
+            baseLoops.Add(marker is null ? 0 : lastLoop);
             sfxMarkers[i] = marker;
             soundsList!.Items.Add(marker is null ? new FormLink<ISkyrimMajorRecordGetter>(Sk(0x3B)) : marker.ToLink<ISkyrimMajorRecordGetter>());
         }
@@ -880,7 +919,7 @@ public sealed partial class RgPluginBuilder
             if (Make(i, kind, off, rate) is { } m)
             {
                 soundsList!.Items.Add(m.ToLink<ISkyrimMajorRecordGetter>());
-                keys.Add(SoundKey(kind, i, off)); rates.Add(rate); seconds.Add(lastSeconds); reach.Add(lastReach);
+                keys.Add(SoundKey(kind, i, off)); rates.Add(rate); seconds.Add(lastSeconds); reach.Add(lastReach); loops.Add(lastLoop);
                 SoundVariants++;
             }
             else if (kind == SoundPositional && Math.Clamp(127 + off, 0, 127) == 0) SoundsSilent++;
@@ -888,6 +927,7 @@ public sealed partial class RgPluginBuilder
         if (baseSeconds.Count > 128 || keys.Count > 128)
             Problems.Add($"sounds: {baseSeconds.Count} effects and {keys.Count} other ways to play them, past the 128 a Papyrus array holds: those past it are not found (TMRgState.SoundEntry)");
         soundBaseSeconds = [.. baseSeconds.Take(128)];
+        soundBaseLoops = [.. baseLoops.Take(128)]; soundLoops = [.. loops.Take(128)];
         soundKeys = [.. keys.Take(128)]; soundRates = [.. rates.Take(128)]; soundSeconds = [.. seconds.Take(128)]; soundReach = [.. reach.Take(128)];
         SoundsLooping = sfx.Effects.Where((e, i) => e.Loop != 0 && sfxMarkers.GetValueOrDefault(i) is not null).Count();
     }
@@ -906,6 +946,9 @@ public sealed partial class RgPluginBuilder
 
     int variablePlays;
     float lastSeconds, lastReach;
+    int lastLoop;
+    /// <summary>Whether each entry loops (1), so it is stopped when its loops are played (TMRgState.ChannelPlaying).</summary>
+    List<int> soundLoops = [], soundBaseLoops = [];
     List<int> soundKeys = [], soundRates = [];
     List<float> soundSeconds = [], soundReach = [], soundBaseSeconds = [];
     /// <summary>Ways the scripts play an effect besides FlatSound(n, 0, 0) (offsets, rates, placed), each its own sound.</summary>
@@ -937,7 +980,7 @@ public sealed partial class RgPluginBuilder
                 if (File.Exists(Path.Combine(shipped, "Compiled", lib + ".pex"))) File.Copy(Path.Combine(shipped, "Compiled", lib + ".pex"), Path.Combine(outDir, lib + ".pex"), true);
             return names.Where(n => File.Exists(Path.Combine(outDir, n + ".pex"))).ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
-        string imports = $"{Path.GetFullPath(sourceDir)};{shipped};{skseSrc};{vanillaSrc}";
+        string imports = $"{Path.GetFullPath(sourceDir)};{Skyrim.PapyrusRun.Stubs(shipped, Path.GetFullPath(sourceDir).TrimEnd('\\', '/') + "_helpers")};{skseSrc};{vanillaSrc}";
         string Run(string target, bool all, string cwd)
         {
             var psi = new System.Diagnostics.ProcessStartInfo(compiler) { WorkingDirectory = cwd, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -969,9 +1012,9 @@ public sealed partial class RgPluginBuilder
             // stays an import, so the scripts still see each other. What a batch drops (the compiler can when memory
             // runs short) once more one at a time.
             foreach (var n in stale) File.Delete(Path.Combine(outDir, n + ".pex"));
-            int parallel = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
+            var (parallel, batchSize) = Skyrim.PapyrusRun.Plan(stale.Count);
             // Batches of at most 400, and as many as can run at once when there are enough scripts (100 or more each).
-            int batches = Math.Max((stale.Count + 399) / 400, Math.Min(parallel, (stale.Count + 99) / 100));
+            int batches = Math.Max(1, (stale.Count + batchSize - 1) / batchSize);
             int size = (stale.Count + batches - 1) / batches;
             var chunks = stale.Chunk(size).Select((names, i) => (Index: i, Names: names)).ToList();
             var outputs = new System.Collections.Concurrent.ConcurrentDictionary<int, string>();

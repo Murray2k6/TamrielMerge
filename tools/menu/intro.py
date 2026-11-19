@@ -115,7 +115,9 @@ SHOTS = [
                 "+OBICImperialPrisonDistrict+OBICImperialPalace", "centre": [28700, 63424], "radius": 18000, "land_radius": 60000},
      "populate": 140,
      "light": {"azimuth": 105, "elevation": 16, "sun": [1.0, 0.82, 0.62], "sun_power": 3.6, "sky": [0.36, 0.5, 0.74],
-               "fog": [0.7, 0.66, 0.62], "fog_density": 0.8e-5, "exposure": 0.92, "water": [0.05, 0.11, 0.15],
+               # Half the haze it had (user, 2026-10-24: "less dense but still there"): seen from 34,000 units out, 0.8e-5
+               # washed the city and the hills behind it blue-white.
+               "fog": [0.7, 0.66, 0.62], "fog_density": 0.4e-5, "exposure": 0.92, "water": [0.05, 0.11, 0.15],
                "cloud_cover": 0.4},
      # High enough to look over the walls into the districts (streets at about 3500, the tower's top near 17500).
      "orbit": {"centre": [28672, 63424, 0], "angle": [206, 236], "radius": [34000, 34000], "height": [14000, 14000],
@@ -128,16 +130,18 @@ SHOTS = [
                "cloud_cover": 0.5},
      "orbit": {"centre": [32800, -97000, 0], "angle": [-62, -38], "radius": [17750, 17750], "height": [2000, 2000],
                "look_z": [1700, 1700]}},
-    # Daggerfall's town is a worldspace of its own, without land: shown where it stands in the Iliac Bay overland (user,
-    # 2026-10-09: "the menu flybys need to be the games worldspace not a test area"). "~+DFTDaggerfall17@door": the
-    # exporter finds the overland (whichever tile holds the gate's door) and the offset putting the town on that door
-    # (84992, -141312, 2301 with the default terrain settings), so this shot's numbers are the town's own coordinates;
-    # the camera and the crowd move with the offset scene.json records. The overland's land under the town is taken out.
+    # Daggerfall city where it stands on the Iliac Bay overland (user, 2026-10-09: "the menu flybys need to be the games
+    # worldspace not a test area"; 2026-10-25: "towns go on the overland like in daggerfall"). "~+DFLocDaggerfall17@location":
+    # the exporter finds the overland tile whose cells carry the city's location and the city's middle on its ground, so
+    # this shot's numbers are in the city's own frame (centred on it, as when it was a worldspace of its own); the camera
+    # and the crowd move with the offset scene.json records. The locations round it are in Daggerfall Towns.esm.
     # Under a sunlit morning mist (user, 2026-10-08: the first render's horizon read as a grey fog bank).
     {"name": "daggerfall", "scene": "daggerfall", "caption": ("Daggerfall", "Daggerfall"), "seconds": 7.5,
      # The overland's land is in its own plugin (Daggerfall Land.esm, with Daggerfall Land 2.esm... when it is split),
      # loaded over Daggerfall.esm.
-     "export": {"plugin": "Daggerfall.esm", "also": ["Daggerfall Land.esm"], "world": "~+DFTDaggerfall17@door",
+     # Its foliage (Daggerfall Foliage.esm: trees, bushes and rocks as Daggerfall lays them; user, 2026-10-25:
+     # "daggerfall has foliage").
+     "export": {"plugin": "Daggerfall.esm", "also": ["Daggerfall Land.esm", "Daggerfall Towns.esm", "Daggerfall Foliage.esm"], "world": "~+DFLocDaggerfall17@location",
                 "centre": [-2048, -2048], "radius": 46000, "land_radius": 75000},
      "light": {"azimuth": 240, "elevation": 14, "sun": [1.0, 0.74, 0.48], "sun_power": 4.2, "sky": [0.38, 0.5, 0.72],
                "fog": [0.9, 0.8, 0.66], "fog_density": 0.8e-5, "exposure": 0.95, "cloud_cover": 0.55},
@@ -257,7 +261,8 @@ def run_render(out, shot, size, ss, only=None, dest=None):
     subprocess.run(cmd, check=True)
 
 
-def free_commit_gb():
+def free_memory_gb():
+    """(free RAM, free commit) in GB: the commit (RAM and page file) runs out first with a small page file."""
     import ctypes
 
     class MS(ctypes.Structure):
@@ -267,10 +272,61 @@ def free_commit_gb():
                     ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
     m = MS(); m.dwLength = ctypes.sizeof(MS)
     ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
-    return m.ullAvailPageFile / 2 ** 30
+    return m.ullAvailPhys / 2 ** 30, m.ullAvailPageFile / 2 ** 30
+
+
+def free_commit_gb():
+    return free_memory_gb()[1]
+
+
+def free_vram_gb():
+    """The graphics card's free memory (GB), None when nvidia-smi can't say."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=15)
+        return float(r.stdout.split()[0]) / 1024
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def total_vram_gb():
+    """The graphics card's memory (GB), None when nvidia-smi can't say."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=15)
+        return float(r.stdout.split()[0]) / 1024
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+class MemoryStop(RuntimeError):
+    """A Blender run stopped by the memory guard: its peak so far, and whether it ran alone (else it gave way to the others)."""
+    def __init__(self, peak, alone, vram=None):
+        super().__init__(f"Blender stopped: free memory under 0.7 GB (at {peak:.1f} GB)")
+        self.peak, self.alone, self.vram = peak, alone, vram
+
+
+class BlenderExit(RuntimeError):
+    """A Blender run that ended with an error code (2026-10-25: three runs on the 8 GB card, the NVIDIA driver reset the
+    device, event 153, and they all ended with 0x6E76003B)."""
+
+
+import threading                                     # noqa: E402 (the runs below share this)
+RUNNING = []                                         # the Blender runs going at once: [proc, scene], oldest first
+RUNNING_LOCK = threading.Lock()
+
+
+def blender_private_gb(proc):
+    try:
+        import psutil
+        return psutil.Process(proc.pid).memory_info().private / 2 ** 30
+    except Exception:
+        return 0.0
 
 
 def run_blender(out, shot, dest, only=None):
+    """One Blender run of a shot's frames; returns its peak memory and the graphics card's memory it took (GB: the card's
+    use above what it was at the start; with None when nvidia-smi can't say, and whether it ran alone throughout). With
+    other runs going, the guard stops only the newest when the free commit falls under 0.7 GB (it goes again later, its
+    frames kept); alone, it stops as before."""
     blender = find_blender()
     if not blender:
         raise RuntimeError("Blender not found (TamrielMerge.Cli setup installs it)")
@@ -280,31 +336,44 @@ def run_blender(out, shot, dest, only=None):
     if only:
         cmd += ["--only", ",".join(map(str, only))]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    import threading
+    entry = [proc, shot["scene"]]
+    with RUNNING_LOCK:
+        RUNNING.append(entry)
     stopped = []
-
     peak = [0.0]
+    total = total_vram_gb()
+    free0 = free_vram_gb()
+    base = total - free0 if total is not None and free0 is not None else None
+    vram = [0.0 if base is not None else None]
+    solo = [True]
 
     def watch():
-        import psutil
         while proc.poll() is None:
-            try:
-                peak[0] = max(peak[0], psutil.Process(proc.pid).memory_info().private / 2 ** 30)
-            except Exception:
-                pass
+            peak[0] = max(peak[0], blender_private_gb(proc))
+            if base is not None and (free := free_vram_gb()) is not None:
+                vram[0] = max(vram[0], total - free - base)
+            with RUNNING_LOCK:
+                solo[0] = solo[0] and len(RUNNING) == 1
             if free_commit_gb() < 0.7:
-                stopped.append(True); proc.kill(); return
+                with RUNNING_LOCK:
+                    newest, alone = RUNNING[-1] is entry, len(RUNNING) == 1
+                if newest:
+                    stopped.append(alone); proc.kill(); return
             time.sleep(2)
     threading.Thread(target=watch, daemon=True).start()
+    tag = f"[{shot['name']}] "
     for line in proc.stdout:
-        if any(k in line for k in ("frame ", "objects", "land:", "town ground", "crowd:", "populate:", "people:", "(no ", "Error", "rror:", "GPU at", "Traceback")):
-            print("   ", line.rstrip(), flush=True)
+        if any(k in line for k in ("frame ", "objects", "land:", "town ground", "crowd:", "populate:", "people:", "(no ", "Error", "rror:", "GPU at", "Traceback", "phase ", "crowd rays")):
+            print("   ", tag + line.strip(), flush=True)
     proc.wait()
-    print(f"    Blender peak {peak[0]:.1f} GB", flush=True)
+    with RUNNING_LOCK:
+        RUNNING.remove(entry)
+    print(f"    {tag}Blender peak {peak[0]:.1f} GB" + (f", {vram[0]:.1f} GB of the graphics card{'' if solo[0] else ' (beside other runs)'}" if vram[0] is not None else ""), flush=True)
     if stopped:
-        raise RuntimeError("Blender stopped: free memory under 0.7 GB")
+        raise MemoryStop(peak[0], stopped[0], vram[0])
     if proc.returncode:
-        raise RuntimeError(f"Blender exited {proc.returncode}")
+        raise BlenderExit(f"Blender exited {proc.returncode} (0x{proc.returncode & 0xFFFFFFFF:08X})")
+    return peak[0], vram[0], solo[0]
 
 
 def rt_preview(out, names):
@@ -370,11 +439,49 @@ def scene_stamp(s):
         return None
 
 
+PARALLEL = 3          # Blender runs at once at most: one building its scene on the CPU while others render on the GPU
+PEAK_GUESS = 12.0     # GB a scene's run is budgeted before one has been measured (Whiterun's reached 11.2, 2026-10-24)
+# GB of the graphics card a scene's run is budgeted before one has been measured alone (blender-vram.json): Whiterun
+# with its distant view took 6.2 GB of the 8 GB card on its own (2026-10-25), and three runs counted at 2.5 each
+# overfilled it until the driver reset the card.
+VRAM_GUESS = 6.0
+VRAM_SPARE = 0.8      # GB of the card kept free beside the runs (the desktop, the driver)
+
+
+def vram_file():
+    return os.path.join(SCENES, "blender-vram.json")
+
+
+def load_vram():
+    try:
+        return json.load(open(vram_file()))
+    except (OSError, ValueError):
+        return {}
+
+
+def peaks_file():
+    return os.path.join(SCENES, "blender-peaks.json")
+
+
+def load_peaks():
+    try:
+        return json.load(open(peaks_file()))
+    except (OSError, ValueError):
+        return {}
+
+
 def rt_render(out, names):
+    """Every chosen shot's missing frames, the shots side by side (user, 2026-10-24: "it shouldnt take that long for the
+    flybys. use cpu and gpu to do it"): one after another, each run built its scene on one CPU core for minutes while the
+    graphics card waited, then drew on the card with one core busy. A run starts while others go when the free RAM,
+    commit and graphics memory hold its scene's last measured peak (blender-peaks.json beside the scenes) and what the
+    running ones may still grow to; the biggest first."""
+    jobs = []
     for s in chosen(names):
         dest = os.path.join(out, "rt", s["name"])
         # Frames are made again when what they are made from changed (2026-10-14: a convert reused frames of older
-        # scenes and scripts): the scene, the render and prep scripts, the shot's path and the ray-tracing switch.
+        # scenes and scripts): the scene, the render and prep scripts, the shot's path and the ray-tracing switch. Not
+        # scene3d/blend_runtime.py: how a run goes (its shader workers, its phase lines), not what it draws.
         stamp = {"scene": scene_stamp(s), "scripts": file_hash(os.path.join(CODE, "scene3d", "blend_scene.py"), os.path.join(CODE, "scene3d", "blend_prep.py"),
                                                                os.path.join(out, s["name"] + ".json")),
                  "raytrace": os.environ.get("TM_GAME_RAYTRACE", "")}
@@ -384,9 +491,106 @@ def rt_render(out, names):
                     if f.endswith(".png"):
                         os.remove(os.path.join(dest, f))
             write_stamp(dest, stamp)
-        todo = [f for f in range(int(s["seconds"] * FPS)) if not os.path.exists(os.path.join(dest, f"{f:05d}.png"))]
-        for i in range(0, len(todo), CHUNK):
-            run_blender(out, s, dest, todo[i:i + CHUNK])
+        if missing_frames(s, dest):
+            jobs.append((s, dest))
+    if not jobs:
+        return
+    peaks = load_peaks()
+    vrams = load_vram()
+    card = total_vram_gb()
+
+    def need(s):
+        return float(peaks.get(s["scene"], PEAK_GUESS))
+
+    def need_vram(scene):
+        return float(vrams.get(scene, VRAM_GUESS))
+    waiting = sorted(jobs, key=lambda j: -need(j[0]))
+    threads, failures = [], []
+    tries = {}
+    crashes = {}
+    lock = threading.Lock()
+    clock = time.time()
+
+    def work(job):
+        s, dest = job
+        start = time.time()
+        try:
+            todo = missing_frames(s, dest)
+            for i in range(0, len(todo), CHUNK):
+                peak, vram, solo = run_blender(out, s, dest, todo[i:i + CHUNK])
+                with lock:
+                    peaks[s["scene"]] = round(peak + 0.5, 1)
+                    json.dump(peaks, open(peaks_file(), "w"), indent=1)
+                    # The card's memory it took: as measured when it ran alone; beside others (their growth counted in
+                    # too, so more than its own) only until it has run alone.
+                    if vram is not None and (solo or s["scene"] not in vrams):
+                        vrams[s["scene"]] = round(vram + 0.3, 1)
+                        json.dump(vrams, open(vram_file(), "w"), indent=1)
+            print(f"  {s['name']}: {len(todo)} frames in {(time.time() - start) / 60:.1f} min", flush=True)
+        except BlenderExit as e:
+            with lock:
+                # Once more (its frames kept), after the others: a driver reset ends every run on the card at once.
+                crashes[s["name"]] = crashes.get(s["name"], 0) + 1
+                if crashes[s["name"]] > 1:
+                    failures.append(e)
+                else:
+                    print(f"  {s['name']}: {e}; tried again when there is room", flush=True)
+                    waiting.append(job)
+        except MemoryStop as e:
+            with lock:
+                # What it reached is the least it needs: started again only with that much room (its frames kept).
+                peaks[s["scene"]] = max(need(s), round(e.peak + 1, 1))
+                json.dump(peaks, open(peaks_file(), "w"), indent=1)
+                tries[s["name"]] = tries.get(s["name"], 0) + 1
+                if e.alone and (tries[s["name"]] > 1 or not waiting):
+                    failures.append(e)
+                elif e.alone:
+                    # Stopped on its own: the others first (they may fit), then it once more.
+                    print(f"  {s['name']}: not enough memory on its own ({e.peak:.1f} GB reached), tried again after the others", flush=True)
+                    waiting.append(job)
+                else:
+                    print(f"  {s['name']}: gave way to the other runs (memory), again when there is room", flush=True)
+                    waiting.append(job)
+        except Exception as e:      # noqa: BLE001 (reported once the other runs end)
+            with lock:
+                failures.append(e)
+
+    last_start = 0.0
+    while True:
+        with lock:
+            threads[:] = [t for t in threads if t.is_alive()]
+            if (failures or not waiting) and not threads:
+                break
+            nxt = waiting[0] if waiting and not failures else None
+        if nxt is not None and len(threads) < PARALLEL and time.time() - last_start > 20:
+            ram, commit = free_memory_gb()
+            with RUNNING_LOCK:
+                # The running ones may still grow to their measured peaks.
+                growth = sum(max(0.0, float(peaks.get(scene, PEAK_GUESS)) - blender_private_gb(p)) for p, scene in RUNNING)
+                # The card: every run's measured share (not what is free now: a run fills it as it goes).
+                card_use = sum(need_vram(scene) for _, scene in RUNNING)
+            vram = free_vram_gb()
+            n = need(nxt[0])
+            fits_card = card is None or card_use + need_vram(nxt[0]["scene"]) + VRAM_SPARE <= card
+            if not threads or (commit >= n + growth + 2 and ram >= n + growth + 1 and fits_card):
+                with lock:
+                    waiting.remove(nxt)
+                if threads:
+                    print(f"  {nxt[0]['name']}: started beside {len(threads)} other run(s) ({commit:.0f} GB free to commit, "
+                          f"{vram:.1f} GB on the graphics card)" if vram is not None else f"  {nxt[0]['name']}: started beside {len(threads)} other run(s)", flush=True)
+                t = threading.Thread(target=work, args=(nxt,), daemon=True)
+                t.start()
+                threads.append(t)
+                last_start = time.time()
+                continue
+        time.sleep(2)
+    if failures:
+        raise failures[0]
+    print(f"rendered {len(jobs)} shots in {(time.time() - clock) / 60:.1f} min", flush=True)
+
+
+def missing_frames(s, dest):
+    return [f for f in range(int(s["seconds"] * FPS)) if not os.path.exists(os.path.join(dest, f"{f:05d}.png"))]
 
 
 def export(cli, plugins, names, data=None):
@@ -401,8 +605,9 @@ def export(cli, plugins, names, data=None):
         plugin = os.path.join(data or "", e["plugin"]) if e.get("skyrim") else os.path.join(plugins, e["plugin"])
         if not os.path.exists(plugin):
             print(f"{s['name']}: {e['plugin']} not converted, shot left out"); continue
-        # A land too big for one plugin is split: "Daggerfall Land.esm" stands for "Daggerfall Land 2.esm"... too.
-        also = [x for a in e.get("also", []) for x in ([a] + [f"Daggerfall Land {i}.esm" for i in range(2, 5)] if a == "Daggerfall Land.esm" else [a])]
+        # A plugin too big for one is split: "Daggerfall Land.esm" stands for "Daggerfall Land 2.esm"... too (and the
+        # foliage's the same way).
+        also = [x for a in e.get("also", []) for x in [a] + [f"{a[:-4]} {i}.esm" for i in range(2, 11)]]
         files = [plugin] + [q for q in (os.path.join(plugins, a) for a in also) if os.path.exists(q)]
         stamp = {"plugins": [[os.path.basename(f), os.path.getsize(f), int(os.path.getmtime(f))] for f in files],
                  "converter": int(os.path.getmtime(cli)) if os.path.exists(cli) else 0, "export": e}
@@ -700,8 +905,11 @@ def pack(out, menu_dir):
             t = (k + 1) / (FADE + 1)
             seq.append(((s, n - FADE + k, n), (nxt, k, clips[(i + 1) % len(clips)][1]), t * t * (3 - 2 * t)))
     fw, fh = SIZE
-    # As many whole frames as fit in 4096 each way, the sheet trimmed to them (whole 4-pixel blocks for DXT1).
-    cols, rows = max(1, 4096 // fw), max(1, 4096 // fh)
+    # One frame a sheet (user, 2026-10-25: "the flyby is shaking"): with two 1440p frames a sheet, every other frame came
+    # from the sheet's lower half, and the mesh's UVs (half floats in Skyrim's BSTriShape) are coarser between 0.5 and 1
+    # than below 0.5: the lower frames landed up to 0.7 pixels off the upper ones, a 10-a-second wobble. One a sheet, every
+    # frame has the same UVs. The same texture memory either way (whole 4-pixel blocks for DXT1).
+    cols, rows = 1, 1
     per = cols * rows
     sheet_w, sheet_h = (fw * cols + 3) // 4 * 4, (fh * rows + 3) // 4 * 4
     os.makedirs(menu_dir, exist_ok=True)
@@ -719,10 +927,10 @@ def pack(out, menu_dir):
                 contact.append(frame.resize((300, 169)))
         sheet.save(os.path.join(menu_dir, f"flyby_{sh:02d}.dds"), pixel_format="DXT1")
         print(f"  sheet {sh + 1}/{sheets}", flush=True)
-    for old in range(sheets, 100):
-        p = os.path.join(menu_dir, f"flyby_{old:02d}.dds")
-        if os.path.exists(p):
-            os.remove(p)
+    # Sheets of an earlier pack past this one's (any number of them: one frame a sheet makes hundreds).
+    for f in os.listdir(menu_dir):
+        if f.startswith("flyby_") and f.endswith(".dds") and f[6:-4].isdigit() and int(f[6:-4]) >= sheets:
+            os.remove(os.path.join(menu_dir, f))
     json.dump({"frames": len(seq), "fps": FPS, "cols": cols, "rows": rows, "sheetWidth": sheet_w, "sheetHeight": sheet_h,
                "frameWidth": fw, "frameHeight": fh, "sheets": sheets, "towns": [s["name"] for s, _ in clips]},
               open(os.path.join(menu_dir, "flyby.json"), "w"), indent=1)

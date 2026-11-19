@@ -165,7 +165,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     }
 
     /// <param name="scriptKind">Object, Quest or MagicEffect (Oblivion's script type); Result (a dialogue response's
-    /// result script: a TopicInfo fragment, Fragment_End, the speaker its reference) or Stage (a quest stage log entry's
+    /// result script: TMObLine's Result, run when the line is done, or as it begins when a script says it; the speaker its reference) or Stage (a quest stage log entry's
     /// result script: OB_Run on the quest, called from the quest's fragment), each a single block (<see cref="ParseFragment"/>).</param>
     /// <param name="onActor">An object script on an NPC or creature.</param>
     /// <param name="questDelay">A quest script's update interval (Oblivion's default 5 seconds).</param>
@@ -218,8 +218,31 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             body.AppendLine("EndEvent");
             body.AppendLine();
         }
+        // A follow with a place ends when the follower gets there (ObScriptRecords.FollowEnd): Skyrim's follow never
+        // completes, its condition drops it, and that is a package change, not an end. So the change of such a package,
+        // the follower at its place, runs the script's "package done" blocks (2026-11-13: the Emperor reached his
+        // marker in the prisoner's cell, walked back to the gate and in again, the opening held at stage 15).
+        followArrives = eventGroups.Any(g => g.Key.StartsWith("Event OnPackageEnd(", StringComparison.Ordinal));
+        if (followArrives)
+        {
+            // The follow whose arrival ran the blocks last (once per arrival, by the change or by the frame's look).
+            body.AppendLine("Package __followDone");
+            body.AppendLine("Int __followTick");
+            body.AppendLine();
+        }
         foreach (var e in eventGroups)
             WriteEvent(body, e.Key, e.ToList());
+        if (followArrives && !eventGroups.Any(g => g.Key.StartsWith("Event OnPackageChange(", StringComparison.Ordinal)))
+        {
+            body.AppendLine("Event OnPackageChange(Package akOldPackage)");
+            body.AppendLine($"  If akOldPackage != __followDone && {St()}.FollowArrived({AsActor(new Code("Self", actor ? T.Actor : T.Ref))}, akOldPackage)");
+            body.AppendLine("    __followDone = akOldPackage");
+            body.AppendLine("    OnPackageEnd(akOldPackage)");
+            body.AppendLine("  EndIf");
+            body.AppendLine("EndEvent");
+            body.AppendLine();
+        }
+        followArrives = false;
         // MenuMode: a function run every tenth of a second while a menu it's for is open (Papyrus runs then too),
         // and right after a message box the script shows, whose button it reads as Oblivion's MenuMode did.
         var menuNames = hasMenuMode ? menuBlocks.SelectMany(b => MenuNames(b.Parameters.FirstOrDefault() ?? "")).Distinct().ToList() : [];
@@ -364,7 +387,8 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             }
         }
 
-        if (usesSecondsPassed || usesLoaded || usesRestarted) St();   // OB_Frame and OB_GameLoaded below need the helper quest's property
+        if (usesRestarted) St();   // OB_GameRestarted below needs the helper quest's property
+        if (usesSecondsPassed || usesLoaded) { Clock(); ClockLoads(); }   // and OB_Frame and OB_GameLoaded the clock's
         var head = new StringBuilder();
         head.AppendLine($"ScriptName {name} extends {extends}{(kind is "Result" or "Stage" ? " Hidden" : "")}");
         head.AppendLine(kind switch
@@ -418,14 +442,14 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             head.AppendLine("Int __frameLoads = -1");
             head.AppendLine();
             head.AppendLine("Function OB_Frame()");
-            head.AppendLine($"  TMObState st = {St()}");
-            head.AppendLine("  Float now = st.PlayTime()");
+            head.AppendLine($"  Float now = {Clock()}");
+            head.AppendLine($"  Int loads = {ClockLoads()}");
             head.AppendLine("  __framePassed = 0.0");
-            head.AppendLine("  If __frameAt >= 0.0 && __frameLoads == st.ClockLoads");
+            head.AppendLine("  If __frameAt >= 0.0 && __frameLoads == loads");
             head.AppendLine("    __framePassed = now - __frameAt");
             head.AppendLine("  EndIf");
             head.AppendLine("  __frameAt = now");
-            head.AppendLine("  __frameLoads = st.ClockLoads");
+            head.AppendLine("  __frameLoads = loads");
             head.AppendLine("EndFunction");
         }
         foreach (var (used, fn, count) in new[] { (usesLoaded, "OB_GameLoaded", "ClockLoads"), (usesRestarted, "OB_GameRestarted", "Launches") })
@@ -434,7 +458,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             head.AppendLine($"Int __seen{count} = -1");
             head.AppendLine();
             head.AppendLine($"Bool Function {fn}()");
-            head.AppendLine($"  Int now = {St()}.{count}");
+            head.AppendLine($"  Int now = {(count == "ClockLoads" ? ClockLoads() : St() + "." + count)}");
             head.AppendLine($"  If __seen{count} == now");
             head.AppendLine("    Return False");
             head.AppendLine("  EndIf");
@@ -500,6 +524,15 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     /// <summary>The helper quest's script (TMObState), which keeps what Oblivion's engine kept for scripts.</summary>
     string St() => $"({Generated("TMObState", "Quest")} as TMObState)";
 
+    /// <summary>
+    /// The play clock and the count of loads, read from globals (TMObState keeps them), not asked of TMObState: every
+    /// running quest's and every loaded actor's script asks them each time it runs, and asked of the one script they
+    /// queued on it (stack dump in Oblivion's prison, 2026-11-13: 17 of 25 running stacks waiting in
+    /// TMObState.PlayTime; a line's beginning told to that script took over 17 seconds to be heard).
+    /// </summary>
+    string Clock() => $"TMObState.Clock({Generated("TMOB_ClockPaused", "GlobalVariable")}, {Generated("TMOB_ClockHeld", "GlobalVariable")})";
+    string ClockLoads() => $"{Generated("TMOB_ClockLoads", "GlobalVariable")}.GetValueInt()";
+
     /// <summary>An Oblivion variable's property name (v_, so it can't clash with a script or type name).</summary>
     static string Var(string name) => "v_" + Clean(name);
 
@@ -531,7 +564,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         "scripteffectstart" => "Event OnEffectStart(Actor akTarget, Actor akCaster)",
         "scripteffectfinish" => "Event OnEffectFinish(Actor akTarget, Actor akCaster)",
         "function" => FunctionHeader(b),
-        FragmentBlock when kind == "Result" => "Function Fragment_End(ObjectReference akSpeakerRef)",
+        FragmentBlock when kind == "Result" => "Function Result(ObjectReference akSpeakerRef)",
         FragmentBlock when kind == "Stage" => "Function OB_Run()",
         _ => null,
     };
@@ -544,6 +577,8 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
 
     /// <summary>For a Result or Stage: the quest whose script's variables it names bare.</summary>
     string? fragmentQuest;
+    /// <summary>The script being written has "package done" blocks: a follow's arrival runs them too.</summary>
+    bool followArrives;
 
     void WriteEvent(StringBuilder sb, string header, List<Block> blocks)
     {
@@ -563,8 +598,6 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             return;
         }
         sb.AppendLine(header);
-        // A response's result script extends TMObLine: its end (the speaker done talking) first.
-        if (kind == "Result" && header.StartsWith("Function Fragment_End(", StringComparison.Ordinal)) sb.AppendLine("  Parent.Fragment_End(akSpeakerRef)");
         if (types.Contains("scripteffectstart") && kind == "MagicEffect") sb.AppendLine($"  RegisterForSingleUpdate({Frame})");
         // A block asking how long since the script last ran: measured as it starts (GetSecondsPassed's one value a run).
         if (blocks.Any(b => Calls(new Script("", [], [b])).Any(c => TimesTheRun(c.Function)))) sb.AppendLine(FrameMarker);
@@ -582,6 +615,13 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         {
             sb.AppendLine($"  If akActionRef == {PlayerRef()}");
             sb.AppendLine($"    {St()}.EnteringGate(Self)");
+            sb.AppendLine("  EndIf");
+        }
+        if (followArrives && header.StartsWith("Event OnPackageChange(", StringComparison.Ordinal))
+        {
+            sb.AppendLine($"  If akOldPackage != __followDone && {St()}.FollowArrived({AsActor(new Code("Self", actor ? T.Actor : T.Ref))}, akOldPackage)");
+            sb.AppendLine("    __followDone = akOldPackage");
+            sb.AppendLine("    OnPackageEnd(akOldPackage)");
             sb.AppendLine("  EndIf");
         }
         foreach (var b in blocks)
@@ -616,6 +656,20 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     /// around it). The blocks become OB_GameMode, so a Return in them ends the run; the update is asked for again once
     /// it is over, so no two runs overlap.
     /// </summary>
+    /// <summary>
+    /// No frame while a quest stage's result script is still running (TMObState.StageTo): Oblivion runs it inside
+    /// SetStage, before any other script's next frame; Skyrim runs it beside them. The opening's quest script saw stage
+    /// 16 with its timer still at 0 (set by that stage's result, which hadn't run yet), went on to 17 at once, and the
+    /// Emperor's stage-16 line, asked for a moment later, no longer held (seen in game 2026-11-14).
+    /// </summary>
+    void WriteStageBusy(StringBuilder sb)
+    {
+        sb.AppendLine($"  If {Generated("TMOB_StageBusy", "GlobalVariable")}.GetValue() > 0.0");
+        sb.AppendLine("    RegisterForSingleUpdate(0.05)");
+        sb.AppendLine("    Return");
+        sb.AppendLine("  EndIf");
+    }
+
     void WriteFrame(StringBuilder sb, List<Block> blocks)
     {
         sb.AppendLine("Event OnUpdate()");
@@ -630,16 +684,29 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 sb.AppendLine("    Return");
                 sb.AppendLine("  EndIf");
                 // The delay is play time: what passed in a conversation doesn't count.
-                sb.AppendLine($"  TMObState st = {St()}");
-                sb.AppendLine("  Float now = st.PlayTime()");
-                sb.AppendLine("  If __questLoads == st.ClockLoads && now < __questDue");
+                // Oblivion's quests pause while the player is in another game's lands (2026-11-09: forty of them ticked
+                // through a visit to Daggerfall and Morrowind, and one activated the Arcane University's teleporter 24
+                // times from Vvardenfell), as Morrowind's global scripts do.
+                // Asked here, of the player's cell (this quest is the plugin's own record: the cell is Oblivion's when
+                // its FormID begins as this quest's does), not of TMObState: every quest's update asking that one script
+                // had them all wait on it, hundreds of stacks at once on arriving in Oblivion (2026-11-12: "Suspended
+                // stack count is over our warning threshold" in the log); and the waits apart, not all in one moment.
+                sb.AppendLine("  Cell __here = Game.GetPlayer().GetParentCell()");
+                sb.AppendLine("  If !__here || Math.RightShift(__here.GetFormID(), 24) != Math.RightShift(GetFormID(), 24)");
+                sb.AppendLine("    RegisterForSingleUpdate(Utility.RandomFloat(4.0, 8.0))");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine($"  Float now = {Clock()}");
+                sb.AppendLine($"  Int loads = {ClockLoads()}");
+                sb.AppendLine("  If __questLoads == loads && now < __questDue");
                 sb.AppendLine("    RegisterForSingleUpdate(__questDue - now)");
                 sb.AppendLine("    Return");
                 sb.AppendLine("  EndIf");
+                WriteStageBusy(sb);
                 sb.AppendLine(FrameMarker);
                 sb.AppendLine("  OB_GameMode()");
-                sb.AppendLine("  __questLoads = st.ClockLoads");
-                sb.AppendLine("  __questDue = st.PlayTime() + QuestDelay");
+                sb.AppendLine("  __questLoads = loads");
+                sb.AppendLine($"  __questDue = {Clock()} + QuestDelay");
                 sb.AppendLine("  RegisterForSingleUpdate(QuestDelay)");
                 break;
             case "MagicEffect":
@@ -650,6 +717,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 sb.AppendLine("    RegisterForSingleUpdate(0.1)");
                 sb.AppendLine("    Return");
                 sb.AppendLine("  EndIf");
+                WriteStageBusy(sb);
                 sb.AppendLine(FrameMarker);
                 sb.AppendLine("  OB_GameMode()");
                 sb.AppendLine("  If !__effectEnded");
@@ -670,6 +738,25 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 sb.AppendLine("    RegisterForSingleUpdate(0.1)");
                 sb.AppendLine("    Return");
                 sb.AppendLine("  EndIf");
+                WriteStageBusy(sb);
+                if (followArrives && actor)
+                {
+                    // A follow with a place, its follower there (TMObState.FollowPoll, looked at four times a second):
+                    // Oblivion's package is done. The package keeps no "not there yet" condition: with one, a follower
+                    // already at the place never took the package up and its end never came (the Emperor stood on his
+                    // marker and the opening held at stage 15, seen in game 2026-11-14).
+                    sb.AppendLine("  __followTick += 1");
+                    sb.AppendLine("  If __followTick >= 25");
+                    sb.AppendLine("    __followTick = 0");
+                    sb.AppendLine($"    Package __there = {St()}.FollowPoll(Self as Actor)");
+                    sb.AppendLine("    If __there && __there != __followDone");
+                    sb.AppendLine("      __followDone = __there");
+                    sb.AppendLine("      OnPackageEnd(__there)");
+                    sb.AppendLine($"    ElseIf !__there && __followDone && !{St()}.FollowArrived(Self as Actor, __followDone)");
+                    sb.AppendLine("      __followDone = None");
+                    sb.AppendLine("    EndIf");
+                    sb.AppendLine("  EndIf");
+                }
                 sb.AppendLine(FrameMarker);
                 sb.AppendLine("  OB_GameMode()");
                 sb.AppendLine($"  RegisterForSingleUpdate({Frame})");
@@ -741,6 +828,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     string? BlockFilter(string type, List<string> parameters)
     {
         string Is(string arg, T type) => FormCompare(new Code(arg, type), "==", Expr(new Name(parameters[0]))).Text;
+        string Package(string arg, string name) => $"({Is(arg, T.Form)} || {arg} == {ScheduledPackage(name)})";
         switch (type)
         {
             case "onactivate" when parameters.Count > 0: return Is("akActionRef", T.Ref);
@@ -769,6 +857,11 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "onmagiceffecthit" when parameters.Count > 0: return $"akEffect && {EffectList(parameters[0])}.HasForm(akEffect)";
             // OnActorEquip ITEM: that item put on.
             case "onactorequip" when parameters.Count > 0: return Is("akBaseObject", T.Form);
+            // OnPackageStart/End/Done/Change PACKAGE: that package's own (2026-11-02: unfiltered, the chapel guard's three
+            // patrol blocks ran as one on any package's end, each starting the next package, and one guard's runs flooded
+            // Papyrus with 10,128 waiting at once). Either copy of it: the actor runs its own list's (ObScheduledPackage).
+            case "onpackagestart" when parameters.Count > 0: return Package("akNewPackage", parameters[0]);
+            case "onpackageend" or "onpackagedone" or "onpackagechange" when parameters.Count > 0: return Package("akOldPackage", parameters[0]);
             default: return null;
         }
     }
@@ -826,8 +919,18 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             switch (s)
             {
                 case Set set:
-                    sb.AppendLine(ind + Line(Assignment(set)));
+                {
+                    string assignment = Assignment(set);
+                    // "set timer to Say ...": Oblivion's Say gives the line's length at once; here it is known a moment
+                    // later, when the line begins (TMObState.SayTimed waits for it, up to 10 s). A timer other scripts
+                    // read (a global, a quest's variable) holds 10 meanwhile, or they take the line for over: the
+                    // opening went from stage 16 to 17 before the Emperor's "You... I've seen you" began, and his
+                    // greeting was cut off by it (seen in game 2026-11-13).
+                    if (assignment.Contains(".SayTimed(", StringComparison.Ordinal) && System.Text.RegularExpressions.Regex.Match(assignment, @"^(\w+)\.SetValue\(") is { Success: true } timer)
+                        sb.AppendLine(ind + $"{timer.Groups[1].Value}.SetValue(10.0)");
+                    sb.AppendLine(ind + Line(assignment));
                     break;
+                }
                 case If i:
                     for (int k = 0; k < i.Branches.Count; k++)
                     {
@@ -1149,6 +1252,12 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         return "PlayerRef";
     }
 
+    /// <summary>GetIsRace / GetPCIsRace: a stand-in race (ObPluginBuilder.RaceStandIns: Dremora, Golden Saint, Dark Seducer,
+    /// Sheogorath, the vampires) is its keyword on the converted actor (ObRaceKeywords: OBRace...), not the mortal Skyrim
+    /// race it wears, which Skyrim's own people have too; any other race is the race itself.</summary>
+    string IsRace(string actor, string race) =>
+        ObPluginBuilder.RaceStandIns.ContainsKey(race) ? $"{actor}.HasKeyword({Generated(ObPluginBuilder.RaceKeywordId(race), "Keyword")})" : $"{actor}.GetRace() == {FormProperty(race, "Race")}";
+
     string FormProperty(string editorId, string type)
     {
         string name = "f_" + Clean(editorId);
@@ -1217,7 +1326,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         {
             // quests and globals
             case "getstage": return R($"{Quest(c, 0)}.GetStage()", T.Int);
-            case "setstage": return R($"{Quest(c, 0)}.SetStage({ArgInt(c, 1)})", T.Bool);
+            case "setstage": return R($"{St()}.StageTo({Quest(c, 0)}, {ArgInt(c, 1)})", T.Bool);
             case "getstagedone": return R($"{Quest(c, 0)}.IsStageDone({ArgInt(c, 1)})", T.Bool);
             case "startquest": return R($"{Quest(c, 0)}.Start()", T.Bool);
             case "stopquest": return R($"{Quest(c, 0)}.Stop()", T.Void);
@@ -1324,16 +1433,18 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                     Gap("TrapUpdate: fTrapDeathPushBack in place of the push back on a killing hit (the CS wiki's guess)");
                 return R("__trapAt = Utility.GetCurrentRealTime()", T.Void);
             // Skyrim's own Enable/DisableLinkedPathPoints only return (SkyrimSE.exe 1.7.104: "mov al, 1; ret"): it has no path
-            // grid for them to act on.
+            // grid for them to act on. The reference's linked points are navmesh-cutting boxes here (ObWorld.PlacePathCuts),
+            // which TMObState.LinkedPathPoints turns on to switch the points off.
             case "disablelinkedpathpoints" or "enablelinkedpathpoints":
-                return Nothing($"; {info?.Name ?? c.Function}: Skyrim's own does nothing (no path grid)");
+                return R($"TMObState.LinkedPathPoints({self()}, {Generated("OBPathCut", "Keyword")}, {(fn == "enablelinkedpathpoints" ? "True" : "False")})", T.Void);
             case "setownership":
                 if (c.Args.Count == 0) return R($"{self()}.SetActorOwner({PlayerRef()}.GetActorBase())", T.Void);
                 return R(c.Args[0] is Name on && world.Find(on.Id)?.PapyrusType == "Faction" ? $"{self()}.SetFactionOwner({FormProperty(on.Id, "Faction")})" : $"{self()}.SetActorOwner({Paren(Arg(c, 0).Text)} as ActorBase)", T.Void);
-            case "disableplayercontrols": return R("Game.DisablePlayerControls()", T.Void);
-            case "enableplayercontrols": return R("Game.EnablePlayerControls()", T.Void);
+            // Oblivion's: off until EnablePlayerControls or a conversation (TMObState.DisableControls).
+            case "disableplayercontrols": return R("TMObState.DisableControls()", T.Void);
+            case "enableplayercontrols": return R("TMObState.EnableControls()", T.Void);
             case "getdeadcount": return R($"({Paren(Arg(c, 0).Text)} as ActorBase).GetDeadCount()", T.Int);
-            case "getdetectionlevel": return Approx("0 or 3", R($"({AsActor(Arg(c, 0))}.IsDetectedBy({actorSelf()}) as Int) * 3", T.Int));
+            case "getdetectionlevel": return R($"TMObState.DetectionLevel({actorSelf()}, {AsActor(Arg(c, 0))})", T.Int);
             case "forceweather": return R($"({Paren(Arg(c, 0).Text)} as Weather).ForceActive(true)", T.Void);
             case "setweather": return R($"({Paren(Arg(c, 0).Text)} as Weather).SetActive(true)", T.Void);
             case "releaseweatheroverride": return R("Weather.ReleaseOverride()", T.Void);
@@ -1360,7 +1471,12 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "isincombat" or "getcombattarget" when canonical == "isincombat": return R($"{actorSelf()}.IsInCombat()", T.Bool);
             case "getcombattarget": return R($"{actorSelf()}.GetCombatTarget()", T.Actor);
             case "evaluatepackage" or "evp": return R($"{actorSelf()}.EvaluatePackage()", T.Void);
-            case "getiscurrentpackage": return R($"{actorSelf()}.GetCurrentPackage() == {Arg(c, 0).Text}", T.Bool);
+            // Either copy of the package: the actor runs its own list's (ObScheduledPackage), the script names the other.
+            case "getiscurrentpackage":
+            {
+                string actor = actorSelf();
+                return R($"({actor}.GetCurrentPackage() == {Arg(c, 0).Text} || {actor}.GetCurrentPackage() == {ScheduledPackage(Word(c, 0))})", T.Bool);
+            }
             case "getinfaction": return R($"{actorSelf()}.IsInFaction({FormProperty(Word(c, 0), "Faction")})", T.Bool);
             case "getfactionrank": return R($"{actorSelf()}.GetFactionRank({FormProperty(Word(c, 0), "Faction")})", T.Int);
             case "setfactionrank": return R($"{actorSelf()}.SetFactionRank({FormProperty(Word(c, 0), "Faction")}, {ArgInt(c, 1)})", T.Void);
@@ -1378,7 +1494,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "getunconscious": return R($"{actorSelf()}.IsUnconscious()", T.Bool);
             case "getweaponanimtype": return R($"TMObState.WeaponAnimType({actorSelf()})", T.Int);
             case "isweaponout": return R($"{actorSelf()}.IsWeaponDrawn()", T.Bool);
-            case "getisrace": return R($"{actorSelf()}.GetRace() == {FormProperty(Word(c, 0), "Race")}", T.Bool);
+            case "getisrace": return R(IsRace(actorSelf(), Word(c, 0)), T.Bool);
             case "getissex": return R($"{actorSelf()}.GetActorBase().GetSex() == {(Word(c, 0).StartsWith("F", StringComparison.OrdinalIgnoreCase) ? 1 : 0)}", T.Bool);
             case "getlevel": return R($"{actorSelf()}.GetLevel()", T.Int);
             // Disposition towards the player (Skyrim.Disposition: Variable09 holds it minus 50, kept within 0-100).
@@ -1438,7 +1554,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "isininterior": return R($"{self()}.IsInInterior()", T.Bool);
             case "israining": return R("Weather.GetCurrentWeather().GetClassification() == 2", T.Bool);
             case "issnowing": return R("Weather.GetCurrentWeather().GetClassification() == 3", T.Bool);
-            case "getpcisrace": return R($"{PlayerRef()}.GetRace() == {FormProperty(Word(c, 0), "Race")}", T.Bool);
+            case "getpcisrace": return R(IsRace(PlayerRef(), Word(c, 0)), T.Bool);
             case "getpcissex": return R($"{PlayerRef()}.GetActorBase().GetSex() == {(Word(c, 0).StartsWith("F", StringComparison.OrdinalIgnoreCase) ? 1 : 0)}", T.Bool);
             case "resethealth": return R($"{actorSelf()}.RestoreActorValue(\"Health\", 100000.0)", T.Void);
             case "clearownership": return R($"{self()}.SetActorOwner(None)", T.Void);
@@ -1448,12 +1564,25 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             // actor values
             // An attribute or skill: Oblivion's own (TMObState.GetStat: the actor's Oblivion value, the player's where it
             // lives); any other actor value Skyrim's of the same meaning.
+            // Oblivion's "vampirism" actor value: the VAMP magnitude of the Vampirism ability on the player (25..100), kept
+            // by TMObState for the stage checks of VampireScript (TMObVampirism); setting it is the ability's, not a script's.
+            case "getactorvalue" or "getav" or "getbaseactorvalue" or "getbaseav" when Word(c, 0).Equals("vampirism", StringComparison.OrdinalIgnoreCase):
+                return R($"TMObState.VampirismOf({actorSelf()})", T.Float);
+            case "setactorvalue" or "setav" or "forceactorvalue" or "forceav" or "modactorvalue" or "modav" when Word(c, 0).Equals("vampirism", StringComparison.OrdinalIgnoreCase):
+                return Nothing("; SetAV Vampirism: the stage is the Vampirism ability's own effect (TMObVampirism)");
             case "getactorvalue" or "getav" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var gs: return R($"{St()}.GetStat({actorSelf()}, {gs})", T.Float);
             case "getbaseactorvalue" or "getbaseav" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var bs: return R($"{St()}.GetStat({actorSelf()}, {bs}, True)", T.Float);
             case "setactorvalue" or "setav" or "forceactorvalue" or "forceav" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var ss:
                 return AiStatGap(ss, R($"{St()}.SetStat({actorSelf()}, {ss}, {ArgNum(c, 1)})", T.Void));
             case "modactorvalue" or "modav" when ObPluginBuilder.StatIndex(Word(c, 0)) is >= 0 and var ms:
                 return AiStatGap(ms, R($"{St()}.ModStat({actorSelf()}, {ms}, {ArgNum(c, 1)})", T.Void));
+            // Encumbrance: Oblivion's value is what the actor carries and its base what they can carry (MQ01: "trigger
+            // encumbrance tutorial when player's encumbrance gets above base encumbrance"). Both read as Skyrim's
+            // CarryWeight, the tutorial's stage 75 was set at the start of the opening (seen 2026-11-12).
+            case "getactorvalue" or "getav" when Word(c, 0).Equals("encumbrance", StringComparison.OrdinalIgnoreCase):
+                return R($"{actorSelf()}.GetActorValue(\"InventoryWeight\")", T.Float);
+            case "getbaseactorvalue" or "getbaseav" when Word(c, 0).Equals("encumbrance", StringComparison.OrdinalIgnoreCase):
+                return R($"{actorSelf()}.GetActorValue(\"CarryWeight\")", T.Float);
             case "getactorvalue" or "getav": return R($"{actorSelf()}.GetActorValue(\"{AVg(Word(c, 0))}\")", T.Float);
             case "getbaseactorvalue" or "getbaseav": return R($"{actorSelf()}.GetBaseActorValue(\"{AVg(Word(c, 0))}\")", T.Float);
             case "setactorvalue" or "setav": return R($"{actorSelf()}.SetActorValue(\"{AVg(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
@@ -1461,7 +1590,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             case "forceactorvalue" or "forceav": return R($"{actorSelf()}.ForceActorValue(\"{AVg(Word(c, 0))}\", {ArgNum(c, 1)})", T.Void);
             // sound, visuals, animation
             case "playsound" or "playsound3d": return R($"{FormProperty(Word(c, 0), "Sound")}.Play({self()})", T.Int);
-            case "playmagicshadervisuals" or "pms": return R($"{FormProperty(Word(c, 0), "EffectShader")}.Play({self()}, {ArgNum(c, 1, "-1.0")})", T.Void);
+            case "playmagicshadervisuals" or "pms": return R($"TMObState.PlayShader({FormProperty(Word(c, 0), "EffectShader")}, {self()}, {ArgNum(c, 1, "-1.0")})", T.Void);
             case "stopmagicshadervisuals" or "sms": return R($"{FormProperty(Word(c, 0), "EffectShader")}.Stop({self()})", T.Void);
             // PickIdle: the actor picks a new idle now (after a script changed what idles test): Skyrim's own PickIdle, from
             // the classic script table (TamrielMergeNative), on Skyrim's idle tree, which plays Oblivion's people's idles.
@@ -1488,6 +1617,10 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
             // Oblivion's numbering (0 Sundas .. 6 Loredas) of the day Skyrim's calendar shows: a new game begins on Sundas
             // (UESP Skyrim:Calendar), a day a whole game day.
             case "getdayofweek": return R("((Utility.GetCurrentGameTime() as Int) % 7)", T.Int);
+            // Oblivion's own value (a global the build fills from the plugins' GMST: ObCrime.ScriptGlobal); a name held in
+            // a variable has no value to look up.
+            case "getgamesetting" when Word(c, 0).Length > 0 && System.Text.RegularExpressions.Regex.IsMatch(Word(c, 0), "^[A-Za-z0-9_]+$"):
+                return R($"{Generated("TMOB_GMST_" + Word(c, 0), "GlobalVariable")}.GetValue()", T.Float);
             case "getgamesetting": return Approx("Skyrim's setting of that name", R($"Game.GetGameSettingFloat(\"{Word(c, 0)}\")", T.Float));
             // OBSE (onto SKSE)
             case "iskeypressed" or "iskeypressed2" or "iskeypressed3": return R($"Input.IsKeyPressed({ArgInt(c, 0)})", T.Bool);
@@ -1652,7 +1785,7 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
                 return R($"TMObState.PositionAt({self()}, {Anchor(Word(c, 4))}, {ArgNum(c, 0)}, {ArgNum(c, 1)}, {ArgNum(c, 2)}, {ArgNum(c, 3)})", T.Void);
             // Visuals of a magic effect by its Oblivion code: the converted effect shader for it.
             case "playmagiceffectvisuals" or "pme":
-                return R($"{EffectVisual(Word(c, 0))}.Play({self()}, {(c.Args.Count > 1 ? Convert(Arg(c, 1), T.Float) : "-1.0")})", T.Void);
+                return R($"TMObState.PlayShader({EffectVisual(Word(c, 0))}, {self()}, {(c.Args.Count > 1 ? Convert(Arg(c, 1), T.Float) : "-1.0")})", T.Void);
             case "stopmagiceffectvisuals" or "sme": return R($"{EffectVisual(Word(c, 0))}.Stop({self()})", T.Void);
             case "hasmagiceffect": return R($"TMObState.HasEffectIn({actorSelf()}, {EffectList(Word(c, 0))})", T.Bool);
             // nothing to do in Skyrim: hints and switches for Oblivion's engine
@@ -1693,6 +1826,13 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
     {
         string prop = "m_" + Clean(editorId);
         properties.TryAdd(prop, new Property(prop, type, "@mod:" + editorId));
+        return prop;
+    }
+    /// <summary>A package's copy on the actors' own lists, the one they run (the script names the other copy).</summary>
+    string ScheduledPackage(string package)
+    {
+        string prop = "sp_" + Clean(package);
+        properties.TryAdd(prop, new Property(prop, "Package", "@sched:" + package));
         return prop;
     }
     /// <summary>A marker in the named cell or worldspace (PositionCell / PositionWorld move there first).</summary>
@@ -1839,6 +1979,9 @@ public sealed class ObPapyrus(ObPapyrus.IWorld world, ObFunctions functions)
         "illusion" => "Illusion",
         "mysticism" => "Alteration",
         "restoration" => "Restoration",
+        // What an actor can carry (the opening's MQ01 asked for it every tick: 36 "Actor value encumbrance does not exist"
+        // in the game's log, 2026-11-09).
+        "encumbrance" => "CarryWeight",
         _ => av,
     };
 

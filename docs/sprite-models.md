@@ -44,8 +44,14 @@ the GUI's "Missing models" option):
 4. **GPU care**: only with `--gpu` (else CPU, hours); between sprites the script reads nvidia-smi and waits while the
    card is above 78 C. About 4-5 s a model on an RTX 5060 (2026-10-12, user: "its slow too": the painting drawn on
    the GPU instead of a triangle at a time in Python, the edge colour fill by a distance transform, TripoSR's density
-   queried in chunks of 262144 points, not 4096; it was 10-11 s). Finished sprites are skipped, so a run resumes; ones made by an older pipeline
+   queried in chunks of 262144 points, not 4096; it was 10-11 s). Finished sprites are skipped, so a run resumes; finished plants and trees painted by an older cutout rule
+   (`reprojected`) are painted again from their own `texture_ai.png` (made again without it); ones made by an older pipeline
    (`pipeline.txt`, now 5) are made again.
+
+The release ships each model's `pipeline.txt` and `reprojected` with it (2026-11-03: without them the model maker took
+all 628 shipped models for unfinished ones and made them again); the 280 plants and trees were repainted by the facing
+cutout rule then (the see-through share of a tree's surface: median 18.1% before, 9.3% after; plants 14.7% to 7.1%).
+An output converted before that is made again: its `models.json` records each model's paint (`Paint`).
 
 The model maker lives in its own environment (`tools/model3d/.venv`, made by `setup`: PyTorch CUDA or CPU, omegaconf,
 einops, transformers, trimesh, PyMCubes, xatlas, moderngl, imageio, spandrel, fast_simplification, scipy; PyTorch and
@@ -67,3 +73,29 @@ interiors and streets, turned at random; sprites without a made model keep their
 
 Dev aids: `sprite-models --export`, `--import DIR` (the finished models into a scratch plugin), and
 `tools/model3d/preview.py DIR` (front, side and top views of each model next to its input).
+
+## Realistic plants in their place (2026-11-04)
+
+User: "the foliage is ugly ... they need realism and redone in the same way they look"; "find free models online and
+use skyrims if cant find any"; "these free models need to be part of the tool". Daggerfall's tree and plant sprites
+named in `tools/foliage/mapping.json` (74, matched by eye: palms to palms, broad crowns to oaks, elms, maple, conifers
+to pines, spruces, firs and junipers, swamp trees to willows, ferns, reeds, cattails, yucca, banana and tropical plants)
+are realistic models from Sketchfab (CC-BY 4.0, `tools/foliage/CREDITS.md`, 28 models by 7 authors), not models made
+from the sprites (Skyrim/Meshes/FoliageModels, called by SpriteModelImporter.MakeFiles):
+
+- Downloaded with a Sketchfab API token (the user's, used once and kept nowhere) as glTF zips into
+  `tools/foliage/sketchfab` (not shipped), each one's licence read from the API first (only CC-BY and CC0 taken), its
+  name, author and page in `sketchfab/credits.json`; `credits.py` writes CREDITS.md for the models shipped.
+- `tools/foliage/export.py` (Blender, `blender -b -P export.py -- <zip> <out>`) splits a file into single plants: a
+  backdrop sphere round everything and ground discs dropped, each mesh broken into its connected pieces, pieces whose
+  footprints overlap grouped, groups with two or more trunks (standing pieces in the bottom tenth, taller than wide)
+  split by the nearest trunk, ground pieces off every trunk (rocks) dropped; each plant to `models/<uid>/<n>/` as an
+  OBJ and PNGs per material (textures at most 1024 px), `plant.json` (parts, cut-out where the colour texture has
+  see-through pixels) and a thumbnail.
+- In the conversion each mapped sprite's static gets the plant, as tall as the sprite stands in Daggerfall and no wider
+  than a quarter more than it (shrunk whole), its leaves alpha-tested and two-sided, colour as BC3/BC1 DDS with mips,
+  normal maps turned from glTF's (OpenGL) to Skyrim's (green flipped), trees and plants 150 or more tall on a trunk
+  column. The output's models.json records each sprite's plant (`Foliage`): a changed mapping is imported anew.
+- Kept as they were: Daggerfall's fantasy plants (bulb plants, blue pods, coiled stalks), the winter sets (505, 507,
+  509, 511: snow on every branch), crops, potted plants, flowers and mushrooms (no free counterpart), and for now its
+  dead trees and saguaros (the free dead trees came untextured or in leaf, the saguaro without arms).

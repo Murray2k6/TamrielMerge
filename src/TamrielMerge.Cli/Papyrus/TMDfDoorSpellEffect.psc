@@ -9,11 +9,15 @@ Float Property Chance = 100.0 Auto
 {Daggerfall's chance for Open at the reference caster level.}
 
 Event OnEffectStart(Actor akTarget, Actor akCaster)
-  ObjectReference target = Game.FindClosestReferenceOfAnyTypeInListFromRef(DoorBases, akCaster, Reach)
+  ; A Daggerfall door (its own model, TMDfDoor) first; else one of Skyrim's standing in for one (older builds).
+  ObjectReference target = TMDfDoor.Nearest(akCaster, Reach)
+  If !target
+    target = Game.FindClosestReferenceOfAnyTypeInListFromRef(DoorBases, akCaster, Reach)
+  EndIf
   If !target
     Debug.Notification("There is no target near enough.")
   ElseIf LockDoor
-    target.SetOpen(False)
+    TMDfDoor.SetDoor(target, False)
     target.Lock(True)
     target.SetLockLevel(100)
   ElseIf !target.IsLocked()
@@ -22,7 +26,7 @@ Event OnEffectStart(Actor akTarget, Actor akCaster)
     Debug.Notification("This lock cannot be opened by magic.")
   ElseIf Utility.RandomFloat(0.0, 100.0) < Chance
     target.Lock(False)
-    target.SetOpen(True)
+    TMDfDoor.SetDoor(target, True)
   Else
     Debug.Notification("The spell failed to open the lock.")
   EndIf

@@ -19,6 +19,10 @@ public sealed record GameLevelling
 
     /// <summary>The skills a class can name: Skyrim's eighteen (actor value names) and the progression's own
     /// (<see cref="ProgressionSkills"/> ids). Each game's skills map to these.</summary>
+    /// <summary>A Skyrim skill's actor value as Papyrus names it (GetActorValue, GetBaseActorValue): Mutagen's Archery is
+    /// Papyrus's Marksman, Speech its Speechcraft; the others are the same.</summary>
+    public static string PapyrusActorValue(string skill) => skill switch { "Archery" => "Marksman", "Speech" => "Speechcraft", _ => skill };
+
     public static readonly string[] SkyrimSkills = ["OneHanded", "TwoHanded", "Archery", "Block", "Smithing", "HeavyArmor", "LightArmor", "Pickpocket",
         "Lockpicking", "Sneak", "Alchemy", "Speech", "Alteration", "Conjuration", "Destruction", "Enchanting", "Illusion", "Restoration"];
 

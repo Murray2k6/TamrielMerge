@@ -114,6 +114,11 @@ public sealed class TownTextures(string arena2, DfTextureExport export)
             for (int tx = 0; tx < 16; tx++)
             {
                 byte t = tb.GroundTiles[tx, 15 - tz];
+                // Over 55 (0xFF): no tile, "terrain blend space" (Daggerfall Unity TerrainHelper: ground textures are
+                // 0-55), the land as it is round the town: its grass (record 2, the land's own grass texture), unturned.
+                // Until 2026-11-04 it was record 63 clamped to 55, one transition tile repeated over the city-wall blocks
+                // (2,803 of WALLAA's tiles, 5,383 in all; user: "patches of textures instead of blending with it").
+                if ((t & 0x3F) > 55) t = 2;
                 var (path, w, h) = export.Ensure(terrain, t & 0x3F);
                 var tex = new Tex(path, DfTextureExport.FlatNormal, false, w, h);
                 float x0 = tx * tile, y0 = tz * tile;

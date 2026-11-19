@@ -81,6 +81,7 @@ public sealed class ObBsa
     /// <summary>A read-only window of a stream, so the decompressor stops at the file's end.</summary>
     sealed class SubStream(Stream inner, long length) : Stream
     {
+        readonly long size = length;
         long left = length;
         public override int Read(byte[] buffer, int offset, int count)
         {
@@ -91,8 +92,8 @@ public sealed class ObBsa
         public override bool CanRead => true;
         public override bool CanSeek => false;
         public override bool CanWrite => false;
-        public override long Length => length;
-        public override long Position { get => length - left; set => throw new NotSupportedException(); }
+        public override long Length => size;
+        public override long Position { get => size - left; set => throw new NotSupportedException(); }
         public override void Flush() { }
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();

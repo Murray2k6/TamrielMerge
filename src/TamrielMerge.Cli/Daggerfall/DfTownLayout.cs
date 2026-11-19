@@ -123,6 +123,58 @@ public static class DfTownLayout
     public static IEnumerable<DoorSurface> DungeonEntrances(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models) =>
         Surfaces(block, models, p => p.TextureArchive % 100 == 56 || p.TextureArchive == 331 && p.TextureRecord > 0);
 
+    /// <summary>The graveyard block with Daggerfall's crypt (model 41619, its way in a family-56 entrance surface).</summary>
+    public const string CryptBlock = "GRVEAS00.RMB";
+    public const uint CryptModel = 41619;
+
+    /// <summary>
+    /// A block given Daggerfall's graveyard crypt (<paramref name="crypt"/>: GRVEAS00's model 41619 as that block places
+    /// it) for a dungeon whose blocks have no entrance (<see cref="DungeonEntrances"/>): Daggerfall's graveyard blocks
+    /// GRVEAS10 and GRVEAS36, of 28 cemeteries, hold only their walls, plinths and gravestones (72 and 80 units tall), and
+    /// Daggerfall Unity, which takes a way in only from an entrance texture, leaves those dungeons closed. The crypt goes
+    /// at the clear spot nearest the block's middle (no model's faces, nor a flat, within its footprint and a margin;
+    /// on a 64-unit grid), at the height and turn GRVEAS00 gives it; null when there is no clear spot.
+    /// </summary>
+    public static DfDungeonBlock? WithCrypt(DfDungeonBlock block, DfRdbObject crypt, IReadOnlyDictionary<uint, DfModel> models)
+    {
+        if (!models.TryGetValue(crypt.ModelId, out var cryptModel)) return null;
+        // The crypt's footprint about its own origin, turned as placed.
+        var turn = DfDungeon.ObjectTransform(crypt with { Position = Vector3.Zero }, Vector3.Zero);
+        var own = cryptModel.Polygons.SelectMany(p => p.Points).Select(v => Vector3.Transform(v, turn)).ToList();
+        const float margin = 48;
+        float minX = own.Min(v => v.X) - margin, maxX = own.Max(v => v.X) + margin, minZ = own.Min(v => v.Z) - margin, maxZ = own.Max(v => v.Z) + margin;
+        // What stands in the block: its models' faces sampled along their edges every 32 units, and its flats.
+        var taken = new List<Vector2>();
+        foreach (var o in block.Objects)
+        {
+            if (o.Type == DfRdbObjectType.Flat) { taken.Add(new Vector2(o.Position.X, o.Position.Z)); continue; }
+            if (o.Type != DfRdbObjectType.Model || !models.TryGetValue(o.ModelId, out var model)) continue;
+            var m = DfDungeon.ObjectTransform(o, Vector3.Zero);
+            foreach (var p in model.Polygons)
+                for (int i = 0; i < p.Points.Length; i++)
+                {
+                    var a = Vector3.Transform(p.Points[i], m);
+                    var b = Vector3.Transform(p.Points[(i + 1) % p.Points.Length], m);
+                    int steps = Math.Max(1, (int)(Vector3.Distance(a, b) / 32));
+                    for (int s = 0; s <= steps; s++) { var q = Vector3.Lerp(a, b, s / (float)steps); taken.Add(new Vector2(q.X, q.Z)); }
+                }
+        }
+        const float side = DfTownBlock.Side, mid = DfTownBlock.Side / 2;
+        Vector2? best = null;
+        float bestD = float.MaxValue;
+        for (float z = -minZ; z <= side - maxZ; z += 64)
+            for (float x = -minX; x <= side - maxX; x += 64)
+            {
+                float d = (x - mid) * (x - mid) + (z - mid) * (z - mid);
+                if (d >= bestD) continue;
+                if (taken.Any(t => t.X >= x + minX && t.X <= x + maxX && t.Y >= z + minZ && t.Y <= z + maxZ)) continue;
+                bestD = d;
+                best = new Vector2(x, z);
+            }
+        if (best is not { } at) return null;
+        return new DfDungeonBlock { Name = block.Name + "_Crypt", Objects = [.. block.Objects, crypt with { Position = new Vector3(at.X, crypt.Position.Y, at.Y) }] };
+    }
+
     /// <summary>The building door surfaces (texture family 74) on a block's models, in block space.</summary>
     public static IEnumerable<DoorSurface> Doors(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models) =>
         Surfaces(block, models, p => p.TextureArchive % 100 == BuildingDoorArchive);

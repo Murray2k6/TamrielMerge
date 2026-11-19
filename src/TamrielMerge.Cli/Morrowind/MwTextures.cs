@@ -15,6 +15,31 @@ public sealed class MwTextures(Tes3Data data, string modOutDir)
     public const string FlatNormal = @"textures\tamrielmerge\mw\flat_n.dds";
 
     readonly Dictionary<string, (string? Path, bool Alpha)> done = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> cutouts = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether a converted texture's alpha is a cut-out, a silhouette: over a tenth of it clear (under 24), over a fifth
+    /// opaque (232 and up), under 40% in between (a soft edge: the Bitter Coast's leaves, tx_bc_leaves_02, are 44.6%
+    /// clear, 32.1% opaque, 23.3% in between; glass and smoke are mostly in between). Morrowind's leaves are (2026-11-05,
+    /// user: "morrowind trees look tacky": flora_bc_tree_01's leaf cards were blended, flags 237, with no depth write,
+    /// so they sorted wrongly and showed through each other); a cut-out is drawn as Skyrim draws its foliage,
+    /// alpha-tested with depth writes.
+    /// </summary>
+    public bool IsCutout(string? rel) => rel is not null && cutouts.Contains(rel);
+
+    static bool Cutout(uint[] px)
+    {
+        if (px.Length == 0) return false;
+        int clear = 0, between = 0;
+        foreach (var c in px)
+        {
+            uint a = c >> 24;
+            if (a < 24) clear++;
+            else if (a < 232) between++;
+        }
+        int opaque = px.Length - clear - between;
+        return clear > px.Length * 0.10 && opaque > px.Length * 0.20 && between < px.Length * 0.40;
+    }
     public int Converted { get; private set; }
     public List<string> Missing { get; } = [];
 
@@ -22,36 +47,127 @@ public sealed class MwTextures(Tes3Data data, string modOutDir)
     /// Null path when the texture can't be found.</summary>
     public (string? Path, bool Alpha) Ensure(string name)
     {
-        string key = Path.ChangeExtension(Tes3Bsa.Normalize(name).Replace(@"textures\", ""), null);
+        string key = KeyOf(name);
         if (done.TryGetValue(key, out var hit)) return hit;
         EnsureFlatNormal();
-        string? source = new[] { ".dds", Path.GetExtension(name), ".tga", ".bmp" }
-            .Select(ext => @"textures\" + key + ext).FirstOrDefault(data.Exists);
-        if (source is null) { Missing.Add(name); return done[key] = (null, false); }
+        return Keep(name, key, Make(name, key));
+    }
+
+    static string KeyOf(string name) => Path.ChangeExtension(Tes3Bsa.Normalize(name).Replace(@"textures\", ""), null);
+
+    /// <summary>Land textures written without shine (<see cref="EnsureLand"/>).</summary>
+    public int LandMatte { get; private set; }
+    readonly object landGate = new();
+
+    /// <summary>
+    /// A texture for the land ({name}_land.dds): the same picture with no alpha. Skyrim's land takes a land texture's
+    /// alpha as its shine (its own carry about 60 to 75 of 255, measured 2026-11-10); Morrowind's land textures are
+    /// opaque, which reads as 255, the land as shiny as it can be (Daggerfall's and Redguard's were made matte on
+    /// 2026-11-10, Morrowind's and Oblivion's left open until 2026-11-12). The texture as models use it when it can't
+    /// be read back.
+    /// </summary>
+    public string? EnsureLand(string name) => Ensure(name).Path is { } path ? MatteLand(modOutDir, path, () => LandMatte++, landGate) : null;
+
+    /// <summary>The land copy of a converted texture (data-relative paths), made once.</summary>
+    public static string MatteLand(string modOutDir, string rel, Action made, object gate)
+    {
+        string land = Path.ChangeExtension(rel, null) + "_land.dds";
+        string full = Path.Combine(modOutDir, land);
+        lock (gate)
+        {
+            if (File.Exists(full)) return land;
+            if (Util.DdsImage.Decode(File.ReadAllBytes(Path.Combine(modOutDir, rel))) is not { } img) return rel;
+            var matte = new uint[img.Px.Length];
+            for (int i = 0; i < matte.Length; i++) matte[i] = img.Px[i] & 0x00FFFFFFu;
+            WriteBcDds(full, matte, img.W, img.H, true);
+            made();
+        }
+        return land;
+    }
+
+    (string? Path, bool Alpha) Keep(string name, string key, (string? Rel, bool Alpha, bool Cutout) made)
+    {
+        if (made.Rel is null) { Missing.Add(name); return done[key] = (null, false); }
+        if (made.Cutout) cutouts.Add(made.Rel);
+        Converted++;
+        return done[key] = (made.Rel, made.Alpha);
+    }
+
+    /// <summary>The texture converted and written, touching nothing shared (the game's files are read one thread at a
+    /// time): its path (null when the game hasn't it), whether it has alpha and whether that is a cut-out.</summary>
+    (string? Rel, bool Alpha, bool Cutout) Make(string name, string key)
+    {
+        string? source;
+        byte[] bytes;
+        lock (data)
+        {
+            source = new[] { ".dds", Path.GetExtension(name), ".tga", ".bmp" }
+                .Select(ext => @"textures\" + key + ext).FirstOrDefault(data.Exists);
+            if (source is null) return (null, false, false);
+            bytes = data.Read(source)!;
+        }
         string rel = $@"{OutFolder}\{key}.dds";
         string full = Path.Combine(modOutDir, rel);
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        var bytes = data.Read(source)!;
-        bool alpha;
+        bool alpha, cutout = false;
         // An upscaled version (tools/upscale, from mw-upscale-export) replaces the original when there is one.
         if (UpscaleCache is { } cache && ReadRaw(Path.Combine(cache, FlatName(key) + ".rgba")) is { } up)
         {
             alpha = up.Px.Any(c => c >> 24 != 0xFF);
+            cutout = alpha && Cutout(up.Px);
             WriteBcDds(full, up.Px, up.W, up.H, alpha);
         }
         else if (source.EndsWith(".dds"))
         {
             File.WriteAllBytes(full, bytes);
             alpha = DdsHasAlpha(bytes);
+            cutout = alpha && Util.DdsImage.Decode(bytes) is { } img && Cutout(img.Px);
         }
         else
         {
             var (px, w, h) = source.EndsWith(".tga") ? DecodeTga(bytes) : DecodeBmp(bytes);
             alpha = px.Any(c => c >> 24 != 0xFF);
+            cutout = alpha && Cutout(px);
             WriteBcDds(full, px, w, h, alpha);
         }
-        Converted++;
-        return done[key] = (rel, alpha);
+        return (rel, alpha, cutout);
+    }
+
+    /// <summary>
+    /// Textures converted ahead on every core, with their normal maps, so the models that use them find them made
+    /// (2026-11-10: a running build's one busy thread was in WriteBcDds and ReadRaw under MwMeshConverter.Write, each
+    /// model's textures compressed on its first use while the interiors were placed, one at a time). Returns how many
+    /// were made.
+    /// </summary>
+    public int Prepare(IEnumerable<string> names)
+    {
+        var todo = names.Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => (Name: n, Key: KeyOf(n)))
+            .DistinctBy(t => t.Key, StringComparer.OrdinalIgnoreCase).Where(t => !done.ContainsKey(t.Key)).ToList();
+        if (todo.Count == 0) return 0;
+        EnsureFlatNormal();
+        var made = new (string? Rel, bool Alpha, bool Cutout)[todo.Count];
+        var normal = new string?[todo.Count];
+        Parallel.For(0, todo.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 2) }, i =>
+        {
+            try
+            {
+                made[i] = Make(todo[i].Name, todo[i].Key);
+                if (made[i].Rel is { } rel) normal[i] = MakeNormal(rel);
+            }
+            catch (Exception e) when (e is IOException or InvalidDataException or IndexOutOfRangeException or ArgumentException)
+            {
+                // Left for the model's own first use, which reports it as before.
+                made[i] = (null, false, false); normal[i] = "?";
+            }
+        });
+        int n = 0;
+        for (int i = 0; i < todo.Count; i++)
+        {
+            if (normal[i] == "?") continue;
+            Keep(todo[i].Name, todo[i].Key, made[i]);
+            if (made[i].Rel is { } rel && normal[i] is { } nrm) { normals[rel] = nrm; n++; }
+        }
+        return n;
     }
 
     /// <summary>Folder of upscaled textures (&lt;flat name&gt;.rgba) to use instead of the originals, if set.</summary>
@@ -111,14 +227,19 @@ public sealed class MwTextures(Tes3Data data, string modOutDir)
     public string NormalFor(string diffuseRel)
     {
         if (normals.TryGetValue(diffuseRel, out var hit)) return hit;
+        return normals[diffuseRel] = MakeNormal(diffuseRel);
+    }
+
+    string MakeNormal(string diffuseRel)
+    {
         string rel = Path.ChangeExtension(diffuseRel, null) + "_n.dds";
         string full = Path.Combine(modOutDir, rel);
-        if (File.Exists(full)) return normals[diffuseRel] = rel;
+        if (File.Exists(full)) return rel;
         string source = Path.Combine(modOutDir, diffuseRel);
         if (!File.Exists(source) || Util.DdsImage.Decode(File.ReadAllBytes(source)) is not { } img || img.W < 8 || img.H < 8)
-            return normals[diffuseRel] = FlatNormal;
+            return FlatNormal;
         WriteNormalMap(img.Px, img.W, img.H, full);
-        return normals[diffuseRel] = rel;
+        return rel;
     }
 
     /// <summary>The relief normal map (see NormalFor) of a texture's pixels, written as a BC3 DDS.</summary>
@@ -285,7 +406,13 @@ public sealed class MwTextures(Tes3Data data, string modOutDir)
     public static void WriteBcDds(string path, uint[] px, int w, int h, bool alpha)
     {
         var levels = new List<(uint[] Px, int W, int H)> { (px, w, h) };
-        while (levels[^1].W > 1 || levels[^1].H > 1) levels.Add(Half(levels[^1]));
+        // A cut-out (leaves, grates) keeps its share of drawn texels in every smaller level: averaged down as it
+        // is, the alpha of a card of thin leaves settles over the test's 128 across its whole middle, and from a few
+        // paces a tree's leaves drew as solid sheets with holes in them (seen in game at Seyda Neen, 2026-11-10; user:
+        // "fix morrwinds trees"). Colours are averaged by their alpha, so the clear texels' black doesn't darken edges.
+        bool cut = alpha && Cutout(px);
+        float share = cut ? px.Count(c => c >> 24 >= 128) / (float)px.Length : 0;
+        while (levels[^1].W > 1 || levels[^1].H > 1) levels.Add(cut ? KeepCoverage(Half(levels[^1], byAlpha: true), share) : Half(levels[^1]));
         int blockBytes = alpha ? 16 : 8;
         using var bw = new BinaryWriter(File.Create(path));
         bw.Write(0x20534444u); bw.Write(124u);
@@ -309,20 +436,42 @@ public sealed class MwTextures(Tes3Data data, string modOutDir)
                 }
     }
 
-    static (uint[] Px, int W, int H) Half((uint[] Px, int W, int H) s)
+    /// <summary>The level with its alpha scaled so the share of texels at 128 and over is <paramref name="share"/>.</summary>
+    static (uint[] Px, int W, int H) KeepCoverage((uint[] Px, int W, int H) s, float share)
+    {
+        if (s.Px.Length < 16) return s;
+        var alphas = s.Px.Select(c => (int)(c >> 24)).OrderByDescending(a => a).ToArray();
+        // The alpha that should sit exactly on the test: the one with `share` of the texels at or over it.
+        int at = alphas[Math.Clamp((int)(share * alphas.Length), 0, alphas.Length - 1)];
+        if (at <= 0 || at == 128) return s;
+        float k = 128f / at;
+        var n = new uint[s.Px.Length];
+        for (int i = 0; i < n.Length; i++)
+        {
+            uint c = s.Px[i];
+            n[i] = (uint)Math.Min(255, (int)MathF.Round((c >> 24) * k)) << 24 | c & 0xFFFFFF;
+        }
+        return (n, s.W, s.H);
+    }
+
+    internal static (uint[] Px, int W, int H) Half((uint[] Px, int W, int H) s, bool byAlpha = false)
     {
         int nw = Math.Max(1, s.W / 2), nh = Math.Max(1, s.H / 2);
         var n = new uint[nw * nh];
         for (int y = 0; y < nh; y++)
             for (int x = 0; x < nw; x++)
             {
-                uint a = 0, r = 0, g = 0, b = 0;
+                uint a = 0, r = 0, g = 0, b = 0, wr = 0, wg = 0, wb = 0;
                 for (int k = 0; k < 4; k++)
                 {
                     uint c = s.Px[Math.Min(y * 2 + k / 2, s.H - 1) * s.W + Math.Min(x * 2 + k % 2, s.W - 1)];
-                    a += c >> 24; r += c >> 16 & 0xFF; g += c >> 8 & 0xFF; b += c & 0xFF;
+                    uint ca = c >> 24;
+                    a += ca; r += c >> 16 & 0xFF; g += c >> 8 & 0xFF; b += c & 0xFF;
+                    wr += (c >> 16 & 0xFF) * ca; wg += (c >> 8 & 0xFF) * ca; wb += (c & 0xFF) * ca;
                 }
-                n[y * nw + x] = (a / 4) << 24 | (r / 4) << 16 | (g / 4) << 8 | b / 4;
+                n[y * nw + x] = byAlpha && a > 0
+                    ? (a / 4) << 24 | (wr / a) << 16 | (wg / a) << 8 | wb / a
+                    : (a / 4) << 24 | (r / 4) << 16 | (g / 4) << 8 | b / 4;
             }
         return (n, nw, nh);
     }

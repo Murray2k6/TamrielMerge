@@ -45,7 +45,15 @@ Event OnUpdate()
   done = True
   Utility.Wait(2.0)
   Brennan.Enable()
-  Utility.Wait(1.5)
+  Utility.Wait(1.0)
+  ; He comes over from where Redguard brings him out (its cabin door) to Cyrus, as in Redguard's scene, and they talk
+  ; face to face (2026-11-10, in game: he appeared standing where he was placed and spoke from there).
+  Actor player = Game.GetPlayer()
+  If Brennan.GetDistance(player) > 200.0
+    Brennan.PathToReference(player, 0.4)
+  EndIf
+  Brennan.SetLookAt(player)
+  Utility.Wait(0.5)
   ; CYRUS! / CAPTAIN, GOOD TO SEE YOU BACK IN COMMAND. / AH... PLEASE CALL ME BRENNAN... / THAT SO, HM?
   BrennanSays(0)
   CyrusSays(0)
@@ -73,6 +81,7 @@ Event OnUpdate()
   Utility.Wait(4.0)
   ; LET US MOVE ON, BEFORE MORE SHOW UP.
   BrennanSays(3)
+  Brennan.ClearLookAt()
   Utility.Wait(1.5)
   Game.GetPlayer().MoveTo(Docks)
   Utility.Wait(2.0)

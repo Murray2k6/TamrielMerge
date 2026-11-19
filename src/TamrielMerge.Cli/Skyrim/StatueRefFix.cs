@@ -159,11 +159,11 @@ public static class StatueRefFix
         }
     }
 
-    /// <summary>"DFI" + style + RMB block + building (two digits) + R/B, as TownBuilder names shared interiors (a part's
-    /// copies end in "P" and the part's number after that).</summary>
+    /// <summary>"DFI" + style + RMB block + building (two digits) + R/B, as TownBuilder names shared interiors (Daggerfall
+    /// Towns.esm's end in "T"; older builds' per-part copies in "P" and the part's number).</summary>
     static (string Rmb, int Index)? Interior(string name)
     {
-        string rest = System.Text.RegularExpressions.Regex.Replace(name[3..], "(?<=[RB])P[0-9]+$", "");
+        string rest = System.Text.RegularExpressions.Regex.Replace(name[3..], "(?<=[RB])(P[0-9]+|T)$", "");
         foreach (var style in Enum.GetNames<TownStyle>())
             if (rest.StartsWith(style))
             {

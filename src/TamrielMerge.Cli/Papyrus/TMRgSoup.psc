@@ -47,8 +47,16 @@ Int Property SyncGroup = -1 Auto
 Int Property SyncMembers = 0 Auto
 {How many objects of that group take part (SyncWithGroup waits for them all).}
 Bool Property Hangable = False Auto
+; An indoor scene stands about Skyrim's origin, not where Redguard's numbers put it (RgPluginBuilder.CentreInteriors:
+; Skyrim moves what stands 30,000 units from an interior's origin): the move, added wherever a position is worked out
+; from Redguard's numbers and taken off where one is given back as them. 0 outdoors.
+Float Property OffX = 0.0 Auto
+Float Property OffY = 0.0 Auto
 {The player can hang from it (its script tests PlayerHanging): activating it from below (TMRgMove).}
 
+; No parameter or local here is named x, y or z: ObjectReference declares Float properties X, Y and Z (its position),
+; and the compiler resolves those names to the properties, not the parameter (2026-10-29: LineUpAt(x, z, ...) "type
+; mismatch", and every S_ function with such parameters read the object's position instead of its arguments).
 ObjectReference Property Who Auto Hidden
 
 Int pc0 = -2
@@ -67,6 +75,7 @@ Float due1 = 0.0
 Float _yield = 0.0
 Bool busy = False
 Bool loaded = False
+Int myLocks = 0
 Bool activated = False
 Float activatedAt = 0.0
 Bool hookOn = True
@@ -131,12 +140,54 @@ Event OnCellAttach()
   Begin()
 EndEvent
 
+; Hidden by a script (HideMe: disabled, its cell still there) is not unloaded: Redguard's script runs on whether its
+; object shows or not. The docks' arrival (ISLAND's BOATSTAR) locks the player out, hides its boat and lets the player
+; go 13 steps later: stopped by its own HideMe, it never did (2026-11-10, user: "you cant walk after opening"; the log
+; of every run had its lockout taken and none given back).
+; An unload that comes while the object is still with the player is not the place being left: its 3D was dropped and
+; made again, or the event is a late one from the moment of arriving (events are queued and can come after the
+; load's). In a new game the docks' BOATSTAR stopped for good eight seconds into its arrival that way, twice: its
+; variables showed loaded False, its next step due and never run, the boat in full view and the player locked out
+; (2026-11-12). Its cell could not tell: a persistent object of a worldspace is in the world's persistent cell, which
+; never counts as attached.
+Bool Function StillHere()
+  If Is3DLoaded()
+    Return True
+  EndIf
+  ; A script holding the player locked out runs to its end wherever it stands. The docks' BOATSTAR is a marker out
+  ; at sea, 13,425 units from the player on the quay (read in game, 2026-11-12): past any distance limit, it stopped
+  ; with the lockout held and the player could never move again.
+  If myLocks > 0
+    If RG.LockedOut()
+      Return True
+    EndIf
+    ; A map change let every lockout go.
+    myLocks = 0
+  EndIf
+  Actor p = Game.GetPlayer()
+  Cell pc = p.GetParentCell()
+  Cell c = GetParentCell()
+  If pc && pc.IsInterior()
+    Return c == pc
+  EndIf
+  If c && c.IsInterior()
+    Return False
+  EndIf
+  Return GetWorldSpace() == p.GetWorldSpace() && p.GetDistance(Self) < 10000.0
+EndFunction
+
 Event OnUnload()
+  If StillHere()
+    Return
+  EndIf
   loaded = Shell
   AmbientRun()
 EndEvent
 
 Event OnCellDetach()
+  If StillHere()
+    Return
+  EndIf
   loaded = Shell
   AmbientRun()
 EndEvent
@@ -145,7 +196,19 @@ Function Begin()
   Setup()
   If !loaded && !killed
     loaded = True
-    RegisterForSingleUpdate(Utility.RandomFloat(0.1, 0.4))
+    ; A place's objects all load in the same moment (Stros M'Kai: 440 scripts): those near the player start at once,
+    ; the rest over the next seconds, so the first runs don't all stand in line together (Papyrus log, 2026-11-12:
+    ; 230 stacks waiting at once on arriving on the island).
+    Float first = Utility.RandomFloat(0.1, 0.4)
+    If !Shell
+      Float d = Game.GetPlayer().GetDistance(Self)
+      If d > 3072.0
+        first = Utility.RandomFloat(1.0, 6.0)
+      ElseIf d > 1024.0
+        first = Utility.RandomFloat(0.4, 2.0)
+      EndIf
+    EndIf
+    RegisterForSingleUpdate(first)
   EndIf
 EndFunction
 
@@ -181,8 +244,18 @@ Event OnUpdate()
   Float wait = 0.25
   If !Shell
     Float d = Game.GetPlayer().GetDistance(Self)
-    If d > 8192.0
+    If d > 8192.0 || d < 1.0
       wait = 5.0
+      If myLocks > 0
+        wait = 0.25
+      EndIf
+      ; Far off (or no distance to be had: another world): still in the loaded world? (An unload is ignored while the cell is attached, above: this is where
+      ; an object the player has really left stops.)
+      If !StillHere()
+        loaded = Shell
+        AmbientRun()
+        Return
+      EndIf
     ElseIf d > 3072.0
       wait = 2.0
     ElseIf d > 1024.0
@@ -635,11 +708,11 @@ Int Function GetField(ObjectReference r, Int field)
     Return 0
   EndIf
   If field == 1
-    Return ((r.GetPositionX() + 32768.0) * 256.0) as Int
+    Return ((r.GetPositionX() - OffX + 32768.0) * 256.0) as Int
   ElseIf field == 2
     Return (-r.GetPositionZ() * 256.0) as Int
   ElseIf field == 3
-    Return ((r.GetPositionY() + 32768.0) * 256.0) as Int
+    Return ((r.GetPositionY() - OffY + 32768.0) * 256.0) as Int
   ElseIf field == 4
     Return (r.GetAngleX() * 2048.0 / 360.0) as Int
   ElseIf field == 5
@@ -652,7 +725,11 @@ Int Function GetField(ObjectReference r, Int field)
     Actor a = r as Actor
     Return B(a && a.IsDead())
   ElseIf field == 9
+    ; torch_timer: the player's torch's seconds left (TMRgState); anyone else's torch burns while equipped.
     Actor p = r as Actor
+    If p == Game.GetPlayer()
+      Return RG.TorchTime()
+    EndIf
     If p && p.GetEquippedItemType(0) == 11
       Return 60
     EndIf
@@ -670,11 +747,11 @@ Function SetField(ObjectReference r, Int field, Int v)
     Float py = r.GetPositionY()
     Float pz = r.GetPositionZ()
     If field == 1
-      px = v / 256.0 - 32768.0
+      px = v / 256.0 - 32768.0 + OffX
     ElseIf field == 2
       pz = -v / 256.0
     Else
-      py = v / 256.0 - 32768.0
+      py = v / 256.0 - 32768.0 + OffY
     EndIf
     SetPos(r, px, py, pz)
   ElseIf field == 4
@@ -693,6 +770,10 @@ Function SetField(ObjectReference r, Int field, Int v)
     Actor a = r as Actor
     If a && v != 0
       a.Kill()
+    EndIf
+  ElseIf field == 9
+    If (r as Actor) == Game.GetPlayer()
+      RG.SetTorchTime(v)
     EndIf
   EndIf
 EndFunction
@@ -718,22 +799,22 @@ EndFunction
 
 ; SetPos from Redguard's numbers (pos.vx/vy/vz, 256ths) where the translator couldn't stretch them.
 Function SetPosRg(ObjectReference r, Int rx, Int ry, Int rz)
-  SetPos(r, rx / 256.0 - 32768.0, rz / 256.0 - 32768.0, -ry / 256.0)
+  SetPos(r, rx / 256.0 - 32768.0 + OffX, rz / 256.0 - 32768.0 + OffY, -ry / 256.0)
 EndFunction
 
 ; ---- rotation (Skyrim's angles: model to world is RotX(-x) RotY(-y) RotZ(-z), row vectors) ----
 
-Float Function Atan2(Float y, Float x)
-  If x > 0.0
-    Return Math.atan(y / x)
-  ElseIf x < 0.0
-    If y >= 0.0
-      Return Math.atan(y / x) + 180.0
+Float Function Atan2(Float oy, Float ox)
+  If ox > 0.0
+    Return Math.atan(oy / ox)
+  ElseIf ox < 0.0
+    If oy >= 0.0
+      Return Math.atan(oy / ox) + 180.0
     EndIf
-    Return Math.atan(y / x) - 180.0
-  ElseIf y > 0.0
+    Return Math.atan(oy / ox) - 180.0
+  ElseIf oy > 0.0
     Return 90.0
-  ElseIf y < 0.0
+  ElseIf oy < 0.0
     Return -90.0
   EndIf
   Return 0.0
@@ -827,6 +908,12 @@ Float Function TurnTo(Float ax, Float ay, Float az, Float seconds)
     Who.SetAngle(ax, ay, az)
     Return 0.0
   EndIf
+  ; Without its 3D (its cell not loaded: a seagull circling out of sight) nothing can be translated: the turn is made at
+  ; once and its time still taken, so the script keeps its pace.
+  If !Who.Is3DLoaded()
+    Who.SetAngle(ax, ay, az)
+    Return seconds
+  EndIf
   Float d = Math.abs(Wrap(az - Who.GetAngleZ()))
   Float dx = Math.abs(Wrap(ax - Who.GetAngleX()))
   Float dy = Math.abs(Wrap(ay - Who.GetAngleY()))
@@ -870,6 +957,10 @@ Float Function MoveTo3(Float tx, Float ty, Float tz, Float seconds)
   If seconds <= 0.05 || dist < 0.5
     Who.SetPosition(tx, ty, tz)
     Return 0.0
+  EndIf
+  If !Who.Is3DLoaded()
+    Who.SetPosition(tx, ty, tz)   ; out of sight: there at once, the time still taken (as TurnTo)
+    Return seconds
   EndIf
   Who.TranslateTo(tx, ty, tz, Who.GetAngleX(), Who.GetAngleY(), Who.GetAngleZ(), dist / seconds, 0.0)
   Return seconds
@@ -1092,11 +1183,26 @@ Int Function S_DistanceToLocation(Int i)
   Return (Math.sqrt(dx * dx + dy * dy + dz * dz) * 256.0) as Int
 EndFunction
 
-Int Function S_SetObjectLocation(Int i, Int x, Int y, Int z)
+; SetObjectLocation(i, x, y, z): this object's location i set (256ths, Redguard's x east, y down, z north, as the
+; position fields are read: a position copied from an object is the stretched world's). OffsetLocation(i, j):
+; location i moved to location j's place.
+Int Function S_SetObjectLocation(Int i, Int ox, Int oy, Int oz)
+  If !Locations || i < 0 || i * 3 + 2 >= Locations.Length
+    Return 0
+  EndIf
+  Locations[i * 3] = ox / 256.0 - 32768.0 + OffX
+  Locations[i * 3 + 1] = oz / 256.0 - 32768.0 + OffY
+  Locations[i * 3 + 2] = -oy / 256.0
   Return 0
 EndFunction
 
 Int Function S_OffsetLocation(Int a, Int b)
+  If !Locations || a < 0 || b < 0 || a * 3 + 2 >= Locations.Length || b * 3 + 2 >= Locations.Length
+    Return 0
+  EndIf
+  Locations[a * 3] = Locations[b * 3]
+  Locations[a * 3 + 1] = Locations[b * 3 + 1]
+  Locations[a * 3 + 2] = Locations[b * 3 + 2]
   Return 0
 EndFunction
 
@@ -1107,33 +1213,53 @@ ObjectReference Function Marker(Int n)
   Return Markers.GetAt(n) as ObjectReference
 EndFunction
 
+; MoveMarker(n, speed) / MoveNodeMarker: an actor walks to the marker (speed 0, the patrols' usual: its own walk;
+; any other, the cutscenes' 64-16384: a run); a prop slides there at 150 a second.
+Float Function Pace(Int speed)
+  If speed > 0
+    Return 1.0
+  EndIf
+  Return 0.5
+EndFunction
+
 Float Function S_MoveMarker(Int n, Int speed)
   ObjectReference m = Marker(n)
-  Actor a = Who as Actor
   If !m
     Return 0.0
   EndIf
+  Return GoTo(m.GetPositionX(), m.GetPositionY(), m.GetPositionZ(), Pace(speed), m)
+EndFunction
+
+Float Function GoTo(Float tx, Float ty, Float tz, Float pace, ObjectReference m)
+  Actor a = Who as Actor
   If a
     If a != Game.GetPlayer()
-      If nextIsMulti && nextSlot >= 0
-        WalkAsync(a, m.GetPositionX(), m.GetPositionY(), m.GetPositionZ(), 0.5)
+      If nextIsMulti && nextSlot >= 0 || !m
+        WalkAsync(a, tx, ty, tz, pace)
       Else
-        a.PathToReference(m, 0.5)
+        a.PathToReference(m, pace)
       EndIf
     EndIf
     Return 0.0
   EndIf
-  Float d = Who.GetDistance(m)
-  Float secs = d / 150.0
-  Return MoveTo3(m.GetPositionX(), m.GetPositionY(), m.GetPositionZ(), secs)
+  Float dx = tx - Who.GetPositionX()
+  Float dy = ty - Who.GetPositionY()
+  Float dz = tz - Who.GetPositionZ()
+  Float secs = Math.sqrt(dx * dx + dy * dy + dz * dz) / 150.0
+  Return MoveTo3(tx, ty, tz, secs)
 EndFunction
 
 Float Function S_MoveNodeMarker(Int n, Int speed)
   Return S_MoveMarker(n, speed)
 EndFunction
 
+; MoveNodeLocation(i, speed): to the object's own location i (the thugs back to their places at 4096: a run).
 Float Function S_MoveNodeLocation(Int i, Int speed)
-  Return S_MoveToLocation(i, 10)
+  Float[] at = LocationOf(i)
+  If !at
+    Return 0.0
+  EndIf
+  Return GoTo(at[0], at[1], at[2], Pace(speed), None)
 EndFunction
 
 Int Function S_AtNodeMarker(Int n, Int dist)
@@ -1148,15 +1274,34 @@ Int Function S_AtNodeLocation(Int i, Int dist)
   Return B(S_DistanceToLocation(i) <= dist)
 EndFunction
 
-Int Function S_ResetRotation(Int x, Int y, Int z)
-  If Who == Self
-    Who.SetAngle(startAX, startAY, startAZ)
-  Else
+; ResetRotation(x, y, z): the axes flagged go back to the start angle, the others stay (Redguard's x, y, z are
+; Skyrim's x, z, y).
+Int Function S_ResetRotation(Int ox, Int oy, Int oz)
+  Float ax = Who.GetAngleX()
+  Float ay = Who.GetAngleY()
+  Float az = Who.GetAngleZ()
+  Float sx = startAX
+  Float sy = startAY
+  Float sz = startAZ
+  If Who != Self
     TMRgSoup other = Who as TMRgSoup
-    If other
-      Who.SetAngle(other.StartAngle(0), other.StartAngle(1), other.StartAngle(2))
+    If !other
+      Return 0
     EndIf
+    sx = other.StartAngle(0)
+    sy = other.StartAngle(1)
+    sz = other.StartAngle(2)
   EndIf
+  If ox != 0
+    ax = sx
+  EndIf
+  If oz != 0
+    ay = sy
+  EndIf
+  If oy != 0
+    az = sz
+  EndIf
+  Who.SetAngle(ax, ay, az)
   Return 0
 EndFunction
 
@@ -1164,15 +1309,34 @@ Int Function S_ReloadRotation()
   Return S_ResetRotation(1, 1, 1)
 EndFunction
 
-Int Function S_ResetPosition(Int x, Int y, Int z)
-  If Who == Self
-    Who.SetPosition(startX, startY, startZ)
-  Else
+; ResetPosition(x, y, z): the axes flagged go back to the start position, the others stay (Redguard's y is up,
+; Skyrim's z).
+Int Function S_ResetPosition(Int ox, Int oy, Int oz)
+  Float px = Who.GetPositionX()
+  Float py = Who.GetPositionY()
+  Float pz = Who.GetPositionZ()
+  Float sx = startX
+  Float sy = startY
+  Float sz = startZ
+  If Who != Self
     TMRgSoup other = Who as TMRgSoup
-    If other
-      Who.SetPosition(other.StartPos(0), other.StartPos(1), other.StartPos(2))
+    If !other
+      Return 0
     EndIf
+    sx = other.StartPos(0)
+    sy = other.StartPos(1)
+    sz = other.StartPos(2)
   EndIf
+  If ox != 0
+    px = sx
+  EndIf
+  If oz != 0
+    py = sy
+  EndIf
+  If oy != 0
+    pz = sz
+  EndIf
+  Who.SetPosition(px, py, pz)
   Return 0
 EndFunction
 
@@ -1238,12 +1402,46 @@ Float Function S_PlayerLineUp(Int a, Int b, Int c)
   Return d / 180.0 + 0.1
 EndFunction
 
-Float Function S_PlayerPickupLineUp(Int x, Int z, Int angle)
-  Return S_PlayerFaceObj()
+; PlayerPickupLineUp(x, z, angle): Cyrus stepped to the spot (x, z) (256ths, Redguard's x east and z north, in the
+; object's frame) beside this object, turned to face it; PlayerParallelLineUp the same spot, turned to the object's
+; heading plus angle (2048ths), as for standing beside it. Far away (over 256 units) he only turns.
+Float Function LineUpAt(Int ox, Int oz, Float face)
+  Actor p = Game.GetPlayer()
+  If Who == p
+    Return 0.0
+  EndIf
+  Float h = Who.GetAngleZ()
+  Float fx = ox / 256.0
+  Float fz = oz / 256.0
+  Float tx = Who.GetPositionX() + fx * Math.cos(h) + fz * Math.sin(h)
+  Float ty = Who.GetPositionY() - fx * Math.sin(h) + fz * Math.cos(h)
+  Float dx = tx - p.GetPositionX()
+  Float dy = ty - p.GetPositionY()
+  Float d = Math.sqrt(dx * dx + dy * dy)
+  If d > 256.0
+    Return S_PlayerFaceObj()
+  EndIf
+  If d < 8.0
+    p.SetAngle(p.GetAngleX(), p.GetAngleY(), face)
+    Return 0.1
+  EndIf
+  p.TranslateTo(tx, ty, p.GetPositionZ() + 2.0, 0.0, 0.0, face, 180.0, 360.0)
+  Return d / 180.0 + 0.1
 EndFunction
 
-Float Function S_PlayerParallelLineUp(Int x, Int z, Int angle)
-  Return S_PlayerFaceObj()
+Float Function S_PlayerPickupLineUp(Int ox, Int oz, Int angle)
+  Actor p = Game.GetPlayer()
+  Float dx = Who.GetPositionX() - p.GetPositionX()
+  Float dy = Who.GetPositionY() - p.GetPositionY()
+  Float face = Math.atan(dx / dy)
+  If dy < 0.0
+    face += 180.0
+  EndIf
+  Return LineUpAt(ox, oz, face + angle * 360.0 / 2048.0)
+EndFunction
+
+Float Function S_PlayerParallelLineUp(Int ox, Int oz, Int angle)
+  Return LineUpAt(ox, oz, Who.GetAngleZ() + angle * 360.0 / 2048.0)
 EndFunction
 
 ; A teleporter: Cyrus put at an offset from this object (256ths: x east, y down, z north), facing d (2048ths).
@@ -1274,15 +1472,21 @@ Int Function S_MoveAboveMe()
   Return 0
 EndFunction
 
+; PushPlayer('gremlin') / PopPlayer: the player as the gremlin and back (TMRgState; the argument, a script string,
+; always names the gremlin: 27 and 30 uses, all of it).
 Int Function S_PushPlayer(Int a)
+  RG.PushPlayer()
   Return 0
 EndFunction
 
 Int Function S_PopPlayer()
+  RG.PopPlayer()
   Return 0
 EndFunction
 
-Int Function S_Offset(Int x, Int y, Int z)
+; Offset(x, y, z) / UnOffset / PlayerOffsettask(x, y, z): the model drawn at an offset from its place. Every call in the
+; game is a zero offset (dump 2026-10-29: Offset(0, 0, 0) 18, UnOffset 8, PlayerOffsettask(0, 0, 0) 4): nothing to do.
+Int Function S_Offset(Int ox, Int oy, Int oz)
   Return 0
 EndFunction
 
@@ -1290,11 +1494,18 @@ Int Function S_UnOffset()
   Return 0
 EndFunction
 
-Float Function S_PlayerOffsettask(Int x, Int y, Int z)
+Float Function S_PlayerOffsettask(Int ox, Int oy, Int oz)
   Return 0.0
 EndFunction
 
-Int Function S_BounceObject(Int a, Int b, Int c)
+; BounceObject(power, speed, steer): the object launched up and forward. Its one use (NECRTOWR's NC_BOUNC, when the
+; tower's explosion flag is set and Cyrus is within 256 units: BounceObject(160, 40, 1)) throws Cyrus; here he is
+; knocked away from the object (Skyrim's push, power 160 as a force of 4).
+Int Function S_BounceObject(Int power, Int speed, Int steer)
+  Actor p = Game.GetPlayer()
+  If p.GetDistance(Who) < 512.0
+    Who.PushActorAway(p, power / 40.0)
+  EndIf
   Return 0
 EndFunction
 
@@ -1538,6 +1749,8 @@ Float Function MaxHealth(Actor a)
   Return a.GetBaseActorValue("Health")
 EndFunction
 
+; adjustHealth(delta, kill): delta of Redguard's 0-100 health; kill 0 keeps the actor alive (the game's 137 damaging
+; calls pass 1, Arkay's heal 0).
 Int Function S_adjustHealth(Int delta, Int kill)
   Actor a = Who as Actor
   If !a
@@ -1545,7 +1758,15 @@ Int Function S_adjustHealth(Int delta, Int kill)
   EndIf
   Float amount = MaxHealth(a) * delta / 100.0
   If amount < 0.0
-    a.DamageActorValue("Health", -amount)
+    If kill == 0
+      Float now = a.GetActorValue("Health")
+      If -amount >= now
+        amount = -(now - 1.0)
+      EndIf
+    EndIf
+    If amount < 0.0
+      a.DamageActorValue("Health", -amount)
+    EndIf
   ElseIf amount > 0.0
     a.RestoreActorValue("Health", amount)
   EndIf
@@ -1647,8 +1868,16 @@ Int Function S_AddFlatEffect(Int a, Int b, Int c, Int d, Int e, Int f)
   Return 0
 EndFunction
 
+; ZapPlayer(v): v of Redguard's 0-100 health off the player (as adjustHealth and setHealth scale it; 2026-10-29, it
+; took v raw points of Skyrim's health).
 Int Function S_ZapPlayer(Int v)
-  Game.GetPlayer().DamageActorValue("Health", v)
+  Actor p = Game.GetPlayer()
+  Float amount = MaxHealth(p) * v / 100.0
+  If amount > 0.0
+    p.DamageActorValue("Health", amount)
+  ElseIf amount < 0.0
+    p.RestoreActorValue("Health", -amount)
+  EndIf
   Return 0
 EndFunction
 
@@ -1785,13 +2014,13 @@ Bool statusSeen = False
 
 Int Function S_PlayerStatus()
   Actor p = Game.GetPlayer()
-  Float x = p.GetPositionX()
-  Float y = p.GetPositionY()
-  Float z = p.GetPositionZ()
-  Bool moved = statusSeen && (x - statusX) * (x - statusX) + (y - statusY) * (y - statusY) + (z - statusZ) * (z - statusZ) > 1.0
-  statusX = x
-  statusY = y
-  statusZ = z
+  Float ox = p.GetPositionX()
+  Float oy = p.GetPositionY()
+  Float oz = p.GetPositionZ()
+  Bool moved = statusSeen && (ox - statusX) * (ox - statusX) + (oy - statusY) * (oy - statusY) + (oz - statusZ) * (oz - statusZ) > 1.0
+  statusX = ox
+  statusY = oy
+  statusZ = oz
   statusSeen = True
   If p.GetAnimationVariableBool("bInJumpState")
     Return 5
@@ -1801,11 +2030,11 @@ Int Function S_PlayerStatus()
   Return 0
 EndFunction
 
-; The player inside a rectangle of Redguard's ground plane (x east, z north).
+; The player inside a rectangle of Redguard's ground plane (x east, z north; 256ths, as its positions are).
 Int Function S_InRectangle(Int x1, Int z1, Int x2, Int z2)
   Actor p = Game.GetPlayer()
-  Float rx = p.GetPositionX() + 32768.0
-  Float rz = p.GetPositionY() + 32768.0
+  Float rx = (p.GetPositionX() - OffX + 32768.0) * 256.0
+  Float rz = (p.GetPositionY() - OffY + 32768.0) * 256.0
   If x1 > x2
     Int t = x1
     x1 = x2
@@ -1859,6 +2088,7 @@ Int Function S_LightTorch()
       a.AddItem(torch, 1, True)
     EndIf
     a.EquipItem(torch, False, True)
+    RG.TorchLit(a)
   EndIf
   Return 0
 EndFunction
@@ -1868,6 +2098,9 @@ Int Function S_UnlightTorch()
   Form torch = RG.Item(45)
   If a && torch
     a.UnequipItem(torch, False, True)
+    If a == Game.GetPlayer()
+      RG.TorchOut()
+    EndIf
   EndIf
   Return 0
 EndFunction
@@ -2043,6 +2276,8 @@ EndFunction
 
 ; Holding an item for an animation (Redguard draws it in Cyrus's hand): a weapon or torch Skyrim equips, item 0 (an
 ; empty hand) takes it back; potions and the rest show as Skyrim's own use shows them (TMRgState.HandItem).
+; HandItem(n): the item in the hand: a weapon or the torch as itself, any other item with a hand model as its twin
+; (RGHandItems), the rest (potions) Skyrim's own use.
 Int Function S_HandItem(Int n)
   Actor a = Who as Actor
   If !a
@@ -2050,9 +2285,16 @@ Int Function S_HandItem(Int n)
   EndIf
   If n <= 0
     RG.HandItem(a, None)
-  Else
-    RG.HandItem(a, ItemForm(n))
+    Return 0
   EndIf
+  Form f = ItemForm(n)
+  If !(f as Weapon) && !(f as Light)
+    Form twin = RG.HandTwin(n)
+    If twin
+      f = twin
+    EndIf
+  EndIf
+  RG.HandItem(a, f)
   Return 0
 EndFunction
 
@@ -2422,20 +2664,52 @@ Float Function ShotOfWho()
   Return 0.0
 EndFunction
 
-Float Function S_showObj(Int x, Int y, Int z)
-  Return ShotOfWho()
+; A shot with its camera placed (TMRgState.PlaceShot): of the script's own object, or of Cyrus (who isn't shown while
+; he holds a weapon, as Redguard's showCyrus forms return at once then). The time left for the task to wait: none
+; when the camera was placed (a pan has taken its time already), the pan's when Skyrim's own camera stood in.
+Float Function PlacedShot(Bool abCyrus, Int ox, Int oy, Int oz, Bool abTurned, Int t)
+  ObjectReference subject = Who
+  If abCyrus
+    Actor p = Game.GetPlayer()
+    If p.IsWeaponDrawn()
+      Return 0.0
+    EndIf
+    subject = p
+  EndIf
+  If RG.PlaceShot(subject, LookHeight(subject), ox, oy, oz, abTurned, PanTime(t))
+    Return 0.0
+  EndIf
+  If abCyrus
+    RG.ShotOfCyrus()
+  Else
+    ShotOfWho()
+  EndIf
+  Return PanTime(t)
 EndFunction
 
-Float Function S_showObjLoc(Int x, Int y, Int z)
-  Return ShotOfWho()
+Float Function S_showObj(Int ox, Int oy, Int oz)
+  Return PlacedShot(False, ox, oy, oz, False, 0)
 EndFunction
 
-Float Function S_showObjPan(Int x, Int y, Int z, Int t)
-  Return ShotOfWho()
+Float Function S_showObjLoc(Int ox, Int oy, Int oz)
+  Return PlacedShot(False, ox, oy, oz, True, 0)
 EndFunction
 
-Float Function S_showObjPanLoc(Int x, Int y, Int z, Int t)
-  Return ShotOfWho()
+; The pans (showObjPan*, showCyrusPan*, showPlayerPan) take t ticks (12.14 a second: START's SCENEST waits 50 after a
+; pan of 48, the item scripts 4 after one of 6); the shot is Skyrim's at once, the task waits the pan's time.
+Float Function PanTime(Int t)
+  If t <= 0
+    Return 0.0
+  EndIf
+  Return t / 12.14
+EndFunction
+
+Float Function S_showObjPan(Int ox, Int oy, Int oz, Int t)
+  Return PlacedShot(False, ox, oy, oz, False, t)
+EndFunction
+
+Float Function S_showObjPanLoc(Int ox, Int oy, Int oz, Int t)
+  Return PlacedShot(False, ox, oy, oz, True, t)
 EndFunction
 
 Float Function S_showObjRot(Int a, Int b, Int c, Int d, Int e, Int f, Int g, Int h)
@@ -2446,24 +2720,20 @@ Float Function S_lookObj(Int a)
   Return ShotOfWho()
 EndFunction
 
-Float Function S_showCyrus(Int x, Int y, Int z)
-  RG.ShotOfCyrus()
-  Return 0.0
+Float Function S_showCyrus(Int ox, Int oy, Int oz)
+  Return PlacedShot(True, ox, oy, oz, False, 0)
 EndFunction
 
-Float Function S_showCyrusLoc(Int x, Int y, Int z)
-  RG.ShotOfCyrus()
-  Return 0.0
+Float Function S_showCyrusLoc(Int ox, Int oy, Int oz)
+  Return PlacedShot(True, ox, oy, oz, True, 0)
 EndFunction
 
-Float Function S_showCyrusPan(Int x, Int y, Int z, Int t)
-  RG.ShotOfCyrus()
-  Return 0.0
+Float Function S_showCyrusPan(Int ox, Int oy, Int oz, Int t)
+  Return PlacedShot(True, ox, oy, oz, False, t)
 EndFunction
 
-Float Function S_showCyrusPanLoc(Int x, Int y, Int z, Int t)
-  RG.ShotOfCyrus()
-  Return 0.0
+Float Function S_showCyrusPanLoc(Int ox, Int oy, Int oz, Int t)
+  Return PlacedShot(True, ox, oy, oz, True, t)
 EndFunction
 
 Float Function S_lookCyrus(Int a)
@@ -2478,7 +2748,7 @@ EndFunction
 
 Float Function S_showPlayerPan(Int t)
   RG.EndShot()
-  Return 0.0
+  Return PanTime(t)
 EndFunction
 
 Int Function S_XResetCamera()
@@ -2495,28 +2765,45 @@ Int Function S_cameraController()
 EndFunction
 
 Int Function S_lockoutPlayer(Int on)
-  RG.Lockout(on != 0)
+  If on != 0
+    myLocks += 1
+  ElseIf myLocks > 0
+    myLocks -= 1
+  EndIf
+  RG.Lockout(on != 0, Self)
   Return 0
 EndFunction
 
 ; Animations: Redguard's animation groups that Skyrim has an idle for play it (picking up, levers, talking, drinking,
 ; standing); the time they hold the script is kept by the frame waits that follow them (12 frames a second).
+Float animStarted = -1.0   ; real time the last group started (frame waits count from it)
+Int animGroup = -1
+Int animCount = 1
+
 Float Function S_PushAnimation(Int anim, Int count)
-  PlayGroup(Who as Actor, anim)
+  PlayGroup(Who as Actor, anim, count)
   Return 0.0
 EndFunction
 
 Float Function S_PushControlAnimation(Int anim, Int count)
-  PlayGroup(Who as Actor, anim)
+  PlayGroup(Who as Actor, anim, count)
   Return 0.0
 EndFunction
 
 Int Function S_PlayAnimation(Int anim, Int count)
-  PlayGroup(Who as Actor, anim)
+  PlayGroup(Who as Actor, anim, count)
   Return 0
 EndFunction
 
-Function PlayGroup(Actor a, Int anim)
+; A group played count times (Redguard loops it; Skyrim's idle plays once, then again as the waits reach the next
+; loop: WaitAnimFrame past the group's length restarts it), its start remembered for the frame waits.
+Function PlayGroup(Actor a, Int anim, Int count = 1)
+  animStarted = Utility.GetCurrentRealTime()
+  animGroup = anim
+  If count < 1
+    count = 1
+  EndIf
+  animCount = count
   If !a || a.IsDead() || a.IsInCombat()
     Return
   EndIf
@@ -2526,12 +2813,22 @@ Function PlayGroup(Actor a, Int anim)
   EndIf
 EndFunction
 
+; WaitAnimFrame(anim, frame): until the group reaches that frame (12.14 ticks a second: SOUP), measured from the
+; group's start; a frame past the group's end is in its next loop, so the idle is played again.
 Float Function S_WaitAnimFrame(Int anim, Int frame)
-  Return frame / 12.0
+  Float due = frame / 12.14
+  If animStarted >= 0.0 && anim == animGroup
+    Float left = animStarted + due - Utility.GetCurrentRealTime()
+    If left < 0.0
+      left = 0.0
+    EndIf
+    Return left
+  EndIf
+  Return due
 EndFunction
 
 Float Function S_WaitPlayerAnimFrame(Int anim, Int frame)
-  Return frame / 12.0
+  Return S_WaitAnimFrame(anim, frame)
 EndFunction
 
 ; COMMON's potion status icons: a line when one comes or goes.
@@ -2582,6 +2879,34 @@ Int Function S_LightOff()
   If MyLight
     MyLight.Disable()
   EndIf
+  Return 0
+EndFunction
+
+; LightFlicker(a, b): the light's flicker is in its record (set by the build for the lights whose scripts call it).
+Int Function S_LightFlicker(Int a, Int b)
+  Return 0
+EndFunction
+
+; LightIntensity(v): Skyrim can't change a placed light's brightness: the light is on above 0 (OB_CON01 ramps its light
+; up in 9s to 100 and down again before LightOff), off at 0 and below.
+Int Function S_LightIntensity(Int v)
+  If !MyLight
+    Return 0
+  EndIf
+  If v > 0
+    MyLight.Enable()
+  Else
+    MyLight.Disable()
+  EndIf
+  Return 0
+EndFunction
+
+; LightOffset(x, y, z): the light moved to an offset from this object (256ths; Redguard's x east, y down, z north).
+Int Function S_LightOffset(Int ox, Int oy, Int oz)
+  If !MyLight
+    Return 0
+  EndIf
+  MyLight.SetPosition(Who.GetPositionX() + ox / 256.0, Who.GetPositionY() + oz / 256.0, Who.GetPositionZ() - oy / 256.0)
   Return 0
 EndFunction
 
@@ -2671,15 +2996,14 @@ EndFunction
 
 Int Function S_LoadWorld(Int slot)
   If Places && slot >= 0 && slot < Places.Length && Places[slot]
+    RG.MapChanged()   ; the map left behind holds the player no more
     Game.GetPlayer().MoveTo(Places[slot])
   EndIf
   Return 0
 EndFunction
 
 Int Function S_AddLog(Int stage)
-  If RG.LogQuest && stage > 0
-    RG.LogQuest.SetStage(stage)
-  EndIf
+  RG.AddLog(stage)
   Return 0
 EndFunction
 

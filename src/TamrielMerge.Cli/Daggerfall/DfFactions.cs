@@ -15,6 +15,11 @@ public sealed record DfFaction(int Id, int Parent, DfFactionType Type, string Na
 {
     /// <summary>A province's ruler title (FACTION.TXT "ruler": 1 King .. 12 Lady; -1 none).</summary>
     public int Ruler { get; init; } = -1;
+    /// <summary>A province's vampire clan (FACTION.TXT "vam": the clans' factions 150 Vraseth .. 158 Selenu; 0 none).</summary>
+    public int Vam { get; init; }
+    /// <summary>The faction's power (FACTION.TXT "power"): a guild quest's gold reward scales with it (Daggerfall Unity
+    /// Item.CreateGold: (power + 50) / 100, 50 for no faction).</summary>
+    public int Power { get; init; }
 }
 
 /// <summary>
@@ -42,8 +47,10 @@ public sealed class DfFactions
             int I(string k, int d = -1) => fields.TryGetValue(k, out var v) && int.TryParse(v, out var n) ? n : d;
             while (stack.Count > 0 && stack[^1].Depth >= depth) stack.RemoveAt(stack.Count - 1);
             int parent = stack.Count > 0 ? stack[^1].Id : 0;
-            result[id] = new DfFaction(id, parent, (DfFactionType)I("type", 2), fields.GetValueOrDefault("name", ""), I("rep", 0), I("region"), I("race"),
-                (DfSocialGroup)I("sgroup"), I("ggroup"), I("face"), I("flat"), [.. allies], [.. enemies]) { Ruler = I("ruler") };
+            // "region" counts from 1 (Daggerfall Unity GetRegionFaction: region - 1 is the region's index; Daggerfall's
+            // province says 18 for region 17): kept as the index, -1 for none.
+            result[id] = new DfFaction(id, parent, (DfFactionType)I("type", 2), fields.GetValueOrDefault("name", ""), I("rep", 0), I("region", 0) - 1, I("race"),
+                (DfSocialGroup)I("sgroup"), I("ggroup"), I("face"), I("flat"), [.. allies], [.. enemies]) { Ruler = I("ruler"), Vam = I("vam", 0), Power = I("power", 0) };
             stack.Add((depth, id));
         }
         foreach (var raw in File.ReadLines(Path.Combine(arena2, "FACTION.TXT"), System.Text.Encoding.Latin1))

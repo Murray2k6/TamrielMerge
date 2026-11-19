@@ -108,7 +108,8 @@ public sealed partial class ObPluginBuilder
             }
         }
         // Skyrim's own lines kept from Oblivion's people: a silent one at every moment Oblivion has none for.
-        SkyrimMomentsSilenced = Skyrim.ForeignVoices.Silence(mod, SkyrimEsm, quest, people.FormKey, "OB", own);
+        // (Not over a walk-up greeting: TMObGreet has the greeter in OBGreetNow as Skyrim picks its first line.)
+        SkyrimMomentsSilenced = Skyrim.ForeignVoices.Silence(mod, SkyrimEsm, quest, people.FormKey, "OB", own, GreetNowFaction().FormKey);
     }
 
     public int SkyrimMomentsSilenced { get; private set; }

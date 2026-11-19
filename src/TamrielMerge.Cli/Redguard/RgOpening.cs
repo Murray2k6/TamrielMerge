@@ -5,6 +5,7 @@ using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
 using NAudio.Wave;
 using Noggog;
+using TamrielMerge.Skyrim;
 
 namespace TamrielMerge.Redguard;
 
@@ -27,9 +28,54 @@ public sealed partial class RgPluginBuilder
     static readonly (string Tag, bool Cyrus)[] OpeningTalk =
         [("b71d", false), ("bh1c", true), ("bh1a", false), ("bo1c", true), ("b72a", false), ("b73a", false)];
 
-    /// <summary>Where the opening ends: Stros M'Kai's docks, where the old start was.</summary>
-    void PlaceDocksArrival(Scene scene, Vector3 at, float facing)
+    /// <summary>Every ship placed (PlaceShip), by scene.</summary>
+    readonly List<(string Scene, PlacedObject Ref)> placedShips = [];
+
+    /// <summary>The ship's collision (model space) placed where a reference puts it.</summary>
+    internal static List<Vector3[]> ShipSolid(Skyrim.Meshes.ShipModel.Made ship, P3Float position, P3Float rotation, float scale)
     {
+        var m = Skyrim.SkyrimRotation.Matrix(rotation);
+        var p = new Vector3(position.X, position.Y, position.Z);
+        return ship.Solid.Select(t => t.Select(v => Vector3.Transform(v * scale, m) + p).ToArray()).ToList();
+    }
+
+    /// <summary>
+    /// Where the player stands at one of Redguard's spots over a ship put in place of its boat: on the ship's own surface
+    /// there (up to 100 units over the spot: the ship's deck isn't the boat's) at the nearest place a standing body is
+    /// clear (Morrowind's ClearSpot), else the spot as it is. Redguard's arrival at the docks stood 25 units under the deck
+    /// of the ship that replaced Brennan's boat (2026-11-04, user: "redguard i cant move on start").
+    /// </summary>
+    Vector3 OnShip(Scene scene, Vector3 at, Action<string>? log)
+    {
+        if (ship is null) return at;
+        foreach (var (_, r) in placedShips.Where(s => s.Scene == scene.Name))
+        {
+            float scale = r.Scale ?? 1;
+            var c = r.Placement!.Position;
+            // A spot on Redguard's boat goes with the ship moored in its place (2026-11-10, in game: the docks' arrival stayed
+            // where the boat had lain, 620 units from the ship moved to the dock, in the air over the harbour: the player
+            // dropped into the sea), then the spot as it is.
+            var move = shipMoves.GetValueOrDefault(r.FormKey);
+            foreach (var spot in move == Vector2.Zero ? new[] { at } : new[] { new Vector3(at.X + move.X, at.Y + move.Y, at.Z), at })
+            {
+                if (Vector2.Distance(new Vector2(c.X, c.Y), new Vector2(spot.X, spot.Y)) > Skyrim.Meshes.ShipModel.Length * scale / 2) continue;
+                var solid = ShipSolid(ship, r.Placement.Position, r.Placement.Rotation, scale);
+                // From the deck's height where the spot is under it (the ship's deck is far over the boat's).
+                var from = new Vector3(spot.X, spot.Y, MathF.Max(spot.Z, c.Z + ship.Deck * scale - 60));
+                if (Morrowind.MwPluginBuilder.ClearSpot(from, solid, above: 100) is { } landed)
+                {
+                    log?.Invoke($"start: on the ship at {landed} (Redguard's spot {at}: {Morrowind.MwPluginBuilder.BodyHits(at, solid)} collision points in a standing body, landed {Morrowind.MwPluginBuilder.BodyHits(landed, solid)})");
+                    return landed;
+                }
+            }
+        }
+        return at;
+    }
+
+    /// <summary>Where the opening ends: Stros M'Kai's docks, where the old start was.</summary>
+    void PlaceDocksArrival(Scene scene, Vector3 at, float facing, Action<string>? log = null)
+    {
+        at = OnShip(scene, at, log);
         docksArrival = new PlacedObject(mod)
         {
             EditorID = "RGOpeningDocks",
@@ -60,10 +106,20 @@ public sealed partial class RgPluginBuilder
             var npc = mod.Npcs.DuplicateInAsNewRecord(t);
             npc.EditorID = edid;
             npc.Name = name;
-            if (npc.AIData is { } ai) { ai.Aggression = hostile ? Aggression.Aggressive : Aggression.Unaggressive; ai.Confidence = hostile ? Confidence.Brave : Confidence.Average; }
+            // Its face the vanilla actor's own (a copy has none: the boarders were black-faced, 2026-11-10 in game), its AI
+            // its own (the template's was the vanilla actor's, whatever was set here).
+            VanillaActors.Lookalike(npc, t, ownAI: true);
+            npc.AIData ??= new AIData();
+            // Very aggressive, as Skyrim's own bandits are: its bandit faction is no enemy of the player's (the console's
+            // GetFactionRelation gave 0 for a boarder), so a merely aggressive boarder stood on the deck muttering and the
+            // opening, which waits for both to be dead or in the sea, never went on (seen in a new game, 2026-11-12; the
+            // vanilla actor's own AI had applied until the copies got their own on 2026-11-10).
+            npc.AIData.Aggression = hostile ? Aggression.VeryAggressive : Aggression.Unaggressive;
+            npc.AIData.Confidence = hostile ? Confidence.Brave : Confidence.Average;
+            npc.AIData.Assistance = hostile ? Assistance.HelpsAllies : Assistance.HelpsNobody;
             return npc;
         }
-        var boarder = Copy("EncBandit02Melee1HRedguardM", "RGOpeningPirate", "League Pirate", hostile: true);
+        var boarder = Copy("EncBandit02Melee1HRedguardM", "RGOpeningPirate", "Pirate", hostile: true);
         var crew = Copy("EncSailorRedguardM", "RGOpeningVandarCrew", "League Pirate", hostile: false);
         var brennanNpc = PersonNpc("SBRENNAN", People["BRENNAN"]);
         var vandarNpc = PersonNpc("SVANDAR", People["VANDAR"]);
@@ -74,9 +130,9 @@ public sealed partial class RgPluginBuilder
         brennanNpc.Packages.Clear();
 
         var cell = PersistentCellFor(scene);
-        PlacedNpc Put(Npc npc, string script, bool disabled)
+        PlacedNpc Put(Npc npc, string script, bool disabled, Vector3? at = null)
         {
-            var p = Where(script) ?? new Vector3(boat.Ref.Placement!.Position.X, boat.Ref.Placement.Position.Y, boat.Ref.Placement.Position.Z);
+            var p = at ?? Where(script) ?? new Vector3(boat.Ref.Placement!.Position.X, boat.Ref.Placement.Position.Y, boat.Ref.Placement.Position.Z);
             var on = BoatNear(p);
             float yaw = data.Objects.FirstOrDefault(o => o.Script.Equals(script, StringComparison.OrdinalIgnoreCase)) is { } o ? RgSpace.Euler(o.Rotation).Z : 0;
             var r = new PlacedNpc(mod)
@@ -89,7 +145,13 @@ public sealed partial class RgPluginBuilder
             return r;
         }
         var boarders = new[] { Put(boarder, "SPIRATE1", false), Put(boarder, "SPIRATE2", false) };
-        var brennan = Put(brennanNpc, "SBRENNAN", true);
+        // Brennan comes up out of his ship's hold: he appears on its hatch (RgHolds) and walks over (TMRgOpening).
+        // ...out of his quarters when the ship has them (user, 2026-11-10: "the captain suppose to come out of catains
+        // quarters of the ship"): before the cabin door; else on the hold's hatch.
+        Vector3? hatchAt = cabinOf.TryGetValue(boat.Ref.FormKey, out var cabin) ? cabin.Front
+            : hatchOf.TryGetValue(boat.Ref.FormKey, out var hatch) ? new Vector3(hatch.Placement!.Position.X, hatch.Placement.Position.Y, hatch.Placement.Position.Z) : null;
+        var brennan = Put(brennanNpc, "SBRENNAN", true, hatchAt);
+        if (hatchAt is null) Problems.Add("opening: Brennan's ship has neither quarters nor a hatch; he appears where Redguard stood him");
         var vandarCrew = new[] { Put(vandarNpc, "SVANDAR", true), Put(crew, "SPIRATE3", true), Put(crew, "SPIRATE4", true), Put(crew, "SPIRATE5", true) };
 
         // Vandar's boat: hidden until Brennan points at it, then sailing south (MoveObjectAxis(2, -1024000, ..): away
@@ -110,9 +172,28 @@ public sealed partial class RgPluginBuilder
         var toward = mid - from;
         if (toward.LengthSquared() < 1) toward = Vector2.UnitY;
         var stand = from - Vector2.Normalize(toward) * MathF.Min(200, toward.Length());
+        var standAt = new Vector3(stand.X, stand.Y, DeckOf(boat.Ref, boat.Scale));
+        // Where Redguard itself starts Cyrus (WORLD.INI's start_marker of the START map), on the ship in its boat's
+        // place (user, 2026-11-12: "the start is near the hull like in redguard"; it had been a place of ours by the
+        // boat's middle): the marker's own spot when it is over the ship, set on the deck there.
+        if (ini.StartMarker >= 0 && ini.StartMarker < data.Markers.Count)
+        {
+            var own = At(scene, data.Markers[ini.StartMarker]);
+            float reach = Skyrim.Meshes.ShipModel.Length * boat.Scale / 2;
+            if (Vector2.Distance(new Vector2(own.X, own.Y), from) <= reach)
+            {
+                var landed = OnShip(scene, own, log);
+                standAt = new Vector3(landed.X, landed.Y, MathF.Max(landed.Z, DeckOf(boat.Ref, boat.Scale) - 8) + 8);
+                var look = mid - new Vector2(standAt.X, standAt.Y);
+                if (look.LengthSquared() > 1) toward = look;
+                log?.Invoke($"opening: Cyrus starts at Redguard's own marker {ini.StartMarker} ({own.X:F0}, {own.Y:F0}), on the deck at {standAt.X:F0}, {standAt.Y:F0}, {standAt.Z:F0}, {Vector2.Distance(new Vector2(standAt.X, standAt.Y), from):F0} from the ship's middle");
+            }
+            else log?.Invoke($"opening: Redguard's start marker {ini.StartMarker} at {own.X:F0}, {own.Y:F0} is {Vector2.Distance(new Vector2(own.X, own.Y), from):F0} from the ship's middle (not on it): the start stays by the middle");
+        }
+        else log?.Invoke($"opening: no start marker {ini.StartMarker} among START's {data.Markers.Count}: the start stays by the ship's middle");
         StartMarker.Placement = new Placement
         {
-            Position = new P3Float(stand.X, stand.Y, DeckOf(boat.Ref, boat.Scale)),
+            Position = new P3Float(standAt.X, standAt.Y, standAt.Z),
             Rotation = new P3Float(0, 0, MathF.Atan2(toward.X, toward.Y)),
         };
         cell.Persistent.Add(StartMarker);

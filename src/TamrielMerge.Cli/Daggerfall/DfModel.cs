@@ -50,15 +50,61 @@ public sealed class DfModel
             for (int k = 0; k < count; k++)
             {
                 int offset = BitConverter.ToInt32(d, pos);
-                raw[k] = new Vector2(BitConverter.ToInt16(d, pos + 4), BitConverter.ToInt16(d, pos + 6));
+                int ru = BitConverter.ToInt16(d, pos + 4), rv = BitConverter.ToInt16(d, pos + 6);
+                // Packed coordinates (Daggerfall Unity Arch3dFile.UVunpack: the first three points of models under 905).
+                if (k < 3 && id < 905) { ru = Unpack(ru); rv = Unpack(rv); }
+                raw[k] = new Vector2(ru, rv);
                 pos += 8; // offset + u + v
                 int pp = pointList + (version == "v2.5" ? offset * 3 : offset);
                 pts[k] = new Vector3(BitConverter.ToInt32(d, pp), -BitConverter.ToInt32(d, pp + 4), BitConverter.ToInt32(d, pp + 8)) / PointDivisor;
                 min = Vector3.Min(min, pts[k]); max = Vector3.Max(max, pts[k]);
             }
-            polys.Add(new DfPolygon(pts, normal, texture >> 7, texture & 0x7f, Uvs(pts, raw)));
+            var uvs = Uvs(pts, raw);
+            // The fan's first point is the polygon's first corner, as Daggerfall Unity draws it (GetCornerPoints: the
+            // first point after 0 that isn't in a line with its neighbours), so a polygon is cut into the same
+            // triangles as there. (df-uv-census, 2026-11-10: 181,896 of 204,380 polygons start at another point than
+            // 0 this way; 1 polygon is not convex, so the cover is the same either way but for that one.)
+            int hub = Hub(pts);
+            if (hub != 0)
+            {
+                pts = [.. pts[hub..], .. pts[..hub]];
+                if (uvs is not null) uvs = [.. uvs[hub..], .. uvs[..hub]];
+            }
+            Fanned += hub != 0 ? 1 : 0;
+            polys.Add(new DfPolygon(pts, normal, texture >> 7, texture & 0x7f, uvs));
         }
         return new DfModel { Id = id, Polygons = polys, Min = min, Max = max };
+    }
+
+    /// <summary>Polygons whose fan starts at another point than their first, and coordinates unpacked (for the log).</summary>
+    public static int Fanned, Unpacked;
+
+    /// <summary>
+    /// Daggerfall Unity's UVunpack: a coordinate outside -14335..14335 (and -7168) is packed, the nearest multiple of
+    /// 8192 taken off it. Left as stored, a wall's texture ran hundreds of times across it and drew as one flat colour,
+    /// or in streaks (seen in game in Daggerfall city, 2026-11-10).
+    /// </summary>
+    static int Unpack(int u)
+    {
+        if (u > -14336 && u < 14336 && u != -7168) return u;
+        int next = (((u - 1) >> 13) + 1) << 13, prev = next - 8192;
+        Unpacked++;
+        return u - (u - prev < next - u ? prev : next);
+    }
+
+    /// <summary>The first corner Daggerfall Unity's GetCornerPoints finds: point i + 1 where i, i + 1, i + 2 turn.</summary>
+    static int Hub(Vector3[] pts)
+    {
+        int n = pts.Length;
+        if (n < 4) return 0;
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 l0 = pts[(i + 1) % n] - pts[i], l1 = pts[(i + 2) % n] - pts[i];
+            float len = l0.Length() * l1.Length();
+            if (len < 1e-9f) continue;
+            if (MathF.Acos(Math.Clamp(Vector3.Dot(l0, l1) / len, -1f, 1f)) > 0.001f) return (i + 1) % n;
+        }
+        return 0;
     }
 
     /// <summary>

@@ -10,6 +10,11 @@ namespace TamrielMerge.Skyrim.Distant;
 /// One distant-object chunk (meshes\terrain\&lt;world&gt;\objects\&lt;world&gt;.&lt;level&gt;.&lt;x&gt;.&lt;y&gt;.bto) as Skyrim's
 /// own (tamriel.4.0.0.bto, tamriel.8.0.0.bto, read 2026-10-13): a NiNode "Obj" over a BSMultiBoundNode with its AABB,
 /// holding BSSubIndexTriShapes named "Obj" in the chunk's local units (0-4096 across, scaled by the level; heights too),
+/// each shape placed at the chunk's south-west corner in world units (its translation) and the AABB in world units, as
+/// tamriel.4.4.-4.bto has them (t 16384,-16384; AABB centre 24471,-6862). Unlike land chunks (.btr, at 0,0,0 with a local
+/// AABB: the game places those by their name), the game draws an object chunk where its shapes say: until 2026-11-04
+/// they were at 0,0,0, every chunk drawn its own corner's distance towards the world's origin (user: Redguard's distant
+/// "floating buildings and archetecture and foliage ... similar what daggerfall had").
 /// shaded by the distant-object shader (flags 0x80400000 / 0x5: z-test and write, LOD objects) with the sheet and its
 /// normals. Each level-4 shape's triangles are in runs, one per cell of the chunk (segment (x - x0) * 4 + (y - y0),
 /// the cells' own references): the game hides a cell's run when the cell itself is loaded. Higher levels have one run.
@@ -33,8 +38,9 @@ public static class BtoWriter
 
     static readonly object NifLock = new();
 
-    /// <summary>Writes the chunk at <paramref name="path"/>; its shapes use the texture sheet named <paramref name="sheet"/>.</summary>
-    public static void Write(string path, string sheet, int level, IReadOnlyList<Shape> shapes)
+    /// <summary>Writes the chunk at <paramref name="path"/>; its shapes use the texture sheet named <paramref name="sheet"/>;
+    /// <paramref name="origin"/> is the chunk's south-west corner (world units), which the shapes' points are local to.</summary>
+    public static void Write(string path, string sheet, int level, Vector2 origin, IReadOnlyList<Shape> shapes)
     {
         int segments = level == 4 ? 16 : 1;
         var pieces = new List<(Shape Shape, List<(int Start, int Count)> Runs)>();
@@ -46,9 +52,11 @@ public static class BtoWriter
             var root = nif.GetRootNode();
             root.name = new NiStringRef("Obj");
             root.flags = 14;
-            float zMin = float.MaxValue, zMax = float.MinValue;
-            foreach (var s in shapes) foreach (var p in s.P) { zMin = MathF.Min(zMin, p.Z * level); zMax = MathF.Max(zMax, p.Z * level); }
-            var bound = MultiBound(hdr, level * 4096f, zMin, zMax);
+            // The AABB of what the chunk holds, in world units.
+            var lo = new Vector3(float.MaxValue); var hi = new Vector3(float.MinValue);
+            foreach (var s in shapes) foreach (var p in s.P) { var w = p * level + new Vector3(origin, 0); lo = Vector3.Min(lo, w); hi = Vector3.Max(hi, w); }
+            if (lo.X > hi.X) (lo, hi) = (new Vector3(origin, 0), new Vector3(origin + new Vector2(level * 4096f), 0));
+            var bound = MultiBound(hdr, lo, hi);
             uint boundId = hdr.AddBlock(bound);
             var boundNode = (NiNode)hdr.GetBlockById(boundId);
             nif.SetParentNode(boundNode, root);
@@ -80,7 +88,7 @@ public static class BtoWriter
                     // Last: replacing the shape block (its scale, the level) after everything that looks it up.
                     BlockMeshBuilder.EditBlock<BSTriShape>(nif, hdr.GetBlockID(shape), t =>
                     {
-                        var tr = t.transform; tr.scale = level; t.transform = tr;
+                        var tr = t.transform; tr.scale = level; tr.translation = new nifly.Vector3(origin.X, origin.Y, 0); t.transform = tr;
                         t.flags = 14;
                     });
                     pieces.Add((piece, piece.Runs));
@@ -133,11 +141,13 @@ public static class BtoWriter
         if (cur is not null && cur.T.Count > 0) yield return Finish(cur);
     }
 
-    static BSMultiBoundNode MultiBound(NiHeader hdr, float size, float zMin, float zMax)
+    /// <summary>The chunk's bound node, its AABB round <paramref name="lo"/>-<paramref name="hi"/> (world units).</summary>
+    static BSMultiBoundNode MultiBound(NiHeader hdr, Vector3 lo, Vector3 hi)
     {
         var aabb = BlockMeshBuilder.Owned(new BSMultiBoundAABB());
-        aabb.center = new nifly.Vector3(size / 2, size / 2, (zMin + zMax) / 2);
-        aabb.halfExtent = new nifly.Vector3(size / 2, size / 2, MathF.Max((zMax - zMin) / 2, 1));
+        var c = (lo + hi) / 2; var h = (hi - lo) / 2;
+        aabb.center = new nifly.Vector3(c.X, c.Y, c.Z);
+        aabb.halfExtent = new nifly.Vector3(MathF.Max(h.X, 1), MathF.Max(h.Y, 1), MathF.Max(h.Z, 1));
         uint aabbId = hdr.AddBlock(aabb);
         var mb = BlockMeshBuilder.Owned(new BSMultiBound());
         var dataRef = mb.dataRef; dataRef.index = aabbId; mb.dataRef = dataRef;

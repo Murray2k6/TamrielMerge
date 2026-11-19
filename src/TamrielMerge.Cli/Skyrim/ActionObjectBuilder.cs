@@ -90,8 +90,9 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
     /// <summary>The menu riddles are typed into (Interface\riddle.as), opened by TMDfAction as "TamrielMerge/riddle".</summary>
     public const string RiddleMenu = "TamrielMerge/riddle";
 
-    /// <summary>Daggerfall's text with its player macros filled in for a message box.</summary>
-    static string Say(string s) => System.Text.RegularExpressions.Regex.Replace(s.Replace("%pcn", "traveller").Replace("%pcf", "traveller"), @"%\w+", "").Trim();
+    /// <summary>Daggerfall's text for a message box: the player's name macros (%pcn, %pcf) kept for TMDfAction.Said to fill
+    /// in game, the other macros dropped.</summary>
+    static string Say(string s) => System.Text.RegularExpressions.Regex.Replace(s, @"%(?!pcn\b|pcf\b)\w+", "").Trim();
 
     string? TextOf(int id) => Text?[id] is { Count: > 0 } lines && !lines[0].Contains("do not translate") ? Say(lines[0]) : null;
 
@@ -311,8 +312,37 @@ public sealed class ActionObjectBuilder(SkyrimMod mod, IReadOnlyDictionary<uint,
             script.Properties.Add(new ScriptObjectProperty { Name = "NextObject", Object = target.ToLink<ISkyrimMajorRecordGetter>() });
             links++;
         }
+        Unpersist(cell);
         ByIndex.Clear();
         return links;
+    }
+
+    /// <summary>References that must stay persistent whatever points at them (held doors, opened by a quest's transfer).</summary>
+    public HashSet<PlacedObject> KeepPersistent { get; } = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Objects made persistent for nothing, for the build's log.</summary>
+    public int Unpersisted { get; private set; }
+
+    /// <summary>
+    /// This block's objects that nothing in the cell points at (a chain's next object, a rider, a link, an enable parent)
+    /// made temporary. Every object was persistent in case a chain reached it: 2026-11-01, 20,072 of Daggerfall's 54,125
+    /// scripted dungeon objects weren't reached by anything, each holding one of the game's 1,048,576 handles whatever
+    /// else the user has installed. A chain stays within its block (<see cref="ByIndex"/>), so what points at these is in
+    /// the cell by now.
+    /// </summary>
+    void Unpersist(Cell cell)
+    {
+        var pointed = new HashSet<FormKey>();
+        foreach (var r in cell.Persistent.Concat(cell.Temporary))
+            foreach (var l in r.EnumerateFormLinks())
+                if (!l.IsNull) pointed.Add(l.FormKey);
+        foreach (var r in ByIndex.Values.Distinct())
+        {
+            if (pointed.Contains(r.FormKey) || KeepPersistent.Contains(r) || r.TeleportDestination is not null || !cell.Persistent.Remove(r)) continue;
+            r.SkyrimMajorRecordFlags &= ~(SkyrimMajorRecord.SkyrimMajorRecordFlag)0x400;
+            cell.Temporary.Add(r);
+            Unpersisted++;
+        }
     }
 
     /// <summary>Daggerfall Unity uses the trigger/lock field as a trigger only when it is a known trigger value (RdbTriggerFlags;

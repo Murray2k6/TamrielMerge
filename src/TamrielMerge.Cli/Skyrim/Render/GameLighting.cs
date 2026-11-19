@@ -17,8 +17,8 @@ public static class GameLighting
         if (world.Parent is { } wp && !wp.Worldspace.IsNull && wp.Flags.HasFlag((Enum)Enum.Parse(wp.Flags.GetType(), "UseClimateData"))
             && cache.TryResolve<IWorldspaceGetter>(wp.Worldspace.FormKey, out var parent))
             world = parent;
-        if (!cache.TryResolve<IClimateGetter>(world.Climate.FormKey, out var climate) || climate.WeatherTypes.Count == 0) return null;
-        var type = climate.WeatherTypes.OrderByDescending(t => t.Chance).First();
+        if (!cache.TryResolve<IClimateGetter>(world.Climate.FormKey, out var climate) || climate.WeatherTypes is not { Count: > 0 } types) return null;
+        var type = types.OrderByDescending(t => t.Chance).First();
         if (!cache.TryResolve<IWeatherGetter>(type.Weather.FormKey, out var weather)) return null;
         static float[] Rgb(System.Drawing.Color c) => [c.R / 255f, c.G / 255f, c.B / 255f];
         object Time(IAmbientColorsGetter amb, System.Drawing.Color sun, Mutagen.Bethesda.Plugins.IFormLinkGetter<IImageSpaceGetter>? imgsLink)
@@ -44,7 +44,9 @@ public static class GameLighting
                 ["grade"] = grade,
             };
         }
-        var a = weather.DirectionalAmbientLightingColors; var s = weather.SunlightColor; var i = weather.ImageSpaces;
+        // A weather without its directional ambient has no light to read (none of Skyrim's lacks it).
+        if (weather.DirectionalAmbientLightingColors is not { } a) return null;
+        var s = weather.SunlightColor; var i = weather.ImageSpaces;
         var v = weather.VolumetricLighting;
         // The weather's sky, fog, clouds and volumetric light (user, 2026-10-11: "the weather needs done too", "and
         // volumetrics"): each time of day's sky colours (upper, lower, horizon), fog colours, cloud colours, and its
@@ -90,14 +92,14 @@ public static class GameLighting
         for (int k = 0; k < tex.Count && k < weather.Clouds.Count; k++)
         {
             var c = weather.Clouds[k];
-            if (tex[k]?.DataRelativePath.Path is not { Length: > 0 } cloudTex || c.Enabled != true) continue;
+            if (tex[k]?.DataRelativePath.Path is not { Length: > 0 } cloudTex || c.Enabled != true || c.Colors is not { } colors || c.Alphas is not { } alphas) continue;
             clouds.Add(new Dictionary<string, object?>
             {
                 // Its slot: the game draws layer k on shape k of meshes\sky\clouds.nif (layer 0 overhead, 1 east, 2 west,
                 // ... 15-18 the horizon's four bands, 28 the ring on the horizon).
                 ["layer"] = k, ["texture"] = cloudTex, ["speed_x"] = c.XSpeed, ["speed_y"] = c.YSpeed,
-                ["day"] = Rgb(c.Colors.Day), ["sunrise"] = Rgb(c.Colors.Sunrise), ["sunset"] = Rgb(c.Colors.Sunset), ["night"] = Rgb(c.Colors.Night),
-                ["alpha_day"] = c.Alphas.Day, ["alpha_sunrise"] = c.Alphas.Sunrise, ["alpha_sunset"] = c.Alphas.Sunset, ["alpha_night"] = c.Alphas.Night,
+                ["day"] = Rgb(colors.Day), ["sunrise"] = Rgb(colors.Sunrise), ["sunset"] = Rgb(colors.Sunset), ["night"] = Rgb(colors.Night),
+                ["alpha_day"] = alphas.Day, ["alpha_sunrise"] = alphas.Sunrise, ["alpha_sunset"] = alphas.Sunset, ["alpha_night"] = alphas.Night,
             });
         }
         return new Dictionary<string, object?>

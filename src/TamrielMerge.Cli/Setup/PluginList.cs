@@ -73,6 +73,8 @@ public static class PluginList
             if (lines.Count != before) File.WriteAllLines(file, lines, new UTF8Encoding(false));
         }
         Drop(OwnList);
+        // The load order LOOT and Vortex keep beside it.
+        Drop(OwnOrder);
         done.Add($"{string.Join(", ", plugins)} taken off {OwnList}");
         var profiles = Mo2Profiles(mo2).ToList();
         if (profiles.Count > 0 && Process.GetProcessesByName("ModOrganizer").Length > 0)
@@ -91,6 +93,12 @@ public static class PluginList
     }
 
     static string OwnList => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Skyrim Special Edition", "Plugins.txt");
+    static string OwnOrder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Skyrim Special Edition", "loadorder.txt");
+
+    /// <summary>Every plugin list <see cref="Remove"/> edits that exists: Skyrim's Plugins.txt and loadorder.txt, and Mod
+    /// Organizer 2's profiles' plugins.txt and loadorder.txt.</summary>
+    public static List<string> ListFiles(string? mo2 = null) =>
+        new[] { OwnList, OwnOrder }.Concat(Mo2Profiles(mo2).SelectMany(p => new[] { Path.Combine(p, "plugins.txt"), Path.Combine(p, "loadorder.txt") })).Where(File.Exists).ToList();
 
     static void Disable(string file, IReadOnlyList<string> plugins)
     {
@@ -100,22 +108,24 @@ public static class PluginList
     }
 
     /// <summary>The folder chosen for Mod Organizer 2 (settings), or null.</summary>
-    public static string? Mo2Folder
+    public static string? Mo2Folder { get => Setting("mo2"); set => SetSetting("mo2", value); }
+
+    /// <summary>A setting of TamrielMerge.settings.json in the working folder ("mo2", "output", "build", "temp"), or null.</summary>
+    public static string? Setting(string key)
     {
-        get
-        {
-            try { return File.Exists(SettingsFile) && JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(SettingsFile)) is { } s && s.TryGetValue("mo2", out var v) ? v : null; }
-            catch (JsonException) { return null; }
-        }
-        set
-        {
-            Dictionary<string, string> s;
-            // A settings file that can't be read is started again rather than failing (the getter reads it the same way).
-            try { s = File.Exists(SettingsFile) ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(SettingsFile)) ?? [] : []; }
-            catch (JsonException) { s = []; }
-            if (string.IsNullOrWhiteSpace(value)) s.Remove("mo2"); else s["mo2"] = value;
-            File.WriteAllText(SettingsFile, JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true }));
-        }
+        try { return File.Exists(SettingsFile) && JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(SettingsFile)) is { } s && s.TryGetValue(key, out var v) ? v : null; }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>Writes (or, blank, removes) a setting of TamrielMerge.settings.json.</summary>
+    public static void SetSetting(string key, string? value)
+    {
+        Dictionary<string, string> s;
+        // A settings file that can't be read is started again rather than failing (the getter reads it the same way).
+        try { s = File.Exists(SettingsFile) ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(SettingsFile)) ?? [] : []; }
+        catch (JsonException) { s = []; }
+        if (string.IsNullOrWhiteSpace(value)) s.Remove(key); else s[key] = value;
+        File.WriteAllText(SettingsFile, JsonSerializer.Serialize(s, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     static void Merge(string file, IReadOnlyList<string> plugins, bool star)
@@ -138,9 +148,18 @@ public static class PluginList
             }
             previous = p;
         }
+        // Those already listed go into this order, in the places they hold: a packed build (PluginPack) can move a plugin
+        // against an earlier install's list, and its joins rely on the load order they were made for.
+        var places = plugins.Select(p => lines.FindIndex(l => Bare(l).Equals(p, StringComparison.OrdinalIgnoreCase))).Where(i => i >= 0).ToList();
+        var ordered = places.Select(i => lines[i]).ToList();
+        places.Sort();
+        for (int i = 0; i < places.Count; i++) lines[places[i]] = ordered[i];
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
         File.WriteAllLines(file, lines, new UTF8Encoding(false));
     }
+
+    /// <summary>The selected profile folders of the Mod Organizer 2 instances managing Skyrim Special Edition.</summary>
+    public static List<string> Mo2ProfileFolders(string? mo2 = null) => Mo2Profiles(mo2).ToList();
 
     /// <summary>The selected profile folder of each Mod Organizer 2 instance that manages Skyrim Special Edition.</summary>
     static IEnumerable<string> Mo2Profiles(string? chosen)

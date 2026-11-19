@@ -187,13 +187,31 @@ def reproject(model_dir, sprite_png, tex_size=1024, whiten_amount=1.0, cutout=Fa
     weight = np.clip((t[:, 2] - 0.2) / 0.4, 0, 1)[:, None]   # 1 facing the view, 0 edge-on
     own = colours[cy, cx] * ai_shade[np.clip(gy_ * ah // tex_size, 0, ah - 1), np.clip(gx_ * aw // tex_size, 0, aw - 1)][:, None]
     out[gy_, gx_, :3] = (colours[cy, cx] * weight + own * (1 - weight)).astype(np.uint8)
-    out[gy_, gx_, 3] = np.where(keep[cy, cx], 255, 0) if cutout else 255
+    # The sprite's outline cuts out only what faces its view: a side or slanted face lands outside it from the front without
+    # being outside the tree, and was made see-through (2026-11-02, measured on the 125 tree models: a median 13.5% of a
+    # tree's surface dropped, up to 39%, side faces losing 25-44%; user: "some trees arent being drawed all the way").
+    out[gy_, gx_, 3] = np.where(keep[cy, cx] | (t[:, 2] < 0.6), 255, 0) if cutout else 255
     texture = os.path.join(model_dir, "texture.png")
     ai = os.path.join(model_dir, "texture_ai.png")
     if not os.path.exists(ai) and os.path.exists(texture):
         os.replace(texture, ai)
     Image.fromarray(out).save(texture)
-    open(os.path.join(model_dir, "reprojected"), "w").close()
+    # What it was painted by: a cutout model painted before the facing rule above is painted again.
+    with open(os.path.join(model_dir, "reprojected"), "w") as f:
+        f.write(CUTOUT_RULE if cutout else "")
+
+
+# The cutout rule a model was painted with (its "reprojected" file): an empty or older one is painted again.
+CUTOUT_RULE = "facing 0.6"
+
+
+def painted_by(model_dir):
+    """The cutout rule a model was painted with, or None when it hasn't been painted."""
+    path = os.path.join(model_dir, "reprojected")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return f.read().strip()
 
 
 def main():
@@ -212,9 +230,10 @@ def main():
         d = os.path.join(models, name)
         if name not in jobs or not os.path.exists(os.path.join(d, "mesh.obj")):
             continue
-        if os.path.exists(os.path.join(d, "reprojected")) and not again:
-            continue
         sprite, amount, cutout = jobs[name]
+        rule = painted_by(d)
+        if rule is not None and not again and (not cutout or rule == CUTOUT_RULE):
+            continue
         reproject(d, sprite, whiten_amount=amount, cutout=cutout)
         print("painted", name, flush=True)
 

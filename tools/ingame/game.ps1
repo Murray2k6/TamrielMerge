@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory)] [ValidateSet('shot', 'keys', 'type', 'focus', 'click', 'hold', 'move', 'press')] [string] $Action,
+    [Parameter(Mandatory)] [ValidateSet('shot', 'keys', 'type', 'focus', 'click', 'hold', 'move', 'press', 'wheel')] [string] $Action,
     [string] $Arg = '',
     [string] $Out = '',
     [int] $X = 0, [int] $Y = 0, [int] $Ms = 0, [double] $Scale = 0.5
@@ -33,6 +33,11 @@ public static class GameInput {
         i.u.m = new MOUSEINPUT { dwFlags = flags };
         SendInput(1, new[] { i }, Marshal.SizeOf(typeof(INPUT)));
     }
+    public static void Wheel(int clicks) {
+        var i = new INPUT { type = 0 };
+        i.u.m = new MOUSEINPUT { mouseData = unchecked((uint)(clicks * 120)), dwFlags = 0x0800 };
+        SendInput(1, new[] { i }, Marshal.SizeOf(typeof(INPUT)));
+    }
     public static void MoveBy(int dx, int dy) {
         var i = new INPUT { type = 0 };
         i.u.m = new MOUSEINPUT { dx = dx, dy = dy, dwFlags = 0x1 };
@@ -48,9 +53,9 @@ $scan = @{
     'backspace'=0x0E; 'tab'=0x0F; 'q'=0x10; 'w'=0x11; 'e'=0x12; 'r'=0x13; 't'=0x14; 'y'=0x15; 'u'=0x16; 'i'=0x17; 'o'=0x18; 'p'=0x19;
     'enter'=0x1C; 'a'=0x1E; 's'=0x1F; 'd'=0x20; 'f'=0x21; 'g'=0x22; 'h'=0x23; 'j'=0x24; 'k'=0x25; 'l'=0x26; ';'=0x27; "'"=0x28; '`'=0x29;
     'shift'=0x2A; 'z'=0x2C; 'x'=0x2D; 'c'=0x2E; 'v'=0x2F; 'b'=0x30; 'n'=0x31; 'm'=0x32; ','=0x33; '.'=0x34; '/'=0x35; 'space'=0x39;
-    'up'=0x48; 'down'=0x50; 'left'=0x4B; 'right'=0x4D; 'f5'=0x3F; 'f9'=0x43
+    'up'=0x48; 'down'=0x50; 'left'=0x4B; 'right'=0x4D; 'f5'=0x3F; 'f9'=0x43; 'pgup'=0x49; 'pgdn'=0x51
 }
-$extended = @('up', 'down', 'left', 'right')
+$extended = @('up', 'down', 'left', 'right', 'pgup', 'pgdn')
 
 # Input only ever goes to the game: before each key, Skyrim must be the foreground window, or this stops (once,
 # focus moved mid-test and the typed console commands landed in the user's editor).
@@ -105,6 +110,12 @@ switch ($Action) {
         $steps = [Math]::Max(1, [int]([Math]::Max([Math]::Abs($X), [Math]::Abs($Y)) / 10))
         for ($k = 0; $k -lt $steps; $k++) { [GameInput]::MoveBy([int]($X / $steps), [int]($Y / $steps)); Start-Sleep -Milliseconds 10 }
         "moved $X,$Y"
+    }
+    'wheel' {
+        # The mouse wheel, -X clicks toward you (zoom out on the map) or +X away (zoom in).
+        Guard
+        for ($k = 0; $k -lt [Math]::Abs($X); $k++) { [GameInput]::Wheel([Math]::Sign($X)); Start-Sleep -Milliseconds 120 }
+        "wheel $X"
     }
     'press' {
         # A left click where the game's cursor is.

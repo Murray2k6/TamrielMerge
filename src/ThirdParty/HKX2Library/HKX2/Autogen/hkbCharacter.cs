@@ -70,9 +70,8 @@ namespace HKX2
             des.ReadEmptyPointer(br);
             des.ReadEmptyPointer(br);
             des.ReadEmptyPointer(br);
+            // m_poseLocal is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            m_deleteWorldFromModel = br.ReadBoolean();
-            m_deletePoseLocal = br.ReadBoolean();
         }
 
         public override void Write(PackFileSerializer s, BinaryWriterEx bw)
@@ -95,9 +94,8 @@ namespace HKX2
             s.WriteVoidPointer(bw);
             s.WriteVoidPointer(bw);
             s.WriteVoidPointer(bw);
+            // m_poseLocal is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            bw.WriteBoolean(m_deleteWorldFromModel);
-            bw.WriteBoolean(m_deletePoseLocal);
         }
 
         public override void ReadXml(XmlDeserializer xd, XElement xe)

@@ -103,8 +103,20 @@ Function Prune()
   EndWhile
 EndFunction
 
+FormList Property Busy Auto
+{OBConvBusy: the packages made from Oblivion's "skip fallout behavior" ones. Their people don't stop to talk.}
+
 Bool Function Free(Actor a)
-  Return a && a.Is3DLoaded() && !a.IsDead() && !a.IsInCombat() && !a.IsInDialogueWithPlayer() && !a.IsUnconscious() && a.GetSleepState() == 0
+  If !a || !a.Is3DLoaded() || a.IsDead() || a.IsInCombat() || a.IsInDialogueWithPlayer() || a.IsUnconscious() || a.GetSleepState() != 0
+    Return False
+  EndIf
+  If Busy
+    Package now = a.GetCurrentPackage()
+    If now && Busy.HasForm(now)
+      Return False
+    EndIf
+  EndIf
+  Return True
 EndFunction
 
 ; ---- starting ----
@@ -218,8 +230,9 @@ Function SayTopic(Topic t)
   current = t
   phase = 1
   ReferenceAlias who = GetAlias(ListenerAlias) as ReferenceAlias
-  If who
+  If who && who.GetReference() != listener
     who.ForceRefTo(listener)
+    Utility.Wait(0.05)
   EndIf
   speaker.SetLookAt(listener)
   listener.SetLookAt(speaker)

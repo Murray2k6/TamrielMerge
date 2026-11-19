@@ -53,7 +53,10 @@ public sealed class ObWornSource(ObData data, ObTextures textures)
 
     /// <summary>The model's shapes in the skeleton's space, weights by Biped bone, with the skeleton they are bound to
     /// (Oblivion's, with each skinned bone at its bind from the model's skin data).</summary>
-    public (List<WornShape> Shapes, BindSkeleton Skeleton) Read(string model, List<string> problems)
+    /// <param name="keepSkin">Also the shapes textured from characters\ (heads and hair, which are no armour's bare
+    /// skin).</param>
+    /// <param name="rides">The bone a rigid shape rides when the model names none (hair and heads: the head bone).</param>
+    public (List<WornShape> Shapes, BindSkeleton Skeleton) Read(string model, List<string> problems, bool keepSkin = false, string? rides = null)
     {
         string source = model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model;
         var bytes = data.Read(source) ?? throw new FileNotFoundException(source);
@@ -77,7 +80,7 @@ public sealed class ObWornSource(ObData data, ObTextures textures)
                 if (type is not ("NiTriStrips" or "NiTriShape") || (shape.flags & 1) != 0) continue;
                 string texture = nif.GetTexturePathByIndex(shape, 0) ?? "";
                 // Oblivion's bare skin in armour (arms, legs, hands): Skyrim's body is worn under it instead.
-                if (ObData.Normalize(texture).Contains(@"characters\")) continue;
+                if (!keepSkin && ObData.Normalize(texture).Contains(@"characters\")) continue;
                 var verts = nif.GetVertsForShape(shape);
                 if (verts is null || verts.Count == 0) continue;
                 var normals = nif.GetNormalsForShape(shape);
@@ -137,9 +140,20 @@ public sealed class ObWornSource(ObData data, ObTextures textures)
                         if (holder is null && pn.StartsWith("Bip01", StringComparison.OrdinalIgnoreCase) && character.Has(pn)) { holder = pn; break; }
                         local *= WornMesh.ToMatrix(parent.transform);
                     }
-                    holder ??= prn is not null && character.Has(prn) ? prn : null;
+                    holder ??= prn is not null && character.Has(prn) ? prn : rides is not null && character.Has(rides) ? rides : null;
                     if (holder is null) { problems.Add($"{model}: rigid shape {shape.name.get()} names no bone it rides"); continue; }
-                    var place = local * character.World[holder];
+                    // What rides the head (helmets, hoods) is modelled upright about the head bone's position, in the
+                    // actor's own axes, not in the bone's frame (whose x runs up the neck): 2026-11-13, the Blades, iron
+                    // and glass helmets' own vertices run 7.4 to 10.3 either side of x = 0, forward to y = 13 and up to
+                    // z = 21, and placed in the bone's frame every helmet lay on its side (worn -17..5 across the head).
+                    var place = holder.Equals("Bip01 Head", StringComparison.OrdinalIgnoreCase)
+                        ? local * Matrix4x4.CreateTranslation(character.World[holder].Translation)
+                        : local * character.World[holder];
+                    if (Environment.GetEnvironmentVariable("TM_WORN_DEBUG") == "1")
+                    {
+                        var raw = Enumerable.Range(0, n).Select(i => new Vector3(verts[i].x, verts[i].y, verts[i].z)).ToList();
+                        Console.WriteLine($"DEBUG rigid {model} {shape.name.get()} holder {holder} prn {prn} raw {raw.Aggregate(Vector3.Min):F1}..{raw.Aggregate(Vector3.Max):F1} local x <{local.M11:F2},{local.M12:F2},{local.M13:F2}> y <{local.M21:F2},{local.M22:F2},{local.M23:F2}> z <{local.M31:F2},{local.M32:F2},{local.M33:F2}> t {local.Translation:F1}");
+                    }
                     mirrored = place.GetDeterminant() < 0;
                     for (int i = 0; i < n; i++)
                     {
@@ -164,8 +178,8 @@ public sealed class ObWornSource(ObData data, ObTextures textures)
                     Uv = Enumerable.Range(0, n).Select(i => uvs is { Count: > 0 } && i < uvs.Count ? new Vector2(uvs[i].u, uvs[i].v) : Vector2.Zero).ToArray(),
                     Tris = tris, Weights = weights,
                     Textures = glow is not null
-                        ? [diffuse ?? @"textures\tamrielmerge\ob\missing.dds", texture.Length > 0 ? textures.Normal(texture) : ObTextures.FlatNormal, glow]
-                        : [diffuse ?? @"textures\tamrielmerge\ob\missing.dds", texture.Length > 0 ? textures.Normal(texture) : ObTextures.FlatNormal],
+                        ? [diffuse ?? textures.BlankDiffuse(), texture.Length > 0 ? textures.Normal(texture) : textures.Flat(), glow]
+                        : [diffuse ?? textures.BlankDiffuse(), texture.Length > 0 ? textures.Normal(texture) : textures.Flat()],
                     // As Oblivion's statics are converted: specular from the normal map's alpha.
                     Flags1 = 0x82400303,
                     Flags2 = 0x8001u | (glow is not null ? 0x40u : 0),
@@ -213,8 +227,10 @@ public sealed partial class ObPluginBuilder
         if (lower) return new(VanillaActors.Slot(53), 53, "body", armour ? 1.2f : 0.5f, null);
         if (f.HasFlag(Ob.BipedFlag.Hand)) return new(BipedObjectFlag.Hands, 33, "hands", armour ? 0.6f : 0.4f, null);
         if (f.HasFlag(Ob.BipedFlag.Foot)) return new(BipedObjectFlag.Feet, 37, "feet", armour ? 0.8f : 0.5f, null);
-        if (f.HasFlag(Ob.BipedFlag.Head)) return new(BipedObjectFlag.Head | BipedObjectFlag.Hair, 30, null, 0, null);
-        if (f.HasFlag(Ob.BipedFlag.Hair)) return new(BipedObjectFlag.Hair, 31, null, 0, null);
+        // Helmets and hoods over Skyrim's head, which isn't Oblivion's (fitted outside it: until 2026-11-14 they were
+        // only placed on the head bone, and the head showed through them).
+        if (f.HasFlag(Ob.BipedFlag.Head)) return new(BipedObjectFlag.Head | BipedObjectFlag.Hair, 30, "head", armour ? 0.35f : 0.25f, null);
+        if (f.HasFlag(Ob.BipedFlag.Hair)) return new(BipedObjectFlag.Hair, 31, "head", armour ? 0.35f : 0.25f, null);
         if (f.HasFlag(Ob.BipedFlag.Shield)) return new(BipedObjectFlag.Shield, 39, null, 0, null);
         return null;
     }
@@ -248,6 +264,15 @@ public sealed partial class ObPluginBuilder
                 lock (wornSourceLock) (source, skeleton) = wornSource!.Read(model, problems);
                 if (source.Count == 0) throw new InvalidDataException($"{model}: no shapes to wear");
                 var shapes = WornMesh.Retarget(source, skeleton, skyrimSkeleton, problems);
+                if (Environment.GetEnvironmentVariable("TM_WORN_DEBUG") == "1")
+                {
+                    static string B(IEnumerable<WornShape> l) => string.Join("; ", l.Select(s => $"{s.Name} {s.V.Aggregate(Vector3.Min):F1}..{s.V.Aggregate(Vector3.Max):F1} on {string.Join(",", s.Weights.SelectMany(w => w.Select(x => x.Item1)).Distinct().Take(3))}"));
+                    Console.WriteLine($"DEBUG {model} female {female} | source {B(source)} | moved {B(shapes)}");
+                    foreach (var bone in new[] { "Bip01 Head", "Bip01 Neck", "Bip01 Spine2", "Bip01 L Hand", "Bip01" })
+                        if (skeleton.Has(bone)) { var w = skeleton.World[bone]; Console.WriteLine($"  {bone}: at {w.Translation:F1} x {new Vector3(w.M11, w.M12, w.M13):F2} y {new Vector3(w.M21, w.M22, w.M23):F2} z {new Vector3(w.M31, w.M32, w.M33):F2}"); }
+                    foreach (var bone in skyrimSkeleton.World.Keys.Where(k => k.StartsWith("NPC Head") || k.StartsWith("NPC Neck")))
+                    { var w = skyrimSkeleton.World[bone]; Console.WriteLine($"  {bone}: at {w.Translation:F1} x {new Vector3(w.M11, w.M12, w.M13):F2} y {new Vector3(w.M21, w.M22, w.M23):F2} z {new Vector3(w.M31, w.M32, w.M33):F2}"); }
+                }
                 bool any1st = false;
                 foreach (int weight in new[] { 0, 1 })
                 {
@@ -288,7 +313,7 @@ public sealed partial class ObPluginBuilder
         foreach (bool female in new[] { false, true })
         {
             characterAssets.Skeleton(female);
-            foreach (var part in new[] { "body", "hands", "feet" })
+            foreach (var part in new[] { "body", "hands", "feet", "head" })
                 foreach (int w in new[] { 0, 1 }) characterAssets.Surface(part, female, w);
         }
         lock (wornSourceLock) wornSource.Skeleton();

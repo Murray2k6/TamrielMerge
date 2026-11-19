@@ -27,17 +27,39 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     static readonly FormKey InfoMapKey = new(ModKey.FromFileName("Skyrim.esm"), 0x12FB4);
 
     NavigationMeshInfoMap? infoMap;
+    /// <summary>The plugin it was made for (kept as a field: <see cref="Target"/> starts from it too).</summary>
+    readonly SkyrimMod mod = mod;
     SkyrimMod Mod => mod;
+    /// <summary>The plugin new navmeshes are made in (<paramref name="mod"/> to begin with): a tile's navmeshes written
+    /// into several plugins by size (OverlandNavmesh) switch it between pieces.</summary>
+    public SkyrimMod Target { get; set; } = mod;
 
-    /// <summary>Recast settings in Skyrim units: actor ~128 tall, 24 radius, steps up to 32 (stairs arrive as ramps), slopes to 50 degrees (Daggerfall's steepest stairs are 45).</summary>
-    static RcConfig Config(RcPartition partition = RcPartition.WATERSHED, float coarse = 1, float outline = 1) => new(
+    /// <summary>Recast settings in Skyrim units: actor ~128 tall, 24 radius (12 in Oblivion's interiors: Config), steps up to 32 (stairs arrive as ramps), slopes to 50 degrees (Daggerfall's steepest stairs are 45).</summary>
+    /// <summary>
+    /// How near the floor an interior's navmesh must lie, in units, whatever the try's voxels (0: as the settings below
+    /// give it, in voxels: 16 units, and 32 in the tries with voxels twice as coarse). Oblivion sets 8 (2026-11-15):
+    /// the Imperial prison's mesh, kept from a coarse try, lay a median 5.6 off the floor along Captain Renault's way to
+    /// her marker but 16 to 37 above it over long stretches, and at the 37 she turned back each time and never
+    /// arrived (run r71, cell-walk; user: "fix the pathing"). The other games' meshes are left as they were.
+    /// </summary>
+    public float FloorFit { get; set; }
+
+    static RcConfig Config(RcPartition partition = RcPartition.WATERSHED, float coarse = 1, float outline = 1, float floorFit = 0) => new(
         partition,
         cellSize: Env("CS", 8f) * coarse, cellHeight: Env("CH", 4f) * coarse,
-        agentMaxSlope: Env("SLOPE", 50f), agentHeight: Env("HEIGHT", 128f), agentRadius: Env("RADIUS", 24f), agentMaxClimb: Env("CLIMB", 32f),
+        // Radius: how far the mesh keeps off walls. 24 for the other games; 12 with a floor fit (Oblivion's interiors), as
+        // Skyrim's own keep theirs (open edges a median 13.5 to 29.7 off the wall in Morthal's guardhouse, Solitude's jail,
+        // Helgen Keep, Bleak Falls Barrow: CLI nav-layout, 2026-11-16, where ours were a tight 28.5): Skyrim's jail guard
+        // on a travel package walked out of the Imperial prison's cell clean in 4-5 s with 12 (probes p13, p14) where with
+        // 24 it took 16-24 s, standing up to 10 s and set down once (p8, p9, p12).
+        agentMaxSlope: Env("SLOPE", 50f), agentHeight: Env("HEIGHT", 128f), agentRadius: Env("RADIUS", floorFit > 0 ? 12f : 24f), agentMaxClimb: Env("CLIMB", 32f),
         regionMinSize: 8, regionMergeSize: 20,
         edgeMaxLen: 600f, edgeMaxError: 2f * outline,
         vertsPerPoly: 6,
-        detailSampleDist: Env("DETAILDIST", 6f), detailSampleMaxError: Env("DETAILERR", 4f),
+        // (In voxels: Recast multiplies the distance by the cell size and the error by the cell height. With a floor
+        // fit: heights every 24 units, never under 1.5 voxels, and the error that many units.)
+        detailSampleDist: floorFit > 0 ? MathF.Max(1.5f, 24f / (Env("CS", 8f) * coarse)) : Env("DETAILDIST", 6f),
+        detailSampleMaxError: floorFit > 0 ? floorFit / (Env("CH", 4f) * coarse) : Env("DETAILERR", 4f),
         filterLowHangingObstacles: Env("LOWHANG", 1f) > 0, filterLedgeSpans: Env("LEDGE", 1f) > 0, filterWalkableLowHeightSpans: Env("LOWHEIGHT", 1f) > 0,
         walkableAreaMod: new RcAreaModification(0x3f), buildMeshDetail: Env("DETAIL", 1f) > 0);
 
@@ -52,12 +74,20 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// <summary>Meshes still not fully triangulated after every retry (their Recast warnings are printed).</summary>
     public static int Untriangulated => untriangulated;
     static int untriangulated;
+    /// <summary>Meshes Recast warned about (a bad triangulation, an unmerged hole) that measured whole all the same.</summary>
+    public static int WarnedButWhole => warnedButWhole;
+    static int warnedButWhole;
+    /// <summary>Meshes made whole by cutting their regions into smaller blocks after every try had warned.</summary>
+    public static int SmallerBlocks => smallerBlocks;
+    static int smallerBlocks;
+    [ThreadStatic] static int blockOverride;
 
     /// <summary>The counts, for a build's log: the retries and the tries that made them whole.</summary>
     public static string RecastSummary =>
-        $"navmeshes: {retriangulated} made again after Recast's first try, {untriangulated} still not whole after every retry, {turnedUpChosen} interiors from faces turned up (more actors on it), {actorsSnapped} actors moved onto their navmesh" +
+        $"navmeshes: {retriangulated} made again after Recast's first try, {untriangulated} still not whole after every retry, {smallerBlocks} made clean by smaller blocks, {Interlocked.Read(ref outlinesTriangulated)} outlines Recast gave up on triangulated here ({Interlocked.Read(ref outlinesNotTriangulated)} neither could), {Interlocked.Read(ref contourCornersCleaned)} outline corners enclosing nothing taken out, {warnedButWhole} whole by measure though Recast warned, {turnedUpChosen} interiors from faces turned up (more actors on it), {actorsSnapped} actors moved onto their navmesh" +
         (retriangulated > 0 ? " (made whole by " + string.Join(", ", Enumerable.Range(1, Tries.Length - 1).Where(t => tryWins[t] > 0)
             .Select(t => $"{Tries[t].Partition.ToString().ToLowerInvariant()}{(Tries[t].Coarse > 1 ? " coarse" : "")}{(Tries[t].Error < 1 ? $" outline x{Tries[t].Error}" : "")}: {tryWins[t]}")) + ")" : "") +
+        (SplitSummary.Length > 0 ? "; " + SplitSummary : "") +
         Environment.NewLine + "  " + FloorSummary;
 
     /// <summary>The tries in order: partitioning, voxel size (times the config's) and outline error (times the config's).</summary>
@@ -68,6 +98,20 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         (RcPartition.LAYERS, 1, 0), (RcPartition.MONOTONE, 1, 0),
         (RcPartition.WATERSHED, 2, 1), (RcPartition.LAYERS, 2, 1), (RcPartition.MONOTONE, 2, 1), (RcPartition.LAYERS, 2, 0), (RcPartition.MONOTONE, 2, 0),
     ];
+
+    /// <summary>The order of <see cref="Tries"/> in the open-country setting: those that win it first (measured 2026-10-31
+    /// on 7,673 cells of Daggerfall's overland: try 0 6,352, try 3 880, try 6 412, every other 30 in all; each win at 3 or
+    /// 6 had paid for two or five failed builds first). A mesh is taken by the same tests in any order.</summary>
+    static readonly int[] OpenTries = [0, 3, 6, 1, 2, 4, 5, 7, 8, 9, 10, 11, 12];
+
+    /// <summary>Recast tries that threw, by what they threw. A try that throws is only the next try's cue, so nothing else
+    /// shows it: measured 2026-10-31, every try of the overland's open setting threw, each cell falling back
+    /// to the fine setting silently, at about seven times the time.</summary>
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> triesThrown = new();
+
+    /// <summary>For the build's log: the tries that threw, most common first (empty when none did).</summary>
+    public static string TriesThrownSummary => triesThrown.IsEmpty ? ""
+        : $"Recast tries that threw: {triesThrown.Values.Sum():N0} ({string.Join("; ", triesThrown.OrderByDescending(kv => kv.Value).Take(3).Select(kv => $"{kv.Value:N0} {kv.Key}"))})";
 
     /// <summary>How many meshes each try made whole (by <see cref="Tries"/>' index; declared after it, as static fields are
     /// set in order).</summary>
@@ -92,7 +136,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// are kept (<see cref="RecastOutput"/>) and printed only for a mesh no try could make whole.
     /// </summary>
     static (RcPolyMesh Mesh, RcPolyMeshDetail? Detail)? BuildMesh(IRcInputGeomProvider geom, Func<RcPartition, float, float, RcBuilderConfig> config, Func<float, float, float?>? land = null, Lazy<WoundInput>? wound = null,
-        float margin = 0, Hazards? hazards = null)
+        float margin = 0, Hazards? hazards = null, bool open = false)
     {
         (RcPolyMesh Mesh, RcPolyMeshDetail? Detail)? best = null;
         FloorCheck bestFloor = default;
@@ -102,14 +146,16 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         double bestCovered = 0;
         string bestWarnings = "";
         Exception? error = null;
-        for (int t = 0; t < Tries.Length; t++)
+        // One try: Recast's build in that try's settings and what it left out (nothing chosen here).
+        TryOutcome Measure(int t)
         {
             var (partition, coarse, outline) = Tries[t];
+            var tryWatch = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 var bc = config(partition, coarse, outline);
-                var r = RecastOutput.Keep(() => land is null && wound is null && hazards is null ? new RcBuilder().Build(geom, bc, true) : BuildOverLand(geom, bc, land, wound, marks, hazards), out var warnings);
-                if (r.Mesh is null || r.ContourSet is null || r.CompactHeightfield is null) { if (t == 0) return r.Mesh is null ? null : (r.Mesh, r.MeshDetail); continue; }
+                var r = RecastOutput.Keep(() => land is null && wound is null && hazards is null ? BuildSplit(geom, bc) : BuildOverLand(geom, bc, land, wound, marks, hazards), out var warnings);
+                if (r.Mesh is null || r.ContourSet is null || r.CompactHeightfield is null) return new TryOutcome(t, r, warnings, 0, 0, default, null, Incomplete: true);
                 int overlapping = Overlapping(r.CompactHeightfield);
                 if (overlapping > 0) warnings += $"{overlapping} regions lie over themselves ({partition}){Environment.NewLine}";
                 int bad = RecastOutput.Bad(warnings) + overlapping;
@@ -141,13 +187,78 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                             }
                         }
                         Console.WriteLine(sb.ToString());
+                        // The detail triangles over that point (the navmesh's faces) with their height there, and the
+                        // polygon each belongs to with its corners' heights.
+                        if (r.MeshDetail is { } dm)
+                        {
+                            var db = new StringBuilder($"  detail at {colX:F0},{colY:F0} (try {t}):");
+                            float wx = colX, wz = -colY;
+                            for (int m = 0; m < dm.nmeshes; m++)
+                            {
+                                int vb = dm.meshes[m * 4], tb = dm.meshes[m * 4 + 2], tc = dm.meshes[m * 4 + 3];
+                                for (int k = 0; k < tc; k++)
+                                {
+                                    var p3 = Enumerable.Range(0, 3).Select(q => { int v = (vb + dm.tris[(tb + k) * 4 + q]) * 3; return (X: dm.verts[v], Y: dm.verts[v + 1], Z: dm.verts[v + 2]); }).ToArray();
+                                    double den = (p3[1].Z - p3[2].Z) * (p3[0].X - p3[2].X) + (p3[2].X - p3[1].X) * (p3[0].Z - p3[2].Z);
+                                    if (Math.Abs(den) < 1e-9) continue;
+                                    double wa = ((p3[1].Z - p3[2].Z) * (wx - p3[2].X) + (p3[2].X - p3[1].X) * (wz - p3[2].Z)) / den;
+                                    double wb = ((p3[2].Z - p3[0].Z) * (wx - p3[2].X) + (p3[0].X - p3[2].X) * (wz - p3[2].Z)) / den;
+                                    if (wa < -0.02 || wb < -0.02 || wa + wb > 1.02) continue;
+                                    double hy = wa * p3[0].Y + wb * p3[1].Y + (1 - wa - wb) * p3[2].Y;
+                                    db.Append($" [poly {m} reg {(m < r.Mesh.npolys ? r.Mesh.regs[m] : -1)}: height {hy:F0}, corners {string.Join("/", p3.Select(c => c.Y.ToString("F0")))}]");
+                                }
+                            }
+                            Console.WriteLine(db.ToString());
+                        }
                     }
                 }
                 if (Trace)
                 {
-                    Console.WriteLine($"  recast try {t} ({partition}, voxels x{coarse}, outline x{outline}) at {Where(r.Mesh)}: {bad} bad ({overlapping} over themselves); {floor}");
+                    Console.WriteLine($"  recast try {t} ({partition}, voxels x{coarse}, outline x{outline}) at {Where(r.Mesh)}: {tryWatch.Elapsed.TotalSeconds:F1} s, {bad} bad ({overlapping} over themselves); {floor}{(floor.FarAt.Length > 0 ? $"; far at {floor.FarAt}" : "")}");
                     if (floor.None > 0) Console.Write(RegionDetail(r.CompactHeightfield, r.ContourSet, r.Mesh, floor.Where));
                 }
+                return new TryOutcome(t, r, warnings, overlapping, bad, floor, null);
+            }
+            catch (Exception e) { return new TryOutcome(t, null, "", 0, 0, default, e); }
+        }
+        // The tries in order. An interior's (no land, wound input or hazards: nothing shared between tries) after a first
+        // that wasn't whole are built side by side on the idle cores, a wave at a time, the cheap ones first (2026-11-02:
+        // Daggerfall's dungeons that needed a retry were made whole by tries 1, 2 and 5 only, 98 of them; the outline-0
+        // tries took The Hold of Copperham 468 s one after another while its batch waited). They are taken in the same
+        // order as one at a time, so the mesh is the same; a wave starts only when no try before it won.
+        // Every cell with land takes the tries in the open country's order (2026-11-10): Oblivion's exterior cells were
+        // made whole by try 3 in 4,353 cases and try 6 in 619, by tries 1 and 2 in 12 (Morrowind's: 1,583, 224 and 2),
+        // each of those wins paying for two or five failed builds first, about a fifth of Oblivion's navmesh time.
+        // TM_NAV_TRIES=n (dev aid): only the first n tries, to look at one quickly.
+        var order = Enumerable.Range(0, Math.Clamp((int)Env("TRIES", Tries.Length), 1, Tries.Length)).Select(i => open || land is not null ? OpenTries[i] : i).ToList();
+        bool sideBySide = land is null && wound is null && hazards is null;
+        int[] waves = sideBySide ? [1, 4, 4, 4] : Enumerable.Repeat(1, order.Count).ToArray();
+        int at = 0;
+        foreach (int size in waves.Concat(Enumerable.Repeat(1, order.Count)))
+        {
+            if (at >= order.Count) break;
+            var wave = order.Skip(at).Take(size).ToList();
+            at += wave.Count;
+            // The wave's tries side by side, each looked at in its turn as soon as it is made: a try that is whole is
+            // taken without waiting for the later ones of its wave (their work is left to run out unused). Until
+            // 2026-11-10 the whole wave was waited for: a Morrowind interior held its build over 30 minutes on one
+            // core in a single try's RcMeshs.BuildPolyMesh (sampled on a running build), and one Oblivion interior
+            // 31 minutes of every conversion.
+            var making = wave.Count == 1 ? null : wave.Select(t => Task.Run(() => Measure(t))).ToArray();
+            for (int member = 0; member < wave.Count; member++)
+            {
+                var o = making is null ? Measure(wave[0]) : making[member].Result;
+                int t = o.Try;
+                var (partition, coarse, outline) = Tries[t];
+                if (o.Error is { } e)
+                {
+                    error ??= e;
+                    triesThrown.AddOrUpdate($"{e.GetType().Name}: {e.Message.Split((char)10)[0]}", 1, (_, n) => n + 1);
+                    continue;
+                }
+                var r = o.Result!;
+                if (o.Incomplete) { if (t == 0) return r.Mesh is null ? null : (r.Mesh, r.MeshDetail); continue; }
+                var (warnings, overlapping, bad, floor) = (o.Warnings, o.Overlapping, o.Bad, o.Floor);
                 // Floor left without navmesh: under no polygon, in a region Recast made no outline for, or with only
                 // another floor's polygon over or under it (2026-10-19, nine Bitter Coast cells of Morrowind: every one
                 // of those was in a region with no outline, 0.05% of the floor, pockets on rock tops and under overhangs).
@@ -169,13 +280,40 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 if (best is null || (overlapping == 0 && bestOverlapping > 0) || ((overlapping == 0) == (bestOverlapping == 0) && (covered > bestCovered || (covered == bestCovered && bad < bestBad))))
                     (bestFloor, bestBad, best, bestWarnings, bestOverlapping, bestCovered, bestTry) = (floor, bad, (r.Mesh, r.MeshDetail), warnings, overlapping, covered, t);
             }
-            catch (Exception e) { error ??= e; }
         }
         if (best is null) throw error ?? new InvalidOperationException("Recast made no mesh");
         Record(bestFloor, best.Value.Mesh);
         long bestLost = bestFloor.None + bestFloor.Dropped + bestFloor.Far;
         // Whole only in coarser voxels, where no finer try could be made at all (one threw) or covered as much.
-        if (bestLost == 0 && bestBad == 0)
+        // A mesh Recast still warned about after every try (a "Bad triangulation": it gave up on part of one region's
+        // outline) is made again in the same settings with its regions cut into smaller blocks (SplitLarge at 24, then 12
+        // voxels in place of 48): a block's outline is short and nearly convex, which Recast triangulates (user,
+        // 2026-11-11, on Oblivion's six: "6 not whole and need fixed"; all six had every walkable span under a polygon).
+        if (bestBad > 0 && bestOverlapping == 0 && bestTry >= 0)
+            // The kept try's settings first, at each block size; then the other fine tries' (three of Oblivion's six
+            // still warned at 24 and 12 in the kept try's settings alone).
+            foreach (var (smaller, withTry) in new[] { 24, 12, 6, 4, 3 }.Select(bsz => (bsz, bestTry))
+                .Concat(new[] { 12, 6, 3 }.SelectMany(bsz => Enumerable.Range(0, Tries.Length).Where(t => t != bestTry && Tries[t].Coarse == Tries[bestTry].Coarse).Select(t => (bsz, t)))))
+            {
+                TryOutcome o;
+                blockOverride = smaller;
+                try { o = Measure(withTry); } finally { blockOverride = 0; }
+                if (o.Error is not null || o.Incomplete || o.Result?.Mesh is null) continue;
+                long lostSmaller = o.Floor.None + o.Floor.Dropped + o.Floor.Far;
+                if (o.Bad != 0 || lostSmaller > bestLost) continue;
+                Interlocked.Increment(ref retriangulated);
+                Interlocked.Increment(ref smallerBlocks);
+                Record(o.Floor, o.Result.Mesh);
+                if (lostSmaller == 0) return (o.Result.Mesh, o.Result.MeshDetail);
+                (bestFloor, bestBad, best, bestWarnings, bestLost) = (o.Floor, 0, (o.Result.Mesh, o.Result.MeshDetail), o.Warnings, lostSmaller);
+                break;
+            }
+        if (bestLost == 0 && bestBad > 0 && bestOverlapping == 0)
+        {
+            Interlocked.Increment(ref warnedButWhole);
+            Console.Write($"Recast warned at {Where(best!.Value.Mesh)} in every setting and block size; every walkable span has a polygon (kept try {bestTry}):{Environment.NewLine}{bestWarnings}");
+        }
+        if (bestLost == 0 && bestOverlapping == 0)
         {
             Interlocked.Increment(ref retriangulated);
             Interlocked.Increment(ref tryWins[bestTry]);
@@ -187,6 +325,548 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             $"{(bestFloor.DroppedAt.Length > 0 ? $"; in regions without an outline at {bestFloor.DroppedAt}" : "")}{(bestFloor.FarAt.Length > 0 ? $"; far at {bestFloor.FarAt}" : "")}{Environment.NewLine}{bestWarnings}");
         return best;
     }
+
+    /// <summary>
+    /// The floor of a doorway an inner door stands in (a gate, a room's door: no teleport), in Skyrim cell space: the
+    /// door's foot as a convex outline (<paramref name="Corners"/>, x and y; its bounds across and a step through on
+    /// either side) and the heights its floor lies between. Recast takes the agent's radius off every floor edge, so
+    /// a doorway kept little more than its middle: the prisoner's cell gate in Oblivion's Imperial prison, 96 wide
+    /// between its posts, stood over a neck of navmesh 40 wide with open edges either side (2026-11-16), and Skyrim's
+    /// people never once went through it, whatever the door (its own gate, unowned, unscripted, or Skyrim's own
+    /// FarmhouseJailDoor01 there): they stood before it and the game set them down on its far side. Skyrim's own
+    /// navmesh runs out to the frame under its inner doors (Morthal's guardhouse jail door, 92 wide, over a strip 90
+    /// wide). Inside these the floor is kept walkable as it was before the radius was taken off.
+    /// </summary>
+    public sealed record Doorway(System.Numerics.Vector2[] Corners, float Bottom, float Top);
+
+    /// <summary>Recast's volumes standing for doorways (<see cref="Doorway"/>): kept walkable after the agent's radius
+    /// comes off the floor, not given an area.</summary>
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<RcConvexVolume, Doorway> DoorwayVolumes = new();
+
+    /// <summary>Walkable spans kept in doorways that the agent's radius had taken off (<see cref="KeepDoorways"/>).</summary>
+    public static long DoorwaySpans => Interlocked.Read(ref doorwaySpans);
+    static long doorwaySpans;
+
+    /// <summary>Inner doors' doorways added to interiors' navmesh input.</summary>
+    public static long DoorwaysKept => Interlocked.Read(ref doorwaysKept);
+    static long doorwaysKept;
+
+    /// <summary>Each doorway's floor walkable again where it was before the agent's radius came off (<paramref name="walkable"/>:
+    /// the areas as they were): every span over a voxel whose middle is inside the doorway's outline, between its heights.</summary>
+    static void KeepDoorways(RcCompactHeightfield chf, int[] walkable, List<RcConvexVolume> doorways)
+    {
+        long kept = 0;
+        foreach (var v in doorways)
+        {
+            int n = v.verts.Length / 3;
+            float minX = float.MaxValue, maxX = float.MinValue, minZ = float.MaxValue, maxZ = float.MinValue;
+            for (int k = 0; k < n; k++)
+            {
+                minX = MathF.Min(minX, v.verts[k * 3]); maxX = MathF.Max(maxX, v.verts[k * 3]);
+                minZ = MathF.Min(minZ, v.verts[k * 3 + 2]); maxZ = MathF.Max(maxZ, v.verts[k * 3 + 2]);
+            }
+            int x0 = Math.Max(0, (int)MathF.Floor((minX - chf.bmin.X) / chf.cs)), x1 = Math.Min(chf.width - 1, (int)MathF.Floor((maxX - chf.bmin.X) / chf.cs));
+            int z0 = Math.Max(0, (int)MathF.Floor((minZ - chf.bmin.Z) / chf.cs)), z1 = Math.Min(chf.height - 1, (int)MathF.Floor((maxZ - chf.bmin.Z) / chf.cs));
+            int y0 = (int)MathF.Floor((v.hmin - chf.bmin.Y) / chf.ch), y1 = (int)MathF.Ceiling((v.hmax - chf.bmin.Y) / chf.ch);
+            for (int z = z0; z <= z1; z++)
+                for (int x = x0; x <= x1; x++)
+                {
+                    float px = chf.bmin.X + (x + 0.5f) * chf.cs, pz = chf.bmin.Z + (z + 0.5f) * chf.cs;
+                    if (!InOutline(v.verts, n, px, pz)) continue;
+                    var c = chf.cells[x + z * chf.width];
+                    for (int i = c.index; i < c.index + c.count; i++)
+                    {
+                        if (chf.areas[i] != 0 || walkable[i] == 0) continue;   // still walkable, or never was
+                        if (chf.spans[i].y < y0 || chf.spans[i].y > y1) continue;
+                        chf.areas[i] = walkable[i];
+                        kept++;
+                    }
+                }
+        }
+        Interlocked.Add(ref doorwaySpans, kept);
+    }
+
+    /// <summary>Whether (x, z) of Recast's space is inside a convex volume's outline (its corners' x and z).</summary>
+    static bool InOutline(float[] verts, int n, float x, float z)
+    {
+        bool inside = false;
+        for (int i = 0, j = n - 1; i < n; j = i++)
+        {
+            float xi = verts[i * 3], zi = verts[i * 3 + 2], xj = verts[j * 3], zj = verts[j * 3 + 2];
+            if ((zi > z) != (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi) inside = !inside;
+        }
+        return inside;
+    }
+
+    /// <summary>Recast's build of <paramref name="geom"/> (<see cref="BuildSplit(RcContext, int, int, IRcInputGeomProvider, RcConfig, RcHeightfield)"/>).</summary>
+    static RcBuilderResult BuildSplit(IRcInputGeomProvider geom, RcBuilderConfig bc)
+    {
+        var ctx = new RcContext();
+        return BuildSplit(ctx, bc.tileX, bc.tileZ, geom, bc.cfg, RcVoxelizations.BuildSolidHeightfield(ctx, geom, bc));
+    }
+
+    /// <summary>
+    /// Recast's build from the solid heightfield on, step for step as RcBuilder.Build (DotRecast 2026.3.1), with the
+    /// regions that lie over themselves split before their outlines are traced (<see cref="SplitOverlapping"/>; user,
+    /// 2026-11-02: "the overlapping navmeshing needs fixed"). Recast finds them and only warns: its BuildRegions says
+    /// "If overlapping regions were found during merging, split those regions" and then logs "rcBuildRegions: n overlapping
+    /// regions". The outline of such a region runs over both floors and crosses itself, so part of it got no polygons and
+    /// its detail mesh bridged the floors: The Hold of Copperham's region 475 held floors at 2,052 and 3,076 in the same
+    /// columns and a navmesh triangle ran from one to the other (corners 3,080/3,080/2,056), 10,153 spans under no polygon
+    /// and 6,550 far from it, and its retries took 469 s.
+    /// </summary>
+    static RcBuilderResult BuildSplit(RcContext ctx, int tileX, int tileZ, IRcInputGeomProvider geom, RcConfig cfg, RcHeightfield solid)
+    {
+        if (cfg.FilterLowHangingObstacles) RcFilters.FilterLowHangingWalkableObstacles(ctx, cfg.WalkableClimb, solid);
+        if (cfg.FilterLedgeSpans) RcFilters.FilterLedgeSpans(ctx, cfg.WalkableHeight, cfg.WalkableClimb, solid);
+        if (cfg.FilterWalkableLowHeightSpans) RcFilters.FilterWalkableLowHeightSpans(ctx, cfg.WalkableHeight, solid);
+        var chf = RcCompacts.BuildCompactHeightfield(ctx, cfg.WalkableHeight, cfg.WalkableClimb, solid);
+        var volumes = geom.ConvexVolumes();
+        var doorways = volumes.Where(v => DoorwayVolumes.TryGetValue(v, out _)).ToList();
+        int[]? walkable = doorways.Count > 0 ? (int[])chf.areas.Clone() : null;
+        RcAreas.ErodeWalkableArea(ctx, cfg.WalkableRadius, chf);
+        foreach (var vol in volumes) if (!DoorwayVolumes.TryGetValue(vol, out _)) RcAreas.MarkConvexPolyArea(ctx, vol.verts, vol.hmin, vol.hmax, vol.areaMod, chf);
+        if (walkable is not null) KeepDoorways(chf, walkable, doorways);
+        if (cfg.Partition == RcPartitionType.WATERSHED.Value)
+        {
+            RcRegions.BuildDistanceField(ctx, chf);
+            RcRegions.BuildRegions(ctx, chf, cfg.MinRegionArea, cfg.MergeRegionArea);
+        }
+        else if (cfg.Partition == RcPartitionType.MONOTONE.Value) RcRegions.BuildRegionsMonotone(ctx, chf, cfg.MinRegionArea, cfg.MergeRegionArea);
+        else RcRegions.BuildLayerRegions(ctx, chf, cfg.MinRegionArea);
+        SplitOverlapping(chf, cfg.MinRegionArea);
+        SplitLarge(chf, cfg.MinRegionArea);
+        var cset = RcContours.BuildContours(ctx, chf, cfg.MaxSimplificationError, cfg.MaxEdgeLen, RcBuildContoursFlags.RC_CONTOUR_TESS_WALL_EDGES);
+        CleanContours(cset);
+        var (pmesh, dmesh) = MeshInParts(ctx, cset, chf, cfg);
+        return new RcBuilderResult(tileX, tileZ, solid, chf, cset, pmesh, dmesh, ctx);
+    }
+
+    /// <summary>Meshes made in parts on several cores (<see cref="MeshInParts"/>), and the parts (for the build's log).</summary>
+    public static long MeshesInParts => Interlocked.Read(ref meshesInParts);
+    static long meshesInParts, meshParts;
+    public static string PartsSummary => meshesInParts == 0 ? "" : $"meshes made in parts on several cores: {meshesInParts:N0}, in {Interlocked.Read(ref meshParts):N0} parts";
+
+    /// <summary>
+    /// The polygon mesh and its detail from the outlines, on several cores (user, 2026-11-10: "it needs to use more
+    /// than one"): one mesh's outlines dealt into as many lots as there are cores (the biggest first, each to the
+    /// lightest lot by its points squared), each lot's polygons and detail made by itself, and the lots joined as
+    /// Recast joins the tiles of a tiled build (RcMeshs.MergePolyMeshes, which joins the shared corners and works out
+    /// the neighbours again, and RcMeshDetails.MergePolyMeshDetails, in the same order). An outline's polygons depend
+    /// on that outline alone, so the mesh is the same as made in one piece but for the order of its polygons. Before,
+    /// a mesh was made on one core however big: a Morrowind interior over 30 minutes (sampled in
+    /// RcMeshs.BuildPolyMesh). Each lot's warnings are written again on the calling thread, where a try counts them.
+    /// TM_NAV_PARTS=1 (dev aid): in one piece, to compare.
+    /// </summary>
+    /// <summary>Outlines Recast could not triangulate that were triangulated here (<see cref="PolyMesh"/>), and those
+    /// neither could.</summary>
+    public static long OutlinesTriangulatedHere => Interlocked.Read(ref outlinesTriangulated);
+    static long outlinesTriangulated, outlinesNotTriangulated;
+
+    /// <summary>
+    /// Recast's polygon mesh of an outline set, with every outline it gives up on ("BuildPolyMesh: Bad triangulation
+    /// Contour n": its ear clipping finds no ear and keeps only the part done) triangulated here instead and given
+    /// back to it as one small outline a triangle, so its mesh has the whole outline (user, 2026-11-11: "fix all bad
+    /// trianglation when found"). The outline set's list is replaced, not changed: other lots and the checks after
+    /// keep the outlines as Recast made them.
+    /// </summary>
+    static RcPolyMesh PolyMesh(RcContext ctx, RcContourSet cset, int maxVertsPerPoly)
+    {
+        for (int round = 0; ; round++)
+        {
+            var mesh = RecastOutput.Keep(() => RcMeshs.BuildPolyMesh(ctx, cset, maxVertsPerPoly), out string said);
+            var bad = BadContour.Matches(said).Select(m => int.Parse(m.Groups[1].Value)).Distinct().Where(k => k >= 0 && k < cset.conts.Count).OrderByDescending(k => k).ToList();
+            var replaced = new List<int>();
+            if (round < 3 && bad.Count > 0)
+            {
+                var conts = new List<RcContour>(cset.conts);
+                foreach (int k in bad)
+                {
+                    if (Triangles(conts[k]) is not { } tris) { Interlocked.Increment(ref outlinesNotTriangulated); continue; }
+                    conts.RemoveAt(k);
+                    conts.AddRange(tris);
+                    replaced.Add(k);
+                    Interlocked.Increment(ref outlinesTriangulated);
+                }
+                if (replaced.Count > 0) { cset.conts = conts; continue; }
+            }
+            // What Recast said that stands: written where the caller's own keeping hears it.
+            if (said.Length > 0) Console.Write(said);
+            return mesh;
+        }
+    }
+
+    static readonly System.Text.RegularExpressions.Regex BadContour = new(@"Bad triangulation Contour (\d+)", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// An outline as triangles, each an outline of its own (in the outline's winding, its region and area): ear clipping
+    /// in whole numbers. A corner is an ear when it turns the outline's way and no other corner of the outline lies in
+    /// or on its triangle (corners at the same spot as one of the triangle's own don't count: Recast joins a hole to its
+    /// outline through a way in and out along one line, so its corners come twice); a corner that turns nowhere is
+    /// dropped. Null when no ear is left before the outline is done (an outline that crosses itself).
+    /// </summary>
+    static List<RcContour>? Triangles(RcContour c)
+    {
+        int n = c.nverts;
+        if (n < 3) return [];
+        long X(int k) => c.verts[k * 4];
+        long Z(int k) => c.verts[k * 4 + 2];
+        long Cross(int a, int b, int d) => (X(b) - X(a)) * (Z(d) - Z(a)) - (Z(b) - Z(a)) * (X(d) - X(a));
+        long area2 = 0;
+        for (int k = 0; k < n; k++) { int m = (k + 1) % n; area2 += X(k) * Z(m) - X(m) * Z(k); }
+        if (area2 == 0) return [];
+        int way = Math.Sign(area2);
+        var left = Enumerable.Range(0, n).ToList();
+        var tris = new List<(int A, int B, int D)>();
+        while (left.Count > 3)
+        {
+            bool clipped = false;
+            for (int k = 0; k < left.Count && !clipped; k++)
+            {
+                int a = left[(k + left.Count - 1) % left.Count], b = left[k], d = left[(k + 1) % left.Count];
+                long turn = Cross(a, b, d) * way;
+                if (turn < 0) continue;
+                if (turn == 0) { left.RemoveAt(k); clipped = true; break; }
+                bool blocked = false;
+                foreach (int e in left)
+                {
+                    if (e == a || e == b || e == d) continue;
+                    if ((X(e) == X(a) && Z(e) == Z(a)) || (X(e) == X(b) && Z(e) == Z(b)) || (X(e) == X(d) && Z(e) == Z(d))) continue;
+                    if (Cross(a, b, e) * way >= 0 && Cross(b, d, e) * way >= 0 && Cross(d, a, e) * way >= 0) { blocked = true; break; }
+                }
+                if (blocked) continue;
+                tris.Add((a, b, d));
+                left.RemoveAt(k);
+                clipped = true;
+            }
+            if (!clipped) return null;
+        }
+        if (left.Count == 3 && Cross(left[0], left[1], left[2]) * way > 0) tris.Add((left[0], left[1], left[2]));
+        var made = new List<RcContour>(tris.Count);
+        foreach (var (a, b, d) in tris)
+        {
+            var v = new int[12];
+            int at = 0;
+            foreach (int k in new[] { a, b, d }) { Array.Copy(c.verts, k * 4, v, at, 4); at += 4; }
+            made.Add(new RcContour { verts = v, nverts = 3, rverts = (int[])v.Clone(), nrverts = 3, reg = c.reg, area = c.area });
+        }
+        return made;
+    }
+
+    static (RcPolyMesh Mesh, RcPolyMeshDetail? Detail) MeshInParts(RcContext ctx, RcContourSet cset, RcCompactHeightfield chf, RcConfig cfg)
+    {
+        RcPolyMeshDetail? Detail(RcContext c, RcPolyMesh m) => cfg.BuildMeshDetail ? RcMeshDetails.BuildPolyMeshDetail(c, m, chf, cfg.DetailSampleDist, cfg.DetailSampleMaxError) : null;
+        int most = (int)Env("PARTS", Environment.ProcessorCount);
+        int parts = Math.Min(most, cset.conts.Count / 4);
+        if (parts < 2)
+        {
+            var whole = PolyMesh(ctx, cset, cfg.MaxVertsPerPoly);
+            return (whole, Detail(ctx, whole));
+        }
+        var lots = Enumerable.Range(0, parts).Select(_ => new List<RcContour>()).ToArray();
+        var weight = new double[parts];
+        foreach (var c in cset.conts.OrderByDescending(c => c.nverts))
+        {
+            int to = Array.IndexOf(weight, weight.Min());
+            lots[to].Add(c);
+            weight[to] += (double)c.nverts * c.nverts + 1;
+        }
+        var meshes = new RcPolyMesh?[parts];
+        var details = new RcPolyMeshDetail?[parts];
+        var said = new string[parts];
+        Parallel.For(0, parts, new ParallelOptions { MaxDegreeOfParallelism = parts }, i =>
+        {
+            meshes[i] = RecastOutput.Keep(() =>
+            {
+                var c = new RcContext();
+                var lot = new RcContourSet
+                {
+                    conts = lots[i], bmin = cset.bmin, bmax = cset.bmax, cs = cset.cs, ch = cset.ch,
+                    width = cset.width, height = cset.height, borderSize = cset.borderSize, maxError = cset.maxError,
+                };
+                var m = PolyMesh(c, lot, cfg.MaxVertsPerPoly);
+                if (m.npolys > 0) details[i] = Detail(c, m);
+                return m;
+            }, out said[i]);
+        });
+        foreach (var s in said) if (s.Length > 0) Console.Write(s);
+        var keep = Enumerable.Range(0, parts).Where(i => meshes[i] is { npolys: > 0 }).ToArray();
+        if (keep.Length == 0)
+        {
+            var whole = PolyMesh(ctx, cset, cfg.MaxVertsPerPoly);
+            return (whole, Detail(ctx, whole));
+        }
+        Interlocked.Increment(ref meshesInParts);
+        Interlocked.Add(ref meshParts, keep.Length);
+        if (keep.Length == 1) return (meshes[keep[0]]!, details[keep[0]]);
+        var joined = RcMeshs.MergePolyMeshes(ctx, keep.Select(i => meshes[i]!).ToArray(), keep.Length);
+        var joinedDetail = cfg.BuildMeshDetail ? RcMeshDetails.MergePolyMeshDetails(ctx, keep.Select(i => details[i]!).ToArray(), keep.Length) : null;
+        return (joined, joinedDetail);
+    }
+
+    /// <summary>Regions split for lying over themselves (<see cref="SplitOverlapping"/>), and the pieces made of them.</summary>
+    public static long RegionsSplit => Interlocked.Read(ref regionsSplit);
+    static long regionsSplit, regionPieces;
+
+    /// <summary>For the build's log.</summary>
+    public static string SplitSummary => regionsSplit == 0 ? "" : $"regions over themselves split: {regionsSplit:N0}, into {Interlocked.Read(ref regionPieces):N0} pieces";
+
+    // Recast's directions: west, north, east, south in its x/z (rcGetDirOffsetX/Y).
+    static readonly int[] DirX = [-1, 0, 1, 0], DirZ = [0, 1, 0, -1];
+
+    /// <summary>
+    /// Each region with two spans in one column (<see cref="Overlapping"/>) made into pieces that have none: grown from
+    /// its lowest span over its connected spans, a piece never taking a second span in a column it has, then the next
+    /// piece from the lowest span left, and so on (a stair that turns back over its foot: the flight under, then the one
+    /// over it). Pieces smaller than Recast's smallest region join a piece of the same region beside them where their
+    /// columns don't clash, as Recast would merge them. Returns the regions split.
+    /// </summary>
+    static int SplitOverlapping(RcCompactHeightfield chf, int minArea)
+    {
+        int w = chf.width, h = chf.height, n = chf.spanCount;
+        var over = new HashSet<int>();
+        int maxReg = 0;
+        var spanX = new int[n];
+        var spanZ = new int[n];
+        for (int z = 0; z < h; z++)
+            for (int x = 0; x < w; x++)
+            {
+                var c = chf.cells[x + z * w];
+                for (int i = c.index, end = c.index + c.count; i < end; i++)
+                {
+                    spanX[i] = x; spanZ[i] = z;
+                    int r = chf.spans[i].reg;
+                    if (r == 0 || (r & RcRecast.RC_BORDER_REG) != 0) continue;
+                    maxReg = Math.Max(maxReg, r);
+                    for (int j = i + 1; j < end; j++)
+                        if (chf.spans[j].reg == r) over.Add(r);
+                }
+            }
+        if (over.Count == 0) return 0;
+        int Col(int i) => spanX[i] + spanZ[i] * w;
+        int Neighbour(int i, int dir)
+        {
+            int con = (chf.spans[i].con >> (dir * 6)) & 0x3f;
+            if (con == 0x3f) return -1;
+            int nx = spanX[i] + DirX[dir], nz = spanZ[i] + DirZ[dir];
+            return chf.cells[nx + nz * w].index + con;
+        }
+        var piece = new int[n];
+        Array.Fill(piece, -1);
+        var columns = new Dictionary<int, HashSet<int>>();
+        var members = new Dictionary<int, List<int>>();
+        var original = new Dictionary<int, int>();
+        int next = maxReg + 1;
+        // The lowest spans first: a region's spans by height, so each piece starts on the floor beneath.
+        var order = Enumerable.Range(0, n).Where(i => over.Contains(chf.spans[i].reg)).OrderBy(i => chf.spans[i].y).ToList();
+        var queue = new Queue<int>();
+        foreach (int seed in order)
+        {
+            if (piece[seed] >= 0) continue;
+            int id = next++, reg = chf.spans[seed].reg;
+            var taken = new HashSet<int> { Col(seed) };
+            var list = new List<int> { seed };
+            piece[seed] = id;
+            queue.Enqueue(seed);
+            while (queue.Count > 0)
+            {
+                int s = queue.Dequeue();
+                for (int dir = 0; dir < 4; dir++)
+                {
+                    int ni = Neighbour(s, dir);
+                    if (ni < 0 || piece[ni] >= 0 || chf.spans[ni].reg != reg || !taken.Add(Col(ni))) continue;
+                    piece[ni] = id;
+                    list.Add(ni);
+                    queue.Enqueue(ni);
+                }
+            }
+            columns[id] = taken; members[id] = list; original[id] = reg;
+        }
+        // Small pieces into a piece of the same region beside them (the biggest whose columns they don't share).
+        foreach (int id in members.Keys.OrderBy(k => members[k].Count).ToList())
+        {
+            if (!members.TryGetValue(id, out var list) || list.Count >= minArea) continue;
+            int best = -1;
+            foreach (int s in list)
+                for (int dir = 0; dir < 4; dir++)
+                {
+                    int ni = Neighbour(s, dir);
+                    if (ni < 0 || piece[ni] < 0 || piece[ni] == id || original[piece[ni]] != original[id]) continue;
+                    int other = piece[ni];
+                    if ((best < 0 || members[other].Count > members[best].Count) && !columns[other].Overlaps(columns[id])) best = other;
+                }
+            if (best < 0) continue;
+            foreach (int s in list) piece[s] = best;
+            members[best].AddRange(list);
+            columns[best].UnionWith(columns[id]);
+            members.Remove(id); columns.Remove(id);
+        }
+        // Ids in order from after the last region (Recast's border flag is the top bit: none may reach it).
+        var ids = members.Keys.Order().Select((k, i) => (k, i)).ToDictionary(t => t.k, t => maxReg + 1 + t.i);
+        if (maxReg + 1 + ids.Count >= RcRecast.RC_BORDER_REG) return 0;
+        foreach (var (id, list) in members)
+            foreach (int s in list)
+                chf.spans[s] = RcCompactSpanBuilder.NewBuilder(ref chf.spans[s]).WithReg(ids[id]).Build();
+        chf.maxRegions = maxReg + 1 + ids.Count;
+        Interlocked.Add(ref regionsSplit, over.Count);
+        Interlocked.Add(ref regionPieces, ids.Count);
+        return over.Count;
+    }
+
+    /// <summary>Outline corners taken out as doubled or as spikes (<see cref="CleanContours"/>).</summary>
+    public static long ContourCornersCleaned => Interlocked.Read(ref contourCornersCleaned);
+    static long contourCornersCleaned;
+
+    /// <summary>
+    /// An outline's corners that enclose nothing, taken out before Recast triangulates it: the same corner twice
+    /// running, and a spike (out to a corner and straight back to the one before). Recast's ear clipping finds no ear
+    /// at such a corner and gives the outline up part-way ("BuildPolyMesh: Bad triangulation Contour n"); with them out
+    /// the outline is the same area. One of Oblivion's exterior cells warned so in every partitioning, outline error
+    /// and block size (2026-11-11, at 4743,5555, every walkable span under a polygon all the same).
+    /// </summary>
+    static void CleanContours(RcContourSet cset)
+    {
+        foreach (var c in cset.conts)
+        {
+            if (c.nverts < 3) continue;
+            var v = new List<(int X, int Y, int Z, int F)>(c.nverts);
+            for (int i = 0; i < c.nverts; i++) v.Add((c.verts[i * 4], c.verts[i * 4 + 1], c.verts[i * 4 + 2], c.verts[i * 4 + 3]));
+            int before = v.Count;
+            bool changed = true;
+            while (changed && v.Count >= 3)
+            {
+                changed = false;
+                for (int i = 0; i < v.Count && v.Count >= 3; i++)
+                {
+                    var p = v[(i + v.Count - 1) % v.Count]; var q = v[i]; var n = v[(i + 1) % v.Count];
+                    if ((q.X == p.X && q.Z == p.Z) || (p.X == n.X && p.Z == n.Z)) { v.RemoveAt(i); i--; changed = true; }
+                }
+            }
+            if (v.Count != before)
+            {
+                Interlocked.Add(ref contourCornersCleaned, before - v.Count);
+                if (v.Count < 3) { c.nverts = 0; continue; }
+                Store(c, v);
+            }
+        }
+        // Not done: an outline that comes back to a corner it has been through is not split in two. Recast joins a
+        // region's holes to its outline by such a way in and out, and split there the hole becomes an outline wound
+        // the wrong way (tried 2026-11-11 on Oblivion's OBDarkFissure: 51 outlines split, ten bad triangulations where
+        // there had been one).
+    }
+
+    static void Store(RcContour c, List<(int X, int Y, int Z, int F)> v)
+    {
+        var flat = new int[v.Count * 4];
+        for (int i = 0; i < v.Count; i++) { flat[i * 4] = v[i].X; flat[i * 4 + 1] = v[i].Y; flat[i * 4 + 2] = v[i].Z; flat[i * 4 + 3] = v[i].F; }
+        c.verts = flat;
+        c.nverts = v.Count;
+    }
+
+    /// <summary>Regions cut for their size (<see cref="SplitLarge"/>), and the pieces made of them (for the build's log).</summary>
+    public static string LargeSummary => largeSplit == 0 ? "" : $"regions cut for their size: {Interlocked.Read(ref largeSplit):N0}, into {Interlocked.Read(ref largePieces):N0} pieces";
+    static long largeSplit, largePieces;
+
+    /// <summary>
+    /// Regions wider than a block and a half (a block: 48 voxels, TM_NAV_BLOCK) cut along the block grid into connected
+    /// pieces, each a region of its own. Recast merges an outline's triangles into polygons by looking at every pair
+    /// again after each merge, which for one region covering a great hall or cavern floor is the cube of its triangles
+    /// on a single core: a Morrowind interior's last navmesh took 4,777 s of its build's 5,231 (2026-11-10), with the
+    /// outlines dealt over the cores (<see cref="MeshInParts"/>) still one core for the one great outline. Cut up, no
+    /// outline is big and the lots are even. Pieces smaller than Recast's smallest region join a piece of their
+    /// region beside them. The floor covered is the same; the polygons meet along the cuts.
+    /// </summary>
+    static int SplitLarge(RcCompactHeightfield chf, int minArea)
+    {
+        int block = blockOverride > 0 ? blockOverride : (int)Env("BLOCK", 48);
+        if (block <= 0) return 0;
+        int w = chf.width, h = chf.height, n = chf.spanCount;
+        var spanX = new int[n];
+        var spanZ = new int[n];
+        var box = new Dictionary<int, (int X0, int Z0, int X1, int Z1)>();
+        int maxReg = 0;
+        for (int z = 0; z < h; z++)
+            for (int x = 0; x < w; x++)
+            {
+                var c = chf.cells[x + z * w];
+                for (int i = c.index, end = c.index + c.count; i < end; i++)
+                {
+                    spanX[i] = x; spanZ[i] = z;
+                    int r = chf.spans[i].reg;
+                    if (r == 0 || (r & RcRecast.RC_BORDER_REG) != 0) continue;
+                    maxReg = Math.Max(maxReg, r);
+                    box[r] = box.TryGetValue(r, out var b) ? (Math.Min(b.X0, x), Math.Min(b.Z0, z), Math.Max(b.X1, x), Math.Max(b.Z1, z)) : (x, z, x, z);
+                }
+            }
+        var large = box.Where(kv => kv.Value.X1 - kv.Value.X0 > block * 3 / 2 || kv.Value.Z1 - kv.Value.Z0 > block * 3 / 2).Select(kv => kv.Key).ToHashSet();
+        if (large.Count == 0) return 0;
+        int Neighbour(int i, int dir)
+        {
+            int con = (chf.spans[i].con >> (dir * 6)) & 0x3f;
+            if (con == 0x3f) return -1;
+            int nx = spanX[i] + DirX[dir], nz = spanZ[i] + DirZ[dir];
+            return chf.cells[nx + nz * w].index + con;
+        }
+        var piece = new int[n];
+        Array.Fill(piece, -1);
+        var members = new Dictionary<int, List<int>>();
+        var original = new Dictionary<int, int>();
+        int next = 0;
+        var queue = new Queue<int>();
+        for (int seed = 0; seed < n; seed++)
+        {
+            int reg = chf.spans[seed].reg;
+            if (piece[seed] >= 0 || !large.Contains(reg)) continue;
+            int bx = spanX[seed] / block, bz = spanZ[seed] / block, id = next++;
+            var list = new List<int> { seed };
+            piece[seed] = id;
+            queue.Enqueue(seed);
+            while (queue.Count > 0)
+            {
+                int sp = queue.Dequeue();
+                for (int dir = 0; dir < 4; dir++)
+                {
+                    int ni = Neighbour(sp, dir);
+                    if (ni < 0 || piece[ni] >= 0 || chf.spans[ni].reg != reg || spanX[ni] / block != bx || spanZ[ni] / block != bz) continue;
+                    piece[ni] = id;
+                    list.Add(ni);
+                    queue.Enqueue(ni);
+                }
+            }
+            members[id] = list; original[id] = reg;
+        }
+        // Small pieces into the biggest piece of the same region beside them.
+        foreach (int id in members.Keys.OrderBy(k => members[k].Count).ToList())
+        {
+            if (!members.TryGetValue(id, out var list) || list.Count >= Math.Max(minArea, 8)) continue;
+            int best = -1;
+            foreach (int sp in list)
+                for (int dir = 0; dir < 4; dir++)
+                {
+                    int ni = Neighbour(sp, dir);
+                    if (ni < 0 || piece[ni] < 0 || piece[ni] == id || original[piece[ni]] != original[id]) continue;
+                    if (best < 0 || members[piece[ni]].Count > members[best].Count) best = piece[ni];
+                }
+            if (best < 0) continue;
+            foreach (int sp in list) piece[sp] = best;
+            members[best].AddRange(list);
+            members.Remove(id);
+        }
+        // Ids from after the last region (Recast's border flag is the top bit: none may reach it).
+        if (maxReg + 1 + members.Count >= RcRecast.RC_BORDER_REG) return 0;
+        var ids = members.Keys.Order().Select((k, i) => (k, i)).ToDictionary(t => t.k, t => maxReg + 1 + t.i);
+        foreach (var (id, list) in members)
+            foreach (int sp in list)
+                chf.spans[sp] = RcCompactSpanBuilder.NewBuilder(ref chf.spans[sp]).WithReg(ids[id]).Build();
+        chf.maxRegions = maxReg + 1 + ids.Count;
+        Interlocked.Add(ref largeSplit, large.Count);
+        Interlocked.Add(ref largePieces, ids.Count);
+        return large.Count;
+    }
+
+    /// <summary>One Recast try as <see cref="BuildMesh"/> measured it: its build (null when it threw), Recast's warnings, the
+    /// regions over themselves, the bad count and the floor left out.</summary>
+    sealed record TryOutcome(int Try, RcBuilderResult? Result, string Warnings, int Overlapping, int Bad, FloorCheck Floor, Exception? Error, bool Incomplete = false);
 
     /// <summary>
     /// Recast's build with every voxel span whose top lies more than <see cref="BuriedDepth"/> under the land at its
@@ -213,7 +893,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     {
         var ctx = new RcContext();
         var solid = RcVoxelizations.BuildSolidHeightfield(ctx, geom, bc);
-        static long Key(int x, int z, int top) => x | ((long)z << 16) | ((long)top << 32);
+        // (x is a span's column, never below 0: taken as unsigned, so its sign can't spill into z's and top's bits.)
+        static long Key(int x, int z, int top) => (uint)x | ((long)z << 16) | ((long)top << 32);
         var marking = System.Diagnostics.Stopwatch.StartNew();
         if (marks.TryGetValue(solid.cs, out var known))
         {
@@ -277,7 +958,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         }
         Interlocked.Add(ref markingTicks, marking.ElapsedTicks);
         var recast = System.Diagnostics.Stopwatch.StartNew();
-        var built = new RcBuilder().Build(ctx, bc.tileX, bc.tileZ, geom, bc.cfg, solid, true);
+        var built = BuildSplit(ctx, bc.tileX, bc.tileZ, geom, bc.cfg, solid);
         Interlocked.Add(ref recastTicks, recast.ElapsedTicks);
         return built;
     }
@@ -288,7 +969,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// <summary>For the build's log: the shut-in test's work and where the time went.</summary>
     public static string MarkingSummary =>
         $"under-land and shut-in marking: {Interlocked.Read(ref shutTested):N0} spans tested, {WoundInput.Rays:N0} rays, {WoundInput.Tests:N0} triangles tested; " +
-        $"{Interlocked.Read(ref markingTicks) / (double)System.Diagnostics.Stopwatch.Frequency:F0} s marking, {Interlocked.Read(ref recastTicks) / (double)System.Diagnostics.Stopwatch.Frequency:F0} s in Recast (all threads)";
+        $"{Interlocked.Read(ref markingTicks) / (double)System.Diagnostics.Stopwatch.Frequency:F0} s marking, {Interlocked.Read(ref recastTicks) / (double)System.Diagnostics.Stopwatch.Frequency:F0} s in Recast (all threads)" + (WoundInput.CheckSummary.Length > 0 ? "; " + WoundInput.CheckSummary : "");
 
     /// <summary>Walkable voxel spans made unwalkable as under the land (<see cref="BuildOverLand"/>), once a voxel size.</summary>
     public static long BuriedSpans => Interlocked.Read(ref buriedSpans);
@@ -368,9 +1049,13 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     static readonly bool Trace = Environment.GetEnvironmentVariable("TM_NAV_TRACE") == "1";
 
     /// <summary>Where a mesh lies, for the log: its middle in Skyrim units and (for an exterior) the cell.</summary>
+    /// <summary>The interior being built (its EditorID), for the messages: it goes with the work onto the worker threads.</summary>
+    static readonly AsyncLocal<string?> Building = new();
+
     static string Where(RcPolyMesh mesh)
     {
         float x = (mesh.bmin.X + mesh.bmax.X) / 2, y = -(mesh.bmin.Z + mesh.bmax.Z) / 2;
+        if (Building.Value is { Length: > 0 } interior) return $"{x:F0},{y:F0} in {interior}";
         return $"{x:F0},{y:F0} (cell {MathF.Floor(x / CellUnits)},{MathF.Floor(y / CellUnits)})";
     }
 
@@ -656,8 +1341,11 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// interiors are made on every core (2026-10-22: Oblivion's 1,916 one at a time took 46 minutes on one of eight).
     /// </summary>
     public PendingInterior BeginInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> asWound, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> turnedUp,
-        IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IReadOnlyList<P3Float> actors, Hazards? hazards, Func<P3Float, bool>? underwater, bool background)
+        IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IReadOnlyList<P3Float> actors, Hazards? hazards, Func<P3Float, bool>? underwater, bool background,
+        IReadOnlyList<Doorway>? doorways = null)
     {
+        Building.Value = cell.EditorID;
+        float fit = FloorFit;
         var doors = loadDoors.ToList();
         NoteDoors(doors);
         var actorList = actors.ToList();
@@ -667,7 +1355,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         pending.Run = () =>
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var made = Generate(cell, asWound, doors, keepAround, actorList, underwater, hazards);
+            var made = Generate(cell, asWound, doors, keepAround, actorList, underwater, hazards, floorFit: fit, doorways: doorways);
             pending.Timing = "as wound: " + made.Timing;
             int On(Generated g) => actorList.Count(a => Distance(g.Data, a) <= 64);
             int on = On(made);
@@ -675,7 +1363,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             {
                 Generated? alt = null;
                 var altWatch = System.Diagnostics.Stopwatch.StartNew();
-                try { alt = Generate(cell, turnedUp, doors, keepAround, actorList, underwater, hazards); }
+                try { alt = Generate(cell, turnedUp, doors, keepAround, actorList, underwater, hazards, floorFit: fit, doorways: doorways); }
                 catch (Exception) { }
                 pending.Timing += $"; turned up ({on} of {actorList.Count} actors on it as wound): {(alt is null ? $"failed after {altWatch.Elapsed.TotalSeconds:F1} s" : alt.Timing)}";
                 if (alt is not null && On(alt) > on) { made = alt; Interlocked.Increment(ref turnedUpChosen); }
@@ -685,12 +1373,82 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         };
         if (background)
         {
-            pending.Navm = new NavigationMesh(mod);
+            pending.Navm = new NavigationMesh(Target);
             cell.NavigationMeshes.Add(pending.Navm);
             pending.Work = Task.Run(pending.Run);
         }
         return pending;
     }
+
+    /// <summary>
+    /// An interior's mesh in navmeshes: each piece of it (triangles joined by edges) that holds a load door, the biggest
+    /// piece apart, in a navmesh of its own; the rest together, first. Skyrim's people go through a load door from one
+    /// navmesh to another, as Skyrim's own cells join theirs: the Imperial prison's Mythic Dawn assassins walked their
+    /// room for twelve minutes and never took its door, whose other side is in the same cell on the same navmesh (runs
+    /// r103 and r104, 2026-11-16; Oblivion's people take such a door: its path grid's doors join wherever they lead).
+    /// </summary>
+    static List<(NavigationMeshData Data, List<P3Float> Verts)> DoorPieces(NavigationMeshData data, List<P3Float> verts)
+    {
+        var tris = data.Triangles;
+        int n = tris.Count;
+        var parent = Enumerable.Range(0, n).ToArray();
+        int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+        for (int i = 0; i < n; i++)
+            foreach (short e in new[] { tris[i].EdgeLink_0_1, tris[i].EdgeLink_1_2, tris[i].EdgeLink_2_0 })
+                if (e >= 0 && e < n) parent[Find(i)] = Find(e);
+        var size = new Dictionary<int, int>();
+        for (int i = 0; i < n; i++) size[Find(i)] = size.GetValueOrDefault(Find(i)) + 1;
+        if (size.Count < 2) return [(data, verts)];
+        int biggest = size.MaxBy(kv => kv.Value).Key;
+        var own = data.DoorTriangles.Select(d => Find(d.TriangleBeforeDoor)).Where(p => p != biggest).Distinct().ToList();
+        if (own.Count == 0) return [(data, verts)];
+        // Pieces in order: the rest together, then each door piece.
+        var groups = new List<Func<int, bool>> { i => !own.Contains(Find(i)) };
+        foreach (int p in own) groups.Add(i => Find(i) == p);
+        var list = new List<(NavigationMeshData, List<P3Float>)>();
+        foreach (var inGroup in groups)
+        {
+            var keep = Enumerable.Range(0, n).Where(inGroup).ToList();
+            var triIndex = new Dictionary<int, int>();
+            for (int k = 0; k < keep.Count; k++) triIndex[keep[k]] = k;
+            var vertIndex = new Dictionary<int, int>();
+            var pv = new List<P3Float>();
+            int Vert(int v) { if (!vertIndex.TryGetValue(v, out int at)) { at = vertIndex[v] = pv.Count; pv.Add(verts[v]); } return at; }
+            var piece = new NavigationMeshData { NavmeshVersion = data.NavmeshVersion, CrcHash = data.CrcHash, Parent = data.Parent.DeepCopy() };
+            var ptris = new List<(int A, int B, int C)>();
+            short Link(short e) => e >= 0 && triIndex.TryGetValue(e, out int to) ? (short)to : (short)-1;
+            foreach (int i in keep)
+            {
+                var t = tris[i];
+                var corners = (Vert(t.Vertices.X), Vert(t.Vertices.Y), Vert(t.Vertices.Z));
+                ptris.Add(corners);
+                piece.Triangles.Add(new NavmeshTriangle
+                {
+                    Vertices = new P3Int16((short)corners.Item1, (short)corners.Item2, (short)corners.Item3),
+                    EdgeLink_0_1 = Link(t.EdgeLink_0_1), EdgeLink_1_2 = Link(t.EdgeLink_1_2), EdgeLink_2_0 = Link(t.EdgeLink_2_0),
+                    Flags = t.Flags, CoverFlags = t.CoverFlags,
+                });
+            }
+            piece.Vertices.AddRange(pv);
+            foreach (var d in data.DoorTriangles)
+                if (triIndex.TryGetValue(d.TriangleBeforeDoor, out int at))
+                    piece.DoorTriangles.Add(new DoorTriangle { TriangleBeforeDoor = (short)at, Unknown = d.Unknown, Door = new FormLink<IPlacedObjectGetter>(d.Door.FormKey) });
+            WriteGrid(piece, pv, ptris);
+            list.Add((piece, pv));
+        }
+        return list;
+    }
+
+    /// <summary>The load doors <paramref name="data"/>'s door triangles name, of <paramref name="linked"/>.</summary>
+    static List<IPlacedObjectGetter> LinkedOf(NavigationMeshData data, List<IPlacedObjectGetter> linked)
+    {
+        var keys = data.DoorTriangles.Select(d => d.Door.FormKey).ToHashSet();
+        return linked.Where(d => keys.Contains(d.FormKey)).ToList();
+    }
+
+    /// <summary>Navmeshes made for an interior's pieces reached only through a load door (<see cref="DoorPieces"/>).</summary>
+    public static long DoorPieceMeshes => Interlocked.Read(ref doorPieceMeshes);
+    static long doorPieceMeshes;
 
     /// <summary>Interiors whose navmesh was made from every face turned up (the choice above).</summary>
     public static int TurnedUpChosen => turnedUpChosen;
@@ -713,6 +1471,16 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         internal Func<Generated>? Run;
         internal Task<Generated>? Work;
         Result? result;
+        /// <summary>Whether the mesh is made (on its worker thread; one made in the foreground, once finished).</summary>
+        public bool IsMade => result is not null || Work is { IsCompleted: true };
+
+        /// <summary>Waits until one of <paramref name="pending"/> made in the background is made.</summary>
+        public static void WaitAny(IEnumerable<PendingInterior> pending)
+        {
+            var work = pending.Where(p => !p.IsMade && p.Work is not null).Select(p => (Task)p.Work!).ToArray();
+            if (work.Length > 0) Task.WaitAny(work);
+        }
+
         /// <summary>Seconds the mesh took to make (on whichever thread made it).</summary>
         public double Seconds { get; internal set; }
         /// <summary>Where that time went (each mesh tried: as wound, then turned up).</summary>
@@ -733,11 +1501,20 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             Generated g;
             try { g = Work is not null ? Work.GetAwaiter().GetResult() : Run!(); }
             catch { if (Navm is not null) Cell.NavigationMeshes.Remove(Navm); throw; }
-            var navm = Navm ?? new NavigationMesh(Owner.Mod);
-            navm.Data = g.Data;
-            if (Navm is null) Cell.NavigationMeshes.Add(navm);
-            Owner.AddInfo(navm, Cell, g.Verts, g.Linked);
             if (SnapActors) { Snapped = SnapToMesh(Cell, g.Verts, g.Data.Triangles, StaysPut); Interlocked.Add(ref actorsSnapped, Snapped); }
+            var navm = Navm ?? new NavigationMesh(Owner.Mod);
+            if (Navm is null) Cell.NavigationMeshes.Add(navm);
+            // FloorFit's interiors (Oblivion's): a piece reached only through a load door its own navmesh (DoorPieces).
+            var pieces = Owner.FloorFit > 0 ? DoorPieces(g.Data, g.Verts) : [(g.Data, g.Verts)];
+            navm.Data = pieces[0].Data;
+            Owner.AddInfo(navm, Cell, pieces[0].Verts, LinkedOf(pieces[0].Data, g.Linked));
+            foreach (var (data, verts) in pieces.Skip(1))
+            {
+                var more = new NavigationMesh(Owner.Target) { Data = data };
+                Cell.NavigationMeshes.Add(more);
+                Owner.AddInfo(more, Cell, verts, LinkedOf(data, g.Linked));
+                Interlocked.Increment(ref doorPieceMeshes);
+            }
             return result = new Result(navm, g.Triangles, g.Verts.Count, g.Linked.Count);
         }
     }
@@ -860,13 +1637,21 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         public string Timing { get; init; } = "";
     }
 
+    // (No walk surface over rough floor. From 2026-11-16 an invisible stair-helper surface was laid over the navmesh's
+    // rough triangles in Oblivion's interiors, the mesh raised onto it; measured that day with Skyrim's own jail guard on
+    // travel packages (probes p10, p11): our navmesh for Skyrim's Dragonsreach with it stalled the climb to the upper
+    // floor 40 and 62 s where Skyrim's own navmesh took 13 s, and without it the climb ran clean twice in 13-15 s. In
+    // the Imperial prison it made no walk better (builds 17 and 18). Taken out.)
+
     /// <summary>
     /// <see cref="BuildInterior"/> begun: with <paramref name="background"/> the mesh is made on a worker thread (the
     /// inputs must not change until it is finished), else when <see cref="PendingInterior.Finish"/> is called.
     /// </summary>
     public PendingInterior BeginInterior(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, IEnumerable<IPlacedObjectGetter> loadDoors, P3Float? keepAround, IEnumerable<P3Float>? keepAlso,
-        Func<P3Float, bool>? underwater, bool background, bool snapActors = false, Hazards? hazards = null)
+        Func<P3Float, bool>? underwater, bool background, bool snapActors = false, Hazards? hazards = null, bool bridgeGaps = false)
     {
+        Building.Value = cell.EditorID;
+        float fit = FloorFit;
         var doors = loadDoors.ToList();
         NoteDoors(doors);
         var keep = keepAlso?.ToList();
@@ -874,13 +1659,13 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         pending.Run = () =>
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var g = Generate(cell, polygons, doors, keepAround, keep, underwater, hazards);
+            var g = Generate(cell, polygons, doors, keepAround, keep, underwater, hazards, bridgeGaps, fit);
             pending.Seconds = sw.Elapsed.TotalSeconds;
             return g;
         };
         if (background)
         {
-            pending.Navm = new NavigationMesh(mod);
+            pending.Navm = new NavigationMesh(Target);
             cell.NavigationMeshes.Add(pending.Navm);
             pending.Work = Task.Run(pending.Run);
         }
@@ -888,16 +1673,29 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     }
 
     static Generated Generate(Cell cell, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, List<IPlacedObjectGetter> doorList, P3Float? keepAround, IEnumerable<P3Float>? keepAlso,
-        Func<P3Float, bool>? underwater, Hazards? hazards = null)
+        Func<P3Float, bool>? underwater, Hazards? hazards = null, bool bridgeGaps = false, float floorFit = 0, IReadOnlyList<Doorway>? doorways = null)
     {
         // Recast's mesh, or the same input's from another part (SharedExteriors: a town part's building interiors are
         // the same buildings as other parts', 2026-10-15: a fifth of a town part's work).
-        // (Not shared with hazards: the shared files are keyed by the polygons alone.)
+        // (Not shared with hazards or doorways: the shared files are keyed by the polygons alone.)
         var stage = System.Diagnostics.Stopwatch.StartNew();
-        var (outVerts, tris) = SharedExteriors is { } dir && hazards is null ? SharedInterior(dir, polygons) : RecastInterior(polygons, hazards);
+        var (outVerts, tris) = SharedExteriors is { } dir && hazards is null && floorFit == 0 && doorways is not { Count: > 0 } ? SharedInterior(dir, polygons) : RecastInterior(polygons, hazards, floorFit, doorways);
         double recastSeconds = stage.Elapsed.TotalSeconds; stage.Restart();
         int recastTris = tris.Count;
         (outVerts, tris) = PruneIslands(outVerts, tris, doorList.Select(d => d.Placement!.Position).Append(keepAround ?? default).Concat(keepAlso ?? []).ToList());
+        // Pieces joined across short gaps nothing stands in, once the islands are gone (2026-11-06: joined first, the
+        // borders went to table tops and ledges, and Redguard's palace kept 34 pieces where 21 joined after).
+        int bridged = 0;
+        if (bridgeGaps)
+        {
+            // TM_NAVIN=DIR (dev aid): each interior's input polygons kept as <cell>.bin (navmesh-bridge-test --polys).
+            if (Environment.GetEnvironmentVariable("TM_NAVIN") is { Length: > 0 } navIn) WritePolygons(Path.Combine(navIn, (cell.EditorID ?? "cell") + ".bin"), polygons);
+            var why = new Dictionary<string, int>();
+            bridged = BridgeGaps(outVerts, tris, polygons, why: why);
+            lock (BridgeReasons) foreach (var (k, v) in why) BridgeReasons[k] = BridgeReasons.GetValueOrDefault(k) + v;
+        }
+        // Ways down off ledges to the floor below (FloorFit's interiors: Oblivion's).
+        if (floorFit > 0) DropLinks(outVerts, tris, polygons);
         double pruneSeconds = stage.Elapsed.TotalSeconds; stage.Restart();
         // Nothing walkable (an Oblivion test cell, a room of models the converter can't read): said plainly, not as the
         // grid's "Sequence contains no elements" (2026-10-17).
@@ -939,7 +1737,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         WriteGrid(data, outVerts, tris);
         return new Generated(data, outVerts, linked, tris.Count)
         {
-            Timing = $"Recast {recastSeconds:F1} s ({polygons.Count:N0} input polygons, {recastTris:N0} triangles), islands pruned {pruneSeconds:F1} s ({tris.Count:N0} kept), the rest {stage.Elapsed.TotalSeconds:F1} s",
+            Timing = $"Recast {recastSeconds:F1} s ({polygons.Count:N0} input polygons, {recastTris:N0} triangles{(bridgeGaps ? $", {bridged} gaps joined" : "")}), islands pruned {pruneSeconds:F1} s ({tris.Count:N0} kept), the rest {stage.Elapsed.TotalSeconds:F1} s",
         };
     }
 
@@ -1088,9 +1886,49 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     public static long HazardSpans => Interlocked.Read(ref hazardSpans);
     static long hazardSpans;
 
+    /// <summary>
+    /// Each navmesh corner set on the floor under it (<see cref="FloorFit"/>'s interiors): the highest face facing up
+    /// from 48 under it to 4 over it. Recast's polygon corners take their height from the outline of a region, which
+    /// can be a raised span beside them (a frame's foot, a sill): in Oblivion's Imperial prison the corners at the
+    /// prisoner's cell doorway lay 14 to 19 over the corridor floor, and Skyrim's own people (a vanilla jail guard sent
+    /// there with PathToReference, 2026-11-16) walked up to that spot and no further, the way failed, whatever stood in
+    /// the doorway or nothing; elsewhere the mesh lay about 8 over the floor and was walked. Skyrim's own navmesh has its
+    /// corners on the floor.
+    /// </summary>
+    static void SetOnFloor(List<P3Float> verts, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons)
+    {
+        var up = new List<Vector3[]>();
+        foreach (var (pts, n) in polygons)
+        {
+            if (n.Z < 0.5f) continue;
+            for (int i = 1; i + 1 < pts.Length; i++) up.Add([pts[0], pts[i], pts[i + 1]]);
+        }
+        if (up.Count == 0) return;
+        var floor = new WoundInput(up);
+        long moved = 0; double lift = 0;
+        for (int i = 0; i < verts.Count; i++)
+        {
+            var v = verts[i];
+            if (floor.FloorUnder(new Vector3(v.X, v.Y, v.Z), 48, 4) is not { } z || MathF.Abs(v.Z - z) < 1) continue;
+            lift += v.Z - z;
+            verts[i] = new P3Float(v.X, v.Y, z);
+            moved++;
+        }
+        Interlocked.Add(ref cornersOnFloor, moved);
+        lock (liftLock) cornerLift += lift;
+    }
+
+    /// <summary>Navmesh corners set on the floor (<see cref="SetOnFloor"/>), and how far they were moved down in all.</summary>
+    public static long CornersOnFloor => Interlocked.Read(ref cornersOnFloor);
+    public static double CornerLift { get { lock (liftLock) return cornerLift; } }
+    static long cornersOnFloor;
+    static double cornerLift;
+    static readonly object liftLock = new();
+
     /// <summary>An interior's mesh as Recast makes it from its polygons, before its islands are pruned; with
     /// <paramref name="hazards"/>, nothing on or under them walkable.</summary>
-    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris) RecastInterior(IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, Hazards? hazards = null)
+    static (List<P3Float> Verts, List<(int A, int B, int C)> Tris) RecastInterior(IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons, Hazards? hazards = null, float floorFit = 0,
+        IReadOnlyList<Doorway>? doorways = null)
     {
         // Skyrim (x, y north, z up) -> Recast (x, y up, z) by rotation (x, z, -y), which keeps winding.
         var verts = new List<float>();
@@ -1106,6 +1944,14 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             }
         }
         var geom = new RcSampleInputGeomProvider(verts.ToArray(), faces.ToArray());
+        // Inner doors' doorways, floor kept to their frame (Doorway), in Recast's space as the polygons are.
+        foreach (var d in doorways ?? [])
+        {
+            var vol = new RcConvexVolume { verts = d.Corners.SelectMany(c => new[] { c.X, 0f, -c.Y }).ToArray(), hmin = d.Bottom, hmax = d.Top };
+            DoorwayVolumes.Add(vol, d);
+            geom.AddConvexVolume(vol);
+            Interlocked.Increment(ref doorwaysKept);
+        }
         if (Environment.GetEnvironmentVariable("TM_NAV_LAYERS") == "1") Console.WriteLine(TallestStack(polygons));
         // TM_NAV_COLUMN=x,y (dev aid): the input triangles within 4 units of that point across, with their height there
         // (or span) and which way they face, as Recast gets them.
@@ -1144,8 +1990,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             }
             Console.WriteLine($"  input at {inX:F0},{inY:F0}: {string.Join("; ", near.OrderBy(t => t.Hi).Select(t => $"{t.Lo:F0}..{t.Hi:F0} nz {t.Nz:F2}"))}");
         }
-        var (pmesh, detail) = BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(Config(p, coarse, outline), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()), hazards: hazards)!.Value;
+        var (pmesh, detail) = BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(Config(p, coarse, outline, floorFit), geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax()), hazards: hazards)!.Value;
         var (outVerts, tris) = SkyrimTriangles(pmesh, detail);
+        if (floorFit > 0) SetOnFloor(outVerts, polygons);
         if (Environment.GetEnvironmentVariable("TM_DEBUG_NAV") == "1")
         {
             // Pieces by Recast's own polygon adjacency, to compare with the vertex-sharing adjacency used below.
@@ -1303,14 +2150,23 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         if (!any) return null;
 
         // The blocks: leaf[x, y] is the size of the block holding quad (x, y); blocks sit on multiples of their size.
+        // A block is walkable by its own slope at its own size (its two triangles'), not its quads': judged a quad at a
+        // time, hills with steep quads scattered through them split to single quads everywhere (2026-10-27, measured on
+        // four 4,096-cell pieces of the Iliac Bay's hills: about 760 triangles a cell whatever the tolerance, 96 or 256).
         var leaf = new int[32, 32];
+        var leafOpen = new bool[32, 32];
+        bool BlockOpen(int x0, int y0, int size)
+        {
+            float a = h[x0, y0], b = h[x0 + size, y0], c = h[x0 + size, y0 + size], d = h[x0, y0 + size], s = size * 128f;
+            return Up((b - a) / s, (c - b) / s) >= cosMax && Up((c - d) / s, (d - a) / s) >= cosMax;
+        }
         bool Fits(int x0, int y0, int size)
         {
-            bool first = open[x0, y0], firstWet = wet[x0, y0];
+            bool firstWet = wet[x0, y0];
             for (int y = y0; y < y0 + size; y++)
                 for (int x = x0; x < x0 + size; x++)
-                    if (open[x, y] != first || wet[x, y] != firstWet) return false;
-            if (!first) return true;
+                    if (wet[x, y] != firstWet) return false;
+            if (!BlockOpen(x0, y0, size)) return true;
             float a = h[x0, y0], b = h[x0 + size, y0], c = h[x0 + size, y0 + size], d = h[x0, y0 + size];
             for (int y = 0; y <= size; y++)
                 for (int x = 0; x <= size; x++)
@@ -1321,10 +2177,14 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                 }
             return true;
         }
-        void Set(int x0, int y0, int size) { for (int y = y0; y < y0 + size; y++) for (int x = x0; x < x0 + size; x++) leaf[x, y] = size; }
+        void Set(int x0, int y0, int size)
+        {
+            bool walkable = BlockOpen(x0, y0, size);
+            for (int y = y0; y < y0 + size; y++) for (int x = x0; x < x0 + size; x++) { leaf[x, y] = size; leafOpen[x, y] = walkable; }
+        }
         void Split(int x0, int y0, int size)
         {
-            if (size == 1 || Fits(x0, y0, size)) { Set(x0, y0, size); return; }
+            if (size <= GridMinBlock || Fits(x0, y0, size)) { Set(x0, y0, size); return; }
             int half = size / 2;
             Split(x0, y0, half); Split(x0 + half, y0, half); Split(x0, y0 + half, half); Split(x0 + half, y0 + half, half);
         }
@@ -1350,8 +2210,9 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                     if (size == 1 || x % size != 0 || y % size != 0) continue;
                     if (Enumerable.Range(0, 4).Any(side => Smallest(x, y, size, side) < size / 2))
                     {
+                        // All four quarters (2026-10-27: one quarter set left the other three unaligned and unwritten).
                         int half = size / 2;
-                        Set(x, y, half);
+                        Set(x, y, half); Set(x + half, y, half); Set(x, y + half, half); Set(x + half, y + half, half);
                         changed = true;
                     }
                 }
@@ -1369,7 +2230,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             for (int x0 = 0; x0 < 32; x0++)
             {
                 int size = leaf[x0, y0];
-                if (x0 % size != 0 || y0 % size != 0 || !open[x0, y0]) continue;
+                if (x0 % size != 0 || y0 % size != 0 || !leafOpen[x0, y0]) continue;
                 int half = size / 2, x1 = x0 + size, y1 = y0 + size;
                 // Midpoints where the neighbour beside an edge is split (south, east, north, west).
                 bool ms = size > 1 && Smallest(x0, y0, size, 2) < size, me = size > 1 && Smallest(x0, y0, size, 1) < size;
@@ -1398,8 +2259,13 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     }
 
     /// <summary>How far (units) a terrain navmesh block may lie from the ground under it (2026-10-15, measured on 600
-    /// overland cells: 48 units made 68 million triangles over the overland, 96 made 26, 128 made 17).</summary>
-    const float GridTolerance = 96f;
+    /// overland cells: 48 units made 68 million triangles over the overland, 96 made 26, 128 made 17; 2026-10-27, four
+    /// hill pieces of 4,096 cells with blocks judged by their own slope: 96 made 4.98 million, 128 made 3.69, against
+    /// 10.36 a quad at a time, and a tile at that came to 2.8 GB, past what Mutagen reads). TM_NAV_GRIDTOL overrides it
+    /// for measuring.</summary>
+    static readonly float GridTolerance = Env("GRIDTOL", 128f);
+    /// <summary>The smallest terrain block, in 128-unit quads (1, 2, 4 ...; TM_NAV_GRIDMIN for measuring).</summary>
+    static readonly int GridMinBlock = (int)Env("GRIDMIN", 1f);
 
     /// <summary>How far past its cell an exterior cell's heightfield reaches (<see cref="GenerateExteriorRaw"/>): the agent's
     /// radius erodes the floor back from the heightfield's edge, out there, and a floor crossing the cell's edge is one
@@ -1420,11 +2286,18 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         // Open country (open: Daggerfall's overland, smooth land and little on it) in coarser voxels and longer, looser
         // edges: a quarter of the triangles over 87,000 cells, as vanilla's wilds are meshed in big triangles too.
         float cs = (open ? 32f : 16f) * coarse, ch = (open ? 8f : 4f) * coarse, radius = 24f;
+        // The detail mesh's height samples, in voxels: never under 1.5. Below Recast's 0.9 it samples nothing, and
+        // DotRecast's RcMeshDetails.TriangulateHull then throws (index out of range). 24 units in the open setting's
+        // 32-unit voxels is 0.75: measured 2026-10-31 on a 4,096-cell piece of Daggerfall's overland, every try of
+        // all 2,189 cells with something standing near threw, 13 tries a cell, and each cell then began again in the
+        // fine setting: 2,329 cell-seconds, 31,153 tries, 370,713 triangles. With 1.5 voxels: 352, 3,026, 214,841, none
+        // thrown. Unchanged in the fine setting (24 units in 16-unit voxels is 1.5).
+        float detailDist = MathF.Max(Env("DETAILDIST", 24f), cs * 1.5f);
         // Not tiled, no border: the heightfield reaches ExteriorMargin past the cell and the mesh is clipped to it.
         return new RcConfig(false, 0, 0, 0, partition,
             cs, ch, agentMaxSlope: 50f, agentHeight: 128f, agentRadius: radius, agentMaxClimb: open ? 48f : 32f,
             minRegionArea: 8 * cs * cs, mergeRegionArea: 20 * cs * cs, edgeMaxLen: open ? 1600f : 600f, edgeMaxError: (open ? 4f : 2f) * outline, vertsPerPoly: 6,
-            detailSampleDist: Env("DETAILDIST", 24f) / cs, detailSampleMaxError: Env("DETAILERR", 16f) / ch, filterLowHangingObstacles: true, filterLedgeSpans: true, filterWalkableLowHeightSpans: true,
+            detailSampleDist: detailDist / cs, detailSampleMaxError: Env("DETAILERR", 16f) / ch, filterLowHangingObstacles: true, filterLedgeSpans: true, filterWalkableLowHeightSpans: true,
             walkableAreaMod: new RcAreaModification(0x3f), buildMeshDetail: Env("DETAIL", 1f) > 0);
     }
 
@@ -1486,7 +2359,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         var bmin = new RcVec3f(cx * CellUnits - ExteriorMargin, minZ - 16, -(cy + 1) * CellUnits - ExteriorMargin);
         var bmax = new RcVec3f((cx + 1) * CellUnits + ExteriorMargin, maxZ + 256, -cy * CellUnits + ExteriorMargin);
         var wound = around is null ? null : new Lazy<WoundInput>(() => new WoundInput(around));
-        if (BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(ExteriorConfig(open, p, coarse, outline), bmin, bmax, 0, 0), land, wound, ExteriorMargin, hazards) is not { } built || built.Mesh.npolys == 0) return null;
+        if (BuildMesh(geom, (p, coarse, outline) => new RcBuilderConfig(ExteriorConfig(open, p, coarse, outline), bmin, bmax, 0, 0), land, wound, ExteriorMargin, hazards, open) is not { } built || built.Mesh.npolys == 0) return null;
         var (cv, ct) = SkyrimTriangles(built.Mesh, built.Detail);
         var clipped = ClipToCell(cv, ct, cx, cy);
         return clipped.Tris.Count == 0 ? null : clipped;
@@ -1701,7 +2574,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// <summary>The cell's input (its triangles in its own coordinates, to 1/16 unit) and, with <paramref name="land"/>,
     /// the land's heights at its 128-unit points from one beyond the cell's edges (the land is flat between them, and
     /// Recast's border reaches 80 units out), which decide what is under it (<see cref="BuildOverLand"/>).</summary>
-    static (ulong, ulong) InputKey(List<Vector3[]> tris, int cx, int cy, Func<float, float, float?>? land = null)
+    static (ulong, ulong, float) InputKey(List<Vector3[]> tris, int cx, int cy, Func<float, float, float?>? land = null)
     {
         var f = new float[tris.Count * 9];
         for (int i = 0; i < tris.Count; i++)
@@ -1709,23 +2582,30 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         return InputKey(f, cx, cy, land);
     }
 
-    /// <summary>The same over corners nine floats a triangle.</summary>
-    static (ulong, ulong) InputKey(float[] coords, int cx, int cy, Func<float, float, float?>? land = null)
+    /// <summary>The same over corners nine floats a triangle. Heights count from the input's lowest (to the whole unit,
+    /// returned as the base): the same blocks stand at every height on the overland (each location on the ground the
+    /// land was levelled to for it), and keyed by their heights as they are, none of their cells' meshes was reused.</summary>
+    static (ulong, ulong, float) InputKey(float[] coords, int cx, int cy, Func<float, float, float?>? land = null)
     {
         var q = new int[coords.Length + (land is null ? 0 : 35 * 35)];
+        float low = float.MaxValue;
+        for (int k = 2; k < coords.Length; k += 3) low = MathF.Min(low, coords[k]);
+        var heights = new float?[land is null ? 0 : 35 * 35];
+        if (land is not null)
+            for (int gy = -1, i = 0; gy <= 33; gy++)
+                for (int gx = -1; gx <= 33; gx++, i++)
+                    if ((heights[i] = land(cx * CellUnits + gx * 128, cy * CellUnits + gy * 128)) is { } g) low = MathF.Min(low, g);
+        float baseZ = low == float.MaxValue ? 0 : MathF.Floor(low);
         int n = 0;
         for (int k = 0; k + 2 < coords.Length; k += 3)
         {
             q[n++] = (int)MathF.Round((coords[k] - cx * CellUnits) * 16);
             q[n++] = (int)MathF.Round((coords[k + 1] - cy * CellUnits) * 16);
-            q[n++] = (int)MathF.Round(coords[k + 2] * 16);
+            q[n++] = (int)MathF.Round((coords[k + 2] - baseZ) * 16);
         }
-        if (land is not null)
-            for (int gy = -1; gy <= 33; gy++)
-                for (int gx = -1; gx <= 33; gx++)
-                    q[n++] = land(cx * CellUnits + gx * 128, cy * CellUnits + gy * 128) is { } g ? (int)MathF.Round(g * 16) : int.MinValue;
+        foreach (var g in heights) q[n++] = g is { } h ? (int)MathF.Round((h - baseZ) * 16) : int.MinValue;
         var hash = System.Security.Cryptography.SHA256.HashData(System.Runtime.InteropServices.MemoryMarshal.AsBytes(q.AsSpan(0, n)));
-        return (BitConverter.ToUInt64(hash, 0), BitConverter.ToUInt64(hash, 8));
+        return (BitConverter.ToUInt64(hash, 0), BitConverter.ToUInt64(hash, 8), baseZ);
     }
 
     (List<P3Float> Verts, List<(int A, int B, int C)> Tris)? GenerateExteriorReused(int cx, int cy, List<Vector3[]> triangles, List<P3Float> keep, bool open,
@@ -1733,7 +2613,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     {
         // Keyed by the whole input round the cell when what is shut in is looked for beyond it (the cell's own input is
         // taken from that).
-        var (k1, k2) = around is null ? InputKey(triangles, cx, cy, land) : InputKey(around, cx, cy, land);
+        var (k1, k2, baseZ) = around is null ? InputKey(triangles, cx, cy, land) : InputKey(around, cx, cy, land);
         // Faces as wound make another mesh of the same input (and another shared file).
         if (asWound) k2 ^= 0x5A5A5A5A5A5A5A5AUL;
         bool made = false;
@@ -1746,7 +2626,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             if (GenerateExteriorRaw(cx, cy, triangles, open, land, around, asWound) is { } raw)
             {
                 float ox = cx * CellUnits, oy = cy * CellUnits;
-                mesh = (raw.Verts.Select(v => new P3Float(v.X - ox, v.Y - oy, v.Z)).ToArray(), raw.Tris.ToArray());
+                mesh = (raw.Verts.Select(v => new P3Float(v.X - ox, v.Y - oy, v.Z - baseZ)).ToArray(), raw.Tris.ToArray());
             }
             if (file is not null) WriteShared(file, mesh);
             return mesh;
@@ -1754,7 +2634,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         if (!made) Interlocked.Increment(ref exteriorReused);
         if (local is not { } m) return null;
         float wx = cx * CellUnits, wy = cy * CellUnits;
-        return Finish(m.Verts.Select(v => new P3Float(v.X + wx, v.Y + wy, v.Z)).ToList(), [.. m.Tris], keep);
+        return Finish(m.Verts.Select(v => new P3Float(v.X + wx, v.Y + wy, v.Z + baseZ)).ToList(), [.. m.Tris], keep);
     }
 
     /// <summary>Writes an exterior cell's navmesh (generated by <see cref="GenerateExterior"/>), with its load doors. A
@@ -1796,7 +2676,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             linked.Add(door);
         }
         WriteGrid(data, verts, tris);
-        var navm = new NavigationMesh(mod) { Data = data };
+        var navm = new NavigationMesh(Target) { Data = data };
         cell.NavigationMeshes.Add(navm);
         // The navmesh map's entry stores the grid the same way: Y first.
         AddInfo(navm, new NavigationMapInfoWorldParent { ParentWorldspace = ws.ToLink<IWorldspaceGetter>(), ParentWorldspaceCoord = new P2Int16((short)cy, (short)cx) }, verts, linked);
@@ -1820,13 +2700,17 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// coast at -218880,185600: the land at 208, a rock's underside at -37 facing down, the navmesh at -19; 2,404 of
     /// 551,295 samples of 154 cells lay over 128 units under the land's lowest point round them).
     /// With <paramref name="reuse"/>, a cell whose input another cell of this builder had takes its mesh
-    /// (<see cref="exteriorCache"/>; Daggerfall's towns). Not with <paramref name="open"/>.</remarks>
+    /// (<see cref="exteriorCache"/>; Daggerfall's towns). Not with <paramref name="open"/>, unless
+    /// <paramref name="fineWhereStanding"/>: then open country's cells with something standing in or round them are
+    /// made in the fine setting (and reused by input with <paramref name="reuse"/>), the bare ones from their heights:
+    /// Daggerfall's overland, its towns' streets and doorways on it.</remarks>
     public (int Meshes, int Triangles) BuildExteriorCells(Worldspace ws, IReadOnlyDictionary<(int X, int Y), Cell> cells,
         Func<int, int, IEnumerable<Vector3[]>> solidsOf, Func<Cell, float?> waterOf, IReadOnlyList<IPlacedObjectGetter> doors, List<string> problems,
         bool open = false, Func<int, int, bool>? only = null, bool reuse = false, bool asWound = false,
-        Func<int, int, IEnumerable<Vector3[]>>? hazardsOf = null, Func<Cell, float?>? hazardLevelOf = null)
+        Func<int, int, IEnumerable<Vector3[]>>? hazardsOf = null, Func<Cell, float?>? hazardLevelOf = null, bool fineWhereStanding = false, Func<int, int, bool>? fineAt = null)
     {
-        var job = BeginExteriorCells(ws, cells, solidsOf, waterOf, doors, problems, open, only, reuse, asWound, hazardsOf, hazardLevelOf);
+        Building.Value = null;
+        var job = BeginExteriorCells(ws, cells, solidsOf, waterOf, doors, problems, open, only, reuse, asWound, hazardsOf, hazardLevelOf, fineWhereStanding, fineAt);
         GenerateExteriorCells([job]);
         return job.Finish();
     }
@@ -1874,14 +2758,21 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     public ExteriorJob BeginExteriorCells(Worldspace ws, IReadOnlyDictionary<(int X, int Y), Cell> cells,
         Func<int, int, IEnumerable<Vector3[]>> solidsOf, Func<Cell, float?> waterOf, IReadOnlyList<IPlacedObjectGetter> doors, List<string> problems,
         bool open = false, Func<int, int, bool>? only = null, bool reuse = false, bool asWound = false,
-        Func<int, int, IEnumerable<Vector3[]>>? hazardsOf = null, Func<Cell, float?>? hazardLevelOf = null)
+        Func<int, int, IEnumerable<Vector3[]>>? hazardsOf = null, Func<Cell, float?>? hazardLevelOf = null, bool fineWhereStanding = false, Func<int, int, bool>? fineAt = null)
     {
-        reuse &= !open;
+        // Cells that get past open country's bare-ground shortcut are made in the fine setting.
+        bool cellOpen = open && !fineWhereStanding;
+        reuse &= !cellOpen;
         const float margin = 160f;
         var keys = cells.Keys.Where(k => only is null || only(k.X, k.Y)).OrderBy(k => k.Y).ThenBy(k => k.X).ToList();
         var results = new (List<P3Float> Verts, List<(int A, int B, int C)> Tris)?[keys.Count];
         var errors = new System.Collections.Concurrent.ConcurrentBag<string>();
         bool InCell(P3Float p, int x, int y) => p.X >= x * CellUnits && p.X < (x + 1) * CellUnits && p.Y >= y * CellUnits && p.Y < (y + 1) * CellUnits;
+        // The worldspace's persistent people by the cell they stand in: their pieces are kept too (2026-11-06: Redguard's
+        // Brennan, Yaelii and Avik on their boats' decks, persistent, had theirs pruned as islands: 80-204 units off).
+        var persistentAt = (ws.TopCell?.Persistent ?? []).OfType<IPlacedNpcGetter>().Where(n => n.Placement is not null)
+            .GroupBy(n => ((int)MathF.Floor(n.Placement!.Position.X / CellUnits), (int)MathF.Floor(n.Placement.Position.Y / CellUnits)))
+            .ToDictionary(g => g.Key, g => g.Select(n => n.Placement!.Position).ToList());
         int done = 0;
         // One cell a core: unbounded, the thread pool kept adding threads to the long iterations (2026-10-19: 26 to 152 in two
         // minutes of Morrowind's exteriors), each a whole Recast build at once with its own pooled buffers, and memory
@@ -1916,10 +2807,15 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             try
             {
                 var cell = cells[(x, y)];
-                var keep = cell.Temporary.OfType<IPlacedNpcGetter>().Select(n => n.Placement!.Position)
+                var keep = cell.Temporary.Concat(cell.Persistent).OfType<IPlacedNpcGetter>().Where(n => n.Placement is not null).Select(n => n.Placement!.Position)
+                    .Concat(persistentAt.GetValueOrDefault((x, y)) ?? [])
                     .Concat(doors.Select(d => d.Placement!.Position).Where(p => InCell(p, x, y))).ToList();
-                // Open country with nothing standing on it near the cell: straight from its heights.
-                if (open && cell.Landscape is { } bare && !Enumerable.Range(-1, 3).Any(dy => Enumerable.Range(-1, 3).Any(dx => solidsOf(x + dx, y + dy).Any())))
+                // Open country with nothing standing on it near the cell (in it, or in a neighbour within the margin the
+                // mesh takes in: what Recast would be given): straight from its heights. (2026-10-26: any neighbour with
+                // something on it sent the cell to Recast, and the bare land round every town was meshed in hundreds of
+                // triangles a cell.)
+                if (open && cell.Landscape is { } bare && !solidsOf(x, y).Any()
+                    && !Enumerable.Range(-1, 3).Any(dy => Enumerable.Range(-1, 3).Any(dx => (dx != 0 || dy != 0) && solidsOf(x + dx, y + dy).Any(Near))))
                 {
                     results[i] = GenerateTerrainGrid(bare, x, y, waterOf(cell), keep);
                     return;
@@ -1977,12 +2873,20 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                     float? LevelAt(float px, float py) => hazardLevelOf is not null && cells.TryGetValue(((int)MathF.Floor(px / CellUnits), (int)MathF.Floor(py / CellUnits)), out var hc) ? hazardLevelOf(hc) : null;
                     if (hz.Count > 0 || hazardLevelOf is not null) hazards = new Hazards(hz.Count > 0 ? new WoundInput(hz.ToArray()) : null, hazardLevelOf is null ? null : LevelAt);
                 }
+                // TM_NAVCELL=WORLD,X,Y,DIR (dev aid): that cell's input (its triangles and the shut-in test's) kept in DIR as
+                // <world>_<x>_<y>.bin and _around.bin (navmesh-cell-test).
+                if (Environment.GetEnvironmentVariable("TM_NAVCELL")?.Split(',') is [var nw, var nx, var ny, var ndir] && nw == ws.EditorID && int.Parse(nx) == x && int.Parse(ny) == y)
+                {
+                    WritePolygons(Path.Combine(ndir, $"{nw}_{x}_{y}.bin"), tris.Select(t => (t, Vector3.UnitZ)).ToList());
+                    File.WriteAllBytes(Path.Combine(ndir, $"{nw}_{x}_{y}_around.bin"), System.Runtime.InteropServices.MemoryMarshal.AsBytes(around.AsSpan()).ToArray());
+                }
                 // A cell Recast can't outline in the open-country setting is tried again in the fine one.
                 // Shared meshes are keyed by the input alone: a cell with hazards is made on its own.
-                if (reuse && hazards is null) results[i] = GenerateExteriorReused(x, y, tris, keep, open, LandAt, around, asWound);
+                if (reuse && hazards is null) results[i] = GenerateExteriorReused(x, y, tris, keep, cellOpen, LandAt, around, asWound);
                 else
-                    try { results[i] = GenerateExterior(x, y, tris, keep, open, LandAt, around, asWound, hazards); }
-                    catch (Exception) when (open) { results[i] = GenerateExterior(x, y, tris, keep, land: LandAt, around: around, asWound: asWound, hazards: hazards); }
+                    // fineAt: cells that must keep the fine setting however coarse the country round them (a door's).
+                    try { results[i] = GenerateExterior(x, y, tris, keep, cellOpen && fineAt?.Invoke(x, y) != true, LandAt, around, asWound, hazards); }
+                    catch (Exception) when (cellOpen && fineAt?.Invoke(x, y) != true) { results[i] = GenerateExterior(x, y, tris, keep, land: LandAt, around: around, asWound: asWound, hazards: hazards); }
                 if (ExteriorSurface.On && results[i] is { } made) ExteriorSurface.Check(ws.EditorID ?? "", x, y, around, made.Verts, made.Tris, LandAt);
             }
             catch (Exception e) { errors.Add($"navmesh {ws.EditorID} {x},{y}: {e.Message}"); }
@@ -2010,9 +2914,25 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
     /// overlaps it most (an EdgeLinks entry, whose index replaces the neighbour, and the edge's EdgeLink flag).
     /// Returns the number of links.
     /// </summary>
+    /// <summary>
+    /// Lets go of exterior navmeshes already written out, every neighbour of which is made and linked to them (a big
+    /// worldspace's are written a piece at a time: OverlandNavmesh). <see cref="LinkExteriorEdges"/> after it links the
+    /// rest as before: an edge linked once is left as it is, so it may be called again as more cells are made.
+    /// </summary>
+    public int ForgetExteriors(ISet<NavigationMesh> written) => exteriors.RemoveAll(e => written.Contains(e.Navmesh));
+
+    /// <summary>Exterior navmeshes held for linking, and the meshes kept for reuse by input (entries, triangles).</summary>
+    public (int Held, int Cached, long CachedTriangles) ExteriorHeld()
+    {
+        long tris = 0;
+        foreach (var v in exteriorCache.Values)
+            if (v.IsValueCreated && v.Value is { } m) tris += m.Tris.Length;
+        return (exteriors.Count, exteriorCache.Count, tris);
+    }
+
     public int LinkExteriorEdges()
     {
-        var byCell = exteriors.GroupBy(m => (m.Worldspace, m.X, m.Y)).ToDictionary(g => g.Key, g => g.First());
+        var byCell = exteriors.GroupBy(m => (m.Worldspace.FormKey, m.X, m.Y)).ToDictionary(g => g.Key, g => g.First());
         // Border edges per mesh and side (BorderEdges, kept when each was written).
         static List<(int Tri, int Edge, float Lo, float Hi, float ZLo, float ZHi)> Borders(ExteriorMesh m, int side) => m.Sides[side];
         int links = 0;
@@ -2022,7 +2942,7 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
             for (int side = 0; side < 4; side++)
             {
                 var (nx, ny, nside) = side switch { 0 => (m.X - 1, m.Y, 1), 1 => (m.X + 1, m.Y, 0), 2 => (m.X, m.Y - 1, 3), _ => (m.X, m.Y + 1, 2) };
-                if (!byCell.TryGetValue((m.Worldspace, nx, ny), out var other)) continue;
+                if (!byCell.TryGetValue((m.Worldspace.FormKey, nx, ny), out var other)) continue;
                 var theirs = Borders(other, nside);
                 if (theirs.Count == 0) continue;
                 foreach (var (tri, edge, lo, hi, zlo, zhi) in Borders(m, side))
@@ -2120,6 +3040,533 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
         new((v[t.A].X + v[t.B].X + v[t.C].X) / 3, (v[t.A].Y + v[t.B].Y + v[t.C].Y) / 3, (v[t.A].Z + v[t.B].Z + v[t.C].Z) / 3);
 
     /// <summary>For each triangle edge (0-1, 1-2, 2-0), the triangle sharing it, or -1.</summary>
+    /// <summary>Dev aid: navmesh input polygons to a file (count; each: point count, points, normal) and back.</summary>
+    internal static void WritePolygons(string path, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        using var w = new BinaryWriter(File.Create(path));
+        w.Write(polygons.Count);
+        foreach (var (pts, n) in polygons)
+        {
+            w.Write(pts.Length);
+            foreach (var p in pts) { w.Write(p.X); w.Write(p.Y); w.Write(p.Z); }
+            w.Write(n.X); w.Write(n.Y); w.Write(n.Z);
+        }
+    }
+
+    internal static List<(Vector3[] Points, Vector3 Normal)> ReadPolygons(string path)
+    {
+        using var r = new BinaryReader(File.OpenRead(path));
+        int count = r.ReadInt32();
+        var list = new List<(Vector3[] Points, Vector3 Normal)>(count);
+        for (int i = 0; i < count; i++)
+        {
+            var pts = new Vector3[r.ReadInt32()];
+            for (int k = 0; k < pts.Length; k++) pts[k] = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+            list.Add((pts, new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle())));
+        }
+        return list;
+    }
+
+    /// <summary>What <see cref="BridgeGaps"/> found in every interior it joined (border vertices with nothing near, ways
+    /// blocked, runs joined...), all builds together.</summary>
+    public static readonly Dictionary<string, int> BridgeReasons = [];
+
+    /// <summary>Navmesh pieces joined across short gaps (<see cref="BridgeGaps"/>), all builds together.</summary>
+    public static int GapsBridged => gapsBridged;
+    static int gapsBridged;
+
+    /// <summary>
+    /// Pieces of a navmesh joined across short level gaps that Recast leaves where nothing stops a walker (2026-11-06,
+    /// Redguard's catacombs in 204 pieces: a groove 12 wide and 21 deep across a corridor, a 12-unit sill, each kept clear
+    /// by the actor's radius on both sides, 47-80 units of nothing between floors at one height). Two border edges of
+    /// different pieces are joined by a quad of two triangles when: their nearest points are at most
+    /// <paramref name="maxGap"/> apart across and <paramref name="climb"/> up; they run within 37 degrees of each other
+    /// and overlap by at least half the shorter; no solid face crosses the way at 40, 80 or 120 units over the floor
+    /// (no wall, door or gate between); and a solid surface lies within a step under every point of the way (no pit). The
+    /// quad's corners are the edges' own vertices, so the triangles link to both pieces. Each border edge joins once.
+    /// </summary>
+    /// <summary>
+    /// Border edges facing another piece within <paramref name="maxGap"/> and <paramref name="climb"/> (by their middle's
+    /// distance to its nearest border edge of another piece) cut into pieces of at most 16 units, for
+    /// <see cref="BridgeGaps"/> to zip vertex to vertex: Recast's borders are straight with vertices only at their corners,
+    /// and across a doorway 80 units wide in Redguard's catacombs the nearest corners were 107-115 apart. A triangle with
+    /// a cut edge is fanned from its middle (its other edges, and so its links, as they were). Stops before the mesh would
+    /// pass 30,000 triangles (a NAVM holds 32,767). Returns the edges cut.
+    /// </summary>
+    static int SubdivideFacingBorders(List<P3Float> verts, List<(int A, int B, int C)> tris, float maxGap, float climb)
+    {
+        Vector3 V(int i) => new(verts[i].X, verts[i].Y, verts[i].Z);
+        var adj = Adjacency(tris);
+        var parent = Enumerable.Range(0, tris.Count).ToArray();
+        int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+        for (int i = 0; i < tris.Count; i++) for (int e = 0; e < 3; e++) if (adj[i, e] >= 0) parent[Find(i)] = Find(adj[i, e]);
+        var edges = new List<(int Tri, int E, int A, int B, int Piece)>();
+        for (int i = 0; i < tris.Count; i++)
+        {
+            var (a, b, c) = tris[i];
+            int[][] es = [[a, b], [b, c], [c, a]];
+            for (int e = 0; e < 3; e++) if (adj[i, e] < 0) edges.Add((i, e, es[e][0], es[e][1], Find(i)));
+        }
+        const float Cell = 64;
+        var byCell = new Dictionary<(int, int), List<int>>();
+        for (int k = 0; k < edges.Count; k++)
+        {
+            Vector3 a = V(edges[k].A), b = V(edges[k].B);
+            int steps = Math.Max(1, (int)MathF.Ceiling(Vector3.Distance(a, b) / Cell));
+            var seen = new HashSet<(int, int)>();
+            for (int s = 0; s <= steps; s++)
+            {
+                var p = Vector3.Lerp(a, b, s / (float)steps);
+                var key = ((int)MathF.Floor(p.X / Cell), (int)MathF.Floor(p.Y / Cell));
+                if (seen.Add(key)) (byCell.TryGetValue(key, out var l) ? l : byCell[key] = []).Add(k);
+            }
+        }
+        // The nearest point of a segment to a point, across (2D); its height there.
+        static (float Across, float Z) Nearest(Vector3 p, Vector3 a, Vector3 b)
+        {
+            var ab = new System.Numerics.Vector2(b.X - a.X, b.Y - a.Y);
+            float len2 = ab.LengthSquared();
+            float t = len2 < 1e-6f ? 0 : Math.Clamp(System.Numerics.Vector2.Dot(new System.Numerics.Vector2(p.X - a.X, p.Y - a.Y), ab) / len2, 0, 1);
+            var q = Vector3.Lerp(a, b, t);
+            return (new System.Numerics.Vector2(q.X - p.X, q.Y - p.Y).Length(), q.Z);
+        }
+        var cut = new Dictionary<int, List<int>>();   // triangle -> its edges (0-2) to cut
+        int reach = (int)MathF.Ceiling(maxGap / Cell), added = 0;
+        for (int k = 0; k < edges.Count; k++)
+        {
+            Vector3 a = V(edges[k].A), b = V(edges[k].B);
+            float len = new System.Numerics.Vector2(b.X - a.X, b.Y - a.Y).Length();
+            if (len <= 24) continue;
+            var mid = (a + b) / 2;
+            int cx = (int)MathF.Floor(mid.X / Cell), cy = (int)MathF.Floor(mid.Y / Cell);
+            bool facing = false;
+            for (int gx = cx - reach; gx <= cx + reach && !facing; gx++)
+                for (int gy = cy - reach; gy <= cy + reach && !facing; gy++)
+                    if (byCell.TryGetValue((gx, gy), out var list))
+                        foreach (int o in list)
+                        {
+                            if (edges[o].Piece == edges[k].Piece) continue;
+                            var (across, z) = Nearest(mid, V(edges[o].A), V(edges[o].B));
+                            if (across <= maxGap && MathF.Abs(z - mid.Z) <= climb) { facing = true; break; }
+                        }
+            if (!facing) continue;
+            int pieces = (int)MathF.Ceiling(len / 16);
+            if (tris.Count + added + pieces + 2 > 30000) break;
+            (cut.TryGetValue(edges[k].Tri, out var l) ? l : cut[edges[k].Tri] = []).Add(edges[k].E);
+            added += pieces + 2;
+        }
+        if (cut.Count == 0) return 0;
+        int edgesCut = 0;
+        var keep = new List<(int A, int B, int C)>();
+        var fans = new List<(int A, int B, int C)>();
+        for (int i = 0; i < tris.Count; i++)
+        {
+            if (!cut.TryGetValue(i, out var which)) { keep.Add(tris[i]); continue; }
+            var (a, b, c) = tris[i];
+            int[] corners = [a, b, c];
+            // The triangle's outline, its cut edges with the points between their ends.
+            var ring = new List<int>();
+            for (int e = 0; e < 3; e++)
+            {
+                int from = corners[e], to = corners[(e + 1) % 3];
+                ring.Add(from);
+                if (!which.Contains(e)) continue;
+                edgesCut++;
+                Vector3 pf = V(from), pt = V(to);
+                int n = (int)MathF.Ceiling(new System.Numerics.Vector2(pt.X - pf.X, pt.Y - pf.Y).Length() / 16);
+                for (int s = 1; s < n; s++)
+                {
+                    var p = Vector3.Lerp(pf, pt, s / (float)n);
+                    verts.Add(new P3Float(p.X, p.Y, p.Z));
+                    ring.Add(verts.Count - 1);
+                }
+            }
+            var centre = (V(a) + V(b) + V(c)) / 3;
+            verts.Add(new P3Float(centre.X, centre.Y, centre.Z));
+            int m = verts.Count - 1;
+            // The fan keeps the triangle's winding: ring order is its own.
+            for (int r = 0; r < ring.Count; r++) fans.Add((m, ring[r], ring[(r + 1) % ring.Count]));
+        }
+        tris.Clear();
+        tris.AddRange(keep);
+        tris.AddRange(fans);
+        return edgesCut;
+    }
+
+    /// <summary>
+    /// Drops from ledges (<see cref="FloorFit"/>'s interiors: Oblivion's): each piece of the mesh not joined to the
+    /// biggest is given ways down off its edge to another piece below it, each a steep strip of two triangles from one
+    /// of its border edges to a border edge 48 to 320 lower and at most 160 across, with nothing in the way off the edge
+    /// or on the way down; people walk off and fall to it. As Skyrim's own interiors drop: 98 triangles steeper than 60
+    /// degrees falling 96 or more join a level to the one below in 52 of Skyrim.esm's cells (Saarthal's: 0.1 of upright,
+    /// 174 down, joined both sides). Oblivion's people need it: the Imperial prison's Mythic Dawn assassins come out of
+    /// their door onto a ledge 190 over the first ambush (Oblivion's own path grid there is a closed group too: its AI
+    /// goes straight at the target where the grid has no way), and with no way down they never reached it (r102, r103).
+    /// </summary>
+    internal static int DropLinks(List<P3Float> verts, List<(int A, int B, int C)> tris, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons,
+        float reach = 160, float minDrop = 48, float maxDrop = 320)
+    {
+        if (tris.Count == 0) return 0;
+        Vector3 V(int i) => new(verts[i].X, verts[i].Y, verts[i].Z);
+        var adj = Adjacency(tris);
+        var parent = Enumerable.Range(0, tris.Count).ToArray();
+        int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+        for (int i = 0; i < tris.Count; i++) for (int e = 0; e < 3; e++) if (adj[i, e] >= 0) parent[Find(i)] = Find(adj[i, e]);
+        var size = new Dictionary<int, int>();
+        for (int i = 0; i < tris.Count; i++) size[Find(i)] = size.GetValueOrDefault(Find(i)) + 1;
+        if (size.Count < 2) return 0;
+        int up = 0;
+        foreach (var (a, b, c) in tris) up += Vector3.Cross(V(b) - V(a), V(c) - V(a)).Z >= 0 ? 1 : -1;
+        bool ccw = up >= 0;
+        var border = new List<(int A, int B, int Tri)>();
+        for (int i = 0; i < tris.Count; i++)
+        {
+            var (a, b, c) = tris[i];
+            int[][] es = [[a, b], [b, c], [c, a]];
+            for (int e = 0; e < 3; e++) if (adj[i, e] < 0) border.Add((es[e][0], es[e][1], i));
+        }
+        // Solid faces by 128-unit squares, and a segment against them (Moller-Trumbore over each polygon's fan).
+        const float SCell = 128;
+        var solidBy = new Dictionary<(int, int), List<int>>();
+        for (int s = 0; s < polygons.Count; s++)
+        {
+            var pts = polygons[s].Points;
+            for (int gx = (int)MathF.Floor(pts.Min(p => p.X) / SCell); gx <= (int)MathF.Floor(pts.Max(p => p.X) / SCell); gx++)
+                for (int gy = (int)MathF.Floor(pts.Min(p => p.Y) / SCell); gy <= (int)MathF.Floor(pts.Max(p => p.Y) / SCell); gy++)
+                    (solidBy.TryGetValue((gx, gy), out var l) ? l : solidBy[(gx, gy)] = []).Add(s);
+        }
+        bool Blocked(Vector3 p, Vector3 q)
+        {
+            var dir = q - p;
+            var seen = new HashSet<int>();
+            for (int gx = (int)MathF.Floor(MathF.Min(p.X, q.X) / SCell); gx <= (int)MathF.Floor(MathF.Max(p.X, q.X) / SCell); gx++)
+                for (int gy = (int)MathF.Floor(MathF.Min(p.Y, q.Y) / SCell); gy <= (int)MathF.Floor(MathF.Max(p.Y, q.Y) / SCell); gy++)
+                    if (solidBy.TryGetValue((gx, gy), out var l))
+                        foreach (int s in l)
+                        {
+                            if (!seen.Add(s)) continue;
+                            var poly = polygons[s].Points;
+                            for (int k = 1; k + 1 < poly.Length; k++)
+                            {
+                                Vector3 e1 = poly[k] - poly[0], e2 = poly[k + 1] - poly[0], h = Vector3.Cross(dir, e2);
+                                float det = Vector3.Dot(e1, h);
+                                if (MathF.Abs(det) < 1e-6f) continue;
+                                float f = 1 / det;
+                                var sv = p - poly[0];
+                                float u = f * Vector3.Dot(sv, h);
+                                if (u < 0 || u > 1) continue;
+                                var qv = Vector3.Cross(sv, e1);
+                                float v = f * Vector3.Dot(dir, qv);
+                                if (v < 0 || u + v > 1) continue;
+                                float t = f * Vector3.Dot(e2, qv);
+                                if (t > 0.02f && t < 0.98f) return true;
+                            }
+                        }
+            return false;
+        }
+        int added = 0;
+        var lift = new Vector3(0, 0, 40);
+        var byBigness = size.OrderByDescending(kv => kv.Value).Select(kv => kv.Key).ToList();
+        int main = byBigness[0];
+        foreach (var piece in byBigness.Skip(1))
+        {
+            // Already joined to the biggest piece by a drop made before.
+            if (Find(piece) == Find(main)) continue;
+            // For each of its border edges, the best edge below to drop to (nearest, the drop counted a quarter); edges of
+            // 32 or more on both sides first (a person is about that wide: build 21's one drop, from the ledge's corner to
+            // an edge 18 long, was never taken, r104), the nearest of any length if no long pair can be had.
+            var pairs = new List<(int A, int B, int U, int W, float Score, Vector3 Mid, bool Wide)>();
+            foreach (var (a, b, ta) in border)
+            {
+                if (Find(ta) != Find(piece)) continue;
+                var m = (V(a) + V(b)) / 2;
+                float upperLong = new System.Numerics.Vector2(V(b).X - V(a).X, V(b).Y - V(a).Y).Length();
+                (int U, int W, float Score, bool Wide)? best = null;
+                foreach (var (u, w, tu) in border)
+                {
+                    if (Find(tu) == Find(piece)) continue;
+                    var n = (V(u) + V(w)) / 2;
+                    float across = new System.Numerics.Vector2(n.X - m.X, n.Y - m.Y).Length(), drop = m.Z - n.Z;
+                    if (across > reach || drop < minDrop || drop > maxDrop) continue;
+                    bool wide = upperLong >= 32 && new System.Numerics.Vector2(V(w).X - V(u).X, V(w).Y - V(u).Y).Length() >= 32;
+                    float score = across + drop / 4;
+                    if (best is { } bb && (bb.Wide && !wide || bb.Wide == wide && bb.Score <= score)) continue;
+                    // Off the edge at knee height, then straight down to the floor below: nothing in the way.
+                    var over = new Vector3(n.X, n.Y, m.Z) + lift;
+                    if (Blocked(m + lift, over) || Blocked(over, n + lift)) continue;
+                    best = (u, w, score, wide);
+                }
+                if (best is { } got) pairs.Add((a, b, got.U, got.W, got.Score, m, got.Wide));
+            }
+            if (pairs.Count == 0) continue;
+            // Wide ones if any, else the single nearest; several along a ledge (128 apart at least, six at most), as
+            // Skyrim's own ledges drop at more than one place.
+            var chosen = new List<(int A, int B, int U, int W, float Score, Vector3 Mid, bool Wide)>();
+            var pool = pairs.Any(x => x.Wide) ? pairs.Where(x => x.Wide).OrderBy(x => x.Score).ToList() : [pairs.MinBy(x => x.Score)];
+            var usedLower = new HashSet<(int, int)>();
+            foreach (var c in pool)
+            {
+                if (chosen.Count >= 6) break;
+                if (chosen.Any(x => Vector3.Distance(x.Mid, c.Mid) < 128) || !usedLower.Add((c.U, c.W))) continue;
+                chosen.Add(c);
+            }
+            int lower = -1;
+            foreach (var d in chosen)
+            {
+                // The lower edge's ends paired with the upper's nearest them, so the strip doesn't twist.
+                int lu = d.U, lw = d.W;
+                if (Vector3.Distance(V(d.B), V(lu)) + Vector3.Distance(V(d.A), V(lw)) > Vector3.Distance(V(d.B), V(lw)) + Vector3.Distance(V(d.A), V(lu))) (lu, lw) = (lw, lu);
+                lower = Find(border.First(x => x.A == d.U && x.B == d.W).Tri);
+                foreach (var (p, q, r) in new[] { (d.A, d.B, lu), (d.A, lu, lw) })
+                {
+                    bool turns = Vector3.Cross(V(q) - V(p), V(r) - V(p)).Z >= 0;
+                    tris.Add(turns == ccw ? (p, q, r) : (p, r, q));
+                    parent = [.. parent, lower];
+                }
+                added++;
+            }
+            parent[Find(piece)] = lower;
+        }
+        Interlocked.Add(ref dropsAdded, added);
+        return added;
+    }
+    static long dropsAdded;
+    /// <summary>Ways down off ledges added (<see cref="DropLinks"/>).</summary>
+    public static long DropsAdded => Interlocked.Read(ref dropsAdded);
+
+    /// <summary>Dev aid: border vertices near here have their partner search printed (navmesh-bridge-test --trace).</summary>
+    internal static Vector3? BridgeTraceAt;
+    internal static int BridgeShowUnfloored;
+
+    internal static int BridgeGaps(List<P3Float> verts, List<(int A, int B, int C)> tris, IReadOnlyList<(Vector3[] Points, Vector3 Normal)> polygons,
+        float maxGap = 96, float climb = 32, Dictionary<string, int>? why = null)
+    {
+        void Why(string reason) { if (why is not null) why[reason] = why.GetValueOrDefault(reason) + 1; }
+        int split = SubdivideFacingBorders(verts, tris, maxGap, climb);
+        if (why is not null) why["border edges split"] = split;
+        if (tris.Count == 0) return 0;
+        Vector3 V(int i) => new(verts[i].X, verts[i].Y, verts[i].Z);
+        var adj = Adjacency(tris);
+        var parent = Enumerable.Range(0, tris.Count).ToArray();
+        int Find(int x) { while (parent[x] != x) x = parent[x] = parent[parent[x]]; return x; }
+        for (int i = 0; i < tris.Count; i++) for (int e = 0; e < 3; e++) if (adj[i, e] >= 0) parent[Find(i)] = Find(adj[i, e]);
+        // The mesh's winding (most triangles'), for the joining triangles to match.
+        int up = 0;
+        foreach (var (a, b, c) in tris) up += Vector3.Cross(V(b) - V(a), V(c) - V(a)).Z >= 0 ? 1 : -1;
+        bool ccw = up >= 0;
+
+        // Border edges (no neighbour), each as its triangle runs it, chained into loops round each piece (the next edge
+        // starts where one ends), and their vertices by the 64-unit square they are in.
+        var border = new List<(int A, int B, int Piece)>();
+        for (int i = 0; i < tris.Count; i++)
+        {
+            var (a, b, c) = tris[i];
+            int[][] es = [[a, b], [b, c], [c, a]];
+            for (int e = 0; e < 3; e++) if (adj[i, e] < 0) border.Add((es[e][0], es[e][1], Find(i)));
+        }
+        var startsAt = new Dictionary<int, List<int>>();
+        for (int k = 0; k < border.Count; k++) (startsAt.TryGetValue(border[k].A, out var l) ? l : startsAt[border[k].A] = []).Add(k);
+        var loops = new List<List<int>>();   // vertex indices in order round the loop
+        var loopPiece = new List<int>();
+        var seenEdge = new bool[border.Count];
+        for (int k = 0; k < border.Count; k++)
+        {
+            if (seenEdge[k]) continue;
+            var loop = new List<int>();
+            int cur = k;
+            while (cur >= 0 && !seenEdge[cur])
+            {
+                seenEdge[cur] = true;
+                loop.Add(border[cur].A);
+                int next = -1;
+                if (startsAt.TryGetValue(border[cur].B, out var outs)) foreach (int o in outs) if (!seenEdge[o] && border[o].Piece == border[cur].Piece) { next = o; break; }
+                cur = next;
+            }
+            if (loop.Count >= 3) { loops.Add(loop); loopPiece.Add(border[k].Piece); }
+        }
+        var placeOf = new Dictionary<int, (int Loop, int At)>();
+        for (int li = 0; li < loops.Count; li++) for (int at = 0; at < loops[li].Count; at++) placeOf.TryAdd(loops[li][at], (li, at));
+        const float Cell = 64;
+        (int, int) Key(Vector3 p) => ((int)MathF.Floor(p.X / Cell), (int)MathF.Floor(p.Y / Cell));
+        var byCell = new Dictionary<(int, int), List<int>>();
+        foreach (int v in placeOf.Keys) { var key = Key(V(v)); (byCell.TryGetValue(key, out var l) ? l : byCell[key] = []).Add(v); }
+        // The solid faces by the 128-unit squares they cover.
+        const float SCell = 128;
+        var solidBy = new Dictionary<(int, int), List<int>>();
+        for (int s = 0; s < polygons.Count; s++)
+        {
+            var pts = polygons[s].Points;
+            float x0 = pts.Min(p => p.X), x1 = pts.Max(p => p.X), y0 = pts.Min(p => p.Y), y1 = pts.Max(p => p.Y);
+            for (int gx = (int)MathF.Floor(x0 / SCell); gx <= (int)MathF.Floor(x1 / SCell); gx++)
+                for (int gy = (int)MathF.Floor(y0 / SCell); gy <= (int)MathF.Floor(y1 / SCell); gy++)
+                    (solidBy.TryGetValue((gx, gy), out var l) ? l : solidBy[(gx, gy)] = []).Add(s);
+        }
+        IEnumerable<int> SolidsNear(Vector3 a, Vector3 b)
+        {
+            var seen = new HashSet<int>();
+            for (int gx = (int)MathF.Floor(MathF.Min(a.X, b.X) / SCell); gx <= (int)MathF.Floor(MathF.Max(a.X, b.X) / SCell); gx++)
+                for (int gy = (int)MathF.Floor(MathF.Min(a.Y, b.Y) / SCell); gy <= (int)MathF.Floor(MathF.Max(a.Y, b.Y) / SCell); gy++)
+                    if (solidBy.TryGetValue((gx, gy), out var l)) foreach (int s in l) if (seen.Add(s)) yield return s;
+        }
+        // A segment against a solid polygon (fanned into triangles): Moller-Trumbore, within the segment.
+        static bool Hits(Vector3 p, Vector3 q, Vector3[] poly)
+        {
+            var dir = q - p;
+            for (int k = 1; k + 1 < poly.Length; k++)
+            {
+                Vector3 e1 = poly[k] - poly[0], e2 = poly[k + 1] - poly[0], h = Vector3.Cross(dir, e2);
+                float det = Vector3.Dot(e1, h);
+                if (MathF.Abs(det) < 1e-6f) continue;
+                float f = 1 / det;
+                var s = p - poly[0];
+                float u = f * Vector3.Dot(s, h);
+                if (u < 0 || u > 1) continue;
+                var qv = Vector3.Cross(s, e1);
+                float v = f * Vector3.Dot(dir, qv);
+                if (v < 0 || u + v > 1) continue;
+                float t = f * Vector3.Dot(e2, qv);
+                if (t >= 0 && t <= 1) return true;
+            }
+            return false;
+        }
+        bool Blocked(Vector3 p, Vector3 q)
+        {
+            foreach (float h in new[] { 40f, 80f, 120f })
+            {
+                var lift = new Vector3(0, 0, h);
+                foreach (int s in SolidsNear(p, q)) if (Hits(p + lift, q + lift, polygons[s].Points)) return true;
+            }
+            return false;
+        }
+        bool Supported(Vector3 p)
+        {
+            var top = p + new Vector3(0, 0, climb); var bottom = p - new Vector3(0, 0, climb + 16);
+            foreach (int s in SolidsNear(p, p)) if (Hits(top, bottom, polygons[s].Points)) return true;
+            return false;
+        }
+
+        // Each border vertex's partner: the nearest border vertex of another piece within the gap and a step, with the
+        // way between clear and floored.
+        var partner = new Dictionary<int, int>();
+        int PartnerOf(int v)
+        {
+            if (partner.TryGetValue(v, out int got)) return got;
+            var pv = V(v);
+            int piece = loopPiece[placeOf[v].Loop], reach = (int)MathF.Ceiling(maxGap / Cell), best = -1;
+            float bestD = float.MaxValue;
+            bool tooHigh = false;
+            var (cx, cy) = Key(pv);
+            for (int gx = cx - reach; gx <= cx + reach; gx++)
+                for (int gy = cy - reach; gy <= cy + reach; gy++)
+                    if (byCell.TryGetValue((gx, gy), out var list))
+                        foreach (int u in list)
+                        {
+                            if (loopPiece[placeOf[u].Loop] == piece) continue;
+                            var pu = V(u);
+                            float across = new System.Numerics.Vector2(pu.X - pv.X, pu.Y - pv.Y).Length(), rise = MathF.Abs(pu.Z - pv.Z);
+                            if (across > maxGap) continue;
+                            if (rise > climb) { tooHigh = true; continue; }
+                            if (across + rise < bestD) { bestD = across + rise; best = u; }
+                        }
+            bool traced = BridgeTraceAt is { } at && new System.Numerics.Vector2(pv.X - at.X, pv.Y - at.Y).Length() < 160 && MathF.Abs(pv.Z - at.Z) < 96;
+            if (traced)
+            {
+                var near = new List<string>();
+                for (int gx = cx - reach; gx <= cx + reach; gx++)
+                    for (int gy = cy - reach; gy <= cy + reach; gy++)
+                        if (byCell.TryGetValue((gx, gy), out var list))
+                            foreach (int u in list)
+                            {
+                                var pu = V(u);
+                                float across = new System.Numerics.Vector2(pu.X - pv.X, pu.Y - pv.Y).Length();
+                                if (across <= maxGap && u != v) near.Add($"{pu} piece {loopPiece[placeOf[u].Loop]}{(loopPiece[placeOf[u].Loop] == piece ? " (own)" : "")} across {across:F0}");
+                            }
+                Console.WriteLine($"    trace {pv} piece {piece}: {near.Count} border vertices within reach: {string.Join("; ", near.Take(6))}");
+            }
+            if (best >= 0)
+            {
+                var pu = V(best);
+                bool blocked = Blocked(pv, pu), floored = true;
+                for (int s = 1; s <= 3 && floored; s++) floored = Supported(Vector3.Lerp(pv, pu, s / 4f));
+                if (traced) Console.WriteLine($"    trace {pv} -> {pu}: {(blocked ? "blocked" : "clear")}, {(floored ? "floored" : "no floor")}");
+                if (!blocked && !floored && BridgeShowUnfloored > 0) { BridgeShowUnfloored--; Console.WriteLine($"    no floor: {pv} -> {pu}"); }
+                if (blocked || !floored) { Why(blocked ? "vertex: way blocked" : "vertex: no floor under the way"); best = -1; }
+            }
+            else
+            {
+                if (traced) Console.WriteLine($"    trace {pv}: {(tooHigh ? "only higher or lower" : "nothing near")}");
+                Why(tooHigh ? "vertex: only higher or lower" : "vertex: nothing near");
+            }
+            return partner[v] = best;
+        }
+
+        var usedEdge = new HashSet<(int, int)>();
+        (int, int) E(int x, int y) => (Math.Min(x, y), Math.Max(x, y));
+        int joined = 0;
+        for (int li = 0; li < loops.Count; li++)
+        {
+            var loop = loops[li];
+            int n = loop.Count;
+            // Runs of neighbouring vertices whose partners are on one other loop (cyclic: started after a break).
+            var partnerLoop = loop.Select(v => PartnerOf(v) is int u and >= 0 ? placeOf[u].Loop : -1).ToArray();
+            int start = Array.FindIndex(partnerLoop, x => x < 0);
+            if (start < 0) start = 0;
+            int idx = 0;
+            while (idx < n)
+            {
+                int q = partnerLoop[(start + idx) % n];
+                if (q < 0) { idx++; continue; }
+                var run = new List<int>();
+                while (idx < n && partnerLoop[(start + idx) % n] == q) { run.Add(loop[(start + idx) % n]); idx++; }
+                if (run.Count < 2) continue;
+                // The other piece's border from the first vertex's partner to the last's, the shorter way round its loop.
+                var qLoop = loops[q];
+                int u0 = placeOf[partner[run[0]]].At, u1 = placeOf[partner[run[^1]]].At, m = qLoop.Count;
+                int back = ((u0 - u1) % m + m) % m, fwd = ((u1 - u0) % m + m) % m;
+                int steps = Math.Min(back, fwd), dir = back <= fwd ? -1 : 1;
+                if (steps > 3 * run.Count + 4) { Why("run: other border too long"); continue; }
+                var other = Enumerable.Range(0, steps + 1).Select(st => qLoop[((u0 + dir * st) % m + m) % m]).ToList();
+                bool clash = false;
+                for (int r = 0; r + 1 < run.Count && !clash; r++) clash = usedEdge.Contains(E(run[r], run[r + 1]));
+                for (int r = 0; r + 1 < other.Count && !clash; r++) clash = usedEdge.Contains(E(other[r], other[r + 1]));
+                if (clash) { Why("run: border already joined"); continue; }
+                // Zip the two borders together, each step to the nearer of the next two vertices; every new crossing clear.
+                var made = new List<(int, int, int)>();
+                int i = 0, j = 0;
+                bool ok = true;
+                while (ok && (i < run.Count - 1 || j < other.Count - 1))
+                {
+                    bool takeA = j >= other.Count - 1 || (i < run.Count - 1 && Vector3.Distance(V(run[i + 1]), V(other[j])) <= Vector3.Distance(V(run[i]), V(other[j + 1])));
+                    if (takeA)
+                    {
+                        if (Blocked(V(run[i + 1]), V(other[j]))) ok = false;
+                        made.Add((run[i], run[i + 1], other[j]));
+                        i++;
+                    }
+                    else
+                    {
+                        if (Blocked(V(run[i]), V(other[j + 1]))) ok = false;
+                        made.Add((run[i], other[j + 1], other[j]));
+                        j++;
+                    }
+                }
+                if (!ok) { Why("run: a crossing blocked"); continue; }
+                foreach (var (x, y, z) in made)
+                {
+                    bool isCcw = Vector3.Cross(V(y) - V(x), V(z) - V(x)).Z >= 0;
+                    tris.Add(isCcw == ccw ? (x, y, z) : (x, z, y));
+                }
+                for (int r = 0; r + 1 < run.Count; r++) usedEdge.Add(E(run[r], run[r + 1]));
+                for (int r = 0; r + 1 < other.Count; r++) usedEdge.Add(E(other[r], other[r + 1]));
+                Why("run: joined");
+                joined++;
+            }
+        }
+        Interlocked.Add(ref gapsBridged, joined);
+        return joined;
+    }
+
     static int[,] Adjacency(List<(int A, int B, int C)> tris)
     {
         var result = new int[tris.Count, 3];
@@ -2273,7 +3720,8 @@ public sealed class NavmeshBuilder(SkyrimMod mod)
                     int tri = DoorTriangleFor(d.Triangles.Count, Of, door);
                     if (tri < 0) continue;
                     var (ta, tb, tc) = Of(tri);
-                    var at = new Vector3(door.Placement.Position.X, door.Placement.Position.Y, door.Placement.Position.Z);
+                    // (Only doors with a placement were taken.)
+                    var at = new Vector3(door.Placement!.Position.X, door.Placement.Position.Y, door.Placement.Position.Z);
                     float dist = Vector3.Distance(at, ClosestOnTriangle(at, new Vector3(ta.X, ta.Y, ta.Z), new Vector3(tb.X, tb.Y, tb.Z), new Vector3(tc.X, tc.Y, tc.Z)));
                     if (dist < pick.D) pick = (nav, tri, dist);
                 }

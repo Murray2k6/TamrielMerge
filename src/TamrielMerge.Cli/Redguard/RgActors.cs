@@ -47,11 +47,16 @@ public sealed partial class RgPluginBuilder
         ("VILEDOG", "Barbas", "EncDog"), ("VR_GARD", "Guardian", "EncDremoraMelee01"),
     ];
 
-    /// <summary>Hostile kinds (Redguard's thugs, monsters and undead attack on sight).</summary>
-    static readonly HashSet<string> Hostile = ["THUG", "GOBLIN", "OGRE", "TROLL", "SKEL", "ZOMBIE", "RAT", "GOLEM", "DRBOT", "VR_GARD"];
+    /// <summary>Hostile kinds (Redguard's monsters and undead attack on sight). Not the thugs: their own scripts start
+    /// their fights (rg-script --dump, 2026-11-11: 9 of the 13 THUG programs call beginCombat() on their own conditions;
+    /// the tavern's three, THUGTV1-3, drink and talk until StartTavernBrawl is set), and in game a thug made hostile on
+    /// sight attacked the player on walking into the Draggin Tale.</summary>
+    static readonly HashSet<string> Hostile = ["GOBLIN", "OGRE", "TROLL", "SKEL", "ZOMBIE", "RAT", "GOLEM", "DRBOT", "VR_GARD"];
 
     readonly Dictionary<string, Npc?> actors = new(StringComparer.OrdinalIgnoreCase);
     public int ActorCount { get; private set; }
+    /// <summary>Animals placed as their own models (AnimalModels: the seagulls).</summary>
+    public int AnimalsPlaced { get; private set; }
 
     Npc? PersonNpc(string script, Person p)
     {
@@ -79,6 +84,13 @@ public sealed partial class RgPluginBuilder
         npc.Configuration.Level = new NpcLevel { Level = 10 };
         npc.Packages.Add(new FormLink<IPackageGetter>(Sk(0x01B217)));   // DefaultSandboxEditorLocation512
         if (npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
+        // Dressed as Stros M'Kai's people, not as the borrowed face's owner (2026-11-10, in game: Brennan came out in an
+        // iron helmet and studded armour): Hammerfell's clothes on its Redguards, a sailor's on the captain; the others
+        // keep the townsperson's clothes their look came with.
+        npc.SleepingOutfit.Clear();
+        if (script.EndsWith("BRENNAN", StringComparison.OrdinalIgnoreCase)) npc.DefaultOutfit.SetTo(Sk(0x045698));        // SailorClothesRND
+        else if (p.Race == "Redguard") npc.DefaultOutfit.SetTo(Sk(VanillaActors.StableHash(p.Name) % 2 == 0 ? 0x06A15Cu : 0x06A15Bu));   // RedguardClothesOutfitNoHat / 01
+        npc.Items = null;
         return npc;
     }
 
@@ -91,7 +103,19 @@ public sealed partial class RgPluginBuilder
         npc.Name = kind.Name;
         // Not the vanilla template's law (an Imperial soldier's crime faction): Stros M'Kai has none (RgLaw).
         WithoutSkyrimLaw(npc, guard: kind.Prefix == "GUARD");
-        if (!Hostile.Contains(kind.Prefix) && npc.AIData is { } ai) ai.Aggression = Aggression.Unaggressive;
+        bool peaceful = !Hostile.Contains(kind.Prefix);
+        // A person's face is the vanilla actor's own (a copy has none: black-faced guards, thugs and pirates).
+        if (vanilla.Skyrim.Races.FirstOrDefault(r => r.FormKey == template.Race.FormKey) is { } race && race.Flags.HasFlag(Race.Flag.Playable))
+            VanillaActors.Lookalike(npc, template, ownAI: peaceful);
+        // Its name and level its own, and its temper when it is peaceful, whatever the vanilla actor took from a template
+        // of its own (in game 2026-11-11: an island thug named "Bandit Outlaw", the bandit template's base data).
+        npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.BaseData;
+        if (peaceful) npc.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.AIData;
+        if (peaceful)
+        {
+            npc.AIData ??= new AIData();
+            npc.AIData.Aggression = Aggression.Unaggressive;
+        }
         return npc;
     }
 
@@ -173,6 +197,53 @@ public sealed partial class RgPluginBuilder
     /// <summary>Where characters seen in several scenes live (the others are the story's scripted moments).</summary>
     static readonly Dictionary<string, string> Homes = new(StringComparer.OrdinalIgnoreCase) { ["RICHTON"] = "PALACE", ["DRAM"] = "PALACE" };
 
+    /// <summary>
+    /// Characters that are animals Skyrim has no actor for, which Redguard animates from its own models: each as a scripted
+    /// prop of that model (its first frame), moving as its script flies it. Before 2026-11-04 a seagull had no carrier but
+    /// an invisible marker: unseen, and its cries (Sound, played at it) and flights failed for want of 3D (user: "fix
+    /// redguards seagull sounds"; they were silent).
+    /// </summary>
+    static readonly Dictionary<string, string> AnimalModels = new(StringComparer.OrdinalIgnoreCase) { ["SEAGULL"] = "SEAGA001" };
+
+    /// <summary>Actors set on top of what they stood inside (TopUnder).</summary>
+    public int ActorsRaised { get; private set; }
+
+    /// <summary>
+    /// The top of a placed model under a point when it is from 12 to 50 units above it (the point: the actor's true feet): what an actor reckoned to stand
+    /// there is standing in (2026-11-11, in game and the user's "i saw a npc clipping": the Draggin Tale's thug THUGTV1,
+    /// seated in Redguard, stood to his thighs in the hearth's step). Null when nothing is.
+    /// </summary>
+    float? TopUnder(Scene scene, Vector3 feet)
+    {
+        float? best = null;
+        var q = new Vector2(feet.X, feet.Y);
+        foreach (var o in scene.Data.Statics.Concat(scene.Data.Objects.Where((o, i) => scene.Data.ObjectTypes[i] == 1 && o.Model.Length > 0)))
+        {
+            string name = o.Model.Split('.')[0].Trim().ToUpperInvariant();
+            if (name.StartsWith("BOAT") || Model(scene, name) is not { } model || model.Vertices.Count == 0) continue;
+            var origin = At(scene, o.Position);
+            origin.Z += SettleScenery(scene, o.Model, o.Position, o.Rotation);
+            var local = model.Vertices.Select(v => RgSpace.Dir(Vector3.Transform(v, o.Rotation))).ToList();
+            var mn = local.Aggregate(Vector3.Min) + origin; var mx = local.Aggregate(Vector3.Max) + origin;
+            if (q.X < mn.X || q.X > mx.X || q.Y < mn.Y || q.Y > mx.Y || mx.Z < feet.Z + 12 || mn.Z > feet.Z + 50) continue;
+            foreach (var f in model.Faces)
+                for (int t = 1; t + 1 < f.Vertices.Length; t++)
+                {
+                    Vector3 a = origin + local[f.Vertices[0]], b = origin + local[f.Vertices[t]], c = origin + local[f.Vertices[t + 1]];
+                    var n = Vector3.Cross(b - a, c - a);
+                    if (n.Length() < 1e-3f || MathF.Abs(n.Z) / n.Length() < 0.5f) continue;
+                    float d = (b.Y - c.Y) * (a.X - c.X) + (c.X - b.X) * (a.Y - c.Y);
+                    if (MathF.Abs(d) < 1e-6f) continue;
+                    float u = ((b.Y - c.Y) * (q.X - c.X) + (c.X - b.X) * (q.Y - c.Y)) / d;
+                    float v = ((c.Y - a.Y) * (q.X - c.X) + (a.X - c.X) * (q.Y - c.Y)) / d;
+                    if (u < 0 || v < 0 || u + v > 1) continue;
+                    float z = u * a.Z + v * b.Z + (1 - u - v) * c.Z;
+                    if (z >= feet.Z + 12 && z <= feet.Z + 50 && (best is null || z > best)) best = z;
+                }
+        }
+        return best;
+    }
+
     void PlaceActors(Scene scene)
     {
         for (int i = 0; i < scene.Data.Objects.Count; i++)
@@ -182,15 +253,28 @@ public sealed partial class RgPluginBuilder
             // A named character once; their first scene in WORLD.INI order is where they live.
             if (Homes.TryGetValue(o.Script, out var home) && !home.Equals(scene.Name, StringComparison.OrdinalIgnoreCase)) continue;
             if (People.ContainsKey(o.Script) && !placedPeople.Add(o.Script)) continue;
+            // By the script's name or its start (the island's gulls are SEAGULL, SEAGULL2 and SEAGULL3: 27, 20 and 18).
+            if (AnimalModels.FirstOrDefault(k => o.Script.StartsWith(k.Key, StringComparison.OrdinalIgnoreCase)).Value is { } animal)
+            {
+                if (ScriptOf(scene, o.Script) is not null && PlaceScriptedProp(scene, i, o with { Model = animal + ".3DC" }) is not null) AnimalsPlaced++;
+                else Problems.Add($"{o.Script} in {scene.Name}: its model {animal} not placed");
+                continue;
+            }
             if (ActorFor(o.Script) is not { } npc) continue;
             var at = At(scene, o.Position);
             float yaw = RgSpace.Euler(o.Rotation).Z;
             var cell = CellFor(scene, at);
+            // Redguard places actors by their middle; Skyrim by their feet (they settle onto the floor). Over a ship (the
+            // tool's, in place of Redguard's boat, its deck higher than the boat's) on its deck, as the player's arrival
+            // (2026-11-06: Brennan stood 100 units under his ship's deck, in the hull, on no navmesh).
+            var feet = OnShip(scene, new Vector3(at.X, at.Y, at.Z - 40), null);
+            // On what is under them when their legs would be inside it: a top from 12 to 50 above their true feet (66
+            // under the middle: Cyrus's model CYRSA001 is 128 tall about its origin, rg-model).
+            if (TopUnder(scene, new Vector3(feet.X, feet.Y, at.Z - 66)) is { } top) { feet.Z = top; ActorsRaised++; }
             var placed = new PlacedNpc(mod)
             {
                 Base = new FormLinkNullable<INpcGetter>(npc.FormKey),
-                // Redguard places actors by their middle; Skyrim by their feet (they settle onto the floor).
-                Placement = new Placement { Position = new P3Float(at.X, at.Y, at.Z - 40), Rotation = new P3Float(0, 0, yaw) },
+                Placement = new Placement { Position = new P3Float(feet.X, feet.Y, feet.Z), Rotation = new P3Float(0, 0, yaw) },
             };
             cell.Temporary.Add(placed);
             placedActors.TryAdd((scene.Name, o.Script.ToUpperInvariant()), placed);

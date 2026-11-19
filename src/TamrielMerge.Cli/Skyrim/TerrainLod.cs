@@ -24,6 +24,8 @@ namespace TamrielMerge.Skyrim;
 /// </summary>
 public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
 {
+    /// <summary>The output folder (kept as a field: <see cref="writeRoot"/> starts from it too).</summary>
+    readonly string outDir = outDir;
     public const int MinLevel = 4, MaxLevel = 32;
     const int Grid = 32;        // quads per chunk side
     const int TexSize = 256;
@@ -31,6 +33,9 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
     static readonly uint DefaultColor = Pack(110, 100, 80);
 
     readonly Dictionary<FormKey, uint> ltexColors = new();
+
+    /// <summary>Other folders the land textures may be in (the conversion's output, when this builds elsewhere).</summary>
+    public IReadOnlyList<string> TextureFolders { get; init; } = [];
 
     /// <summary>Land textures made elsewhere (the overland's Daggerfall ones, in its first part) and their diffuse.</summary>
     public static readonly System.Collections.Concurrent.ConcurrentDictionary<FormKey, string> KnownDiffuse = new();
@@ -61,20 +66,51 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
     /// inclusive, on the 32-cell grid of settings written by <see cref="WriteSettings"/>) only the chunks inside it are
     /// built and the settings are left as they are: a big worldspace is built a region at a time.
     /// </summary>
+    /// <param name="seaLevel">A world in the sea (Redguard's islands): the water's height round its land. Every place in
+    /// the distant view's square (the land's, widened by <paramref name="seaAround"/> cells) without a cell is sea: the
+    /// floor as deep as the land's own edge (the median of its outermost heights, under the water by 64 at least) with
+    /// distant water over it, so the view out to sea doesn't end where the cells do (2026-11-06: past Stros M'Kai's 49 x 49
+    /// cells the distant land dropped to -2,048 with no water over it).</param>
     public void Build<TCell>(string world, IReadOnlyDictionary<(int X, int Y), TCell> cells, Func<TCell, float?> waterOf, float defaultHeight,
-        (int X0, int Y0, int X1, int Y1)? region = null) where TCell : ICellGetter
+        (int X0, int Y0, int X1, int Y1)? region = null, float? seaLevel = null, int seaAround = 0) where TCell : ICellGetter
     {
         var data = new Dictionary<(int X, int Y), CellData>();
         foreach (var (key, cell) in cells)
             if (cell.Landscape is { } land && Decode(land, waterOf(cell)) is { } d) data[key] = d;
         if (data.Count == 0) return;
         int minX = data.Keys.Min(k => k.X), maxX = data.Keys.Max(k => k.X), minY = data.Keys.Min(k => k.Y), maxY = data.Keys.Max(k => k.Y);
+        CellData? seaCell = null;
+        if (seaLevel is float sea)
+        {
+            // The sea floor: the land's outermost heights (each edge cell's outer row or column), their median.
+            var rim = new List<float>();
+            foreach (var ((x, y), d) in data)
+                for (int i = 0; i < 33; i++)
+                {
+                    if (x == minX) rim.Add(d.H[i * 33]);
+                    if (x == maxX) rim.Add(d.H[i * 33 + 32]);
+                    if (y == minY) rim.Add(d.H[i]);
+                    if (y == maxY) rim.Add(d.H[32 * 33 + i]);
+                }
+            rim.Sort();
+            float floor = MathF.Min(rim.Count > 0 ? rim[rim.Count / 2] : defaultHeight, sea - 64);
+            seaCell = new CellData { Water = sea, MinH = floor };
+            Array.Fill(seaCell.H, floor);
+            Array.Fill(seaCell.C, Pack(60, 70, 80));
+            defaultHeight = floor;
+            (minX, maxX, minY, maxY) = (minX - seaAround, maxX + seaAround, minY - seaAround, maxY + seaAround);
+        }
         int swX = FloorTo(minX, MaxLevel), swY = FloorTo(minY, MaxLevel);
         int stride = MaxLevel;
         while (swX + stride <= maxX || swY + stride <= maxY) stride *= 2;
         int ex0 = swX, ey0 = swY, ex1 = swX + stride - 1, ey1 = swY + stride - 1;
         if (region is { } r) (ex0, ey0, ex1, ey1) = (FloorTo(r.X0, MaxLevel), FloorTo(r.Y0, MaxLevel), r.X1, r.Y1);
         else WriteSettings(world, swX, swY, stride);
+        // A world in the sea: every cell of the distant view's square without land of its own is sea.
+        if (seaCell is not null)
+            for (int x = ex0; x <= ex1; x++)
+                for (int y = ey0; y <= ey1; y++)
+                    data.TryAdd((x, y), seaCell);
         // The chunks' files are made on a solid-state drive when the output is on a hard disk (Util.Drives; 2026-10-12: a
         // dozen threads writing thousands of small files at once had it seeking, 15 minutes a region), then moved over one
         // at a time.
@@ -183,6 +219,16 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
         return d;
     }
 
+    /// <summary>A texture's Data-relative path with one "textures\" in front, however it was given: a texture set's
+    /// path may hold it already, and adding another left every Daggerfall land texture unfound (2026-10-25: the Iliac
+    /// Bay's distant land all one default colour, and its world map a featureless grey).</summary>
+    public static string TexturePath(string path)
+    {
+        string p = path.Replace('/', '\\').TrimStart('\\');
+        while (p.StartsWith(@"textures\", StringComparison.OrdinalIgnoreCase)) p = p[9..];
+        return @"textures\" + p;
+    }
+
     /// <summary>A landscape texture's average colour: its texture set's diffuse, from our output or Skyrim's loose data.</summary>
     uint LtexColor(FormKey ltex)
     {
@@ -194,8 +240,8 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
             diffuse = d;
         if (diffuse is not null)
         {
-            string rel = diffuse.StartsWith("textures", StringComparison.OrdinalIgnoreCase) ? diffuse : Path.Combine("textures", diffuse);
-            foreach (var root in new[] { outDir, skyrimData })
+            string rel = TexturePath(diffuse);
+            foreach (var root in TextureFolders.Prepend(outDir).Append(skyrimData))
             {
                 string path = Path.Combine(root, rel);
                 if (!File.Exists(path)) continue;
@@ -211,7 +257,17 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
     static (CellData? D, float Fx, float Fy) Locate(Dictionary<(int X, int Y), CellData> data, double wx, double wy)
     {
         int cx = (int)Math.Floor(wx / Cell), cy = (int)Math.Floor(wy / Cell);
-        return (data.GetValueOrDefault((cx, cy)), (float)((wx - cx * Cell) / 128), (float)((wy - cy * Cell) / 128));
+        float fx = (float)((wx - cx * Cell) / 128), fy = (float)((wy - cy * Cell) / 128);
+        if (data.TryGetValue((cx, cy), out var d)) return (d, fx, fy);
+        // A point on a cell's border belongs to the cell on either side: with the one beyond it missing (the east and north
+        // edge of the cells a piece of a big world is built from, OverlandTiles' 128-cell pieces), the one before it has it
+        // as its last row or column. Until 2026-11-10 such a point took the default height: every piece's east and north
+        // edge dropped to -2,048 in the distance, a trench across the view every 128 cells.
+        bool onX = fx == 0, onY = fy == 0;
+        if (onX && data.TryGetValue((cx - 1, cy), out d)) return (d, 32, fy);
+        if (onY && data.TryGetValue((cx, cy - 1), out d)) return (d, fx, 32);
+        if (onX && onY && data.TryGetValue((cx - 1, cy - 1), out d)) return (d, 32, 32);
+        return (null, fx, fy);
     }
 
     static float Height(Dictionary<(int X, int Y), CellData> data, double wx, double wy, float fallback)
@@ -222,6 +278,34 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
         float tx = Math.Clamp(fx - ix, 0, 1), ty = Math.Clamp(fy - iy, 0, 1);
         float h00 = d.H[iy * 33 + ix], h10 = d.H[iy * 33 + ix + 1], h01 = d.H[(iy + 1) * 33 + ix], h11 = d.H[(iy + 1) * 33 + ix + 1];
         return (h00 * (1 - tx) + h10 * tx) * (1 - ty) + (h01 * (1 - tx) + h11 * tx) * ty;
+    }
+
+    /// <summary>Distant land vertices raised to the land round them (for the log).</summary>
+    public static long Raised;
+
+    /// <summary>
+    /// A distant vertex's height: the highest of the land within <paramref name="reach"/> of it. The distant land has
+    /// a vertex every 512 units at its nearest level, the land itself every 128; taken at the point alone, a terrace's
+    /// edge or a hill's shoulder between two vertices was cut off, and what stands there - a wall, a brazier on it -
+    /// hung over the distant land (user, 2026-11-10: "a floating brazier and a floating wall on a hill slope", "its
+    /// the brazier on the distant land"). Land under its cell's water stays as it is, so shores don't grow.
+    /// </summary>
+    static float HeightOver(Dictionary<(int X, int Y), CellData> data, double wx, double wy, float fallback, float reach)
+    {
+        float at = Height(data, wx, wy, fallback);
+        var (d, _, _) = Locate(data, wx, wy);
+        if (d is null || reach <= 0 || d.Water is { } water && at < water) return at;
+        float best = at;
+        for (int j = -2; j <= 2; j++)
+            for (int i = -2; i <= 2; i++)
+            {
+                if (i == 0 && j == 0) continue;
+                double x = wx + i * reach / 2, y = wy + j * reach / 2;
+                if (Locate(data, x, y).Item1 is null) continue;
+                best = MathF.Max(best, Height(data, x, y, at));
+            }
+        if (best > at + 1) System.Threading.Interlocked.Increment(ref Raised);
+        return best;
     }
 
     static uint Color(Dictionary<(int X, int Y), CellData> data, double wx, double wy)
@@ -246,7 +330,7 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
         var heights = new float[(Grid + 1) * (Grid + 1)];
         for (int j = 0; j <= Grid; j++)
             for (int i = 0; i <= Grid; i++)
-                heights[j * (Grid + 1) + i] = Height(data, ox + i * step, oy + j * step, defaultHeight);
+                heights[j * (Grid + 1) + i] = HeightOver(data, ox + i * step, oy + j * step, defaultHeight, (float)Math.Min(step / 2, Cell / 16.0));
         float minH = heights.Min(), maxH = heights.Max();
 
         // nifly isn't safe to drive from several threads at once (its string and block bookkeeping): one chunk's
@@ -316,7 +400,40 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
                 uint waterId = hdr.GetBlockID(waterNode);
                 hdr.ReplaceBlock(waterId, MultiBoundNode(hdr, "WATER", (float)size, wMin, wMax));
                 var parent = (NiNode)hdr.GetBlockById(waterId);
-                foreach (var (rx0, rx1, ry, w) in runs)
+                // Vanilla's water: one BSSubIndexTriShape with a quad for each of the chunk's cells (tamriel.4.0.32: 64
+                // vertices, 8.0.32: 256, 16.0.32: 1,024; z the water's height over the level). The plain quads made
+                // below drew as a flat beige surface, not water (seen in game 2026-11-12 from 1,200 up, ch0.png; user:
+                // "water is cutting off in the view"), and nifly won't write that shape from made data: so vanilla's own
+                // shape of this level is copied in and its quads set to this chunk's water, a cell without water's
+                // folded to a point far under the land.
+                bool copied = false;
+                if (WaterTemplate(level) is { } tpl)
+                    lock (waterTemplates)
+                    {
+                        var clone = nif.CloneShape(tpl.Shape, "", tpl.Nif);
+                        var old = clone is null ? null : nif.GetVertsForShape(clone);
+                        if (clone is not null && old is not null && old.Count == 4 * level * level)
+                        {
+                            float cellSize = 4096f / level;
+                            using var nv = new vectorVector3();
+                            for (int q = 0; q < old.Count; q += 4)
+                            {
+                                float qx = MathF.Min(MathF.Min(old[q].x, old[q + 1].x), MathF.Min(old[q + 2].x, old[q + 3].x));
+                                float qy = MathF.Min(MathF.Min(old[q].y, old[q + 1].y), MathF.Min(old[q + 2].y, old[q + 3].y));
+                                int cx = x0 + (int)MathF.Round(qx / cellSize), cy = y0 + (int)MathF.Round(qy / cellSize);
+                                float? cw = data.TryGetValue((cx, cy), out var wd) && wd.Water is { } wh2 && wd.MinH < wh2 ? wh2 : null;
+                                for (int k = 0; k < 4; k++)
+                                    nv.Add(cw is { } here ? new Vector3(old[q + k].x, old[q + k].y, here / level) : new Vector3(qx, qy, -30000f / level));
+                            }
+                            nif.SetVertsForShape(clone, nv);
+                            nif.SetParentNode(hdr.GetBlockById(hdr.GetBlockID(clone)), parent);
+                            copied = true;
+                            System.Threading.Interlocked.Increment(ref waterCopied);
+                        }
+                        else if (clone is not null) nif.DeleteShape(clone);
+                    }
+                if (!copied) System.Threading.Interlocked.Increment(ref waterPlain);
+                foreach (var (rx0, rx1, ry, w) in copied ? [] : runs)
                 {
                     float lx0 = (rx0 - x0) * 4096f / level, lx1 = (rx1 + 1 - x0) * 4096f / level, ly0 = (ry - y0) * 4096f / level, ly1 = (ry + 1 - y0) * 4096f / level, z = w / level;
                     using var qv = new vectorVector3 { new Vector3(lx0, ly0, z), new Vector3(lx1, ly0, z), new Vector3(lx0, ly1, z), new Vector3(lx1, ly1, z) };
@@ -338,7 +455,10 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
             if (nif.Save(meshPath) != 0) throw new IOException($"nifly failed to save {meshPath}");
         }
 
-        // Textures: colour, and model-space normals from the heights (X east, Y north, Z up as RGB).
+        // Textures: colour, and model-space normals from the heights, as vanilla's terrain LOD stores them: X east as red,
+        // Z up as green, Y north as blue (fitted against vanilla's own chunks, `lod-normal-fit`: tamriel.32.0.0's green
+        // 0.91 + 0.017 z, blue 0.51 + 0.18 y). Until 2026-11-03 Y was green and Z blue: the land lit as if on its side,
+        // the world map and distant land without relief (user: "the map menus do not have a 3d map its all flat").
         var color = new uint[TexSize * TexSize];
         var normal = new uint[TexSize * TexSize];
         double px = size / TexSize;
@@ -350,14 +470,61 @@ public sealed class TerrainLod(SkyrimMod mod, string outDir, string skyrimData)
                 float dx = (Height(data, wx + px, wy, defaultHeight) - Height(data, wx - px, wy, defaultHeight)) / (float)(2 * px);
                 float dy = (Height(data, wx, wy + px, defaultHeight) - Height(data, wx, wy - px, defaultHeight)) / (float)(2 * px);
                 var n = System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(-dx, -dy, 1));
-                normal[row * TexSize + col] = Pack((int)((n.X * 0.5f + 0.5f) * 255), (int)((n.Y * 0.5f + 0.5f) * 255), (int)((n.Z * 0.5f + 0.5f) * 255));
+                normal[row * TexSize + col] = Pack((int)((n.X * 0.5f + 0.5f) * 255), (int)((n.Z * 0.5f + 0.5f) * 255), (int)((n.Y * 0.5f + 0.5f) * 255));
             }
         string texDir = Path.Combine(writeRoot, "textures", "terrain", world);
+        // One colour and one slope throughout (open sea round an island: most of the 1,636 chunks the sea added to
+        // Redguard's worlds, 2026-11-06): 16 x 16 pixels draw the same, at a 256th of the size.
+        if (Array.TrueForAll(color, c => c == color[0]) && Array.TrueForAll(normal, c => c == normal[0]))
+        {
+            const int Small = 16;
+            Morrowind.MwTextures.WriteBcDds(Path.Combine(texDir, name + ".dds"), Enumerable.Repeat(color[0], Small * Small).ToArray(), Small, Small, false);
+            Morrowind.MwTextures.WriteBcDds(Path.Combine(texDir, name + "_n.dds"), Enumerable.Repeat(normal[0], Small * Small).ToArray(), Small, Small, false);
+            return;
+        }
         Morrowind.MwTextures.WriteBcDds(Path.Combine(texDir, name + ".dds"), color, TexSize, TexSize, false);
         Morrowind.MwTextures.WriteBcDds(Path.Combine(texDir, name + "_n.dds"), normal, TexSize, TexSize, false);
     }
 
     /// <summary>A BSMultiBoundNode with its axis-aligned bound (local to the chunk, in world units), as vanilla chunks have.</summary>
+    int waterCopied, waterPlain;
+    /// <summary>Chunks whose distant water is vanilla's own shape, and those left with plain quads (no vanilla shape found).</summary>
+    public (int Copied, int Plain) WaterChunks => (waterCopied, waterPlain);
+
+    readonly Dictionary<int, (NifFile Nif, NiShape Shape)?> waterTemplates = [];
+
+    /// <summary>Vanilla's distant water shape of a level: an open-sea chunk of Tamriel's, read from Skyrim's own archives.</summary>
+    (NifFile Nif, NiShape Shape)? WaterTemplate(int level)
+    {
+        lock (waterTemplates)
+        {
+            if (waterTemplates.TryGetValue(level, out var hit)) return hit;
+            (NifFile, NiShape)? made = null;
+            try
+            {
+                string rel = $@"meshes\terrain\tamriel\tamriel.{level}.0.{(level == 32 ? 64 : 32)}.btr";
+                foreach (var bsa in Directory.GetFiles(skyrimData, "Skyrim - Meshes*.bsa"))
+                {
+                    var file = Mutagen.Bethesda.Archives.Archive.CreateReader(Mutagen.Bethesda.GameRelease.SkyrimSE, bsa).Files.FirstOrDefault(f => f.Path.Equals(rel, StringComparison.OrdinalIgnoreCase));
+                    if (file is null) continue;
+                    string tmp = Path.Combine(Path.GetTempPath(), $"tm_water_{level}_{Environment.ProcessId}.btr");
+                    File.WriteAllBytes(tmp, file.GetBytes());
+                    var tn = new NifFile();
+                    if (tn.Load(tmp) == 0)
+                    {
+                        var shape = tn.GetShapes().FirstOrDefault(sh => sh.name.get() != "land" && tn.GetVertsForShape(sh).Count == 4 * level * level);   // by its vertices, four a cell
+                        if (shape is not null) made = (tn, shape);
+                    }
+                    File.Delete(tmp);
+                    break;
+                }
+                if (made is null) Problems.Add($"distant water: no vanilla water shape of level {level} found (plain quads written)");
+            }
+            catch (Exception e) { Problems.Add($"distant water: vanilla's shape of level {level} not read: {e.Message}"); }
+            return waterTemplates[level] = made;
+        }
+    }
+
     static BSMultiBoundNode MultiBoundNode(NiHeader hdr, string name, float size, float zMin, float zMax)
     {
         var aabb = BlockMeshBuilder.Owned(new BSMultiBoundAABB());

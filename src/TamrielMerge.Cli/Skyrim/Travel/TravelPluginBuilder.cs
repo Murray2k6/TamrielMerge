@@ -42,7 +42,7 @@ public static class TravelPluginBuilder
     public static int Build(string dir, string skyrimData, string? arena2, Action<string>? log = null, string? outDir = null, string? oblivionData = null)
     {
         var mod = new SkyrimMod(ModKey.FromFileName(PluginName), SkyrimRelease.SkyrimSE);
-        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
+        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small | SkyrimModHeader.HeaderFlag.Master;
         using var skyrim = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
         var worlds = new List<FormKey>();
         var opened = new List<IDisposable>();
@@ -94,13 +94,17 @@ public static class TravelPluginBuilder
             mod.FormLists.Add(list);
             lists.Add(list.FormKey);
         }
+        var groupTowns = ScriptStrings.Grouped(groups.Select(g => g.Towns.Select(t => t.Town.Replace("|", "/"))));
         var props = new List<ScriptProperty>
         {
             new ScriptStringProperty { Name = "WorldName", Data = name },
             new ScriptIntProperty { Name = "Story", Data = story },
             Objects("Worlds", worldspaces),
             new ScriptStringListProperty { Name = "GroupNames", Data = [.. groups.Select(g => g.Name)] },
-            new ScriptStringListProperty { Name = "GroupTowns", Data = [.. groups.Select(g => string.Join("|", g.Towns.Select(t => t.Town.Replace("|", "/"))))] },
+            // Each group's towns in pieces under ScriptStrings.Limit, GroupTownsFirst its first piece (TMStrings.Group): a save
+            // can't hold a script string of 4,096 characters (the Iliac Bay's largest region, 4,347, crashed loading one).
+            new ScriptStringListProperty { Name = "GroupTowns", Data = [.. groupTowns.Pieces] },
+            new ScriptIntListProperty { Name = "GroupTownsFirst", Data = [.. groupTowns.First] },
             Objects("GroupMarkers", lists),
             new ScriptFloatProperty { Name = "UnitsPerPixel", Data = 4096f },
         };
@@ -267,7 +271,7 @@ public static class TravelPluginBuilder
             foreach (var r in (obWs.TopCell?.Persistent ?? []).OfType<Mutagen.Bethesda.Oblivion.IPlacedObjectGetter>())
             {
                 if (r.MapMarker is not { } mm || r.Location is not { } pos) continue;
-                if (!mm.Types.Any(t => t is Mutagen.Bethesda.Oblivion.MapMarker.Type.City or Mutagen.Bethesda.Oblivion.MapMarker.Type.Settlement)) continue;
+                if (!(mm.Types ?? []).Any(t => t is Mutagen.Bethesda.Oblivion.MapMarker.Type.City or Mutagen.Bethesda.Oblivion.MapMarker.Type.Settlement)) continue;
                 string name = mm.Name ?? "";
                 if (name.Length == 0 || found.Any(f => f.Town == name)) continue;
                 if (obWs.FormKey != tam.FormKey)
@@ -311,19 +315,28 @@ public static class TravelPluginBuilder
         if (script is null) { log?.Invoke("travel: Daggerfall.esm has no overland quest"); return null; }
         List<string> Strings(string n) => script.Properties.OfType<IScriptStringListPropertyGetter>().FirstOrDefault(p => p.Name == n)?.Data.ToList() ?? [];
         List<FormKey> Forms(string n) => script.Properties.OfType<IScriptObjectListPropertyGetter>().FirstOrDefault(p => p.Name == n)?.Objects.Select(o => o.Object.FormKey).ToList() ?? [];
+        List<float> Floats(string n) => script.Properties.OfType<IScriptFloatListPropertyGetter>().FirstOrDefault(p => p.Name == n)?.Data.ToList() ?? [];
+        float Float(string n) => script.Properties.OfType<IScriptFloatPropertyGetter>().FirstOrDefault(p => p.Name == n)?.Data ?? 0;
         var regionNames = Strings("RegionNames");
         var regionTowns = Strings("RegionTowns");
+        var regionTownsFirst = script.Properties.OfType<IScriptIntListPropertyGetter>().FirstOrDefault(p => p.Name == "RegionTownsFirst")?.Data.ToList() ?? [];
         var regionLists = Forms("RegionMarkers");
         var tiles = Forms("Tiles");
-        var world = df.Worldspaces.FirstOrDefault(w => tiles.Count > 0 && w.FormKey == tiles[0]);
-        if (world is null || regionNames.Count == 0) { log?.Invoke("travel: Daggerfall's overland isn't one worldspace"); return null; }
-        if (tiles.Count > 1) log?.Invoke("travel: Daggerfall's overland is in tiles: travel stays within one");
-        // The map's frame: the worldspace's bounds in cells (one worldspace, centred on 0,0).
-        var min = world.ObjectBoundsMin;
-        var max = world.ObjectBoundsMax;
-        int cellsX = (int)Math.Round(max.X - min.X);
-        float unitsPerPixel = 4096f * cellsX / DfWorldMap.Width;
-        float westX = min.X * 4096f, northY = max.Y * 4096f;
+        var tileWorlds = tiles.Select(t => df.Worldspaces.FirstOrDefault(w => w.FormKey == t)).ToList();
+        if (tileWorlds.Count == 0 || tileWorlds.Any(w => w is null) || regionNames.Count == 0) { log?.Invoke("travel: Daggerfall.esm's overland quest names worldspaces it hasn't"); return null; }
+        // The whole map's frame (the overland is built centred on 0,0 and split into tiles, OverlandTiles): each tile's 0,0
+        // on it, and the map's edges from the tiles' bounds (in cells, each tile's own, its overlap clipped at the map's
+        // edge) moved by their origins.
+        var originX = Floats("OriginX");
+        var originY = Floats("OriginY");
+        if (originX.Count != tiles.Count || originY.Count != tiles.Count) { originX = [.. tiles.Select(_ => 0f)]; originY = [.. tiles.Select(_ => 0f)]; }
+        float westX = tileWorlds.Select((w, t) => w!.ObjectBoundsMin.X * 4096f + originX[t]).Min();
+        float eastX = tileWorlds.Select((w, t) => w!.ObjectBoundsMax.X * 4096f + originX[t]).Max();
+        float northY = tileWorlds.Select((w, t) => w!.ObjectBoundsMax.Y * 4096f + originY[t]).Max();
+        float unitsPerPixel = (eastX - westX) / DfWorldMap.Width;
+        if (Float("UnitsPerPixel") is var questScale and > 0 && MathF.Abs(questScale - unitsPerPixel) > 1)
+            log?.Invoke($"travel: the map's edges give {unitsPerPixel:F1} units a pixel, the overland quest {questScale:F1}: the quest's taken");
+        if (Float("UnitsPerPixel") is var scale and > 0) unitsPerPixel = scale;
 
         // The towns, as the overland quest lists them (its region lists hold their map markers).
         var lists = df.FormLists.Where(f => regionLists.Contains(f.FormKey)).ToDictionary(f => f.FormKey);
@@ -331,13 +344,15 @@ public static class TravelPluginBuilder
         for (int r = 0; r < regionNames.Count && r < regionLists.Count; r++)
         {
             if (!lists.TryGetValue(regionLists[r], out var list)) continue;
-            var names = regionTowns[r].Split('|');
-            var towns = list.Items.Select((m, i) => (i < names.Length ? names[i] : "?", m.FormKey)).ToList();
+            var names = ScriptStrings.Group(regionTowns, regionTownsFirst, r);
+            var towns = list.Items.Select((m, i) => (i < names.Count ? names[i] : "?", m.FormKey)).ToList();
             groups.Add((regionNames[r], towns));
         }
+        // Every tile's markers, on the whole map.
         var markerAt = new Dictionary<FormKey, (float X, float Y)>();
-        foreach (var r in (world.TopCell?.Persistent ?? []).OfType<IPlacedObjectGetter>())
-            if (r.Placement is { } p) markerAt[r.FormKey] = (p.Position.X, p.Position.Y);
+        for (int t = 0; t < tileWorlds.Count; t++)
+            foreach (var r in (tileWorlds[t]!.TopCell?.Persistent ?? []).OfType<IPlacedObjectGetter>())
+                if (r.Placement is { } p) markerAt[r.FormKey] = (p.Position.X + originX[t], p.Position.Y + originY[t]);
 
         // Daggerfall's map in squares: terrain for the price, landmasses for what a ship must reach.
         var map = DfWorldMap.Load(arena2);
@@ -500,11 +515,23 @@ public static class TravelPluginBuilder
             new ScriptStringProperty { Name = "HubPoints", Data = string.Join("|", hubs.Select(h => { var u = Units(h.X, h.Y); return $"{u.X:F0},{u.Y:F0}"; })) },
             new ScriptStringListProperty { Name = "HubRoutes", Data = [.. routes] },
         };
-        var worldQuest = WorldQuest(mod, "TMTravelWorldIliacBay", "The Iliac Bay", 0, [world.FormKey], groups, extra);
+        // The tiles as one map (TMTravelWorld.GX, Crossing): their origins and their core, as the overland quest has them.
+        if (tiles.Count > 1)
+            extra.AddRange(
+            [
+                new ScriptFloatListProperty { Name = "OriginX", Data = [.. originX] },
+                new ScriptFloatListProperty { Name = "OriginY", Data = [.. originY] },
+                new ScriptFloatProperty { Name = "CoreMinX", Data = Float("CoreMinX") },
+                new ScriptFloatProperty { Name = "CoreMaxX", Data = Float("CoreMaxX") },
+                new ScriptFloatProperty { Name = "CoreMinY", Data = Float("CoreMinY") },
+                new ScriptFloatProperty { Name = "CoreMaxY", Data = Float("CoreMaxY") },
+                new ScriptFloatProperty { Name = "Hysteresis", Data = Float("Hysteresis") },
+            ]);
+        var worldQuest = WorldQuest(mod, "TMTravelWorldIliacBay", "The Iliac Bay", 0, tiles, groups, extra);
         // The UnitsPerPixel WorldQuest sets for every world is replaced by the map's own.
         var props = worldQuest.VirtualMachineAdapter!.Scripts[0].Properties;
         props.Remove(props.First(p => p.Name == "UnitsPerPixel"));
-        log?.Invoke($"travel: The Iliac Bay: {groups.Sum(g => g.Item2.Count)} towns in {groups.Count} regions, {masses} landmasses ({charOf.Count} with towns), {ports.Count} harbours, {hubs.Count} sea hubs");
+        log?.Invoke($"travel: The Iliac Bay: {groups.Sum(g => g.Item2.Count)} towns in {groups.Count} regions ({markerAt.Count} markers found in {tiles.Count} tiles), {masses} landmasses ({charOf.Count} with towns), {ports.Count} harbours, {hubs.Count} sea hubs");
         return worldQuest.FormKey;
     }
 

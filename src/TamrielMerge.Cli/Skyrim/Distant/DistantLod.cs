@@ -89,7 +89,8 @@ public static class DistantLod
                 .Where(w => ours.Contains(w.FormKey.ModKey) && w.EditorID is { Length: > 0 })
                 .GroupBy(w => w.FormKey).Select(g => g.First())
                 .Where(w => onlyWorlds is null || onlyWorlds.Count == 0 || onlyWorlds.Contains(w.EditorID!, StringComparer.OrdinalIgnoreCase)).ToList();
-            // Each worldspace's copies in the plugins, found once (Daggerfall has 3,444 town worldspaces).
+            // Each worldspace's copies in the plugins, found once (each of Daggerfall's town and dungeon plugins has its own
+            // copy of the overland tiles).
             var copies = new Dictionary<FormKey, List<IWorldspaceGetter>>();
             foreach (var mod in mods.Where(m => ours.Contains(m.ModKey)))
                 foreach (var w in mod.Worldspaces)
@@ -100,6 +101,9 @@ public static class DistantLod
             // First, on one thread (the plugins' readers aren't safe to share), each world's land and placements; the
             // land is made world by world (its own work runs on all cores).
             var jobs = new List<(string Name, string Sheet, List<Placed> Placed, IEnumerable<(int X, int Y)> Cells)>();
+            var read = new List<(IWorldspaceGetter World, List<Placed> Placed, List<(int X, int Y)> Land)>();
+            // (Daggerfall's towns and every location's outside stand on the overland tiles themselves, in Daggerfall.esm's
+            // and Daggerfall Towns.esm's copies of them: TownBuilder.)
             int done = 0;
             foreach (var world in worlds)
             {
@@ -128,9 +132,13 @@ public static class DistantLod
                         }
                     }
                 }
-                if (what.Terrain && land.Count > 0) Terrain(name, land, writeRoot, mods, skyrimData, log);
+                if (what.Terrain && land.Count > 0) Terrain(name, land, writeRoot, mods, skyrimData, log, [outDir, dir, .. assets ?? []]);
+                read.Add((world, [.. placed.Values], [.. land.Keys]));
+            }
+            foreach (var (world, placed, land) in read)
+            {
                 if ((what.Objects || what.Trees) && placed.Count > 0)
-                    jobs.Add((name, SheetOf(world.FormKey.ModKey.FileName), [.. placed.Values], land.Count > 0 ? [.. land.Keys] : placed.Values.Select(p => Cell(p.Pos)).Distinct().ToList()));
+                    jobs.Add((world.EditorID!, SheetOf(world.FormKey.ModKey.FileName), placed, land.Count > 0 ? land : placed.Select(p => Cell(p.Pos)).Distinct().ToList()));
             }
             // Then the objects and trees, worlds in parallel, on one texture sheet per game (2026-10-14: a sheet of its own
             // for each of Daggerfall's 3,444 town worlds, one world at a time, took two hours and tens of gigabytes).
@@ -208,7 +216,8 @@ public static class DistantLod
     }
 
     /// <summary>The land, from the winning cells: a big world a 128-cell region at a time (its settings written once).</summary>
-    static void Terrain(string world, Dictionary<(int X, int Y), ICellGetter> land, string writeRoot, List<ISkyrimModDisposableGetter> mods, string skyrimData, Action<string> log)
+    static void Terrain(string world, Dictionary<(int X, int Y), ICellGetter> land, string writeRoot, List<ISkyrimModDisposableGetter> mods, string skyrimData, Action<string> log,
+        IReadOnlyList<string> textureFolders)
     {
         // Land textures and their texture sets from every plugin, for the land's colours.
         var lookup = new SkyrimMod(ModKey.FromFileName("TamrielMergeLod.esp"), SkyrimRelease.SkyrimSE);
@@ -218,9 +227,10 @@ public static class DistantLod
             foreach (var ts in m.TextureSets) lookup.TextureSets.GetOrAddAsOverride(ts);
         }
         static float? Water(ICellGetter c) => c.Flags.HasFlag(Mutagen.Bethesda.Skyrim.Cell.Flag.HasWater) ? 0f : null;
-        var lod = new TerrainLod(lookup, writeRoot, skyrimData);
+        var lod = new TerrainLod(lookup, writeRoot, skyrimData) { TextureFolders = textureFolders };
         const int Region = 128;
-        if (land.Count <= Region * Region * 2) lod.Build(world, land, Water, -2048);
+        // Redguard's worlds are islands in the sea (RgPluginBuilder builds them so too: TerrainLod's seaLevel).
+        if (land.Count <= Region * Region * 2) lod.Build(world, land, Water, -2048, seaLevel: world.StartsWith("RG", StringComparison.OrdinalIgnoreCase) ? 0f : null);
         else
         {
             int FloorTo(int v, int m) => (int)Math.Floor((double)v / m) * m;
@@ -399,7 +409,7 @@ public static class DistantLod
                     }
                 }
                 string path = Path.Combine(writeRoot, "meshes", "terrain", world, "objects", $"{world}.{level}.{x0}.{y0}.bto");
-                try { BtoWriter.Write(path, sheet, level, [.. shapes.Values]); Interlocked.Increment(ref chunks); }
+                try { BtoWriter.Write(path, sheet, level, new Vector2(x0 * 4096f, y0 * 4096f), [.. shapes.Values]); Interlocked.Increment(ref chunks); }
                 catch (Exception e) { errors.Add($"{Path.GetFileName(path)}: {e.Message}"); }
             });
         }

@@ -92,6 +92,10 @@ Message Property IntroPrompt Auto
 Bool Property SkipIntros = False Auto Hidden
 Bool Property AwaitingHelgenEscape = False Auto Hidden
 Bool Property AwaitingRaceMenu = False Auto Hidden
+; A new game begun with Morrowind's opening: the race menu waits for Morrowind's own (its census officer's EnableRaceMenu,
+; TMMwScript.RaceMenu), so the prison ship plays as Morrowind's does (2026-11-05: Jiub's waking line and the guard's came
+; under the fade and Skyrim's race menu, shown on arrival).
+Bool Property RaceMenuHeld = False Auto Hidden
 Int Property PendingKit = -1 Auto Hidden
 
 ; How the game begins (user, 2026-10-12: "the games start in the corrisponding story sequence if chosen. we need an
@@ -114,6 +118,14 @@ Float[] Property AfterOpeningOffsets Auto
 Int[] Property OpeningQuestIds Auto
 Int[] Property OpeningQuestStages Auto
 Int[] Property OpeningItemIds Auto
+; Each game's own start-up (AltStarts.Steps), in order: the story, when (0 its opening, 1 the way in after it), the form
+; in its plugin (or StepPlugins', when not empty) and the value: a quest started (value < 0) or set to that stage, a
+; global set to it, an item given (that many).
+Int[] Property StepStories Auto
+Int[] Property StepWhen Auto
+Int[] Property StepForms Auto
+Float[] Property StepValues Auto
+String[] Property StepPlugins Auto
 ; Skyrim after Helgen, as vanilla's own quickstart leaves it (QF_MQ101 Fragment_27), then on to Riverwood.
 Quest Property MQ102A Auto
 Quest Property MQ102B Auto
@@ -136,6 +148,8 @@ Int Property WayRalof = 3 AutoReadOnly
 ; Stage 0 normal-start fragment. Warp straight into the first story's opening dungeon.
 Function Fragment_Takeover()
   Debug.Trace("[TamrielMerge] MQ101 stage 0: beginning the first story")
+  ; Before anything else: Survival's question comes up some moments into any new game, whichever story is first.
+  HoldSurvivalPrompt()
   If Silence
     Silence.Add()
   EndIf
@@ -198,13 +212,42 @@ Function AfterFirstArrival()
   If ChooseStart()
     Return
   EndIf
-  PlayIntro(PendingIntro)
+  ; The chosen opening's own start-up, now that the start is settled (a new game's first story waited for it, as
+  ; another start may be chosen; another story's opening ran it in BeginStory, and it runs once).
+  If ChosenWay == WayOpening && CurrentStory >= 0 && CurrentStory != StorySkyrim
+    RunSteps(CurrentStory, 0, True)
+    RunSteps(CurrentStory, 0, False)
+  EndIf
+  If PlayIntro(PendingIntro)
+    ; No journey follows here: the screen back from the video's black.
+    Game.FadeOutGame(false, true, 0.0, 1.0)
+  EndIf
   If Silence
     Silence.Remove()
+  EndIf
+  If ChosenWay == WayOpening && CurrentStory == StoryMorrowind
+    RaceMenuHeld = True
+    EquipStartKit()
+    RefreshEquipment()
+    Debug.Trace("[TamrielMerge] Morrowind's opening: the race menu waits for its census officer")
+    Return
   EndIf
   Game.ShowRaceMenu()
   ; Changing race in the race menu leaves what the player wears invisible until it is put on again: re-equip it
   ; when the menu closes (SKSE's menu event, or by checking every two seconds without SKSE).
+  AwaitingRaceMenu = True
+  RegisterForMenu("RaceSex Menu")
+  RegisterForSingleUpdate(2.0)
+EndFunction
+
+; Morrowind's EnableRaceMenu (TMMwScript.RaceMenu): the race menu held back for it, once.
+Function ShowHeldRaceMenu()
+  If !RaceMenuHeld
+    Return
+  EndIf
+  RaceMenuHeld = False
+  Debug.Trace("[TamrielMerge] Morrowind's census officer: the race menu")
+  Game.ShowRaceMenu()
   AwaitingRaceMenu = True
   RegisterForMenu("RaceSex Menu")
   RegisterForSingleUpdate(2.0)
@@ -388,6 +431,11 @@ EndFunction
 
 Function BeginStory(Int story)
   Debug.Trace("[TamrielMerge] beginning story " + story)
+  If story != StorySkyrim
+    HoldSurvivalPrompt()
+  Else
+    ReleaseSurvivalPrompt()
+  EndIf
   ; Before anything moves: Skyrim's opening sets the player's items aside, and only Skyrim's coin may go with them.
   ChangeMoney(CurrentStory, story)
   If CurrentStory >= 0
@@ -400,13 +448,21 @@ Function BeginStory(Int story)
   If Silence
     Silence.Add()
   EndIf
+  Bool sawVideo = False
   If !StartingNewGame
-    PlayIntro(story)   ; a new game's waits until the world is up (AfterFirstArrival)
+    sawVideo = PlayIntro(story)   ; a new game's waits until the world is up (AfterFirstArrival)
   EndIf
   If story == StorySkyrim
+    If sawVideo
+      Game.FadeOutGame(false, true, 0.0, 1.0)
+    EndIf
     BeginSkyrim(True)
   Else
     TravelTo(StartOf(story))
+    If !StartingNewGame
+      RunSteps(story, 0, True)
+      RunSteps(story, 0, False)
+    EndIf
   EndIf
   ; Arrived: the place's own music again (a new game's after its intro).
   If Silence && !StartingNewGame
@@ -437,35 +493,50 @@ String Function IntroVideo(Int story)
   Return ""
 EndFunction
 
-; Plays a story's opening cinematic the first time that story begins (Escape skips it, as Skyrim's own).
-Function PlayIntro(Int story)
+; Plays a story's opening cinematic the first time that story begins (Escape skips it, as Skyrim's own). True when it
+; played: the screen is then black, as it went before the video, and whoever called fades it in again (TravelTo does;
+; with the video's end the place the player was still standing in showed for a moment before the journey's own fade:
+; user, 2026-11-14, "after the intro it briefly showed the start it was originally in").
+Bool Function PlayIntro(Int story)
   If !IntroPlayed
     IntroPlayed = new Bool[5]
   EndIf
   If story < 0 || story >= IntroPlayed.Length || IntroPlayed[story]
-    Return
+    Return False
   EndIf
   IntroPlayed[story] = True
   String video = IntroVideo(story)
   If video == "" || SkipIntros
-    Return
+    Return False
   EndIf
   If IntroPrompt
     Int choice = IntroPrompt.Show()
     If choice == 2
       SkipIntros = True
-      Return
+      Return False
     ElseIf choice == 1
-      Return
+      Return False
     EndIf
   EndIf
   Debug.Trace("[TamrielMerge] playing " + video)
+  Game.FadeOutGame(true, true, 0.0, 0.1)
+  Utility.Wait(0.3)
   ; Interruptible: a key also ends it.
   Game.PlayBink(video, True, True, True, True)
+  Return True
+EndFunction
+
+; Every journey ends Redguard's cutscene holds on the player (its engine ends them on a map change: TMRgState.MapChanged).
+Function EndRedguardHolds()
+  TMRgState rg = Quest.GetQuest("RGScripts") as TMRgState
+  If rg
+    rg.MapChanged()
+  EndIf
 EndFunction
 
 Function TravelTo(ObjectReference destination)
   Actor player = Game.GetPlayer()
+  EndRedguardHolds()
   Game.DisablePlayerControls()
   Game.FadeOutGame(true, true, 0.0, 0.5)
   Debug.Trace("[TamrielMerge] moving player to " + destination)
@@ -480,6 +551,13 @@ Function TravelTo(ObjectReference destination)
   Game.FadeOutGame(false, true, 0.0, 1.0)
   ; A save where the story (or time travel) brought the player: dying reloads the latest save, which would
   ; otherwise be from before (user, 2026-10-09: "dying in any game returns you to riverwood inn").
+  ; Not a new game's first arrival, though: the world isn't up yet (StartingNewGame: the game is still starting
+  ; every quest and script), and a save asked for there crashed the game writing it three times in eight launches
+  ; (2026-11-14/15: EXCEPTION_ACCESS_VIOLATION at SkyrimSE.exe+15B0FD1 in the save's compression, an empty
+  ; .ess.tmp left). The start's choices and the race menu follow at once, and the game is saved after them.
+  If StartingNewGame
+    Return
+  EndIf
   Utility.Wait(1.0)
   Game.RequestAutoSave()
 EndFunction
@@ -639,6 +717,52 @@ Bool Function ChooseStart()
   Return False
 EndFunction
 
+; A story's own start-up steps for its opening (when 0) or the way in after it (1), as its engine does them: the
+; globals (globals True) or the quests and items. A quest is started only if it never has been (an opening's runs once); a stage
+; is set and waited for, so the next step sees what its fragment did (Oblivion's CharacterGen 88 begins Deliver the
+; Amulet before MQ01's 100 stops CharacterGen).
+Function RunSteps(Int story, Int when, Bool globals)
+  If !StepForms || !StepStories || !StepWhen || !StepValues
+    Return
+  EndIf
+  String plugin = PluginOf(story)
+  Int i = 0
+  While i < StepForms.Length
+    If StepStories[i] == story && StepWhen[i] == when
+      String from = plugin
+      If StepPlugins && i < StepPlugins.Length && StepPlugins[i] != ""
+        from = StepPlugins[i]
+      EndIf
+      Form f = Game.GetFormFromFile(StepForms[i], from)
+      GlobalVariable g = f as GlobalVariable
+      Quest q = f as Quest
+      If globals && g
+        g.SetValue(StepValues[i])
+        Debug.Trace("[TamrielMerge] start-up of story " + story + ": " + g + " = " + StepValues[i])
+      ElseIf !globals && q
+        If StepValues[i] < 0
+          If !q.IsRunning() && !q.IsCompleted() && q.GetStage() == 0
+            q.Start()
+            Debug.Trace("[TamrielMerge] start-up of story " + story + ": started " + q)
+          EndIf
+        Else
+          Int stage = StepValues[i] as Int
+          q.SetStage(stage)
+          Int waited = 0
+          While !q.GetStageDone(stage) && waited < 50
+            Utility.Wait(0.1)
+            waited += 1
+          EndWhile
+          Debug.Trace("[TamrielMerge] start-up of story " + story + ": " + q + " stage " + stage + " done " + q.GetStageDone(stage))
+        EndIf
+      ElseIf !globals && f && !g && !q && StepValues[i] >= 1
+        Game.GetPlayer().AddItem(f, StepValues[i] as Int)
+      EndIf
+    EndIf
+    i += 1
+  EndWhile
+EndFunction
+
 ; A start's kit: Daggerfall Unity's (clothes, the sword, gold, torches) for Daggerfall, its clothes and sword for
 ; Redguard and for Oblivion after its tutorial, the clothes for a prisoner's opening; Skyrim after Helgen the side's.
 Function GiveKit(Int story, Int way)
@@ -684,7 +808,11 @@ Function BeginAfterOpening(Int story, Int way, Bool advance)
   Else
     ObjectReference spot = AfterOpeningOf(story)
     Int o = story * 3
+    ; Globals before the move, so nothing there sees the opening's values (Morrowind's Main runs CharGen on arrival while
+    ; CharGenState is 1); the quests once there.
+    RunSteps(story, 1, True)
     TravelToOffset(spot, AfterOpeningOffsets[o], AfterOpeningOffsets[o + 1], AfterOpeningOffsets[o + 2])
+    RunSteps(story, 1, False)
     ; The quest the opening hands on, at its first entry, and what it gives.
     If OpeningQuestIds && OpeningQuestIds[story] != 0
       Quest q = Game.GetFormFromFile(OpeningQuestIds[story], PluginOf(story)) as Quest
@@ -755,9 +883,27 @@ Function TravelToOffset(ObjectReference destination, Float dx, Float dy, Float d
     Return
   EndIf
   Actor player = Game.GetPlayer()
+  EndRedguardHolds()
   Game.DisablePlayerControls()
   Game.FadeOutGame(true, true, 0.0, 0.5)
   player.MoveTo(destination, dx, dy, dz)
+  ; Set down facing away from the door, as coming out of it (MoveTo gives the door's own angle: seen 2026-11-12, the
+  ; player began Morrowind after its opening with their nose to the census office's door).
+  If dx != 0.0 || dy != 0.0
+    Float facing = 0.0
+    If dy == 0.0
+      facing = 90.0
+      If dx < 0.0
+        facing = 270.0
+      EndIf
+    Else
+      facing = Math.atan(dx / dy)
+      If dy < 0.0
+        facing += 180.0
+      EndIf
+    EndIf
+    player.SetAngle(0.0, 0.0, facing)
+  EndIf
   Int guard = 0
   While !player.Is3DLoaded() && guard < 300
     Utility.Wait(0.1)
@@ -891,6 +1037,8 @@ Function EnterNewTime(Int story)
     Else
       ChangeMoney(MoneyHere(), story)
       TravelTo(StartOf(story))
+      RunSteps(story, 0, True)
+      RunSteps(story, 0, False)
       ArriveInTime(story)
     EndIf
   Else
@@ -1115,7 +1263,41 @@ EndFunction
 
 ; Arriving in a story's time: its calendar resumes where it was left (its start date on a first visit), and the
 ; date is announced with its own era (the game's date display always says 4E).
+; Skyrim's Survival Mode add-on asks "Enable Survival Mode?" once, some moments into a new game. In another game's
+; opening the box came up over the scene and held every script until it was answered (2026-11-10 on Morrowind's ship,
+; 2026-11-11 in Redguard's tavern). Its script (survival_mainscript.pex, read 2026-11-11) keeps "has the player been
+; prompted" in the global Survival_PlayerHasBeenPrompted (0x8DF of ccqdrsse001-survivalmode.esl): set here on arriving in
+; a converted game, so the question is asked only in Skyrim's own start. The mode stays in Skyrim's Gameplay settings.
+Function HoldSurvivalPrompt()
+  If Game.GetModByName("ccqdrsse001-survivalmode.esl") == 255
+    Return
+  EndIf
+  GlobalVariable asked = Game.GetFormFromFile(0x8DF, "ccqdrsse001-survivalmode.esl") as GlobalVariable
+  If asked && asked.GetValueInt() == 0
+    asked.SetValueInt(1)
+    SurvivalHeld = True
+  EndIf
+EndFunction
+
+; Skyrim's own story asks as it always did: the question held back here is let go when that story begins.
+Bool Property SurvivalHeld = False Auto Hidden
+Function ReleaseSurvivalPrompt()
+  If !SurvivalHeld || Game.GetModByName("ccqdrsse001-survivalmode.esl") == 255
+    Return
+  EndIf
+  SurvivalHeld = False
+  GlobalVariable asked = Game.GetFormFromFile(0x8DF, "ccqdrsse001-survivalmode.esl") as GlobalVariable
+  If asked
+    asked.SetValueInt(0)
+  EndIf
+EndFunction
+
 Function ArriveInTime(Int story)
+  If story != StorySkyrim
+    HoldSurvivalPrompt()
+  Else
+    ReleaseSurvivalPrompt()
+  EndIf
   If story == StoryRedguard
     BecomeRedguard()
   Else
@@ -1137,7 +1319,7 @@ Function ArriveInTime(Int story)
     era = TimelineEra[story]
     place = TimelinePlace[story]
   EndIf
-  Debug.Notification(era + " " + SavedYear[story] + ", " + Ordinal(SavedDay[story]) + " of " + MonthName(SavedMonth[story]) + ": " + place)
+  Debug.Notification(era + " " + SavedYear[story] + ", " + Ordinal(SavedDay[story]) + MonthName(SavedMonth[story]) + ": " + place)
 EndFunction
 
 ; Redguard is Cyrus's story: whoever arrives there does so as a Redguard, and leaving Redguard's time (the next
@@ -1237,18 +1419,20 @@ Function RestoreRace()
   EndIf
 EndFunction
 
+; "13th of ": the day with its ending and the "of" after it, in one piece. Papyrus keeps one spelling of a string
+; whatever its capitals, and a bare "th" came out as some other script's "Th" (seen 2026-11-12: "13Th of Hearthfire").
 String Function Ordinal(Int day)
   Int lastTwo = day % 100
   If lastTwo >= 11 && lastTwo <= 13
-    Return day + "th"
+    Return day + "th of "
   ElseIf day % 10 == 1
-    Return day + "st"
+    Return day + "st of "
   ElseIf day % 10 == 2
-    Return day + "nd"
+    Return day + "nd of "
   ElseIf day % 10 == 3
-    Return day + "rd"
+    Return day + "rd of "
   EndIf
-  Return day + "th"
+  Return day + "th of "
 EndFunction
 
 String Function MonthName(Int month)

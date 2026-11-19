@@ -28,6 +28,8 @@ TamrielMerge.mods.json
 !/tools/textures/
 !/tools/upscale/
 !/tools/video/
+# The game driver's screenshots from test runs (pictures of the user's games, remade every run).
+/tools/ingame/*.png
 !/tools/voice/
 
 # Creatures: their configuration, scripts and credits (the downloaded source models and work files are in the release)

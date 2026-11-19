@@ -16,6 +16,15 @@
     <ProjectReference Include="..\TamrielMerge.Cli\TamrielMerge.Cli.csproj" />
   </ItemGroup>
 
+  <!-- niflysharp's native library (niflycpp.dll) reaches this project through the converter's package and was taken for
+       a .NET assembly to compile against (MSB3246, no metadata), as in the converter's own project: it is needed only at
+       run time, so it stays among the copied files and leaves the compile references. -->
+  <Target Name="NiflyNativeIsNoReference" AfterTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <ResolvedCompileFileDefinitions Remove="@(ResolvedCompileFileDefinitions)" Condition="'%(Filename)' == 'niflycpp'" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <!-- The tool's logo, shown at the top of its left column and as its window icon. -->
     <EmbeddedResource Include="..\..\tools\menu\logo_source.png" LogicalName="TamrielMerge.logo.png" />

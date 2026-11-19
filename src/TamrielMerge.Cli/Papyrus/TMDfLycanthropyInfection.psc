@@ -17,6 +17,8 @@ Spell Property BeastForm Auto
 {Skyrim's beast form (WerewolfChange): a lycanthrope already.}
 Quest Property VampireQuest Auto
 {Skyrim's PlayerVampireQuest: a vampire already.}
+Spell Property VampireCurse Auto
+{Daggerfall's vampirism (TMDfVampirism): a vampire already.}
 
 Actor host
 Int startingDay
@@ -29,7 +31,7 @@ EndFunction
 
 Event OnEffectStart(Actor akTarget, Actor akCaster)
   host = akTarget
-  Bool vampire = VampireQuest && (VampireQuest as PlayerVampireQuestScript).VampireStatus > 0
+  Bool vampire = (VampireQuest && (VampireQuest as PlayerVampireQuestScript).VampireStatus > 0) || (VampireCurse && host.HasSpell(VampireCurse))
   Bool lycanthrope = (BeastForm && host.HasSpell(BeastForm)) || (Curse && host.HasSpell(Curse)) || (OtherCurse && host.HasSpell(OtherCurse))
   If host != Game.GetPlayer() || vampire || lycanthrope || (Other && host.HasSpell(Other))
     End()

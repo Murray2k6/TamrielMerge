@@ -45,6 +45,8 @@ Float Property FightDispMult = 0.2 Auto
 Float Property WerewolfFightMod = 100.0 Auto
 Float Property FleeHealthMult = 7.0 Auto
 Float Property FleeFleeMult = 0.3 Auto
+Float Property MeleeArmorMult = 1.0 Auto
+Float Property MeleeWeaponMult = 2.0 Auto
 Int Property RecordPackage = -1 Auto
 {Its record's AI package (-1 none, 0 wander, 1 travel, 2 escort, 3 follow, 4 activate), a script's (TMMwAI) above it.}
 Float Property GreetDistanceMultiplier = 6.0 Auto
@@ -87,11 +89,166 @@ Float greetAskedAt = 0.0
 Float lastTick = -1.0
 Bool dispSet = False
 Float dispBase = 50.0
+; When the disposition was last worked out (real seconds), and this actor's Morrowind faction, looked up once.
+Float lastDisp = -100.0
+; When its own next update is due (real seconds), and whether one is running: an update reaches every script on the
+; actor, so the Morrowind script beside this one (a chargen guard's, Processus Vitellius's) woke it at that script's rate
+; on top of its own (2026-11-02, a user's log: 13,552 of its runs waiting at once on one actor).
+Float nextUpdate = 0.0
+Bool updating = False
+Faction myFaction = None
+Bool factionKnown = False
 Bool wasInCombat = False
 Bool Property Saying = False Auto Hidden
 {Saying a script's Say line (TMMwSayLine), for SayDone.}
 Float Property SaidAt = 0.0 Auto Hidden
 {When it began (a line cut off before its end counts as said after a minute: no line runs so long).}
+
+; ---- its record's AI packages (AI_W, AI_T, AI_E, AI_F, AI_A, in the record's order) ----
+; Morrowind runs them one after another and, where the record says so, round again: a miner's or a guard's walk from
+; point to point, a retainer following its lord. Only records with more than one plain wander have them here (a lone
+; wander is the actor's own Skyrim package). A package a script gives the actor ends them, as Morrowind's script
+; commands clear the actor's packages.
+Int[] Property RecordKinds Auto
+Float[] Property RecordX Auto
+Float[] Property RecordY Auto
+Float[] Property RecordZ Auto
+Float[] Property RecordHours Auto
+{An AI_W's or AI_F's/AI_E's duration in hours (0: no end).}
+Float[] Property RecordRange Auto
+{An AI_W's distance.}
+Bool Property RecordRepeat = False Auto
+ObjectReference Property RecordTarget Auto
+{Whom an AI_F follows or an AI_E leads (or what an AI_A uses).}
+Bool Property RecordTargetIsPlayer = False Auto
+Int recordStep = -1   ; the package running (-1 none yet, -2 over for good)
+
+; ---- a wander's idles (AI_W's and AIWander's eight chances, Idle2 to Idle9) ----
+; OpenMW aiwander.cpp getRandomIdle (read 2026-11-11): one roll of 0-1 over fIdleChanceMultiplier means no idle; else
+; each of the eight rolls 0-100, those at or under their chance stand, the highest roll among them wins; the group
+; plays once and the choice is made again when it ends. No idle means a walk (the Skyrim package's own wandering).
+Int[] Property IdleChances Auto
+{Its wander's eight chances now: its record's first AI_W, then whatever AIWander or its record's packages set.}
+Int[] Property RecordIdles Auto
+{Eight chances for each of its record's packages (zeros for one that isn't a wander).}
+Float idleUntil = 0.0
+
+Function SetIdles(Int a2, Int a3, Int a4, Int a5, Int a6, Int a7, Int a8, Int a9)
+  If !IdleChances || IdleChances.Length < 8
+    IdleChances = new Int[8]
+  EndIf
+  IdleChances[0] = a2
+  IdleChances[1] = a3
+  IdleChances[2] = a4
+  IdleChances[3] = a5
+  IdleChances[4] = a6
+  IdleChances[5] = a7
+  IdleChances[6] = a8
+  IdleChances[7] = a9
+EndFunction
+
+Function WanderIdle(Float afNow)
+  If afNow < idleUntil || !IdleChances || IdleChances.Length < 8 || CurrentPackage() != 0
+    Return
+  EndIf
+  If greetState == 1 || Saying || IsInDialogueWithPlayer() || GetSitState() != 0 || GetSleepState() != 0 || IsSwimming() || IsWeaponDrawn() || IsOnMount()
+    Return
+  EndIf
+  Quest q = Quest.GetQuest("MWScriptAI")
+  If !q
+    Return
+  EndIf
+  TMMwAI ai = q as TMMwAI
+  If !ai.WanderIdles || ai.WanderIdles.Length < 8
+    Return
+  EndIf
+  If Utility.RandomFloat(0.0, 1.0) > ai.IdleChanceMultiplier
+    idleUntil = afNow + ai.WalkSeconds
+    Return
+  EndIf
+  Int chosen = -1
+  Float best = 0.0
+  Int i = 0
+  While i < 8
+    Float roll = Utility.RandomFloat(0.0, 100.0)
+    If roll <= IdleChances[i] && roll > best
+      chosen = i
+      best = roll
+    EndIf
+    i += 1
+  EndWhile
+  If chosen < 0
+    idleUntil = afNow + ai.WalkSeconds
+    Return
+  EndIf
+  If ai.WanderIdles[chosen] && PlayIdle(ai.WanderIdles[chosen])
+    idleUntil = afNow + ai.IdleSeconds
+  Else
+    idleUntil = afNow + 1.0
+  EndIf
+EndFunction
+
+Function RunRecord()
+  If recordStep == -2 || !RecordKinds || RecordKinds.Length == 0
+    Return
+  EndIf
+  Quest q = Quest.GetQuest("MWScriptAI")
+  If !q
+    Return
+  EndIf
+  TMMwAI ai = q as TMMwAI
+  If recordStep >= 0
+    Int mine = ai.IsRecord(Self)
+    If mine == 0
+      recordStep = -2   ; a script's package took its place
+      Return
+    EndIf
+    If mine == 1
+      If !ai.Done(Self)
+        Return
+      EndIf
+      recordStep += 1
+    EndIf
+    ; mine == -1: its slot went to another actor while it was away; the same package again
+  Else
+    recordStep = 0
+  EndIf
+  If recordStep >= RecordKinds.Length
+    If !RecordRepeat
+      recordStep = -2
+      Return
+    EndIf
+    recordStep = 0
+  EndIf
+  Int kind = RecordKinds[recordStep]
+  ObjectReference target = RecordTarget
+  If RecordTargetIsPlayer
+    target = Game.GetPlayer()
+  EndIf
+  If kind == 0
+    ai.Wander(Self, RecordRange[recordStep], RecordHours[recordStep])
+    Int at = recordStep * 8
+    If RecordIdles && RecordIdles.Length >= at + 8
+      SetIdles(RecordIdles[at], RecordIdles[at + 1], RecordIdles[at + 2], RecordIdles[at + 3], RecordIdles[at + 4], RecordIdles[at + 5], RecordIdles[at + 6], RecordIdles[at + 7])
+    EndIf
+  ElseIf kind == 1
+    ai.Travel(Self, RecordX[recordStep], RecordY[recordStep], RecordZ[recordStep])
+  ElseIf kind == 2 && target as Actor
+    ai.Escort(Self, target as Actor, RecordHours[recordStep], RecordX[recordStep], RecordY[recordStep], RecordZ[recordStep])
+  ElseIf kind == 3 && target as Actor
+    ai.Follow(Self, target as Actor, RecordHours[recordStep], RecordX[recordStep], RecordY[recordStep], RecordZ[recordStep])
+  ElseIf kind == 4 && target
+    ai.ActivateRef(Self, target)
+  Else
+    ; Nothing to follow, lead or use (its target isn't in the world): the next package at the next look.
+    recordStep += 1
+    If recordStep >= RecordKinds.Length && !RecordRepeat
+      recordStep = -2
+    EndIf
+    Return
+  EndIf
+  ai.MarkRecord(Self)
+EndFunction
 
 Event OnInit()
   ApplyAlarm()
@@ -111,7 +268,10 @@ Event OnLoad()
   RegisterForAnimationEvent(Self, "weaponLeftSwing")
   RegisterForAnimationEvent(Self, "bowDraw")
   lastTick = -1.0
-  RegisterForSingleUpdate(Utility.RandomFloat(0.2, 0.6))
+  updating = False
+  Float first = Utility.RandomFloat(0.2, 0.6)
+  nextUpdate = Utility.GetCurrentRealTime() + first
+  RegisterForSingleUpdate(first)
 EndEvent
 
 TMMwVoices Function Voices()
@@ -134,9 +294,10 @@ Int Function CurrentPackage()
   Return RecordPackage
 EndFunction
 
-; isTargetMagicallyHidden: invisible, or chameleon above 75.
+; isTargetMagicallyHidden: invisible, or chameleon above 75. Skyrim has no chameleon actor value (asking for one is an
+; error each time): the converted chameleon spells are invisibility (TesMagic), so invisibility is both.
 Bool Function Hidden(Actor akPlayer)
-  Return akPlayer.GetActorValue("Invisibility") > 0.0 || akPlayer.GetActorValue("Chameleon") > 75.0
+  Return akPlayer.GetActorValue("Invisibility") > 0.0
 EndFunction
 
 Function ResetGreeting()
@@ -239,26 +400,37 @@ Float Function DerivedDisposition()
   disp += DispPersonalityMult * (personality - DispPersonalityBase)
   Float reaction = 0.0
   Int rank = 0
-  Faction mine = None
-  If st
-    mine = st.MwFactionOf(Self)
+  ; Its own Morrowind faction, looked up once (it changes only by a script's PCJoinFaction-like calls, not for an NPC).
+  If st && !factionKnown
+    myFaction = st.MwFactionOf(Self)
+    factionKnown = True
   EndIf
-  If mine && player.GetFactionRank(mine) >= 0
+  Faction mine = myFaction
+  Int myRank = -1
+  If mine
+    myRank = player.GetFactionRank(mine)
+  EndIf
+  If mine && myRank >= 0
     If !mine.IsPlayerExpelled()
       reaction = st.Reaction(mine, mine)
-      rank = player.GetFactionRank(mine)
+      rank = myRank
     EndIf
   ElseIf mine
+    ; The list read once (each read of another script's property waits its turn on that script).
+    Faction[] all = st.MwFactions
     Bool first = True
     Int i = 0
-    While i < st.MwFactions.Length
-      Faction f = st.MwFactions[i]
-      If f && player.GetFactionRank(f) >= 0 && !f.IsPlayerExpelled()
-        Int r = st.Reaction(mine, f)
-        If first || r < reaction
-          reaction = r
-          rank = player.GetFactionRank(f)
-          first = False
+    While i < all.Length
+      Faction f = all[i]
+      If f
+        Int fr = player.GetFactionRank(f)
+        If fr >= 0 && !f.IsPlayerExpelled()
+          Int r = st.Reaction(mine, f)
+          If first || r < reaction
+            reaction = r
+            rank = fr
+            first = False
+          EndIf
         EndIf
       EndIf
       i += 1
@@ -284,12 +456,21 @@ Float Function DerivedDisposition()
   Return v
 EndFunction
 
-; Variable09 holds it (less 50) for the dialogue; Charm's effect adds to it on top.
+; Variable09 holds it (less 50) for the dialogue; Charm's effect adds to it on top. Worked out when the player talks to it
+; (OnActivate) and on its updates near the player at most once a second: on every update it was most of Papyrus's work
+; (2026-11-02, a user's log: 25,000 of the frames in its stack dumps, every actor waiting on the same state quest).
 Function UpdateDisposition()
   If IsPerson
+    lastDisp = Utility.GetCurrentRealTime()
     SetActorValue("Variable09", DerivedDisposition() - 50.0)
   EndIf
 EndFunction
+
+Event OnActivate(ObjectReference akActionRef)
+  If akActionRef == Game.GetPlayer()
+    UpdateDisposition()
+  EndIf
+EndEvent
 
 ; The scripts' SetDisposition / ModDisposition: the base.
 Function SetBaseDisposition(Float afValue)
@@ -311,21 +492,33 @@ Event OnUnload()
 EndEvent
 
 Event OnUpdate()
+  Float now = Utility.GetCurrentRealTime()
+  ; Not its own update (another script's on the actor), or one already running: nothing, its own is still to come.
+  If updating || now < nextUpdate - 0.05
+    Return
+  EndIf
   If !Is3DLoaded() || IsDead()
     Return
   EndIf
+  updating = True
   Actor player = Game.GetPlayer()
-  Float now = Utility.GetCurrentRealTime()
   Float seconds = 0.0
   If lastTick >= 0.0 && now > lastTick
     seconds = now - lastTick
   EndIf
   lastTick = now
   CountGems()
-  UpdateDisposition()
+  Float distance = GetDistance(player)
+  If distance < 1500.0 && now - lastDisp >= 1.0
+    UpdateDisposition()
+  EndIf
   If !IsInCombat()
     UpdateGreeting(player)
     IdleRemark(player, seconds)
+    RunRecord()
+    If distance < 3000.0
+      WanderIdle(now)
+    EndIf
   EndIf
   Bool aggressive = ShouldAttack(player)
   SetActorValue("Variable10", aggressive as Float)
@@ -339,16 +532,20 @@ Event OnUpdate()
       StartCombat(player)
     EndIf
   EndIf
-  ; Every quarter second where it can greet or remark (OpenMW's sUpdateHelloInterval), twice a second within OpenMW's
-  ; actors' processing range (7168), every two seconds further.
-  Float distance = GetDistance(player)
-  If distance < 3000.0 || distance < Hello * GreetDistanceMultiplier || greetState != 0
-    RegisterForSingleUpdate(0.25)
+  ; Every quarter second where it can greet (OpenMW's sUpdateHelloInterval), every second within 3000 (idle remarks go by
+  ; the seconds passed, so as often as before), every three within OpenMW's actors' processing range (7168), every five
+  ; further. Four times a second within 3000 kept Papyrus behind (2026-11-02).
+  Float wait = 5.0
+  If distance < Hello * GreetDistanceMultiplier + 256.0 || greetState != 0
+    wait = 0.25
+  ElseIf distance < 3000.0
+    wait = 1.0
   ElseIf distance < 7168.0
-    RegisterForSingleUpdate(0.5)
-  Else
-    RegisterForSingleUpdate(2.0)
+    wait = 3.0
   EndIf
+  nextUpdate = Utility.GetCurrentRealTime() + wait
+  updating = False
+  RegisterForSingleUpdate(wait)
 EndEvent
 
 ; getAggroDistance: level for one that can move up and down (flying, or swimming in water).
@@ -395,6 +592,14 @@ Function UpdateFlee(Actor akEnemy)
       rating += DistanceBias(akEnemy)
     EndIf
   EndIf
+  ; makeFleeDecision (OpenMW aicombataction.cpp, read 2026-11-11): a flee rating under 100 counts as none, and the actor
+  ; flees only when it is over the rating of what it fights with (vanillaRateWeaponAndAmmo: its armour rating x
+  ; fAIMeleeArmorMult + the weapon's damage x its skill / 100 x fAIMeleeWeaponMult; bare hands 0). Skyrim's numbers stand
+  ; in for the weapon's damage, the skill and the armour rating (the converted weapon's base damage, the actor's skill
+  ; with it, its damage resistance).
+  If rating >= 100.0 && rating <= WeaponRating()
+    rating = 0.0
+  EndIf
   If rating >= 100.0
     If !fleeing
       fleeing = True
@@ -407,6 +612,24 @@ Function UpdateFlee(Actor akEnemy)
   ElseIf fleeing
     StopFleeing()
   EndIf
+EndFunction
+
+Float Function WeaponRating()
+  Weapon w = GetEquippedWeapon()
+  If !w
+    w = GetEquippedWeapon(True)
+  EndIf
+  If !w
+    Return 0.0
+  EndIf
+  Float skill = GetActorValue("OneHanded")
+  Int kind = w.GetWeaponType()
+  If kind == 5 || kind == 6
+    skill = GetActorValue("TwoHanded")
+  ElseIf kind == 7 || kind == 9
+    skill = GetActorValue("Marksman")
+  EndIf
+  Return GetActorValue("DamageResist") * MeleeArmorMult + w.GetBaseDamage() * skill * 0.01 * MeleeWeaponMult
 EndFunction
 
 Function StopFleeing()
@@ -430,6 +653,15 @@ EndEvent
 
 Event OnGameLoaded(String asEventName, String asArg, Float afNum, Form akSender)
   CheckLoads()
+  ; The real-time clock starts again with each game started, and a save can hold a run part-way: both start afresh.
+  updating = False
+  lastDisp = -100.0
+  If Is3DLoaded()
+    nextUpdate = Utility.GetCurrentRealTime() + 0.5
+    RegisterForSingleUpdate(0.5)
+  Else
+    nextUpdate = 0.0
+  EndIf
 EndEvent
 
 Function CheckLoads()
@@ -500,7 +732,8 @@ EndFunction
 
 Event OnDeath(Actor akKiller)
   SwapTrappedSoul()
-  If akKiller && akKiller == Game.GetPlayer() && WerewolfKills && TMMwScript.IsWerewolf(akKiller)
+  ; A person killed as a werewolf feeds the hunger (Bloodmoon's WereChangeScript: "once an NPC is killed"); a creature doesn't.
+  If akKiller && IsPerson && akKiller == Game.GetPlayer() && WerewolfKills && TMMwScript.IsWerewolf(akKiller)
     WerewolfKills.Mod(1.0)
   EndIf
 EndEvent

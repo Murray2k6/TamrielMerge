@@ -49,17 +49,25 @@ public static class AtmosphereBuilder
         IReadOnlyList<Worldspace> tiles, OverlandTiles layout, HeightField f, DfWorldMap map)
     {
         const int cellUnits = HeightField.QuadsPerCell * HeightField.UnitsPerQuad;
-        int ppc = f.Settings.PixelsPerCell;
+        double ppc = f.Settings.PixelsPerCell;
 
-        // Dominant climate of each cell's Daggerfall pixels.
+        // Dominant climate of each cell's Daggerfall pixels; a cell smaller than a pixel takes the climate of the pixel
+        // under its middle.
         var climate = new DfClimate[f.CellsX, f.CellsY];
         Parallel.For(0, f.CellsY, cy =>
         {
             for (int cx = 0; cx < f.CellsX; cx++)
             {
-                int py0 = (f.CellsY - 1 - cy) * ppc; // cell rows run south to north, map rows north to south
-                climate[cx, cy] = Enumerable.Range(0, ppc * ppc)
-                    .Select(i => map.ClimateAt(cx * ppc + i % ppc, py0 + i / ppc))
+                if (ppc < 1)
+                {
+                    var (u, v) = f.PixelCoord(cx * HeightField.QuadsPerCell + HeightField.QuadsPerCell / 2, cy * HeightField.QuadsPerCell + HeightField.QuadsPerCell / 2);
+                    climate[cx, cy] = map.ClimateAt((int)Math.Floor(u), (int)Math.Floor(v));
+                    continue;
+                }
+                int n = (int)ppc;
+                int py0 = (f.CellsY - 1 - cy) * n; // cell rows run south to north, map rows north to south
+                climate[cx, cy] = Enumerable.Range(0, n * n)
+                    .Select(i => map.ClimateAt(cx * n + i % n, py0 + i / n))
                     .GroupBy(c => c).OrderByDescending(g => g.Count()).First().Key;
             }
         });
@@ -123,6 +131,7 @@ public static class AtmosphereBuilder
             var w = mod.Weathers.DuplicateInAsNewRecord(vanilla);
             w.EditorID = "DF" + vanilla.EditorID;
             Relight(w);
+            Dim(mod, skyrim, w);
             copies[key] = w;
             return w.FormKey;
         }
@@ -134,13 +143,69 @@ public static class AtmosphereBuilder
         {
             var climate = mod.Climates.DuplicateInAsNewRecord(vanillaClimate);
             climate.EditorID = "DFClimateIliacBay";
-            foreach (var wt in climate.WeatherTypes) wt.Weather.SetTo(Copy(wt.Weather.FormKey));
+            foreach (var wt in climate.WeatherTypes ?? []) wt.Weather.SetTo(Copy(wt.Weather.FormKey));
             ws.Climate.SetTo(climate);
         }
         return copies.Count;
     }
 
-    static void Relight(Weather w)
+    /// <summary>
+    /// Daggerfall's daylight in Skyrim's picture. Daggerfall Unity's own numbers (a white sun of 1 and an ambient of
+    /// 0.9) are for a picture that shows a texture at about the texture's own colour; Skyrim's exposure shows a lit
+    /// texture far brighter than it is (measured in game in Daggerfall city at 11:00, 2026-11-10: grass texture
+    /// 33,75,35 drew as 130,204,101 under those numbers and as 99,163,84 under Skyrim's own clear weather, whose sun
+    /// is 163,150,135 and ambient about 110-190; the road drew as white). The sun and ambient keep Daggerfall
+    /// Unity's ratio at the strength of Skyrim's clear weather (<see cref="SunScale"/>, <see cref="AmbientDay"/>),
+    /// and the copies' image spaces are dimmed (<see cref="Brightness"/>).
+    /// </summary>
+    public static float SunScale = 0.6f, AmbientNight = 0.15f, AmbientDay = 0.54f, Brightness = 0.75f, BloomScale = 0.5f;
+
+    /// <summary>The weather's image spaces (sunrise, day, sunset, night) swapped for dimmed copies, made once each.</summary>
+    internal static void Dim(SkyrimMod mod, ISkyrimModGetter skyrim, Weather w)
+    {
+        if (w.ImageSpaces is not { } spaces) return;
+        FormKey Copy(IFormLinkGetter<IImageSpaceGetter> link)
+        {
+            if (link.IsNull) return link.FormKey;
+            string edid = "DFImage" + link.FormKey.ID.ToString("X6");
+            if (mod.ImageSpaces.FirstOrDefault(i => i.EditorID == edid) is { } made) return made.FormKey;
+            if (skyrim.ImageSpaces.FirstOrDefault(i => i.FormKey == link.FormKey) is not { } vanilla) return link.FormKey;
+            var copy = mod.ImageSpaces.DuplicateInAsNewRecord(vanilla);
+            copy.EditorID = edid;
+            if (copy.Cinematic is { } c) c.Brightness *= Brightness;
+            if (copy.Hdr is { } h) h.BloomScale *= BloomScale;
+            return copy.FormKey;
+        }
+        spaces.Sunrise.SetTo(Copy(spaces.Sunrise)); spaces.Day.SetTo(Copy(spaces.Day));
+        spaces.Sunset.SetTo(Copy(spaces.Sunset)); spaces.Night.SetTo(Copy(spaces.Night));
+    }
+
+    /// <summary>
+    /// A world's climate copied with its weathers' image spaces dimmed (<see cref="Dim"/>), their light as it is: for a
+    /// world whose textures are an old game's own, far brighter than Skyrim's (Skyrim's land textures average about
+    /// 45 of 255, measured; Redguard's grass and sand 90 to 150), which Skyrim's exposure turns glaring. Seen in game on
+    /// Stros M'Kai, 2026-11-10: the ground near the player a speckle of bright green, yellow and orange.
+    /// </summary>
+    public static FormKey DimmedClimate(SkyrimMod mod, ISkyrimModGetter skyrim, FormKey climateKey, string prefix)
+    {
+        string edid = prefix + "Climate";
+        if (mod.Climates.FirstOrDefault(c => c.EditorID == edid) is { } made) return made.FormKey;
+        if (skyrim.Climates.FirstOrDefault(c => c.FormKey == climateKey) is not { } vanilla) return climateKey;
+        var weathers = skyrim.Weathers.ToDictionary(w => w.FormKey);
+        var climate = mod.Climates.DuplicateInAsNewRecord(vanilla);
+        climate.EditorID = edid;
+        foreach (var wt in climate.WeatherTypes ?? [])
+        {
+            if (!weathers.TryGetValue(wt.Weather.FormKey, out var w)) continue;
+            var copy = mod.Weathers.DuplicateInAsNewRecord(w);
+            copy.EditorID = prefix + w.EditorID;
+            Dim(mod, skyrim, copy);
+            wt.Weather.SetTo(copy);
+        }
+        return climate.FormKey;
+    }
+
+    internal static void Relight(Weather w)
     {
         bool storm = w.Flags.HasFlag(Weather.Flag.Rainy) && w.ThunderLightningFrequency.Value > 0.01;
         float weatherScale = storm ? 0.25f
@@ -148,8 +213,8 @@ public static class AtmosphereBuilder
             : w.Flags.HasFlag(Weather.Flag.Cloudy) ? 0.65f : 1f;
         // Daylight at each of Skyrim's four times of day: noon 1, sunrise and sunset half, night none.
         System.Drawing.Color Grey(float v) { int c = (int)Math.Round(Math.Clamp(v, 0, 1) * 255); return System.Drawing.Color.FromArgb(0, c, c, c); }
-        System.Drawing.Color Sun(float daylight) => Grey(daylight * weatherScale);
-        System.Drawing.Color Ambient(float daylight) => Grey(0.25f + (0.9f - 0.25f) * daylight * weatherScale);
+        System.Drawing.Color Sun(float daylight) => Grey(SunScale * daylight * weatherScale);
+        System.Drawing.Color Ambient(float daylight) => Grey(AmbientNight + (AmbientDay - AmbientNight) * daylight * weatherScale);
         w.SunlightColor.Sunrise = Sun(0.5f); w.SunlightColor.Day = Sun(1); w.SunlightColor.Sunset = Sun(0.5f); w.SunlightColor.Night = Grey(0.03f);
         w.AmbientColor.Sunrise = Ambient(0.5f); w.AmbientColor.Day = Ambient(1); w.AmbientColor.Sunset = Ambient(0.5f); w.AmbientColor.Night = Ambient(0);
         AmbientColors Flat(System.Drawing.Color c) => new()
@@ -157,10 +222,12 @@ public static class AtmosphereBuilder
             DirectionalXPlus = c, DirectionalXMinus = c, DirectionalYPlus = c, DirectionalYMinus = c, DirectionalZPlus = c, DirectionalZMinus = c,
             Specular = System.Drawing.Color.FromArgb(0, 0, 0, 0), Scale = 1,
         };
-        w.DirectionalAmbientLightingColors.Sunrise = Flat(Ambient(0.5f));
-        w.DirectionalAmbientLightingColors.Day = Flat(Ambient(1));
-        w.DirectionalAmbientLightingColors.Sunset = Flat(Ambient(0.5f));
-        w.DirectionalAmbientLightingColors.Night = Flat(Ambient(0));
+        // (Every vanilla weather has its directional ambient: the record's own is filled.)
+        var ambient = w.DirectionalAmbientLightingColors ??= new();
+        ambient.Sunrise = Flat(Ambient(0.5f));
+        ambient.Day = Flat(Ambient(1));
+        ambient.Sunset = Flat(Ambient(0.5f));
+        ambient.Night = Flat(Ambient(0));
     }
 
     readonly record struct Rect(int X0, int Y0, int X1, int Y1);

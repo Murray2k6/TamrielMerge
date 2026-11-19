@@ -153,7 +153,7 @@ public sealed partial class ObMeshConverter
             shapes[p.Source] = hdr.GetBlockID(shape);
         }
 
-        bool havok = false;
+        bool havok = false, collisionMoves = false;
         foreach (var (source, polys) in collision)
         {
             if (polys.Count == 0) continue;
@@ -161,9 +161,16 @@ public sealed partial class ObMeshConverter
             var tex = polys.Select(s => (s.Pts, s.N, new BlockMeshBuilder.Tex("", "", false))).ToList();
             BlockMeshBuilder.AddCollision(nif, NodeFor(source), moves ? tex : Stairs(tex, false), moves, onTarget: moves, trap: trap && moves);
             havok = true;
+            collisionMoves |= moves;
         }
-        // 0x1 animated (the controllers run), 0x2 havok, 0x8 complex: vanilla MineSecretDoor01's 11.
-        BlockMeshBuilder.AddBsxFlags(nif, root, havok ? 11 : 1);
+        // 0x1 animated (the controllers run), 0x2 havok, 0x8 complex: vanilla MineSecretDoor01's 11. A model whose
+        // collision moves with its animation also 0x80, as Skyrim's own doors have it (ImpJailDoor01 and
+        // MetalCageLongGate01: 139): without it the collision stays where it was when the parts move. Seen twice: the
+        // prison's cell gate ("Open": the Emperor's party stood at the open gate until the game set them down inside,
+        // runs r82 and r86, 2026-11-15; with it they walked through, r85), and the prison's secret wall, which plays
+        // "Forward" as Oblivion's activators do (a vanilla jail guard on a travel package stood in the opened wall 22 s
+        // and was set down in the tunnel below, probe p7, 2026-11-16, where the Emperor was set down in the scene).
+        BlockMeshBuilder.AddBsxFlags(nif, root, havok ? (collisionMoves ? 11 | 0x80 : 11) : 1);
 
         AddAnimation(src, a, nif, map, shapes);
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);

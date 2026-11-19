@@ -123,6 +123,10 @@ public sealed partial class ObPluginBuilder : IDisposable
         }
     }
 
+    /// <summary>The textures Oblivion's models name that its game data doesn't have (their shapes get the white stand-in,
+    /// ObTextures.Blank), so far.</summary>
+    public IEnumerable<string> MissingTextures => meshes.Textures.Missing.Distinct(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// Every model the world's references place (their bases' own: statics, activators, furniture, lights, doors,
     /// containers, flora; not items or actors, made otherwise), converted ahead on every core, so placing them finds each
@@ -384,6 +388,12 @@ public sealed partial class ObPluginBuilder : IDisposable
         // Oblivion's levelling for the Mundus stones (any birthsign spell list still missing goes into the plugin).
         var levelling = Levelling();
         BuildTrainers();
+        // Oblivion's skill mastery perks and the apparatus lists (ObMasteryPerks).
+        FinishMastery();
+        // Item condition and repair (ObWear): after every item.
+        FinishWear();
+        // Oblivion's merchants and the vendor keywords of its items (ObVendors): after every actor and item.
+        FinishVendors();
         FinishMagic();
         FinishJails();
         SwingDoorTwinCount = Skyrim.SwingDoorTwins.AddAll(mod);
@@ -391,6 +401,11 @@ public sealed partial class ObPluginBuilder : IDisposable
         // (their conditions name the quests, made by now).
         AimPackagesAgain();
         FinishNpcPackages();
+        FillFollowEnds();
+        FillBusyPackages();
+        GiveOwnerKeys();
+        ApplyEnableStates();
+        HangWeapons();
         FinishAnimationLengths();
         FinishLines();
         FinishQuestItems();
@@ -399,7 +414,23 @@ public sealed partial class ObPluginBuilder : IDisposable
         TamrielMerge.Skyrim.TopicSubtypes.Fill(mod);
         MakePersonKeywords();
         Console.WriteLine($"  finished, to write {Util.Machine.MemoryNote()}");
-        mod.WriteToBinary(Path.Combine(modOutDir, PluginName));
+        // References held by scripts, quests and lists persistent, in their worldspace's persistent cell (HeldReferences).
+        Skyrim.HeldReferences.Prepare(mod, Console.WriteLine);
+        // Everyone made since the dialogue was built is one of Oblivion's people too (its general dialogue is kept to them).
+        if (obPeople is not null)
+            foreach (var npc in mod.Npcs)
+                if (!npc.Factions.Any(f => f.Faction.FormKey == obPeople.FormKey)) npc.Factions.Add(new RankPlacement { Faction = obPeople.ToLink<IFactionGetter>(), Rank = 0 });
+        Skyrim.HavokSettle.Apply(mod, modOutDir, Console.WriteLine);
+        Skyrim.InteriorBounds.Apply(mod, Console.WriteLine);
+        if (meshes.Textures.LandMatte > 0) Console.WriteLine($"  land textures: {meshes.Textures.LandMatte} written without alpha (Skyrim's land takes it as shine)");
+        // Masters in load order, as every other converted plugin's (Mutagen's default is alphabetical: Dragonborn.esm before
+        // Skyrim.esm). Written alphabetically, the plugin's navmesh map override was Skyrim's map through master 1, and in the
+        // game its entries were missing: entering Oblivion's prison crashed reading a navmesh entry the game made itself, with
+        // no parent cell (2026-11-05, SkyrimSE.exe+4E02B8).
+        mod.WriteToBinary(Path.Combine(modOutDir, PluginName), new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryWriteParameters
+        {
+            MastersListOrdering = new Mutagen.Bethesda.Plugins.Binary.Parameters.MastersListOrderingByLoadOrder(Skyrim.VanillaMasters.Order),
+        });
         Console.WriteLine($"  plugin written {Util.Machine.MemoryNote()}");
         // Oblivion's people moving as Oblivion's do: its character animations retargeted onto Skyrim's skeleton, for the
         // keywords its people carry (ObPeople, Skyrim/Animations/NpcAnimations).

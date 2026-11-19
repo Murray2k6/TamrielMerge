@@ -96,7 +96,7 @@ public sealed partial class ObPluginBuilder
                 }
                 r.Conditions.InsertRange(0, gate);
                 // The line's part in the conversation (TMObLine).
-                if (r.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == LineScript) is { } line)
+                if (r.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == LineScript || s.Name.StartsWith("OB_R_", StringComparison.OrdinalIgnoreCase)) is { } line)
                 {
                     line.Properties.Add(new ScriptIntProperty { Name = "ConvTopic", Data = index[topic.FormKey] });
                     line.Properties.Add(new ScriptIntProperty { Name = "ConvNext", Data = ((int)(item.Data?.DialogType ?? 0) >> 8) & 0xFF });

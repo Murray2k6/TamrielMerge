@@ -98,7 +98,7 @@ public sealed class PartsDialog : Form
             var files = Parts.Files(part, dataDir);
             bool on = files.Count > 0 && files.All(f => PluginList.IsEnabled(f));
             string state = files.Count == 0 ? "not installed" : part.Core ? "on (needed)" : on ? "on" : "off";
-            var item = new ListViewItem([part.Name, files.Count > 0 ? string.Join(", ", files) : string.Join(", ", part.Plugins), files.Count > 0 ? Size(Parts.Size(part, dataDir)) : "", state])
+            var item = new ListViewItem([part.Name, files.Count > 0 ? string.Join(", ", files) : string.Join(", ", part.Plugins), files.Count > 0 ? SizeText(Parts.Size(part, dataDir)) : "", state])
             {
                 Tag = part, Checked = on || (part.Core && files.Count > 0),
                 ForeColor = files.Count == 0 ? Color.Gray : SystemColors.WindowText,
@@ -109,5 +109,5 @@ public sealed class PartsDialog : Form
         note.Text = $"Skyrim's Data folder: {dataDir}";
     }
 
-    static string Size(long bytes) => bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):F1} GB" : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):F0} MB" : $"{Math.Max(1, bytes / 1024)} KB";
+    static string SizeText(long bytes) => bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):F1} GB" : bytes >= 1L << 20 ? $"{bytes / (double)(1L << 20):F0} MB" : $"{Math.Max(1, bytes / 1024)} KB";
 }

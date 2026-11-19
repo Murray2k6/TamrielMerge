@@ -111,6 +111,17 @@ Function Init()
     speakForced = new Bool[16]
     speakForcedAt = new Float[16]
   EndIf
+  If !speakScripted
+    speakScripted = new Bool[16]
+    speakPending = new Bool[16]
+    speakResulted = new Bool[16]
+    speakLineIds = new Int[16]
+    speakLengths = new Float[16]
+    speakBegins = new Int[16]
+    speakBeforeIds = new Int[16]
+    speakBeforeAt = new Float[16]
+    learnedLineIds = new Int[64]
+  EndIf
 EndFunction
 
 Event OnInit()
@@ -385,12 +396,27 @@ Function SetStat(Actor a, Int aiStat, Float afValue)
   Int slot = StatSlot(a, True)
   SetStatDelta(slot, aiStat, afValue - StatBaseOf(a, aiStat))
   MirrorStat(a, aiStat)
-  ; What follows in Skyrim's AI: Aggression as the conversion gives it (80 and up very aggressive), Energy as it is.
+  ; What follows in Skyrim's AI, as the conversion gives it (ObContent.ObAi): Aggression 0 unaggressive, to 50
+  ; aggressive, over 50 very aggressive; Confidence by fifths; Energy as it is.
   If aiStat == 29
-    If afValue >= 80.0
+    If afValue > 50.0
       a.SetActorValue("Aggression", 2.0)
+    ElseIf afValue > 0.0
+      a.SetActorValue("Aggression", 1.0)
     Else
       a.SetActorValue("Aggression", 0.0)
+    EndIf
+  ElseIf aiStat == 30
+    If afValue <= 10.0
+      a.SetActorValue("Confidence", 0.0)
+    ElseIf afValue <= 30.0
+      a.SetActorValue("Confidence", 1.0)
+    ElseIf afValue <= 60.0
+      a.SetActorValue("Confidence", 2.0)
+    ElseIf afValue <= 90.0
+      a.SetActorValue("Confidence", 3.0)
+    Else
+      a.SetActorValue("Confidence", 4.0)
     EndIf
   ElseIf aiStat == 31
     a.SetActorValue("Energy", afValue)
@@ -522,12 +548,51 @@ Int Property Launches = 0 Auto Hidden
 is the plugin's again after each start.}
 MiscObject Property LaunchMarker Auto
 
+GlobalVariable Property ClockPaused Auto
+{TMOB_ClockPaused: seconds spent in menus since the game was loaded.}
+GlobalVariable Property ClockHeld Auto
+{TMOB_ClockHeld: the real time at which the menu now open was opened (the clock stands there); 0 with none open.}
+GlobalVariable Property ClockLoadsGlobal Auto
+{TMOB_ClockLoads: ClockLoads, for the scripts to read.}
+
+; The play clock from its globals: what PlayTime gives, without this script being asked (every script's every run asked
+; it, and they queued here: see ObPapyrus.Clock).
+Float Function Clock(GlobalVariable akPaused, GlobalVariable akHeld) Global
+  Float held = akHeld.GetValue()
+  If held > 0.0
+    Return held - akPaused.GetValue()
+  EndIf
+  Return Utility.GetCurrentRealTime() - akPaused.GetValue()
+EndFunction
+
+Function PublishClock()
+  If ClockPaused
+    ClockPaused.SetValue(pausedTotal)
+  EndIf
+  If ClockHeld
+    If pausedSince >= 0.0
+      ; (0 means none open: a menu opened at the very start still holds the clock.)
+      If pausedSince > 0.001
+        ClockHeld.SetValue(pausedSince)
+      Else
+        ClockHeld.SetValue(0.001)
+      EndIf
+    Else
+      ClockHeld.SetValue(0.0)
+    EndIf
+  EndIf
+  If ClockLoadsGlobal
+    ClockLoadsGlobal.SetValueInt(ClockLoads)
+  EndIf
+EndFunction
+
 Function MenuOpened()
   If menusOpen <= 0
     menusOpen = 0
     pausedSince = Utility.GetCurrentRealTime()
   EndIf
   menusOpen += 1
+  PublishClock()
 EndFunction
 
 Function MenuClosed()
@@ -537,18 +602,54 @@ Function MenuClosed()
     pausedSince = -1.0
     menusOpen = 0
   EndIf
+  PublishClock()
 EndFunction
 
 ; A save loaded or a new game begun (TMObPlayer): the clock starts again, GetGameLoaded is true once to each script.
+GlobalVariable Property StageBusy Auto
+{TMOB_StageBusy: how many quest stages' result scripts are running now; the converted scripts' frames wait meanwhile.}
+
+; SetStage as Oblivion has it: the stage's result script is run before any other script's next frame (Skyrim's
+; SetStage comes back when the stage's fragment is done; the frames wait on TMOB_StageBusy until then).
+Bool Function StageTo(Quest akQuest, Int aiStage)
+  If !akQuest
+    Return False
+  EndIf
+  If StageBusy
+    StageBusy.Mod(1.0)
+  EndIf
+  ; For the log (when Papyrus logging is on): the stages as they are set, so a scene can be followed without the console.
+  Debug.Trace("TMOb stage " + akQuest + " to " + aiStage + " (was " + akQuest.GetStage() + ")")
+  Bool done = akQuest.SetStage(aiStage)
+  If StageBusy
+    StageBusy.Mod(-1.0)
+  EndIf
+  Return done
+EndFunction
+
 Function GameLoaded()
   pausedTotal = 0.0
   pausedSince = -1.0
   menusOpen = 0
   ClockLoads += 1
+  PublishClock()
   If LaunchMarker && LaunchMarker.GetName() != "TamrielMerge started"
     Launches += 1
     LaunchMarker.SetName("TamrielMerge started")
   EndIf
+EndFunction
+
+; Whether the player is in Oblivion's lands (a cell of Oblivion.esm): its quests' scripts run only there.
+Bool Function InOblivion()
+  Cell here = Game.GetPlayer().GetParentCell()
+  If !here
+    Return False
+  EndIf
+  Int index = Game.GetModByName("Oblivion.esm")
+  If index < 0 || index > 254
+    Return False
+  EndIf
+  Return Math.RightShift(here.GetFormID(), 24) == index
 EndFunction
 
 ; Seconds of play since the game was loaded.
@@ -566,6 +667,67 @@ String[] Property AnimKeys Auto
 (ObScriptRecords.FinishAnimationLengths), with each group's length in seconds and whether it loops.}
 Float[] Property AnimLengths Auto
 Bool[] Property AnimLoops Auto
+
+String[] Property AnimCueKeys Auto
+{"model|group" (lower case) of each sound an animation group plays (Oblivion's "Sound: X" text keys in the model's
+sequences, which Skyrim's sequences don't act on: ObScriptRecords.FinishAnimationLengths), a group's together.}
+Float[] Property AnimCueTimes Auto
+{The seconds into the group each is played at.}
+Sound[] Property AnimCueSounds Auto
+
+; Sounds waiting for their second of a group that is playing.
+ObjectReference[] cueRefs
+Sound[] cueSounds
+Float[] cueAt
+
+; A group has started on akRef: its sounds, each at its second (those at the start now). Sounds still waiting from an
+; earlier group of akRef's are dropped, as the group they belonged to no longer plays.
+Function QueueCues(ObjectReference akRef, String asKey)
+  If !AnimCueKeys
+    Return
+  EndIf
+  Int j = 0
+  If cueRefs
+    While j < cueRefs.Length
+      If cueRefs[j] == akRef
+        cueRefs[j] = None
+      EndIf
+      j += 1
+    EndWhile
+  EndIf
+  Int c = AnimCueKeys.Find(asKey)
+  If c < 0
+    Return
+  EndIf
+  If !cueRefs
+    cueRefs = new ObjectReference[16]
+    cueSounds = new Sound[16]
+    cueAt = new Float[16]
+  EndIf
+  Float now = PlayTime()
+  Float soonest = -1.0
+  While c < AnimCueKeys.Length && AnimCueKeys[c] == asKey
+    If AnimCueSounds[c]
+      If AnimCueTimes[c] <= 0.05
+        AnimCueSounds[c].Play(akRef)
+      Else
+        j = cueRefs.Find(None)
+        If j >= 0
+          cueRefs[j] = akRef
+          cueSounds[j] = AnimCueSounds[c]
+          cueAt[j] = now + AnimCueTimes[c]
+          If soonest < 0.0 || AnimCueTimes[c] < soonest
+            soonest = AnimCueTimes[c]
+          EndIf
+        EndIf
+      EndIf
+    EndIf
+    c += 1
+  EndWhile
+  If soonest >= 0.0
+    WakeIn(soonest)
+  EndIf
+EndFunction
 
 ; Plays an Oblivion animation group (the model's controller sequence of that name) and remembers for how long it plays
 ; (its sequence's length; a loop until another group starts), for IsAnimPlaying. A group the model hasn't plays
@@ -587,7 +749,12 @@ Function PlayGroup(ObjectReference akRef, String asGroup, Int aiFlag = 0)
     EndIf
     Return
   EndIf
-  akRef.PlayGamebryoAnimation(asGroup, aiFlag == 0)
+  ; From its beginning, whatever the flag (Oblivion's 0 waits for the group now playing to end, 1 starts at once: both
+  ; play the group from its start). Until 2026-11-15 flag 1 was passed on as "don't start over": the prison's secret
+  ; wall, played "forward 1" by its switch, stood open at once instead of sinking the bed (from 1.1 s) and swinging
+  ; (from 4.5 s) as its sequence has it (user: "the wall animation does not play either and just pops open").
+  akRef.PlayGamebryoAnimation(asGroup, True)
+  QueueCues(akRef, base.GetWorldModelPath() + "|" + asGroup)
   If i < 0
     i = animRefs.Find(None)
   EndIf
@@ -645,7 +812,8 @@ Function LoopGroup(ObjectReference akRef, String asGroup, Int aiCount)
   WakeIn(seconds)
 EndFunction
 
-; The next OnUpdate (LoopGroup's replays, ForceSubtitle's lines that never started): as soon as the soonest wants it.
+; The next OnUpdate (LoopGroup's replays, ForceSubtitle's lines that never started, a group's sounds): as soon as the
+; soonest wants it.
 Float wakeAt = -1.0
 
 Function WakeIn(Float afSeconds)
@@ -672,6 +840,24 @@ Event OnUpdate()
         EndIf
       EndIf
       s += 1
+    EndWhile
+  EndIf
+  ; The playing groups' sounds whose second has come.
+  If cueRefs
+    Float cueNow = PlayTime()
+    Int q = 0
+    While q < cueRefs.Length
+      If cueRefs[q]
+        If cueNow >= cueAt[q] - 0.02
+          If cueSounds[q] && cueRefs[q].Is3DLoaded()
+            cueSounds[q].Play(cueRefs[q])
+          EndIf
+          cueRefs[q] = None
+        ElseIf soonest < 0.0 || cueAt[q] - cueNow < soonest
+          soonest = cueAt[q] - cueNow
+        EndIf
+      EndIf
+      q += 1
     EndWhile
   EndIf
   If !loopRefs
@@ -787,6 +973,29 @@ EndFunction
 ; words at the rate Oblivion's recorded lines are spoken), and once said in that voice what it lasted.
 VoiceType[] Property VoiceTypes Auto
 {The voices TMObLine.Lengths are given in.}
+ReferenceAlias Property Listener Auto
+{OBDialogue's listener, whom the responses' "Run on Target" conditions ask of: the one a script's Say or SayTo speaks to.}
+
+; A line a script says (Say, SayTo): Oblivion runs its result script as it is said, not when it is done (ValenDrethScript
+; reads the taunt stage its line's result sets right after its Say). speakScripted: asked for by a script and not begun
+; yet; speakPending: begun, its result still running (SayTimed waits for it).
+; speakResulted: its result has run as it began, not to run again when it is done (kept here: a response's own script
+; keeps nothing from its beginning to its end).
+Bool[] speakScripted
+Bool[] speakPending
+Bool[] speakResulted
+; The lines by their form IDs: the game gives a response's fragments another script object each time (seen in game
+; 2026-11-13: the object kept at a line's beginning was not the one its end came with, and no longer named its
+; response), so a kept line never equalled the one ending; and it ends a said line twice, as it begins it twice.
+Int[] speakLineIds
+Int[] learnedLineIds
+; A line's length, taken as it begins (Say's value).
+Float[] speakLengths
+; How a speaker's line began: 0 not by a script, 1 by a script's Say and begun once, 2 and begun twice.
+Int[] speakBegins
+; The speaker's scripted line before, while its second beginning is still to come (0 none), and when it began.
+Int[] speakBeforeIds
+Float[] speakBeforeAt
 
 Int Function SpeakerSlot(Actor akActor)
   Int i = speakers.Find(akActor)
@@ -804,18 +1013,94 @@ Int Function SpeakerSlot(Actor akActor)
 EndFunction
 
 Function LineStarted(Actor akSpeaker, TopicInfo akLine)
+  LineBegins(akSpeaker, akLine)
+EndFunction
+
+; A response begins (TMObLine.Fragment_Begin). 0: said by the game (the player's dialogue, a conversation): its result
+; script runs when it is done. 1: said by a script's Say: its result runs now (then ResultRan). 2: this saying of it
+; has begun already (the game begins a said line twice: seen in game 2026-11-12, both within the same second).
+Int Function LineBegins(Actor akSpeaker, TopicInfo akLine)
   If !akSpeaker
-    Return
+    Return 0
   EndIf
   Init()
+  ; Asked first: from here to the line marked begun nothing is called, or the line's second beginning came in between
+  ; and both were taken for the first (seen in game 2026-11-13).
+  Int id = akLine.GetFormID()
+  Float now = Utility.GetCurrentRealTime()
   Int i = SpeakerSlot(akSpeaker)
+  ; For the log (when Papyrus logging is on): every beginning as it found the speaker's slot.
+  Debug.Trace("TMOb begin " + akLine + " by " + akSpeaker + ": slot " + i + " same speaker " + (speakers[i] == akSpeaker) + ", line before " + speakLineIds[i] + ", begins " + speakBegins[i] + ", scripted " + speakScripted[i] + ", talking " + speakTalking[i] + ", " + (now - speakStarts[i]) + " s since")
   If speakers[i] != akSpeaker
     speakLooking[i] = False
+    speakScripted[i] = False
+    speakPending[i] = False
+    speakBegins[i] = 0
+    speakBeforeIds[i] = 0
+    speakLineIds[i] = 0
+  ElseIf speakLineIds[i] == id && speakBegins[i] == 1 && now - speakStarts[i] < 10.0
+    ; A scripted line's second beginning, whatever came since: it came up to 5 seconds late, after the line had ended
+    ; ("Yessir.") and after the speaker's script had asked for its next line, and was taken for that line, whose
+    ; result then ran in its place (seen in game 2026-11-13: lines of the Emperor's party said twice, others skipped).
+    speakBegins[i] = 2
+    Return 2
+  ElseIf speakBeforeIds[i] == id && now - speakBeforeAt[i] < 10.0
+    ; The second beginning of the line before, come after the next line began.
+    speakBeforeIds[i] = 0
+    Return 2
+  ElseIf speakLineIds[i] == id && !speakScripted[i] && (speakTalking[i] || now - speakStarts[i] < 3.0)
+    ; (Or done already: a short line had ended before its second beginning came.)
+    Return 2
   EndIf
+  ; A script's Say that no line answered (none of the topic's held) is not this line's, begun long after.
+  Bool scripted = speakScripted[i] && now - speakStarts[i] < 12.0
+  speakScripted[i] = False
+  speakPending[i] = scripted
+  speakResulted[i] = scripted
   speakers[i] = akSpeaker
   speakLines[i] = akLine
-  speakStarts[i] = Utility.GetCurrentRealTime()
+  speakBeforeIds[i] = 0
+  If speakBegins[i] == 1
+    speakBeforeIds[i] = speakLineIds[i]
+    speakBeforeAt[i] = speakStarts[i]
+  EndIf
+  speakLineIds[i] = id
+  speakBegins[i] = scripted as Int
+  speakStarts[i] = now
   speakTalking[i] = True
+  ; Last: asking the speaker's voice lets the line's second beginning in, which must find the line begun.
+  speakLengths[i] = 0.0
+  speakLengths[i] = LineLength(akSpeaker, akLine)
+  If scripted
+    Return 1
+  EndIf
+  Return 0
+EndFunction
+
+; The result script of a line a script said has run.
+Function ResultRan(Actor akSpeaker)
+  Int i = speakers.Find(akSpeaker)
+  If i >= 0
+    speakPending[i] = False
+  EndIf
+EndFunction
+
+; A response is done (TMObLine.Fragment_End): is its result script still to run? Not when it ran as the line began.
+Bool Function ResultOwed(Actor akSpeaker, TopicInfo akLine)
+  If !akSpeaker
+    Return True
+  EndIf
+  Init()
+  Int i = speakers.Find(akSpeaker)
+  If i < 0 || speakLineIds[i] != akLine.GetFormID()
+    Return True
+  EndIf
+  If speakResulted[i]
+    Return False
+  EndIf
+  ; Owed once: the line's second end finds it run.
+  speakResulted[i] = True
+  Return True
 EndFunction
 
 Function LineEnded(Actor akSpeaker, TopicInfo akLine)
@@ -824,7 +1109,7 @@ Function LineEnded(Actor akSpeaker, TopicInfo akLine)
   EndIf
   Init()
   Int i = speakers.Find(akSpeaker)
-  If i < 0 || speakLines[i] != akLine
+  If i < 0 || speakLineIds[i] != akLine.GetFormID() || !speakTalking[i]
     Return
   EndIf
   speakTalking[i] = False
@@ -833,10 +1118,16 @@ Function LineEnded(Actor akSpeaker, TopicInfo akLine)
     speakLooking[i] = False
     akSpeaker.ClearLookAt()
   EndIf
+  ; A walk-up greeting waits while its greeter is talking (its package's IsTalking condition): looked over again now,
+  ; so it starts as the line ends rather than whenever the game next weighs the speaker's packages.
+  If speakScripted[i]
+    akSpeaker.EvaluatePackage()
+  EndIf
   ; What a line without a recording of its own lasted in this voice.
   If Recorded(akSpeaker, akLine) <= 0.0
     Int k = learnedNext
     learnedLines[k] = akLine
+    learnedLineIds[k] = akLine.GetFormID()
     learnedVoices[k] = akSpeaker.GetVoiceType()
     learnedLengths[k] = Utility.GetCurrentRealTime() - speakStarts[i]
     learnedNext = (k + 1) % learnedLines.Length
@@ -864,7 +1155,7 @@ Float Function LineLength(Actor akSpeaker, TopicInfo akLine)
   VoiceType voice = akSpeaker.GetVoiceType()
   Int k = 0
   While k < learnedLines.Length
-    If learnedLines[k] == akLine && learnedVoices[k] == voice
+    If learnedLineIds[k] == akLine.GetFormID() && learnedVoices[k] == voice
       Return learnedLengths[k]
     EndIf
     k += 1
@@ -884,14 +1175,51 @@ Function SayTopic(ObjectReference akSpeaker, Topic akTopic, Actor akTarget = Non
     Return
   EndIf
   Init()
+  ; Whom the line's "Run on Target" conditions ask of: the one spoken to, the player where none is named (Valen Dreth's
+  ; taunts are by the player's race). Left empty, the game said a response whose conditions do not hold and ran none of
+  ; its fragments (seen in game 2026-11-12: "an Imperial in the Imperial Prison" to a Nord, over and over).
+  If Listener
+    Actor heard = akTarget
+    If !heard
+      heard = Game.GetPlayer()
+    EndIf
+    ; Only when it is another: forced again to the one it holds, the alias was empty as the line was chosen (seen in
+    ; game 2026-11-13: the second taunt to a Nord was the Imperial's).
+    If Listener.GetReference() != heard
+      Listener.ForceRefTo(heard)
+      Utility.Wait(0.05)
+    EndIf
+  EndIf
   Actor a = akSpeaker as Actor
-  If a && (akTarget || abForceSubtitle)
+  If a
     Int i = SpeakerSlot(a)
+    ; The speaker's line before must be over as the game has it (its End fragment, LineEnded), not only by its
+    ; recording's length: asked for the moment that length had passed, the game dropped the new line and the script
+    ; waited its 10 seconds out (2026-11-13, the prison: 8 of 22 lines asked for never began, each the first asked
+    ; after the same speaker's last; asked again they began within 0.6 s).
+    ; Only about that moment: up to 1.5 s past the recording's length (4 s where the length isn't known). A line
+    ; whose end never came (cut off by another) held the Emperor's "You... I've seen you" back 4.8 s, and the opening
+    ; went on to its next stage meanwhile (seen in game 2026-11-13).
+    Float askedAt = Utility.GetCurrentRealTime()
+    Float waitUntil = askedAt + 4.0
+    If speakers[i] == a && speakLengths[i] > 0.0 && speakStarts[i] + speakLengths[i] + 1.5 < waitUntil
+      waitUntil = speakStarts[i] + speakLengths[i] + 1.5
+    EndIf
+    While speakers[i] == a && speakTalking[i] && Utility.GetCurrentRealTime() < waitUntil
+      Utility.Wait(0.05)
+    EndWhile
     If speakers[i] != a
       speakForced[i] = False
+      speakLooking[i] = False
+      speakBegins[i] = 0
+      speakBeforeIds[i] = 0
+      speakLineIds[i] = 0
     EndIf
     speakers[i] = a
     speakTalking[i] = False
+    speakScripted[i] = True
+    speakPending[i] = False
+    speakStarts[i] = Utility.GetCurrentRealTime()
     If akTarget
       a.SetLookAt(akTarget)
       speakLooking[i] = True
@@ -908,6 +1236,7 @@ Function SayTopic(ObjectReference akSpeaker, Topic akTopic, Actor akTarget = Non
       WakeIn(2.0)
     EndIf
   EndIf
+  Debug.Trace("TMOb ask " + akTopic + " by " + akSpeaker + " to " + akTarget)
   akSpeaker.Say(akTopic)
 EndFunction
 
@@ -932,14 +1261,29 @@ Float Function SayTimed(ObjectReference akSpeaker, Topic akTopic, Actor akTarget
   If !a || !akTopic
     Return 0.0
   EndIf
-  Int tries = 0
-  While tries < 40
+  ; The line begins a moment after (10 seconds given: a speaker's first line began over 3 seconds after it was asked
+  ; for, was asked for again and its result ran twice); begun, its result
+  ; script is waited for however long it takes (one re-evaluating the speaker's packages took over 4 seconds, the
+  ; line was said again and its result ran twice: seen in game 2026-11-13).
+  While True
     Int i = speakers.Find(a)
-    If i >= 0 && speakTalking[i] && speakStarts[i] >= asked
-      Return LineLength(a, speakLines[i])
+    ; Begun: its beginning took the asking's mark off. Not "talking now": a short line was over before its result
+    ; script was, and counted as never begun (Baurus's "No sign of pursuit, sir.", seen in game 2026-11-14).
+    Bool begun = i >= 0 && !speakScripted[i] && speakStarts[i] >= asked
+    Float now = Utility.GetCurrentRealTime()
+    If begun && (!speakPending[i] || now > asked + 20.0)
+      ; For the log (when Papyrus logging is on): how long after it was asked for the line began, and its result ended.
+      Debug.Trace("TMOb say " + akTopic + " by " + a + ": began after " + (speakStarts[i] - asked) + " s, returned after " + (now - asked) + " s, length " + speakLengths[i])
+      Return speakLengths[i]
+    EndIf
+    If !begun && now > asked + 10.0
+      Debug.Trace("TMOb say " + akTopic + " by " + a + ": not begun 10 s after it was asked for")
+      If i >= 0
+        speakScripted[i] = False
+      EndIf
+      Return 0.0
     EndIf
     Utility.Wait(0.025)
-    tries += 1
   EndWhile
   Return 0.0
 EndFunction
@@ -954,6 +1298,92 @@ Bool Function IsTalking(Actor akActor)
   Init()
   Int i = speakers.Find(akActor)
   Return i >= 0 && speakTalking[i]
+EndFunction
+
+; Seconds since the actor's last line began (a long time when none is known).
+Float Function SinceSpoke(Actor akActor)
+  If !akActor
+    Return 1000.0
+  EndIf
+  Init()
+  Int i = speakers.Find(akActor)
+  If i < 0
+    Return 1000.0
+  EndIf
+  Return Utility.GetCurrentRealTime() - speakStarts[i]
+EndFunction
+
+; ---- follows that end on arrival ----
+
+; Oblivion's Follow and Accompany packages with a place end when the follower gets there. Skyrim's never complete:
+; the converter gives each a "further from the place than this" condition, which drops it on arrival, and lists it
+; here, both copies (the scripts' and the actors' own), with its place and that distance.
+Package[] Property FollowPackages Auto
+ObjectReference[] Property FollowPlaces Auto
+Float[] Property FollowReach Auto
+
+; akOldPackage is such a follow and akActor has arrived (a package changed for any other reason hasn't ended).
+; The follow package the actor is running now, when it is one that ends on arrival and the actor is at its place.
+; A package whose deed is done (TMObUse: the thing was activated), which Oblivion tells the actor's script of
+; (OnPackageDone) though Skyrim's package of it never ends: kept until the actor's script asks (FollowPoll, each
+; second), which then hears it as its package's end.
+Actor[] doneActors
+Package[] donePackages
+
+Function PackageDone(Actor akActor, Package akPackage)
+  If !akActor || !akPackage
+    Return
+  EndIf
+  If !doneActors
+    doneActors = new Actor[32]
+    donePackages = new Package[32]
+  EndIf
+  Int i = doneActors.Find(akActor)
+  If i < 0
+    i = doneActors.Find(None)
+  EndIf
+  If i < 0
+    i = 0
+  EndIf
+  doneActors[i] = akActor
+  donePackages[i] = akPackage
+EndFunction
+
+Package Function FollowPoll(Actor akActor)
+  If akActor && doneActors
+    Int d = doneActors.Find(akActor)
+    If d >= 0
+      Package done = donePackages[d]
+      doneActors[d] = None
+      donePackages[d] = None
+      If done
+        Return done
+      EndIf
+    EndIf
+  EndIf
+  If !akActor || !FollowPackages
+    Return None
+  EndIf
+  Package now = akActor.GetCurrentPackage()
+  If !now
+    Return None
+  EndIf
+  Int i = FollowPackages.Find(now)
+  If i < 0 || !FollowPlaces[i] || akActor.GetDistance(FollowPlaces[i]) > FollowReach[i] + 48.0
+    Return None
+  EndIf
+  Return now
+EndFunction
+
+Bool Function FollowArrived(Actor akActor, Package akOldPackage)
+  If !akActor || !akOldPackage || !FollowPackages
+    Return False
+  EndIf
+  Int i = FollowPackages.Find(akOldPackage)
+  If i < 0 || !FollowPlaces[i]
+    Return False
+  EndIf
+  Return akActor.GetDistance(FollowPlaces[i]) <= FollowReach[i] + 48.0
 EndFunction
 
 ; ---- script packages ----
@@ -1497,6 +1927,18 @@ Bool Function IsPCAMurderer()
 EndFunction
 
 ; ---- vampires ----
+; Oblivion's vampirism is its own records and script: the Vampirism25/50/75/100 abilities (VAMP 25..100, Sun Damage
+; 0/1/4/8, Weakness to Fire, Resist Disease/Paralysis/Normal Weapons), the Att/Skills abilities and the four powers,
+; swapped by VampireScript (the Vampire quest, translated) on PCVampire: the disease's three days and a sleep, +25%
+; a day without feeding at the next sleep or wait, back to 25% on feeding. The VAMP effect runs TMObVampirism, which
+; keeps the stage here (Oblivion's "vampirism" actor value, GetAV Vampirism) and gives the player Skyrim's vampire
+; look (the race's vampire variant; its Vampire keyword is what GetVampire and the dialogue test). Oblivion's vampire
+; people (races Vampire / VampireRace) carry the Vampire keyword from the converter (ObContent).
+
+Float Property PCVampirism = 0.0 Auto Hidden
+{The VAMP magnitude on the player (25, 50, 75, 100), 0 when not a vampire.}
+Race Property VampireCureRace Auto Hidden
+{The player's race before the vampire look, given back on the cure.}
 
 Bool Function IsVampire(Actor akActor) Global
   If !akActor
@@ -1506,11 +1948,117 @@ Bool Function IsVampire(Actor akActor) Global
   Return (vampire && akActor.HasKeyword(vampire)) || StringUtil.Find(akActor.GetRace().GetName(), "Vampire") >= 0
 EndFunction
 
-Function VampireFeed(Actor akVampire, Actor akVictim)
-  If akVampire && akVictim
-    akVampire.StartVampireFeed(akVictim)
-    ownFeeds += 1
+; GetAV Vampirism: the player's stage; one of Oblivion's vampire people is a full vampire.
+Float Function VampirismOf(Actor akActor) Global
+  If !akActor
+    Return 0.0
   EndIf
+  If akActor == Game.GetPlayer()
+    TMObState st = Quest.GetQuest("TMObState") as TMObState
+    If st
+      Return st.PCVampirism
+    EndIf
+    Return 0.0
+  EndIf
+  If IsVampire(akActor)
+    Return 100.0
+  EndIf
+  Return 0.0
+EndFunction
+
+; The player's vampirism stage (TMObVampirism): the look comes with the first stage, goes with the cure (0).
+; Oblivion's VAMP effect only changes the face (UESP Oblivion:Vampirism); Skyrim's face for it is its vampire race
+; of the player's race (<Race>RaceVampire, as its own PlayerVampireQuest.VampireChange swaps), whose Vampire keyword
+; the player then carries. A race without a vampire variant keeps its look.
+Function SetVampirism(Actor akActor, Float afLevel)
+  If akActor != PlayerRef
+    Return
+  EndIf
+  PCVampirism = afLevel
+  Keyword vampire = Game.GetFormFromFile(0x000A82BB, "Skyrim.esm") as Keyword
+  Race now = akActor.GetRace()
+  If afLevel > 0.0
+    If now && vampire && !now.HasKeyword(vampire)
+      Race look = Race.GetRace(RaceEditorId(now) + "Vampire")
+      If look
+        VampireCureRace = now
+        akActor.SetRace(look)
+      EndIf
+    EndIf
+  ElseIf VampireCureRace
+    akActor.SetRace(VampireCureRace)
+    VampireCureRace = None
+  EndIf
+EndFunction
+
+; A Vampirism ability's effect ended (TMObVampirism): the stage changed (the next ability is on by now) or the cure
+; took the last one off (the Vampire Cure quest's results remove them; PCVampire -1).
+Function VampirismEnded(Actor akActor, MagicEffect akEffect, Perk akFeedPerk)
+  If akActor != PlayerRef
+    Return
+  EndIf
+  Utility.Wait(0.5)
+  If akEffect && akActor.HasMagicEffect(akEffect)
+    Return
+  EndIf
+  SetVampirism(akActor, 0.0)
+  If akFeedPerk && akActor.HasPerk(akFeedPerk)
+    akActor.RemovePerk(akFeedPerk)
+  EndIf
+EndFunction
+
+; Skyrim's vanilla races are named as their EditorIDs without the space ("Dark Elf" is DarkElfRace).
+String Function RaceEditorId(Race akRace) Global
+  String name = akRace.GetName()
+  String id = ""
+  Int i = 0
+  Int n = StringUtil.GetLength(name)
+  While i < n
+    String ch = StringUtil.GetNthChar(name, i)
+    If ch != " "
+      id += ch
+    EndIf
+    i += 1
+  EndWhile
+  Return id + "Race"
+EndFunction
+
+; Feeding on a sleeper (the Feed choice of OBVampireFeed, Skyrim's VampireFeedBeds perk with TMObVampireFeed; or a
+; script's VampireFeed): Skyrim's feeding animation; the victim is unharmed and keeps sleeping. Seen by anyone else,
+; it is assault (UESP Oblivion:Vampirism: "reported as a crime with a bounty of 40 gold", iCrimeGoldAttack) and
+; being caught wakes the victim.
+Function VampireFeed(Actor akVampire, Actor akVictim)
+  If !akVampire || !akVictim
+    Return
+  EndIf
+  akVampire.StartVampireFeed(akVictim)
+  ownFeeds += 1
+  If akVampire != PlayerRef
+    Return
+  EndIf
+  Utility.Wait(3.0)
+  Actor witness = FeedWitness(akVictim)
+  If witness
+    Crime(3, PlayerRef, akVictim)
+    akVictim.SendAssaultAlarm()
+  EndIf
+EndFunction
+
+; Someone awake, alive and not the victim who detects the player.
+Actor Function FeedWitness(Actor akVictim)
+  Cell here = PlayerRef.GetParentCell()
+  If !here
+    Return None
+  EndIf
+  Int i = here.GetNumRefs(62)
+  While i > 0
+    i -= 1
+    Actor other = here.GetNthRef(i, 62) as Actor
+    If other && other != PlayerRef && other != akVictim && !other.IsDead() && other.GetSleepState() == 0 && PlayerRef.IsDetectedBy(other)
+      Return other
+    EndIf
+  EndWhile
+  Return None
 EndFunction
 
 ; Whether the player fed since this was last asked (Oblivion's HasVampireFed, which vampirism's progress resets).
@@ -1646,6 +2194,50 @@ Function WakeUpPC()
     PCSleeping = False
   EndIf
 EndFunction
+
+; ---- the player's controls ----
+
+; Held off by an Oblivion script's DisablePlayerControls (until its EnablePlayerControls or a conversation).
+Bool controlsHeld
+
+; DisablePlayerControls: off, as Oblivion has it, until EnablePlayerControls or until the player is in a conversation.
+; Oblivion's own scripts rely on the second: the Imperial prison's guards hold the prisoner still at CharacterGen stage
+; 14 ("player stay put!") and nothing of Oblivion's turns the controls back on before the prisoner must follow the
+; Emperor; the conversation the Emperor opens at stage 17 does. In Skyrim controls stay off through a conversation, and
+; the prisoner stood at the window for the rest of the escape (runs r98, r99, 2026-11-16).
+Function DisableControls() Global
+  Game.DisablePlayerControls()
+  TMObState obState = Quest.GetQuest("TMObState") as TMObState
+  If obState
+    obState.HoldControls()
+  EndIf
+EndFunction
+
+Function EnableControls() Global
+  Game.EnablePlayerControls()
+  TMObState obState = Quest.GetQuest("TMObState") as TMObState
+  If obState
+    obState.ReleaseControls()
+  EndIf
+EndFunction
+
+Function HoldControls()
+  controlsHeld = True
+  RegisterForMenu("Dialogue Menu")
+EndFunction
+
+Function ReleaseControls()
+  controlsHeld = False
+  UnregisterForMenu("Dialogue Menu")
+EndFunction
+
+Event OnMenuOpen(String asMenuName)
+  If asMenuName == "Dialogue Menu" && controlsHeld
+    Game.EnablePlayerControls()
+    ReleaseControls()
+    Debug.Trace("[TamrielMerge] the player's controls on again: a conversation began (Oblivion's DisablePlayerControls lasts until one)")
+  EndIf
+EndEvent
 
 ; ---- without state ----
 
@@ -2013,7 +2605,7 @@ Function LockAt(ObjectReference akRef, Int aiLevel) Global
   If oblivionLock
     oblivionLock.LockLevel = aiLevel
     oblivionLock.Locked = True
-    If oblivionLock.Swing
+    If oblivionLock.Swing || oblivionLock.Own
       Return
     EndIf
   EndIf
@@ -2078,4 +2670,53 @@ Int Function OblivionLockLevel(ObjectReference akRef) Global
     Return 90
   EndIf
   Return 100
+EndFunction
+
+; PlayMagicShaderVisuals / PlayMagicEffectVisuals: the shader on a reference that is there to show it. Oblivion does
+; nothing for one that isn't loaded; Skyrim's Play is an error then ("is not in a loaded cell and cannot have an effect
+; shader played on it": the Arcane University's teleport pads, used by mages out of sight, 14 errors in a game log of
+; 2026-11-10).
+; Enable/DisableLinkedPathPoints: the reference's linked path points are navmesh-cutting boxes chained to it by akCut
+; links (ObWorld.PlacePathCuts); a point switched off is its box enabled.
+Function LinkedPathPoints(ObjectReference akRef, Keyword akCut, Bool abEnable) Global
+  If !akRef || !akCut
+    Return
+  EndIf
+  ObjectReference box = akRef.GetLinkedRef(akCut)
+  Int guard = 0
+  While box && guard < 64
+    If abEnable
+      box.Disable()
+    Else
+      box.Enable()
+    EndIf
+    box = box.GetLinkedRef(akCut)
+    guard += 1
+  EndWhile
+EndFunction
+
+Function PlayShader(EffectShader akShader, ObjectReference akOn, Float afSeconds) Global
+  If akShader && akOn && akOn.Is3DLoaded()
+    akShader.Play(akOn, afSeconds)
+  EndIf
+EndFunction
+
+; GetDetectionLevel: Oblivion's four levels of how well the observer has the target: 0 lost (it had them and is
+; searching), 1 unseen, 2 noticed (aware of them without seeing them), 3 seen. Skyrim says whether the observer
+; detects the target (IsDetectedBy), sees them (HasLOS) and is searching (combat state 2). Until 2026-11-10 only 0 and
+; 3 were given, so a test for "unseen" (1) never held.
+Int Function DetectionLevel(Actor akObserver, Actor akTarget) Global
+  If !akObserver || !akTarget
+    Return 1
+  EndIf
+  If akTarget.IsDetectedBy(akObserver)
+    If akObserver.HasLOS(akTarget)
+      Return 3
+    EndIf
+    Return 2
+  EndIf
+  If akObserver.GetCombatState() == 2
+    Return 0
+  EndIf
+  Return 1
 EndFunction

@@ -136,7 +136,16 @@ public sealed partial class RgPluginBuilder
         if (logStages.TryGetValue(t, out var stage)) return stage;
         stage = (ushort)((logStages.Count + 1) * 10);
         logStages[t] = stage;
-        logQuest!.Stages.Add(new QuestStage { Index = stage, LogEntries = [new QuestLogEntry { Entry = Text(tag) ?? t }] });
+        string entry = Text(tag) ?? t;
+        logQuest!.Stages.Add(new QuestStage { Index = stage, LogEntries = [new QuestLogEntry { Entry = entry }] });
+        // The entry's first sentence as the quest's objective of the same number: a quest with log entries alone starts
+        // without a word and shows nothing to follow (user, 2026-11-12: "the main quest does not initialize after the
+        // opening as well"). TMRgState.AddLog shows the newest entry's.
+        string first = System.Text.RegularExpressions.Regex.Match(entry.Trim(), @"^.*?[.!?](?=\s|$)", System.Text.RegularExpressions.RegexOptions.Singleline).Value;
+        if (first.Length == 0) first = entry.Trim();
+        first = System.Text.RegularExpressions.Regex.Replace(first, @"\s+", " ");
+        if (first.Length > 120) first = first[..117].TrimEnd() + "...";
+        logQuest.Objectives.Add(new QuestObjective { Index = stage, DisplayText = first });
         return stage;
     }
 

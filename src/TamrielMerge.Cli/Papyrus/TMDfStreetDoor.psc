@@ -1,7 +1,8 @@
 ScriptName TMDfStreetDoor extends ObjectReference
 {A Daggerfall town's building door. Buildings with the same layout share one interior, so the door remembers that the
 player came in through it (and in which town) for the way back out (TMDfExitDoor), leaves this town's names for the
-people inside (they take them when they load, TMDfOccupant; SKSE SetDisplayName), and takes the player in.
+people inside (they take them when they load and on this door's TMDfEntered event, TMDfOccupant; SKSE SetDisplayName),
+and takes the player in.
 Buildings keep Daggerfall's hours (Daggerfall Unity PlayerActivate.openHours/closeHours, by building type); outside
 them the door is locked (lock = quality / 2): sneaking tries to pick it with Daggerfall's exterior chance,
 Lockpicking - 5 x lock (5-95%), once per skill level, and hitting it may bash it open (25 - lock in %).}
@@ -21,6 +22,9 @@ Int Property BuildingType = 17 Auto
 Int Property LockValue = 0 Auto
 String Property BuildingName = "" Auto
 {Daggerfall's name for the building ("The Dancing Griffin"), empty for houses; the quests name it so.}
+String Property DoorName = "" Auto
+{What the door shows (SKSE SetDisplayName, when it loads): the building's name, else as Daggerfall Unity calls it ("The
+Gilmore Residence", "House for sale", "Temple"). Until 2026-11-04 every door was just "Door".}
 GlobalVariable Property BreakIns Auto
 {Shops broken into (the Thieves Guild takes notice, TMDfGuilds).}
 GlobalVariable Property CrimeReport Auto
@@ -105,11 +109,28 @@ Bool Function IsOpen()
   Return OpenHour(BuildingType) <= hour && CloseHour(BuildingType) > hour
 EndFunction
 
+Event OnLoad()
+  If DoorName != "" && SKSE.GetVersion() > 0
+    SetDisplayName(DoorName, True)
+  EndIf
+EndEvent
+
+; Within the building's hours (not counting a picked lock).
+Bool Function InHours()
+  Float now = Utility.GetCurrentGameTime()
+  Int hour = ((now - Math.Floor(now)) * 24.0) as Int
+  Return OpenHour(BuildingType) <= hour && CloseHour(BuildingType) > hour
+EndFunction
+
 Event OnActivate(ObjectReference akActionRef)
   Actor player = Game.GetPlayer()
   If akActionRef != player
     Return
   EndIf
+  ; Come in by its hours, the building is open to the public (Skyrim's trespass doesn't apply); picked open, it isn't
+  ; (2026-11-04, user: "npcs kick you out of certain ones that you are suppose to go in": the shops', bank's and houses'
+  ; interiors were owned and never public, so their people warned the player off and the Watch came).
+  Bool legal = InHours()
   If !IsOpen()
     If !player.IsSneaking()
       Debug.Notification("This building is closed. It is open from " + OpenHour(BuildingType) + ":00 to " + CloseHour(BuildingType) + ":00.")
@@ -149,10 +170,19 @@ Event OnActivate(ObjectReference akActionRef)
     EndIf
   EndIf
   If Arrival
+    Cell inside = Arrival.GetParentCell()
+    If inside
+      inside.SetPublic(legal)
+    EndIf
     player.MoveTo(Arrival)
     If ArrivalAt && ArrivalAt.Length >= 4
       player.SetPosition(ArrivalAt[0], ArrivalAt[1], ArrivalAt[2])
       player.SetAngle(0.0, 0.0, ArrivalAt[3])
+    EndIf
+    ; The people inside become this building's (TMDfOccupant), also when the interior was still loaded from another
+    ; town's building of the same layout and none of them loads again.
+    If Way && SKSE.GetVersion() > 0
+      SendModEvent("TMDfEntered")
     EndIf
   EndIf
 EndEvent

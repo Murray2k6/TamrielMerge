@@ -17,15 +17,15 @@ namespace HKX2
         public virtual void Read(PackFileDeserializer des, BinaryReaderEx br)
         {
             m_name = des.ReadCString(br);
+            // m_value is a TYPE_VARIANT, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_VARIANT");
-            br.Position += 8;
         }
 
         public virtual void Write(PackFileSerializer s, BinaryWriterEx bw)
         {
             s.WriteCString(bw, m_name);
+            // m_value is a TYPE_VARIANT, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_VARIANT");
-            bw.Position += 8;
         }
 
         public virtual void ReadXml(XmlDeserializer xd, XElement xe)
@@ -49,7 +49,8 @@ namespace HKX2
         {
             return other is not null &&
                    (m_name is null && other.m_name is null || m_name == other.m_name || m_name is null && other.m_name == "" || m_name == "" && other.m_name is null) &&
-                   m_value.Equals(other.m_value) &&
+                   // not filled by the readers (TYPE_VARIANT); a null one threw NullReferenceException here before, and still does
+                   (m_value ?? throw new NullReferenceException("hkCustomAttributesAttribute.m_value is null")).Equals(other.m_value) &&
                    Signature == other.Signature; ;
         }
 

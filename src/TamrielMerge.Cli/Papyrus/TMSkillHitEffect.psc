@@ -7,5 +7,7 @@ TMSkills Property Skills Auto
 Event OnEffectStart(Actor akTarget, Actor akCaster)
   If Skills && akCaster == Game.GetPlayer()
     Skills.PlayerHit(akTarget)
+    ; TMWear's weapon wear: a hit gets one combat hit spell, so it hears from this one.
+    SendModEvent("TMPlayerHit")
   EndIf
 EndEvent

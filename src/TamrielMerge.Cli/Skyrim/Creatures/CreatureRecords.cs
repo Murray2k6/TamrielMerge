@@ -8,8 +8,8 @@ using Noggog;
 namespace TamrielMerge.Skyrim.Creatures;
 
 /// <summary>
-/// The records of creatures with their own skeleton, as a light plugin per game ("Daggerfall Creatures.esp" over
-/// Daggerfall.esm, "Morrowind Creatures.esp" over Morrowind.esm, ...), so each needs only its own game (user, 2026-10-11:
+/// The records of creatures with their own skeleton, as a light plugin per game ("Daggerfall Creatures.esm" over
+/// Daggerfall.esm, "Morrowind Creatures.esm" over Morrowind.esm, ...), so each needs only its own game (user, 2026-10-11:
 /// "are they set for when a user does not have a certain game": one plugin over every game's would stop Skyrim loading
 /// for anyone without one of them) and the stand-in bodies come back when it is switched off: per creature a race copied
 /// from its behaviour template's (whose attacks name the template graph's events) with the creature's skeleton and
@@ -30,8 +30,13 @@ public sealed class CreatureRecords
         _ => "Daggerfall.esm",
     };
 
-    /// <summary>The creatures plugin over a game plugin: "Daggerfall Creatures.esp" for Daggerfall.esm.</summary>
-    public static string PluginFor(string gamePlugin) => Path.GetFileNameWithoutExtension(gamePlugin) + " Creatures.esp";
+    /// <summary>The creatures plugin over a game plugin: "Daggerfall Creatures.esm" for Daggerfall.esm (user,
+    /// 2026-11-01: "daggerfall creatures esp needs to be a esm not an esp"; light as before).</summary>
+    public static string PluginFor(string gamePlugin) => Path.GetFileNameWithoutExtension(gamePlugin) + " Creatures.esm";
+
+    /// <summary>The names these plugins had until 2026-11-01. Left beside the new ones they would load the same creatures
+    /// twice, so they are taken out of the output and of Skyrim's Data.</summary>
+    public static readonly string[] OldEspNames = ["Daggerfall Creatures.esp", "Redguard Creatures.esp", "Morrowind Creatures.esp", "Oblivion Creatures.esp"];
 
     public string PluginName => mod.ModKey.FileName;
     readonly SkyrimMod mod;
@@ -44,7 +49,7 @@ public sealed class CreatureRecords
     {
         this.masters = masters;
         mod = new SkyrimMod(ModKey.FromFileName(pluginName), SkyrimRelease.SkyrimSE);
-        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
+        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small | SkyrimModHeader.HeaderFlag.Master;
     }
 
     /// <summary>A converted game's plugin whose actors this one overrides.</summary>
@@ -370,19 +375,19 @@ public sealed class CreatureRecords
                 if (raceAttack > 0 && MathF.Abs(attack / raceAttack - 1) > 0.01f)
                 {
                     o.ActorEffect ??= [];
-                    o.ActorEffect.Add(AttackAbility($"{pascal}{o.EditorID}", attack / raceAttack).ToLink<ISpellRecordGetter>());
+                    o.ActorEffect.Add(AttackAbility(attack / raceAttack).ToLink<ISpellRecordGetter>());
                 }
                 // Faster or slower than the race's first creature (its own Speed): its speed through SpeedMult.
                 if (raceStats.WalkSpeed > 0 && MathF.Abs(st.WalkSpeed / raceStats.WalkSpeed - 1) > 0.005f)
                 {
                     o.ActorEffect ??= [];
-                    o.ActorEffect.Add(ValueAbility($"Speed{pascal}{o.EditorID}", ActorValue.SpeedMult, (st.WalkSpeed / raceStats.WalkSpeed - 1) * 100).ToLink<ISpellRecordGetter>());
+                    o.ActorEffect.Add(ValueAbility(ActorValue.SpeedMult, (st.WalkSpeed / raceStats.WalkSpeed - 1) * 100).ToLink<ISpellRecordGetter>());
                 }
                 // Its own fatigue return where it isn't the race's.
                 if (StaminaRate(st) is float rate && StaminaRate(raceStats) is float raceRate && MathF.Abs(rate - raceRate) > 0.01f)
                 {
                     o.ActorEffect ??= [];
-                    o.ActorEffect.Add(ValueAbility($"Stamina{pascal}{o.EditorID}", ActorValue.StaminaRate, rate - raceRate).ToLink<ISpellRecordGetter>());
+                    o.ActorEffect.Add(ValueAbility(ActorValue.StaminaRate, rate - raceRate).ToLink<ISpellRecordGetter>());
                 }
                 mod.Npcs.Add(o);
                 bases.Add((o.FormKey, st));
@@ -458,29 +463,42 @@ public sealed class CreatureRecords
         return list;
     }
 
+    // The abilities, made once per plugin and shared: one effect per actor value (its magnitude is the spell's), one spell per
+    // exact magnitude (2026-10-24: one effect and spell per actor took Morrowind Creatures.esp to 2,058 new records, past the
+    // 2,048 a light plugin holds, and the conversion stopped; actors of the same numbers, 15 rats, share one).
+    readonly Dictionary<ActorValue, MagicEffect> valueEffects = [];
+    readonly Dictionary<(ActorValue Value, int Bits), Spell> valueSpells = [];
+
     /// <summary>An ability adding <paramref name="magnitude"/> to an actor value (SpeedMult: a faster or slower actor).</summary>
-    Spell ValueAbility(string key, ActorValue value, float magnitude)
+    Spell ValueAbility(ActorValue value, float magnitude)
     {
-        var effect = new MagicEffect(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
+        int bits = BitConverter.SingleToInt32Bits(magnitude);
+        if (valueSpells.TryGetValue((value, bits), out var made)) return made;
+        if (!valueEffects.TryGetValue(value, out var effect))
         {
-            EditorID = $"TMValueFx{key}",
-            Name = value.ToString(),
-            Flags = MagicEffect.Flag.Recover | MagicEffect.Flag.HideInUI | MagicEffect.Flag.NoHitEvent | MagicEffect.Flag.NoDuration | MagicEffect.Flag.NoArea,
-            Archetype = new MagicEffectArchetype(MagicEffectArchetype.TypeEnum.ValueModifier) { ActorValue = value },
-            CastType = CastType.ConstantEffect,
-            TargetType = TargetType.Self,
-        };
-        mod.MagicEffects.Add(effect);
+            effect = new MagicEffect(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
+            {
+                EditorID = $"TMValueFx{value}",
+                Name = value == ActorValue.AttackDamageMult ? "Attack" : value.ToString(),
+                Flags = MagicEffect.Flag.Recover | MagicEffect.Flag.HideInUI | MagicEffect.Flag.NoHitEvent | MagicEffect.Flag.NoDuration | MagicEffect.Flag.NoArea,
+                Archetype = new MagicEffectArchetype(MagicEffectArchetype.TypeEnum.ValueModifier) { ActorValue = value },
+                CastType = CastType.ConstantEffect,
+                TargetType = TargetType.Self,
+            };
+            mod.MagicEffects.Add(effect);
+            valueEffects[value] = effect;
+        }
         var spell = new Spell(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
         {
-            EditorID = $"TMValueAb{key}",
-            Name = value.ToString(),
+            EditorID = $"TMValueAb{value}{(uint)bits:X8}",
+            Name = effect.Name?.String ?? value.ToString(),
             Type = SpellType.Ability,
             CastType = CastType.ConstantEffect,
             TargetType = TargetType.Self,
             Effects = [new Effect { BaseEffect = effect.ToNullableLink<IMagicEffectGetter>(), Data = new EffectData { Magnitude = magnitude } }],
         };
         mod.Spells.Add(spell);
+        valueSpells[(value, bits)] = spell;
         return spell;
     }
 
@@ -496,35 +514,21 @@ public sealed class CreatureRecords
     };
 
     /// <summary>An ability multiplying its attacks' damage (an actor whose game gives it harder blows than its race's).</summary>
-    Spell AttackAbility(string key, float mult)
-    {
-        var effect = new MagicEffect(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
-        {
-            EditorID = $"TMAttackFx{key}",
-            Name = "Attack",
-            Flags = MagicEffect.Flag.Recover | MagicEffect.Flag.HideInUI | MagicEffect.Flag.NoHitEvent | MagicEffect.Flag.NoDuration | MagicEffect.Flag.NoArea,
-            Archetype = new MagicEffectArchetype(MagicEffectArchetype.TypeEnum.ValueModifier) { ActorValue = ActorValue.AttackDamageMult },
-            CastType = CastType.ConstantEffect,
-            TargetType = TargetType.Self,
-        };
-        mod.MagicEffects.Add(effect);
-        var spell = new Spell(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
-        {
-            EditorID = $"TMAttackAb{key}",
-            Name = "Attack",
-            Type = SpellType.Ability,
-            CastType = CastType.ConstantEffect,
-            TargetType = TargetType.Self,
-            Effects = [new Effect { BaseEffect = effect.ToNullableLink<IMagicEffectGetter>(), Data = new EffectData { Magnitude = mult - 1 } }],
-        };
-        mod.Spells.Add(spell);
-        return spell;
-    }
+    Spell AttackAbility(float mult) => ValueAbility(ActorValue.AttackDamageMult, mult - 1);
 
     /// <summary>Writes the plugin (masters in load order: Skyrim's, then the game plugin).</summary>
     public string Write(string dir)
     {
         string path = Path.Combine(dir, PluginName);
+        // Light while its new records fit a light plugin's form IDs (up to 0xFFF); past that a full plugin, said so, rather
+        // than no plugin at all.
+        var own = mod.EnumerateMajorRecords().Where(r => r.FormKey.ModKey == mod.ModKey).ToList();
+        if (own.Count > 0 && own.Max(r => r.FormKey.ID) > 0xFFF && mod.ModHeader.Flags.HasFlag(SkyrimModHeader.HeaderFlag.Small))
+        {
+            mod.ModHeader.Flags &= ~SkyrimModHeader.HeaderFlag.Small;
+            Console.WriteLine($"{PluginName}: {own.Count} records of its own, more than a light plugin holds: written as a full plugin");
+        }
+        Console.WriteLine($"{PluginName}: {own.Count} records of its own, {mod.Npcs.Count} actors, {mod.Spells.Count} abilities");
         var order = new[] { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" }.Select(f => ModKey.FromFileName(f))
             .Concat(games.Select(g => g.ModKey)).ToArray();
         mod.WriteToBinary(path, new BinaryWriteParameters { MastersListOrdering = new MastersListOrderingByLoadOrder(order) });

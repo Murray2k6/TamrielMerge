@@ -7,11 +7,13 @@ using TamrielMerge.Daggerfall;
 namespace TamrielMerge.Skyrim;
 
 /// <summary>
-/// Daggerfall's towns beyond those in Daggerfall.esm, in one plugin "Daggerfall Towns.esm" with Daggerfall.esm as
-/// master, built in parts (one process each; every town at once would not fit in memory) that
-/// <see cref="PluginMerger"/> then joins into that one plugin. A batch builds its towns as Daggerfall.esm builds its own (streets, buildings, people, shops, conversations,
-/// guild services, banks, town dungeons), each entered from its spot on the overland (overrides of Daggerfall.esm's
-/// tiles). Everything shared is then Daggerfall.esm's own record, matched by EditorID (<see cref="UseMasterRecords"/>):
+/// Every Daggerfall location with an outside (its RMB blocks: towns, and the farms, homes, temples, taverns, covens and
+/// dungeons of the wilds) beyond those in Daggerfall.esm, in one plugin "Daggerfall Towns.esm" with Daggerfall.esm and the
+/// land plugins as masters, built in parts (one process each; every town at once would not fit in memory) that
+/// <see cref="PluginMerger"/> then joins into that one plugin. A batch builds its locations as Daggerfall.esm builds its
+/// own (streets, buildings, people, shops, conversations, guild services, banks, town dungeons), each on the overland at
+/// its place in the layout (<see cref="Terrain.LocationLayout"/>), in overrides of the land plugins' own cells of
+/// Daggerfall.esm's tiles. Everything shared is then Daggerfall.esm's own record, matched by EditorID (<see cref="UseMasterRecords"/>):
 /// factions and reputation, guilds, spells, creatures, items, the street people of a region; so joining a guild, a
 /// faction's regard or a bank account is the same in every town. A batch keeps its own conversation quest (its towns'
 /// "Where is", taverns, street population) and its banks keep their accounts in Daggerfall.esm's bank.
@@ -26,40 +28,57 @@ public static class DaggerfallTowns
 
     public static int PartCount(List<DfLocation> all) => (int)Math.Max(1, (all.Sum(l => (long)l.ExteriorBlocks.Length) + BlocksPerPart - 1) / BlocksPerPart);
 
-    /// <summary>The towns the batches cover, in a fixed order: every town with blocks that Daggerfall.esm doesn't build, and
-    /// the witches' covens (one block each: the witches in the open, their summoning and quests; built as a town is).</summary>
+    /// <summary>The locations the batches cover, in a fixed order: every one with blocks that Daggerfall.esm doesn't build
+    /// (it has its own as a location record, "DFLoc" and its name and region): towns, the witches' covens (the witches
+    /// in the open, their summoning and quests) and every other location's outside.</summary>
     public static List<DfLocation> All(string arena2, ISkyrimModGetter master)
     {
-        var inMaster = master.Worldspaces.Select(w => w.EditorID).Where(e => e?.StartsWith("DFT") == true).ToHashSet();
+        var inMaster = master.Locations.Select(l => l.EditorID).Where(e => e?.StartsWith("DFLoc") == true).ToHashSet();
         return DfLocations.LoadAll(arena2)
-            .Where(l => l.ExteriorBlocks.Length > 0 && l.Type is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage or DfLocationType.Coven)
-            .Where(l => !inMaster.Contains("DFT" + LocationPlacer.Sanitize(l.Name) + l.Region))
+            .Where(l => l.ExteriorBlocks.Length > 0 && l.BlockWidth > 0 && l.BlockHeight > 0)
+            .Where(l => !inMaster.Contains("DFLoc" + LocationPlacer.Sanitize(l.Name) + l.Region))
             .OrderBy(l => l.Region).ThenBy(l => l.Name, StringComparer.Ordinal).ThenBy(l => l.PixelX).ThenBy(l => l.PixelY)
             .ToList();
     }
 
     /// <summary>Batch <paramref name="batch"/> of <paramref name="batches"/>: a run of towns holding an even share of the blocks.</summary>
-    public static List<DfLocation> Slice(List<DfLocation> all, int batch, int batches)
+    public static List<DfLocation> Slice(List<DfLocation> all, int batch, int batches) =>
+        Batches(all, batches).Where(x => x.Batch == batch).Select(x => x.Town).ToList();
+
+    /// <summary>Every town with the batch it belongs to: the batch its first block falls in.</summary>
+    static IEnumerable<(DfLocation Town, int Batch)> Batches(List<DfLocation> all, int batches)
     {
         long total = all.Sum(l => (long)l.ExteriorBlocks.Length), before = 0;
-        var mine = new List<DfLocation>();
         foreach (var l in all)
         {
-            // A town belongs to the batch its first block falls in.
-            int b = (int)Math.Min(batches, before * batches / Math.Max(total, 1) + 1);
-            if (b == batch) mine.Add(l);
+            yield return (l, (int)Math.Min(batches, before * batches / Math.Max(total, 1) + 1));
             before += l.ExteriorBlocks.Length;
         }
-        return mine;
+    }
+
+    /// <summary>
+    /// Every shared interior of every batch's towns, numbered in the towns' order, each built by the batch of the first
+    /// town to have it (TownBuilder.SharedOwners): the same numbers in every batch, worked out by each.
+    /// </summary>
+    static Dictionary<string, (int Index, bool Own)> InteriorOwners(TownBuilder builder, List<DfLocation> all, int batch, int batches)
+    {
+        var owners = new Dictionary<string, (int, bool)>();
+        foreach (var (town, b) in Batches(all, batches))
+            foreach (var key in builder.InteriorKeys(town))
+                owners.TryAdd(key, (owners.Count, b == batch));
+        return owners;
     }
 
     /// <summary>A part's build, with where its time went (seconds): setup (shared records, sprite models), laying the towns
     /// out, joining their talk and guilds, and writing.</summary>
     public sealed record Report(int Built, int Failed, int People, string Path, double SetupSeconds = 0, double TownsSeconds = 0, double TalkSeconds = 0, double WriteSeconds = 0);
 
-    public static Report Build(string arena2, string skyrimData, string mainPlugin, int batch, int batches, Terrain.TerrainSettings terrain)
+    /// <param name="buildDir">Where the conversion builds (the layout beside Daggerfall.esm, the land plugins): a part's
+    /// Daggerfall.esm is a copy in a folder of its own. Unset: the main plugin's folder.</param>
+    public static Report Build(string arena2, string skyrimData, string mainPlugin, int batch, int batches, Terrain.TerrainSettings terrain, string? buildDir = null)
     {
         string outDir = Path.GetDirectoryName(Path.GetFullPath(mainPlugin))!;
+        string dataDir = buildDir ?? outDir;
         string outPath = PartPath(outDir, batch);
         var clock = System.Diagnostics.Stopwatch.StartNew();
         using var skyrim = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
@@ -69,10 +88,16 @@ public static class DaggerfallTowns
         PluginMerger.PreparePart(mod, batch, batches);
 
         var map = DfWorldMap.Load(arena2);
-        var field = Terrain.HeightField.Shared(map, terrain);
+        var field = Terrain.HeightField.Shared(map, terrain, DfLocations.LoadAll(arena2));
+        var layout = Terrain.LocationLayout.In(dataDir) ?? throw new InvalidOperationException($"no {Terrain.LocationLayout.FileName} in {dataDir}: build Daggerfall.esm first");
         var tiles = new Terrain.OverlandTiles(field);
-        var (world, moveIntoTiles) = tiles.OverrideTiles(mod, master);
-        var tileWorlds = master.Worldspaces.Where(w => w.EditorID is not null).ToDictionary(w => w.EditorID!, w => w.FormKey);
+        // The locations go in the overland's own cells, which the land plugins hold: their masters too.
+        var landNames = Terrain.OverlandTiles.LandPluginsIn(dataDir);
+        if (landNames.Count == 0) throw new InvalidOperationException($"no Daggerfall land plugins in {dataDir}: the locations stand in their cells");
+        var lands = landNames.Select(n => (ISkyrimModGetter)SkyrimMod.CreateFromBinaryOverlay(Path.Combine(dataDir, n), SkyrimRelease.SkyrimSE)).ToList();
+        try
+        {
+        var (world, cellAt, moveIntoTiles) = tiles.OverrideTiles(mod, master, lands);
         var iliacBay = master.Locations.First(l => l.EditorID == "DFLocIliacBay").FormKey;
 
         // What the towns use, made here as Daggerfall.esm makes it, then swapped for Daggerfall.esm's own records.
@@ -89,26 +114,30 @@ public static class DaggerfallTowns
         creatures.Build();
         var people = new TownPeople(mod, new VanillaActors(skyrimData), DfFactions.Load(arena2), DfNames.Load(arena2));
         var dungeons = new DungeonCellBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), outDir, new Navmesh.NavmeshBuilder(mod), propReplacer)
-        { Spells = spells, Clutter = clutter, Creatures = creatures, People = people, BackgroundInteriors = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y) };
+        {
+            Spells = spells, Clutter = clutter, Creatures = creatures, People = people, BackgroundInteriors = true, GroundAt = (x, y) => LocationPlacer.GroundAt(field, x, y),
+            // The town dungeons' blocks from Daggerfall.esm (it makes every one), as the dungeon parts take them.
+            MasterStatics = master.Statics.Where(s => s.EditorID?.StartsWith("DFDunBlk") == true).GroupBy(s => s.EditorID!).ToDictionary(g => g.Key, g => g.First().FormKey),
+        };
         var townBuilder = new TownBuilder(mod, arena2, DfModel.LoadAll(arena2), new DfBsa(Path.Combine(arena2, "BLOCKS.BSA")), map, dungeons)
         {
             People = people,
             Clutter = clutter,
             Creatures = creatures,
             Shops = new TownShops(mod, skyrim) { SpellTomes = [.. spells.Tomes.Values], DaggerfallSmith = DfItems.Lists(master) },
-            // Each town shows the map of Daggerfall.esm's overland tile it stands on.
-            MapOf = spot =>
-            {
-                int t = tiles.TileAt(spot);
-                return (tileWorlds[tiles.EditorId(t)], tiles.ToLocal(spot, t));
-            },
             // The way back out and the occupants' names on Daggerfall.esm's conversation quest, which every part's
-            // street doors and interiors share; and this part's copies of the shared interiors named its own.
+            // street doors and interiors share; the shared interiors named apart from Daggerfall.esm's own of the same layout.
             WayQuest = master.Quests.FirstOrDefault(q => q.EditorID == "DFTalk")?.FormKey,
-            InteriorSuffix = $"P{batch}",
+            InteriorSuffix = "T",
         };
 
-        var towns = Slice(All(arena2, master), batch, batches);
+        var allTowns = All(arena2, master);
+        // Each shared interior once in the joined plugin: built by the part of the first town to have it, the others'
+        // street doors pointing at it.
+        var ownersClock = System.Diagnostics.Stopwatch.StartNew();
+        townBuilder.SharedOwners = InteriorOwners(townBuilder, allTowns, batch, batches);
+        Console.WriteLine($"Shared interiors: {townBuilder.SharedOwners.Count} in all the parts' towns, {townBuilder.SharedOwners.Values.Count(o => o.Own)} built by this part ({ownersClock.Elapsed.TotalSeconds:F0} s)");
+        var towns = Slice(allTowns, batch, batches);
         double setup = clock.Elapsed.TotalSeconds;
         var built = new List<TownBuilder.Built>();
         var questTowns = new List<QuestSites.Town>();
@@ -117,25 +146,25 @@ public static class DaggerfallTowns
         {
             try
             {
-                var t = townBuilder.Build(town, skyrim, world, LocationPlacer.WorldPosition(field, town.PixelX + 0.5, town.PixelY + 0.5));
+                if (layout.Of(town) is not { } site) { failed++; Console.WriteLine($"  {town.Name} ({town.RegionName}): no place in the layout"); continue; }
+                var t = townBuilder.Build(town, skyrim, new TownBuilder.OverlandSite(world, cellAt, Terrain.LocationLayout.Corner(site), site.CellsW, site.CellsH));
                 built.Add(t);
-                questTowns.Add(new QuestSites.Town(town, t));
-                t.World.Music = world.Music;
+                // Towns as quest sites (QuestSites: their buildings); the dungeons' parts make the other locations' sites.
+                if (TownBuilder.IsTown(town) || town.Type == DfLocationType.Coven) questTowns.Add(new QuestSites.Town(town, t));
             }
             catch (Exception e) { failed++; Console.WriteLine($"  {town.Name} ({town.RegionName}): {e.Message}"); }
         }
-        Console.WriteLine($"Batch {batch}/{batches}: {built.Count} towns ({towns.Sum(t => t.ExteriorBlocks.Length)} blocks), {failed} failed, {townBuilder.SharedInteriors} shared interiors, {dungeons.Navmeshes.ExteriorReused} street navmeshes reused, {dungeons.Navmeshes.ExteriorShared} made by other parts, {Navmesh.NavmeshBuilder.InteriorsShared} interior navmeshes made by other parts");
+        Console.WriteLine($"Batch {batch}/{batches}: {built.Count} locations ({towns.Sum(t => t.ExteriorBlocks.Length)} blocks), {failed} failed, {townBuilder.SharedInteriors} shared interiors ({townBuilder.SharedInteriorsBuilt} built here), {Navmesh.NavmeshBuilder.InteriorsShared} interior navmeshes made by other parts; overland cells: {tiles.OverriddenCells} of the land's, {tiles.NewCells} new");
         dungeons.FinishInteriors();
         double laidOut = clock.Elapsed.TotalSeconds;
         if (built.Count > 0)
         {
-            dungeons.Navmeshes.LinkExteriorEdges();
             var everyone = townBuilder.Placed.Concat(dungeons.PlacedPeople).ToList();
-            var talk = new TownTalk(mod, DfText.Load(arena2), people.Factions);
+            var talk = new TownTalk(mod, DfText.Load(arena2)) { ToneGlobals = TalkTone.Globals(mod, master) };
             talk.Enlist(everyone);
             talk.Build(built, townBuilder.TalkQuest, townBuilder.Shops?.Shopkeepers, townBuilder.Shops?.TavernKeepers, townBuilder.Shops?.Bankers);
             townBuilder.AttachDaytime();
-            var guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2), people.Factions);
+            var guilds = new TownGuilds(mod, skyrim, DfText.Load(arena2));
             guilds.Build(talk, townBuilder.TalkQuest, everyone, townBuilder.BreakIns);
             if (master.Quests.FirstOrDefault(q => q.EditorID == "DFQuestMachine")?.FormKey is { } summonMachine) guilds.AddSummoning(summonMachine);
             // This batch's own conversation quest; its banks keep their accounts in Daggerfall.esm's.
@@ -150,7 +179,7 @@ public static class DaggerfallTowns
         if (master.Quests.FirstOrDefault(q => q.EditorID == "DFQuestMachine")?.FormKey is { } machine)
         {
             var sites = QuestSites.Build(mod, $"T{batch}", machine, questTowns, dungeons.BuiltDungeons, dungeons.QuestMarkers,
-                QuestSites.Individuals(mod, townBuilder.Placed.Concat(dungeons.PlacedPeople)), QuestSites.MasterMarkers(master, arena2));
+                QuestSites.Individuals(mod, townBuilder.Placed.Concat(dungeons.PlacedPeople)), QuestSites.MasterMarkers(master, arena2), townBuilder.OtherPartsMarkers);
             Console.WriteLine($"Quest sites: {questTowns.Count} towns, {dungeons.BuiltDungeons.Count} town dungeons in {sites.Count} site quests");
         }
         foreach (var cell in mod.Cells.Records.SelectMany(b => b.SubBlocks).SelectMany(sb => sb.Cells))
@@ -161,8 +190,10 @@ public static class DaggerfallTowns
 
         mod.ModHeader.Description = DoorRefFix.Marker + "; " + StatueRefFix.Marker;   // doors and statues placed as the fixes make old ones
         double talked = clock.Elapsed.TotalSeconds;
-        PluginMerger.WritePart(mod, outPath, PluginMerger.Masters(Path.GetFileName(mainPlugin)), batch, batches);
+        PluginMerger.WritePart(mod, outPath, PluginMerger.Masters([Path.GetFileName(mainPlugin), .. landNames]), batch, batches);
         return new Report(built.Count, failed, townBuilder.Placed.Count, outPath, setup, laidOut - setup, talked - laidOut, clock.Elapsed.TotalSeconds - talked);
+        }
+        finally { foreach (var l in lands) ((IDisposable)l).Dispose(); }
     }
 
     /// <summary>

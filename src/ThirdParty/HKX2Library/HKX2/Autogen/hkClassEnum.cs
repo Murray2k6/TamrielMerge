@@ -21,34 +21,29 @@ namespace HKX2
         public virtual void Read(PackFileDeserializer des, BinaryReaderEx br)
         {
             m_name = des.ReadCString(br);
+            // m_items is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            m_attributes = des.ReadClassPointer<hkCustomAttributes>(br);
-            m_flags = br.ReadUInt32();
-            br.Position += 4;
         }
 
         public virtual void Write(PackFileSerializer s, BinaryWriterEx bw)
         {
             s.WriteCString(bw, m_name);
+            // m_items is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            s.WriteClassPointer(bw, m_attributes);
-            bw.WriteUInt32(m_flags);
-            bw.Position += 4;
         }
 
         public virtual void ReadXml(XmlDeserializer xd, XElement xe)
         {
             m_name = xd.ReadString(xe, nameof(m_name));
+            // m_items is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            m_flags = xd.ReadFlag<FlagValues, uint>(xe, nameof(m_flags));
         }
 
         public virtual void WriteXml(XmlSerializer xs, XElement xe)
         {
             xs.WriteString(xe, nameof(m_name), m_name);
+            // m_items is a TYPE_SIMPLEARRAY, which isn't supported; nothing after it is ever reached
             throw new NotImplementedException("TPYE_SIMPLEARRAY");
-            xs.WriteSerializeIgnored(xe, nameof(m_attributes));
-            xs.WriteFlag<FlagValues, uint>(xe, nameof(m_flags), m_flags);
         }
 
         public override bool Equals(object? obj)
@@ -60,7 +55,8 @@ namespace HKX2
         {
             return other is not null &&
                    (m_name is null && other.m_name is null || m_name == other.m_name || m_name is null && other.m_name == "" || m_name == "" && other.m_name is null) &&
-                   m_items.Equals(other.m_items) &&
+                   // not filled by the readers (TYPE_SIMPLEARRAY); a null one threw NullReferenceException here before, and still does
+                   (m_items ?? throw new NullReferenceException("hkClassEnum.m_items is null")).Equals(other.m_items) &&
                    m_flags.Equals(other.m_flags) &&
                    Signature == other.Signature; ;
         }

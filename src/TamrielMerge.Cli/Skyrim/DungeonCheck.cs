@@ -421,14 +421,34 @@ public static class DungeonCheck
         {
             if (r.Placement is not { } dp) continue;
             bool single = r.Base.FormKey == DoorPlacer.SingleDoor;
-            if (!single && r.Base.FormKey != DoorPlacer.DoubleDoor) continue;
+            // Daggerfall's own door (DoorPlacer since 2026-11-10: "DFDoor" + its model, the model in its own space with
+            // its origin on the hinge): the doorway is where the leaf stands shut.
+            bool own = bases.TryGetValue(r.Base.FormKey, out var doorBase) && doorBase.Type == "Door" && doorBase.EditorId.StartsWith("DFDoor", StringComparison.Ordinal);
+            if (!single && !own && r.Base.FormKey != DoorPlacer.DoubleDoor) continue;
             float sc = r.Scale ?? 1, hd = dp.Rotation.Z;
             var facing = new Vector3(MathF.Sin(hd), MathF.Cos(hd), 0);
             var pos = new Vector3(dp.Position.X, dp.Position.Y, dp.Position.Z);
-            // DoorPlacer put the origin off the doorway's centre by the leaf's offset, and its floor on the doorway's.
-            var centre = pos + facing * ((single ? -DoorPlacer.SingleLeafOffset : DoorPlacer.DoubleLeafOffset) * sc);
-            float sill = pos.Z + (single ? DoorPlacer.SingleBottom : DoorPlacer.DoubleBottom) * sc;
-            float? lintel = single ? sill + DoorPlacer.SingleOpening * sc : null;
+            Vector3 centre; float sill; float? lintel;
+            if (own)
+            {
+                var turn = SkyrimRotation.Matrix(new Vector3(dp.Rotation.X, dp.Rotation.Y, dp.Rotation.Z));
+                var size = doorBase!.Max - doorBase.Min;
+                // The leaf's thin side is the way through it.
+                var through = Vector3.TransformNormal(size.X <= size.Y ? Vector3.UnitX : Vector3.UnitY, turn);
+                through.Z = 0;
+                if (through.LengthSquared() < 1e-6f) continue;   // a trapdoor: no way to walk through
+                facing = Vector3.Normalize(through);
+                var middle = (doorBase.Min + doorBase.Max) / 2;
+                var at = pos + Vector3.TransformNormal(new Vector3(middle.X, middle.Y, doorBase.Min.Z), turn) * sc;
+                centre = at; sill = at.Z; lintel = sill + size.Z * sc;
+            }
+            else
+            {
+                // DoorPlacer put the origin off the doorway's centre by the leaf's offset, and its floor on the doorway's.
+                centre = pos + facing * ((single ? -DoorPlacer.SingleLeafOffset : DoorPlacer.DoubleLeafOffset) * sc);
+                sill = pos.Z + (single ? DoorPlacer.SingleBottom : DoorPlacer.DoubleBottom) * sc;
+                lintel = single ? sill + DoorPlacer.SingleOpening * sc : null;
+            }
             float room = float.MaxValue, roomAt = 0, step = 0, stepAt = 0;
             bool trace = Environment.GetEnvironmentVariable("TM_CHECK_DOORS") == cellName;
             if (trace) Console.WriteLine($"  door {r.FormKey} at {centre.X:F0},{centre.Y:F0} sill {sill:F0} facing {facing.X:F2},{facing.Y:F2} scale {sc:F2} lintel {lintel:F0}");
@@ -465,7 +485,7 @@ public static class DungeonCheck
                 }
                 if (trace) Console.WriteLine($"    side {side}: " + string.Join(" ", profile));
             }
-            void FlagDoor(string kind, string detail) => problems.Add(new Problem(kind, cellName, r.FormKey.ToString(), single ? "ImpDoorExtSingleSmall01" : "ImpDoorDouble01", centre.X, centre.Y, sill, detail));
+            void FlagDoor(string kind, string detail) => problems.Add(new Problem(kind, cellName, r.FormKey.ToString(), own ? doorBase!.EditorId : single ? "ImpDoorExtSingleSmall01" : "ImpDoorDouble01", centre.X, centre.Y, sill, detail));
             if (room < 128) FlagDoor("Doorway: too low to pass", $"{room:F0} units of head room {roomAt:F0} from the doorway (door scale {sc:F2})");
             if (step > 48) FlagDoor("Doorway: a step too high", $"{step:F0} units {stepAt:F0} from the doorway");
         }

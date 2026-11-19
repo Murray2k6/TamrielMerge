@@ -39,6 +39,13 @@ public sealed class MainForm : Form
     readonly Button voicesButton = new() { Text = "Voice generator", Width = 140, Height = 34 };
     readonly Button lodButton = new() { Text = "Distant LOD", Width = 120, Height = 34 };
     readonly Button checkButton = new() { Text = "Check game", Width = 120, Height = 34 };
+    // Uninstall (user, 2026-11-02: "i need a uninstall button on prior to older versions of tamreil merge and latest for
+    // the skyrim dir"; "add a prompy are you sure for the uninstaller"): this version's and earlier ones' conversions out
+    // of Skyrim's Data, after a question that says what goes.
+    readonly Button uninstallButton = new() { Text = "Uninstall TamrielMerge", AutoSize = true };
+    // The room the games and parts ticked take (user, 2026-11-02: "i need a space requirement of games converted for the
+    // tool so it shows a user how much space they need"): measured sizes (Setup/ConversionSize), with each drive's free space.
+    readonly Label spaceLabel = new() { AutoSize = true, MaximumSize = new Size(930, 0), Margin = new Padding(0, 4, 0, 4) };
     // Progress (user, 2026-10-10: "the tool needs a progress timer and progress left bar"): the bar with how much is done
     // and left, and under it the time so far, the time left (from the last quarter hour's pace, so a run resumed part-way
     // or a slower step reads true) and when it should be done. A voice run going on without the app shows here too.
@@ -55,6 +62,11 @@ public sealed class MainForm : Form
     readonly Button setupButton = new() { Text = "Install missing tools", AutoSize = true };
     readonly Button ckButton = new() { Text = "Open the Creation Kit in Steam", AutoSize = true };
     readonly Button refreshButton = new() { Text = "Check again", AutoSize = true };
+    // Nexus Mods (user, 2026-11-02: "add a login to nexus button on the tool so it can log you in if you are missing
+    // something too"): who is logged in, and what a "Get from Nexus" is doing (downloading, or watching Downloads).
+    readonly Button nexusButton = new() { Text = "Log in to Nexus", AutoSize = true };
+    readonly Label nexusLabel = new() { AutoSize = true, ForeColor = Color.DimGray, Margin = new Padding(0, 7, 6, 0), MaximumSize = new Size(420, 0) };
+    CancellationTokenSource? nexusWork;
     readonly Button modelsButton = new() { Text = "Models…", Width = 110, Height = 34 };
     readonly Button partsButton = new() { Text = "Mod organizer…", Width = 140, Height = 34 };
     readonly Label statusLabel = new() { AutoSize = true, Text = "Ready." };
@@ -76,10 +88,13 @@ public sealed class MainForm : Form
         Environment.CurrentDirectory = workspace;
         Environment.SetEnvironmentVariable("TAMRIELMERGE_TOOLS", Path.Combine(workspace, "tools"));
         Text = "TamrielMerge — The Elder Scrolls in Skyrim";
-        Width = 1320; Height = 840; MinimumSize = new Size(1140, 660);
+        Width = 1320; Height = 960; MinimumSize = new Size(1140, 660);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9.5f);
-        outputBox.Text = Path.Combine(workspace, "out", "convert");
+        // The output folder, remembered (settings "output"; user 2026-10-28: "the tool needs to convert on any drive letter
+        // that a user has"): the workspace's out\convert until one is chosen.
+        outputBox.Text = PluginList.Setting("output") is { Length: > 0 } savedOut ? savedOut : Path.Combine(workspace, "out", "convert");
+        outputBox.Leave += (_, _) => PluginList.SetSetting("output", outputBox.Text.Trim());
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(12) };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -111,7 +126,12 @@ public sealed class MainForm : Form
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
         top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
         top.Controls.Add(Group("Games", gamesPanel, fill: true), 0, 0);
-        var toolsGroup = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Dock = DockStyle.Fill };
+        // Scrolls: the tools' rows outgrew the 210-pixel row (the last rows and the buttons under them were cut off).
+        var toolsGroup = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Dock = DockStyle.Fill, AutoScroll = true };
+        // The Nexus login first, where it is seen without scrolling down the tools.
+        var nexusRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 4) };
+        nexusRow.Controls.AddRange([nexusLabel, nexusButton]);
+        toolsGroup.Controls.Add(nexusRow);
         toolsGroup.Controls.Add(toolsPanel);
         var toolButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         toolButtons.Controls.AddRange([setupButton, ckButton, refreshButton]);
@@ -131,6 +151,28 @@ public sealed class MainForm : Form
         var mo2Browse = new Button { Text = "Browse…", AutoSize = true };
         mo2Row.Controls.AddRange([new Label { Text = "Mod Organizer 2:", AutoSize = true, Margin = new Padding(0, 7, 4, 0) }, mo2Box, mo2Browse]);
         options.Controls.Add(mo2Row);
+        // Where a conversion is staged and where temporary files go (settings "build" and "temp", read by the converter
+        // through Util.Paths): any drive the user has; empty for the fastest solid-state drive and the user's own temp.
+        foreach (var (key, label, tip, desc) in new[]
+        {
+            ("build", "Build folder:", "Where a conversion is staged while it runs (a fast drive with room: 40 GB and more for Daggerfall); empty builds in the output folder itself", "Where a conversion is staged while it runs"),
+            ("temp", "Temp folder:", "Where temporary files go (the voices, models and videos on the way); empty uses the tool's own updates folder", "Where temporary files go"),
+        })
+        {
+            var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+            var box = new TextBox { Width = outputBox.Width, Text = PluginList.Setting(key) ?? "" };
+            var pick = new Button { Text = "Browse…", AutoSize = true };
+            row.Controls.AddRange([new Label { Text = label, AutoSize = true, Margin = new Padding(0, 7, 4, 0) }, box, pick]);
+            options.Controls.Add(row);
+            tips.SetToolTip(box, tip);
+            string k = key, d = desc;
+            box.Leave += (_, _) => PluginList.SetSetting(k, box.Text.Trim());
+            pick.Click += (_, _) =>
+            {
+                using var dialog = new FolderBrowserDialog { SelectedPath = box.Text, Description = d };
+                if (dialog.ShowDialog(this) == DialogResult.OK) { box.Text = dialog.SelectedPath; PluginList.SetSetting(k, box.Text); }
+            };
+        }
         tips.SetToolTip(mo2Box, "If you play through Mod Organizer 2: its folder, so installing switches the plugins on in its profile too (leave empty otherwise)");
         mo2Box.Leave += (_, _) => PluginList.Mo2Folder = mo2Box.Text.Trim();
         mo2Browse.Click += (_, _) =>
@@ -145,9 +187,19 @@ public sealed class MainForm : Form
         options.Controls.Add(respawnRow);
         respawnScale.Enabled = false;
         creaturesBox.CheckedChanged += (_, _) => respawnScale.Enabled = creaturesBox.Checked;
-        options.Controls.Add(installBox);
-        var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 6, 0, 0) };
+        // Uninstall beside Install (the action buttons' row is full: it was off the window's edge there).
+        var installRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+        installBox.Margin = new Padding(3, 7, 12, 0);
+        installRow.Controls.AddRange([installBox, uninstallButton]);
+        options.Controls.Add(installRow);
+        options.Controls.Add(spaceLabel);
+        foreach (var b in new[] { voicesBox, videosBox, modelsBox, installBox }) b.CheckedChanged += (_, _) => UpdateSpace();
+        outputBox.TextChanged += (_, _) => UpdateSpace();
+        // Wraps onto a second line: in one, Mod organizer and the status were past the window's edge (2026-11-02 render).
+        var actions = new FlowLayoutPanel { AutoSize = true, WrapContents = true, MaximumSize = new Size(930, 0), Margin = new Padding(0, 6, 0, 0) };
         actions.Controls.AddRange([convertButton, voicesButton, lodButton, checkButton, pauseButton, cancelButton, modelsButton, partsButton, statusLabel]);
+        tips.SetToolTip(uninstallButton, "Take TamrielMerge's conversions out of Skyrim's Data folder (this version's and older versions'), and their plugins off the plugin lists; asks first, saying what goes. The output folder is kept.");
+        uninstallButton.Click += (_, _) => Uninstall();
         tips.SetToolTip(checkButton, "Start Skyrim through SKSE with Papyrus logging and a crash logger, then report what went wrong: how far it loaded, what a crash happened in (which plugin and record), and TamrielMerge's script errors");
         tips.SetToolTip(lodButton, "Make the distant view of the converted worlds again: the land, the buildings and big rocks, and the trees, as Skyrim shows its own far off");
         tips.SetToolTip(partsButton, "Switch TamrielMerge's parts on or off (each game, the voices, the main menu and music, models, creatures)");
@@ -175,7 +227,7 @@ public sealed class MainForm : Form
         browse.Click += (_, _) =>
         {
             using var dialog = new FolderBrowserDialog { SelectedPath = outputBox.Text, Description = "Where the converted plugins and files go" };
-            if (dialog.ShowDialog(this) == DialogResult.OK) outputBox.Text = dialog.SelectedPath;
+            if (dialog.ShowDialog(this) == DialogResult.OK) { outputBox.Text = dialog.SelectedPath; PluginList.SetSetting("output", outputBox.Text); }
         };
         gpuBox.CheckedChanged += (_, _) =>
         {
@@ -187,6 +239,18 @@ public sealed class MainForm : Form
         videosBox.CheckedChanged += (_, _) => gpuBox.Enabled = videosBox.Checked || modelsBox.Checked;
         modelsBox.CheckedChanged += (_, _) => gpuBox.Enabled = videosBox.Checked || modelsBox.Checked;
         refreshButton.Click += (_, _) => RefreshStatus();
+        tips.SetToolTip(nexusButton, "Log in to Nexus Mods with your personal API key, so the tool can get what is only published there (the Skyrim voice models)");
+        nexusButton.Click += (_, _) =>
+        {
+            if (!Nexus.LoggedIn) { ShowNexusLogin(); return; }
+            nexusWork?.Cancel();
+            Nexus.LogOut();
+            Append("Logged out of Nexus Mods: the key is deleted.");
+            ShowNexusState();
+            RefreshStatus();
+        };
+        FormClosed += (_, _) => nexusWork?.Cancel();
+        ShowNexusState();
         ckButton.Click += (_, _) => OpenCreationKitInSteam();
         setupButton.Click += (_, _) => Run("Installing tools", ["setup", .. gpuBox.Checked ? Array.Empty<string>() : ["--cpu"]]);
         convertButton.Click += (_, _) => Convert();
@@ -333,6 +397,10 @@ public sealed class MainForm : Form
     /// shows them.</summary>
     async void RefreshStatus()
     {
+        // One at a time (a Get from Nexus asks for one after each import): two at once each cleared the lists and both
+        // filled them, so a call while one runs makes it run once more at its end instead.
+        if (refreshing) { refreshAgain = true; return; }
+        refreshing = true;
         refreshButton.Enabled = false;
         // The games first (found in milliseconds), the tools when their check is done: the games no longer wait on the
         // tools (user, 2026-10-10: "why was the detected games list empty in the tool"; no placeholders).
@@ -354,7 +422,7 @@ public sealed class MainForm : Form
         foreach (var (game, label) in Games)
         {
             bool has = found.TryGetValue(game, out var install);
-            if (!gameBoxes.TryGetValue(game, out var box)) gameBoxes[game] = box = new CheckBox { AutoSize = true, Checked = true };
+            if (!gameBoxes.TryGetValue(game, out var box)) { gameBoxes[game] = box = new CheckBox { AutoSize = true, Checked = true }; box.CheckedChanged += (_, _) => UpdateSpace(); }
             box.Text = has ? $"{label}   ({install!.Store})" : $"{label}   (not installed)";
             tips.SetToolTip(box, has ? install!.DataDir : "Not found in Steam or GOG: this story is left out.");
             var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
@@ -378,15 +446,43 @@ public sealed class MainForm : Form
 
         var (tools, ckMissing) = await Task.Run(() => (Dependencies.Check(skyrim ?? ""), Dependencies.CreationKitMissing(skyrim ?? "").Count > 0));
         toolsPanel.Controls.Clear();
-        foreach (var st in tools)
-            toolsPanel.Controls.Add(StatusLine(st.Ready, st.Name, st.Ready ? "ready" : st.Name.StartsWith("Creation Kit") ? "not installed (free on Steam)" : "missing"));
+        // Nexus rows first, under the Nexus login, with their "Get from Nexus" in sight.
+        foreach (var st in tools.OrderBy(t => t.Source is null))
+        {
+            // A Nexus row says how much of it is there (the voice types with a model), and when it isn't all there, how
+            // to get it: from Nexus with the login, or the login first.
+            Control line = StatusLine(st.Ready, st.Name, st.Source is not null ? st.Detail.Split("; ")[0] : st.Ready ? "ready" : st.Name.StartsWith("Creation Kit") ? "not installed (free on Steam)" : "missing");
+            if (st.Source is not null) foreach (Control c in line.Controls) tips.SetToolTip(c, st.Detail.Replace("; ", "\n"));
+            if (st.Source is { } source && !st.Ready)
+            {
+                var get = new LinkLabel
+                {
+                    AutoSize = true, Margin = new Padding(22, 0, 0, 4),
+                    Text = nexusWork is not null ? "Stop getting from Nexus" : Nexus.LoggedIn ? "Get from Nexus" : "Log in to Nexus first",
+                };
+                tips.SetToolTip(get, $"{source.Title}: Nexus Mods {source.Game} mod {source.ModId} ({source.FilesPage})");
+                get.LinkClicked += (_, _) => { if (nexusWork is not null) nexusWork.Cancel(); else GetFromNexus(source); };
+                // On a line of its own under the row: beside it, it went past the Tools box's right edge.
+                var both = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = Padding.Empty };
+                both.Controls.AddRange([line, get]);
+                line = both;
+            }
+            toolsPanel.Controls.Add(line);
+        }
         ckButton.Visible = ckMissing;
-        setupButton.Enabled = running is null && tools.Any(t => !t.Ready && !t.Name.StartsWith("Creation Kit"));
+        // Nexus rows aren't setup's to install: they have their own link.
+        setupButton.Enabled = running is null && tools.Any(t => !t.Ready && !t.Name.StartsWith("Creation Kit") && t.Source is null);
         convertButton.Enabled = running is null && skyrim is not null;
+        uninstallButton.Enabled = running is null && skyrim is not null;
+        UpdateSpace();
         refreshButton.Enabled = true;
+        refreshing = false;
+        if (refreshAgain && !IsDisposed) { refreshAgain = false; RefreshStatus(); }
     }
 
-    static Control StatusLine(bool ok, string name, string detail)
+    bool refreshing, refreshAgain;
+
+    static FlowLayoutPanel StatusLine(bool ok, string name, string detail)
     {
         var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
         row.Controls.Add(new Label { Text = ok ? "✔" : "✖", AutoSize = true, ForeColor = ok ? Color.SeaGreen : Color.Firebrick, Font = new Font("Segoe UI Symbol", 10f, FontStyle.Bold) });
@@ -402,6 +498,113 @@ public sealed class MainForm : Form
         MessageBox.Show(this, "Steam is showing \"Skyrim Special Edition: Creation Kit\" in your Library.\n\n" +
             "1. Click Install there.\n2. When it's installed, start the Creation Kit once (it unpacks its tools and scripts), then close it.\n3. Click \"Check again\" here.",
             "TamrielMerge", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    /// <summary>The Nexus line: who is logged in (from the last check with Nexus), and the button to log in or out.</summary>
+    void ShowNexusState()
+    {
+        if (nexusWork is not null) return;   // a Get from Nexus is saying what it is doing
+        var user = Nexus.StoredUser;
+        nexusLabel.ForeColor = user is null ? Color.DimGray : Color.SeaGreen;
+        nexusLabel.Text = user is null ? "Nexus Mods: not logged in" : $"Logged in to Nexus as {user.Name} ({(user.Premium ? "premium" : "free")})";
+        nexusButton.Text = user is null ? "Log in to Nexus" : "Log out";
+    }
+
+    /// <summary>The login dialog; true when it logged in.</summary>
+    bool ShowNexusLogin()
+    {
+        using var dialog = new NexusLoginDialog();
+        bool ok = dialog.ShowDialog(this) == DialogResult.OK && dialog.User is not null;
+        if (ok) Append($"Logged in to Nexus Mods as {dialog.User!.Name} ({(dialog.User.Premium ? "premium" : "free account")}).");
+        ShowNexusState();
+        RefreshStatus();
+        return ok;
+    }
+
+    /// <summary>
+    /// Get from Nexus, for a requirement only published there. Logged out, the login comes first. The key is checked
+    /// again (Premium may have started or lapsed). Premium: the mod's files are listed through Nexus's API and those still
+    /// wanted downloaded and imported. Free account: Nexus forbids API downloads for it, so the mod's files page opens in
+    /// the browser and the Downloads folder is watched for 30 minutes, each archive from the mod imported as it lands.
+    /// Either stops once the requirement is met, or on "Stop getting from Nexus".
+    /// </summary>
+    async void GetFromNexus(NexusSource source)
+    {
+        if (nexusWork is not null) return;
+        if (!Nexus.LoggedIn && !ShowNexusLogin()) return;
+        nexusWork = new CancellationTokenSource();
+        var ct = nexusWork.Token;
+        RefreshStatus();   // the link becomes "Stop getting from Nexus"
+        // Each step in the log; the rows re-checked so the count of what is there follows the imports.
+        var report = new Progress<string>(line => { Append($"Nexus: {line}"); if (!IsDisposed) RefreshStatus(); });
+        try
+        {
+            nexusLabel.ForeColor = Color.DimGray;
+            nexusLabel.Text = "Checking your Nexus account…";
+            Nexus.User user;
+            try { user = await Nexus.CheckLogin(ct); }
+            catch (Nexus.NexusException e) when (e.Status == System.Net.HttpStatusCode.Unauthorized)
+            {
+                // Revoked or regenerated on Nexus's site since the login: log in again.
+                Nexus.LogOut();
+                MessageBox.Show(this, e.Message, "TamrielMerge — Nexus Mods", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                nexusLabel.Text = "";
+                if (!ShowNexusLogin() || Nexus.StoredUser is not { } again) return;
+                user = again;
+            }
+            if (user.Premium)
+            {
+                Append($"Nexus: getting {source.Title} (mod {source.ModId}) as {user.Name} (premium)");
+                var progress = new Progress<(string File, long Done, long? Total)>(p =>
+                    nexusLabel.Text = p.Total is > 0 ? $"Downloading {p.File}: {p.Done * 100 / p.Total.Value}% of {p.Total.Value / 1048576.0:N0} MB"
+                                                     : $"Downloading {p.File}: {p.Done / 1048576.0:N0} MB");
+                var installed = await Nexus.Fetch(source, report, progress, ct);
+                Append($"Nexus: {source.Title}: {(installed.Count > 0 ? $"installed {installed.Count} ({string.Join(", ", installed)})" : "nothing new installed")}.");
+            }
+            else
+            {
+                // Listing works for free accounts too: it names the files to download from the page.
+                List<Nexus.ModFile>? files = null;
+                try
+                {
+                    var picked = (await Nexus.FilesOf(source.Game, source.ModId, ct)).Where(source.Picks).ToList();
+                    files = picked;
+                    if ((source.Wanted?.Invoke(picked) ?? picked) is { Count: > 0 } wanted)
+                        Append($"Nexus: the files to download: {string.Join(", ", wanted.Select(f => f.Name))}");
+                }
+                catch (Nexus.NexusException e) when (e.Status != System.Net.HttpStatusCode.Unauthorized) { Append($"Nexus: couldn't list the mod's files ({e.Message}); any archive from mod {source.ModId} is imported."); }
+                try { Process.Start(new ProcessStartInfo(source.FilesPage) { UseShellExecute = true }); }
+                catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException) { Append($"Nexus: couldn't open the browser ({e.Message}): go to {source.FilesPage}"); }
+                string downloads = Nexus.DownloadsFolder();
+                var until = DateTime.Now.AddMinutes(30);
+                Append($"Nexus: free accounts can't download through Nexus's API, so {source.Title}' files page is open in your browser: " +
+                       $"click Manual download on each file. TamrielMerge watches {downloads} until {until:HH:mm} and imports each archive from mod {source.ModId} as it lands " +
+                       "(those already there too).");
+                nexusLabel.ForeColor = Color.DimGray;
+                nexusLabel.Text = $"Watching Downloads for {source.Title} until {until:HH:mm}: download the files on the page that opened";
+                var installed = await Nexus.WatchDownloads(source, files, until - DateTime.Now, report, ct);
+                Append(source.Ready() ? $"Nexus: {source.Title}: all there now ({installed.Count} imported)."
+                    : $"Nexus: stopped watching Downloads ({installed.Count} imported{(installed.Count > 0 ? ": " + string.Join(", ", installed) : "")}); Get from Nexus again to carry on.");
+            }
+        }
+        catch (OperationCanceledException) { Append($"Nexus: getting {source.Title} stopped."); }
+        catch (Nexus.NexusException e)
+        {
+            Append($"Nexus: {e.Message}");
+            if (!IsDisposed) MessageBox.Show(this, e.Message, "TamrielMerge — Nexus Mods", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            // An archive that didn't unpack or held nothing usable, or a folder that couldn't be written.
+            Append($"Nexus: {source.Title} couldn't be installed: {e.Message}");
+            if (!IsDisposed) MessageBox.Show(this, e.Message, "TamrielMerge — Nexus Mods", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            nexusWork?.Dispose();
+            nexusWork = null;
+            if (!IsDisposed) { ShowNexusState(); RefreshStatus(); }
+        }
     }
 
     void Convert()
@@ -438,6 +641,79 @@ public sealed class MainForm : Form
     }
 
     TimeSpan Elapsed() => DateTime.Now - started - pausedTotal - (paused ? DateTime.Now - pausedSince : TimeSpan.Zero);
+
+    static string Gb(long bytes) => (bytes / (double)(1L << 30)).ToString("F1", CultureInfo.InvariantCulture) + " GB";
+
+    /// <summary>The space line: what the games and parts ticked take in the output folder and in Skyrim's Data, the room
+    /// a conversion needs beyond that while it runs (measured on this computer's last conversion of those games), and
+    /// whether the drives have it.</summary>
+    void UpdateSpace()
+    {
+        var games = gameBoxes.Where(kv => kv.Value.Checked && kv.Value.Enabled).Select(kv => kv.Key.ToString()).ToList();
+        if (games.Count == 0) { spaceLabel.Text = "Space: tick a game to see how much room its conversion takes."; spaceLabel.ForeColor = Color.DimGray; return; }
+        bool voices = voicesBox.Checked, videos = videosBox.Checked, models = modelsBox.Checked;
+        var all = ConversionSize.Estimate(games, voices, videos, models);
+        // What every conversion shares, counted once; each game's own on top.
+        long shared = ConversionSize.Measured.Where(kv => kv.Key.Game == "Shared" && (kv.Key.Part != ConversionSize.Part.Videos || videos)).Sum(kv => kv.Value.Output);
+        var each = games.Select(g => $"{g} {Gb(ConversionSize.Estimate([g], voices, videos, models).Output - shared)[..^3]}");
+        long? overhead = ConversionSize.MeasuredOverhead(games);
+        var text = new StringBuilder($"Space needed: {Gb(all.Output)} in the output folder ({string.Join(", ", each)}, shared {Gb(shared)[..^3]})");
+        if (installBox.Checked) text.Append($" · {Gb(all.Installed)} in Skyrim's Data");
+        text.Append(overhead is { } o ? $" · up to {Gb(o)} more while converting (your last conversion of these games)."
+            : " · more while converting (the first conversion measures it).");
+        // Each drive's free space against what it is asked for (the output's and Skyrim's on one drive add up).
+        var need = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        void Add(string? folder, long bytes)
+        {
+            try { if (folder is { Length: > 0 } && Path.GetPathRoot(Path.GetFullPath(folder)) is { Length: > 0 } r) need[r] = need.GetValueOrDefault(r) + bytes; }
+            catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException) { }
+        }
+        Add(outputBox.Text, all.Output + (overhead ?? 0));
+        if (installBox.Checked) Add(GameInstalls.SkyrimData(), all.Installed);
+        bool tooLittle = false;
+        foreach (var (root, bytes) in need)
+            try
+            {
+                long free = new DriveInfo(root).AvailableFreeSpace;
+                text.Append($"  {root.TrimEnd('\\')} {Gb(free)} free{(free < bytes ? $" ({Gb(bytes - free)} too little)" : "")}.");
+                tooLittle |= free < bytes;
+            }
+            catch (Exception e) when (e is IOException or ArgumentException or UnauthorizedAccessException) { }
+        spaceLabel.Text = text.ToString();
+        spaceLabel.ForeColor = tooLittle ? Color.Firebrick : Color.FromArgb(40, 40, 40);
+    }
+
+    /// <summary>TamrielMerge's files found in Skyrim's Data, said, and removed only if the user says yes.</summary>
+    async void Uninstall()
+    {
+        if (running is not null) return;
+        if (GameInstalls.SkyrimData() is not { } data) { MessageBox.Show(this, "Skyrim Special Edition isn't installed through Steam or GOG.", "TamrielMerge"); return; }
+        uninstallButton.Enabled = false;
+        statusLabel.Text = "Looking for TamrielMerge's files in Skyrim's Data…";
+        Skyrim.Uninstaller.Plan plan;
+        List<string> kinds;
+        try { (plan, kinds) = await Task.Run(() => { var p = Skyrim.Uninstaller.Find(data); return (p, Skyrim.Uninstaller.Describe(p)); }); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, $"Skyrim's Data folder couldn't be read: {e.Message}", "TamrielMerge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        finally { uninstallButton.Enabled = running is null; statusLabel.Text = "Ready."; }
+        if (plan.Files.Count == 0 && plan.Plugins.Count == 0 && plan.Outside.Count == 0) { MessageBox.Show(this, $"Nothing of TamrielMerge's is installed in\n{data}", "TamrielMerge"); return; }
+        if (Process.GetProcessesByName("SkyrimSE").Length > 0) { MessageBox.Show(this, "Skyrim is running: close it first, then uninstall.", "TamrielMerge", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        string question = "Are you sure you want to uninstall TamrielMerge from Skyrim?\n\n"
+            + $"This removes {plan.Files.Count + plan.Outside.Count:N0} files ({Skyrim.Uninstaller.Size(plan.Bytes)}) that this version or an older one of TamrielMerge put in\n{data},\n"
+            + $"and takes its {plan.Plugins.Count} plugins off the plugin lists:\n\n"
+            + string.Join("\n", kinds.Select(k => "•  " + k))
+            + "\n\nThe plugins come off Skyrim's Plugins.txt and loadorder.txt and Mod Organizer 2's profiles (close Mod Organizer 2 first). Saved games made with them will miss them. "
+            + "The converted files in your output folder are kept.\n\nThis can't be undone.";
+        if (MessageBox.Show(this, question, "Uninstall TamrielMerge?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        // Crash Logger SSE is another author's SKSE plugin: the game check installs it, but it may have been there before.
+        bool crashLogger = Skyrim.Uninstaller.HasCrashLogger(data)
+            && MessageBox.Show(this, "Remove Crash Logger SSE too?\n\nTamrielMerge's game check installs it (SKSE\\Plugins\\CrashLogger.dll), but you may have had it before, or use it for other mods. "
+                + "Its crash logs in Documents are kept either way.", "Uninstall TamrielMerge", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+        Run("Uninstalling", ["uninstall", "--yes", "--data", data, .. crashLogger ? new[] { "--crash-logger" } : []], false);
+    }
 
     static string Remaining(double seconds) =>
         seconds > 86400 * 2 ? $"{seconds / 86400:F1} days"
@@ -631,12 +907,12 @@ public sealed class MainForm : Form
             int code = running?.ExitCode ?? -1;
             var took = DateTime.Now - started;
             running = null;
-            convertButton.Enabled = setupButton.Enabled = voicesButton.Enabled = lodButton.Enabled = checkButton.Enabled = true;
+            convertButton.Enabled = setupButton.Enabled = voicesButton.Enabled = lodButton.Enabled = checkButton.Enabled = uninstallButton.Enabled = true;
             cancelButton.Enabled = pauseButton.Enabled = false;
             if (paused) { paused = false; pauseButton.Text = "Pause"; }
             if (code == 0) { progressBar.Value = 1000; progressLabel.Text = "100% done"; }
             timerLabel.Text = $"⏱ {Clock(took)} in all";
-            statusLabel.Text = code == 0 ? $"{what}: done in {took:hh\\:mm\\:ss}." : $"{what}: stopped (exit code {code}) after {took:hh\\:mm\\:ss}.";
+            statusLabel.Text = code == 0 ? $"{what}: done in {(int)took.TotalHours}:{took:mm\\:ss}." : $"{what}: stopped (exit code {code}) after {(int)took.TotalHours}:{took:mm\\:ss}.";
             Append(statusLabel.Text);
             RefreshStatus();
         }
@@ -645,7 +921,7 @@ public sealed class MainForm : Form
         progress = 0; progressBar.Value = 0; progressLabel.Text = ""; timerLabel.Text = ""; samples.Clear();
         watchingBackground = false;
         runningWhat = what;
-        convertButton.Enabled = setupButton.Enabled = voicesButton.Enabled = lodButton.Enabled = checkButton.Enabled = false;
+        convertButton.Enabled = setupButton.Enabled = voicesButton.Enabled = lodButton.Enabled = checkButton.Enabled = uninstallButton.Enabled = false;
         cancelButton.Enabled = pauseButton.Enabled = true;
         clock.Start();
     }

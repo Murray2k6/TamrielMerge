@@ -22,13 +22,13 @@ Event OnActivate(ObjectReference akActionRef)
     Return
   EndIf
   If akActionRef != player || !IsLocked()
-    Activate(akActionRef, True)
+    TMDfDoor.Use(Self, akActionRef)
     Return
   EndIf
   Key doorKey = GetKey()
   If doorKey && player.GetItemCount(doorKey) > 0
     Lock(False)
-    Activate(player, True)
+    TMDfDoor.Use(Self, player)
     Return
   EndIf
   If LockValue >= 20
@@ -54,7 +54,7 @@ Event OnActivate(ObjectReference akActionRef)
   If Utility.RandomInt(1, 100) <= chance
     Debug.Notification("You pick the lock.")
     Lock(False)
-    Activate(player, True)
+    TMDfDoor.Use(Self, player)
   Else
     Debug.Notification("You fail to pick the lock.")
     failedAtSkill = skill
@@ -67,7 +67,7 @@ Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile,
   EndIf
   If Utility.RandomInt(1, 100) <= 20 - LockValue
     Lock(False)
-    SetOpen(True)
+    TMDfDoor.SetDoor(Self, True)
     Debug.Notification("You bash the door open.")
   EndIf
 EndEvent

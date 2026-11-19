@@ -37,11 +37,25 @@ public sealed class ObTextures(ObData data, string modOutDir)
         }
     }
 
+    /// <summary>Land textures written without shine (<see cref="EnsureLand"/>).</summary>
+    public int LandMatte { get; private set; }
+    readonly object landGate = new();
+
+    /// <summary>A texture for the land (name_land.dds): the same picture with no alpha, which Skyrim's land takes as
+    /// its shine (Morrowind.MwTextures.EnsureLand; Oblivion's land textures are opaque, 255, full shine).</summary>
+    public string? EnsureLand(string texture) => Ensure(texture) is { } path ? Morrowind.MwTextures.MatteLand(modOutDir, path, () => LandMatte++, landGate) : null;
+
     /// <summary>The texture's normal map (name_n.dds), or a flat one without specular.</summary>
     public string Normal(string diffuse)
     {
         string n = Path.ChangeExtension(diffuse, null) + "_n.dds";
         if (data.Exists(n.StartsWith("textures", StringComparison.OrdinalIgnoreCase) ? n : @"textures\" + n) && Ensure(n) is { } path) return path;
+        return Flat();
+    }
+
+    /// <summary>The flat normal map (no bumps, no specular), written once: for a shape without a texture of its own too.</summary>
+    public string Flat()
+    {
         string flat = Path.Combine(modOutDir, FlatNormal);
         lock (done)
             if (!File.Exists(flat))
@@ -50,6 +64,25 @@ public sealed class ObTextures(ObData data, string modOutDir)
                 Morrowind.MwTextures.WriteBcDds(flat, Enumerable.Repeat(0x008080FFu, 16).ToArray(), 4, 4, true);
             }
         return FlatNormal;
+    }
+
+    /// <summary>
+    /// The diffuse texture of a shape with none (or whose texture the game lacks): plain white, so it shows its vertex
+    /// colours as Oblivion draws an untextured shape. Before, such shapes named textures\tamrielmerge\ob\missing.dds,
+    /// which nothing made, and Skyrim drew them purple (2026-10-25: the menu flyby's scene of the Imperial City found it).
+    /// </summary>
+    public const string Blank = @"textures\tamrielmerge\ob\blank_d.dds";
+
+    public string BlankDiffuse()
+    {
+        string full = Path.Combine(modOutDir, Blank);
+        lock (done)
+            if (!File.Exists(full))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                Skyrim.Meshes.DfTextureExport.WriteDds(full, Enumerable.Repeat(0xFFFFFFFFu, 16).ToArray(), 4, 4);
+            }
+        return Blank;
     }
 
     public string? Glow(string diffuse)
@@ -88,10 +121,45 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
     public HashSet<string> TrapModels { get; } = new(StringComparer.OrdinalIgnoreCase);
     bool IsTrap(string model) => TrapModels.Contains(ObData.Normalize(model.StartsWith("meshes", StringComparison.OrdinalIgnoreCase) ? model : @"meshes\" + model));
 
-    Result Played(Result r, List<(string Name, float Length, bool Loop)> groups)
+    /// <summary>The sounds those groups play, by the same model path: Oblivion's sequences carry them as text keys
+    /// ("Sound: DRSPrisonSecretWallOpenVU" in the prison's secret wall's Forward), which Skyrim's sequences have no
+    /// use for; TMObState.PlayGroup plays each at its second.</summary>
+    public readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<(string Group, float Time, string Sound)>> AnimatedCues = new(StringComparer.OrdinalIgnoreCase);
+
+    Result Played(Result r, List<(string Name, float Length, bool Loop)> groups, List<(string Group, float Time, string Sound)>? cues = null)
     {
-        if (groups.Count > 0) Animated[r.Path.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? r.Path[7..] : r.Path] = groups;
+        string key = r.Path.StartsWith(@"meshes\", StringComparison.OrdinalIgnoreCase) ? r.Path[7..] : r.Path;
+        if (groups.Count > 0) Animated[key] = groups;
+        if (cues is { Count: > 0 }) AnimatedCues[key] = cues;
         return r;
+    }
+
+    /// <summary>The sounds an Oblivion model's animation groups play: each sequence's text keys "Sound: X" (X a sound's
+    /// EditorID), with the seconds into the group they are at.</summary>
+    static List<(string Group, float Time, string Sound)> SoundCues(NifFile nif)
+    {
+        var hdr = nif.GetHeader();
+        var root = nif.GetRootNode();
+        var cues = new List<(string Group, float Time, string Sound)>();
+        if (root is null || root.controllerRef.index >= hdr.GetNumBlocks() || hdr.GetBlockById(root.controllerRef.index) is not NiControllerManager manager) return cues;
+        using var cache = new niflycpp.BlockCache(hdr);
+        for (uint k = 0; k < manager.controllerSequenceRefs.GetSize(); k++)
+        {
+            uint id = manager.controllerSequenceRefs.GetBlockRef(k);
+            if (id >= hdr.GetNumBlocks() || hdr.GetBlockById(id) is not NiControllerSequence seq || seq.name.get() is not { Length: > 0 } name) continue;
+            uint keys = seq.textKeyRef.index;
+            if (keys >= hdr.GetNumBlocks() || hdr.GetBlockById(keys) is not NiTextKeyExtraData) continue;
+            float rate = seq.frequency > 0 ? seq.frequency : 1;
+            foreach (var key in Skyrim.Meshes.NiflyRaw.TextKeys(cache.EditableBlockById<NiTextKeyExtraData>(keys)))
+                foreach (var line in (key.value.get() ?? "").Split('\n', '\r'))
+                {
+                    string text = line.Trim();
+                    if (!text.StartsWith("sound:", StringComparison.OrdinalIgnoreCase)) continue;
+                    string sound = text[6..].Trim();
+                    if (sound.Length > 0) cues.Add((name, MathF.Max(0, (key.time - seq.startTime) / rate), sound));
+                }
+        }
+        return cues;
     }
 
     /// <summary>The animation groups of an Oblivion model: its root's controller manager's sequences.</summary>
@@ -184,6 +252,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         List<(string Name, float Length, bool Loop)>? sequences = null;
         var triggers = new List<(V3 Min, V3 Max)>();
         List<(string Name, float Length, bool Loop)> groups = [];
+        List<(string Group, float Time, string Sound)> cues = [];
         try
         {
             using var nif = new NifFile();
@@ -197,6 +266,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             // Moving parts (secret walls, gates, levers, drawbridges): the node tree is kept with the animation.
             var anim = itemMass is null ? ReadAnimation(nif, bytes) : null;
             groups = Groups(nif);
+            cues = SoundCues(nif);
             try { emitters = Emitters(nif); }
             catch (Exception) { /* particle data nifly can't follow: no stand-ins */ }
             foreach (var shape in nif.GetShapes())
@@ -280,7 +350,7 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
         return Played(new Result(rel, pieces.Count, solid.Count,
             all.Count > 0 ? all.Aggregate(new V3(float.MaxValue), V3.Min) : V3.Zero,
             all.Count > 0 ? all.Aggregate(new V3(float.MinValue), V3.Max) : V3.Zero, animated, solid.Select(t => t.Pts).ToList())
-        { Emitters = emitters, Sequences = sequences ?? [], Moves = sequences is not null, Triggers = triggers }, groups);
+        { Emitters = emitters, Sequences = sequences ?? [], Moves = sequences is not null, Triggers = triggers }, groups, cues);
     }
 
     /// <summary>
@@ -602,8 +672,8 @@ public sealed partial class ObMeshConverter(ObData data, ObTextures textures)
             for (int k = 2; !names.Add(name); k++) name = $"{p.Name}:{k}";
             var shape = p.Normals.Count > 0 ? nif.CreateShapeFromData(name, verts, tris, uvs, norms) : nif.CreateShapeFromData(name, verts, tris, uvs);
             string? diffuse = p.Texture is null ? null : textures.Ensure(p.Texture);
-            nif.SetTextureSlot(shape, diffuse ?? @"textures\tamrielmerge\ob\missing.dds", 0);
-            nif.SetTextureSlot(shape, p.Texture is null ? ObTextures.FlatNormal : textures.Normal(p.Texture), 1);
+            nif.SetTextureSlot(shape, diffuse ?? textures.BlankDiffuse(), 0);
+            nif.SetTextureSlot(shape, p.Texture is null ? textures.Flat() : textures.Normal(p.Texture), 1);
             // Oblivion multiplies emissive colour into the texture; Skyrim's own-emit adds a flat tint. So an emissive
             // surface glows through a glow map: Oblivion's own (_g) when it has one, else its diffuse texture.
             bool emissive = p.Emissive.X + p.Emissive.Y + p.Emissive.Z > 0.05f;

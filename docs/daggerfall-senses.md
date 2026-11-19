@@ -14,7 +14,7 @@ are not changed, and Morrowind's, Oblivion's, Redguard's and Skyrim's actors kee
   it themselves, so their Use Script template flag is cleared. The `DFLvlEncounter...` actors keep Use Script, so whatever
   their encounter list picks brings its own copy. The lists hold the `DFLvl...` class actors, not Skyrim's lists. Passive
   copies, townsfolk, animals and vanilla records don't get it. Dungeon and town plugins use Daggerfall.esm's actors, so
-  they need no copies. "Daggerfall Creatures.esp" deep-copies the actors and keeps the script.
+  they need no copies. "Daggerfall Creatures.esm" deep-copies the actors and keeps the script.
 - **TMDfSensesControl** runs on the quest `TMDfSensesQuest`. It is start-game enabled and sits at the fixed number
   0xDF0300 in Daggerfall.esm, so nothing after it is renumbered. A player alias (`TMDfSensesPlayer`) registers the
   menus again after each load. The quest's `IliacBay` property is DFLocIliacBay; with no property set (test plugins)

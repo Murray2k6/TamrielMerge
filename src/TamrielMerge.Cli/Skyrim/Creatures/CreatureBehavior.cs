@@ -533,7 +533,78 @@ public sealed class CreatureBehavior
     {
         var lines = (File.Exists(path) ? File.ReadAllText(path) : Text(vanilla)).Replace("\r", "").Split('\n').Where(l => l.Length > 0).ToList();
         if (!lines.Contains(entry, StringComparer.OrdinalIgnoreCase)) lines.Add(entry);
-        return WriteText(path, lines);
+        string index = WriteText(path, lines);
+        WriteSingleFiles(Path.GetDirectoryName(Path.GetDirectoryName(path)!)!);
+        return index;
+    }
+
+    /// <summary>
+    /// The game's two animation lists with our projects in them: meshes\animationdatasinglefile.txt (every project's clip
+    /// data and motion) and meshes\animationsetdatasinglefile.txt (its attack sets), vanilla's with each project of the
+    /// output's own lists (animationdata\dirlist.txt, animationsetdata\dirlist.txt) that vanilla hasn't appended from its
+    /// own files. Skyrim SE reads a project's data from these two files only: with our projects in the per-project files
+    /// alone, every creature of ours stood in its rest pose and never moved (seen in game 2026-11-09; with the merged files
+    /// the imp played its idle).
+    /// </summary>
+    internal void WriteSingleFiles(string meshes)
+    {
+        static List<string> Lines(string text) { var l = text.Replace("\r", "").Split('\n').ToList(); while (l.Count > 0 && l[^1].Length == 0) l.RemoveAt(l.Count - 1); return l; }
+        static List<string> FileLines(string path) => Lines(File.ReadAllText(path));
+        const string dataName = @"meshes\animationdatasinglefile.txt", setName = @"meshes\animationsetdatasinglefile.txt";
+        string dataList = Path.Combine(meshes, "animationdata", "dirlist.txt");
+        if (archive.ContainsKey(dataName) && File.Exists(dataList))
+        {
+            var v = Lines(Text(dataName));
+            int n = int.Parse(v[0]);
+            var names = v.GetRange(1, n);
+            var known = new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
+            var ours = new List<string>(); var add = new List<string>();
+            foreach (string entry in FileLines(dataList).Where(e => e.Length > 0 && !known.Contains(e)))
+            {
+                string project = Path.GetFileNameWithoutExtension(entry);
+                string own = Path.Combine(meshes, "animationdata", project + ".txt");
+                if (!File.Exists(own)) continue;
+                var data = FileLines(own);
+                ours.Add(entry);
+                add.Add(data.Count.ToString()); add.AddRange(data);
+                // Its motion follows when its clip flag (the line after its file list) is 1.
+                int files = data.Count > 1 && int.TryParse(data[1], out int f) ? f : 0;
+                if (data.Count > 2 + files && data[2 + files] == "1")
+                {
+                    string motionPath = Path.Combine(meshes, "animationdata", "boundanims", $"anims_{project}.txt");
+                    var motion = File.Exists(motionPath) ? FileLines(motionPath) : [];
+                    add.Add(motion.Count.ToString()); add.AddRange(motion);
+                }
+            }
+            var all = new List<string> { (n + ours.Count).ToString() };
+            all.AddRange(names); all.AddRange(ours); all.AddRange(v.Skip(1 + n)); all.AddRange(add);
+            WriteText(Path.Combine(meshes, "animationdatasinglefile.txt"), all);
+        }
+        string setList = Path.Combine(meshes, "animationsetdata", "dirlist.txt");
+        if (archive.ContainsKey(setName) && File.Exists(setList))
+        {
+            var v = Lines(Text(setName));
+            int n = int.Parse(v[0]);
+            var names = v.GetRange(1, n);
+            var known = new HashSet<string>(names.Select(x => x.Replace('/', '\\')), StringComparer.OrdinalIgnoreCase);
+            var ours = new List<string>(); var add = new List<string>();
+            foreach (string entry in FileLines(setList).Where(e => e.Length > 0 && !known.Contains(e.Replace('/', '\\'))))
+            {
+                var parts = entry.Replace('/', '\\').Split('\\');
+                if (parts.Length != 2) continue;
+                string dir = Path.Combine(meshes, "animationsetdata", parts[0]);
+                string listFile = Path.Combine(dir, parts[1]);
+                if (!File.Exists(listFile)) continue;
+                var sets = FileLines(listFile);
+                if (sets.Any(sf => !File.Exists(Path.Combine(dir, sf)))) continue;
+                ours.Add(entry);
+                add.Add(sets.Count.ToString()); add.AddRange(sets);
+                foreach (string sf in sets) add.AddRange(FileLines(Path.Combine(dir, sf)));
+            }
+            var all = new List<string> { (n + ours.Count).ToString() };
+            all.AddRange(names); all.AddRange(ours); all.AddRange(v.Skip(1 + n)); all.AddRange(add);
+            WriteText(Path.Combine(meshes, "animationsetdatasinglefile.txt"), all);
+        }
     }
 
     static string WriteText(string path, IEnumerable<string> lines)

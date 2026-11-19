@@ -19,6 +19,20 @@ Actor Property PlayerRef Auto
 ObjectReference Property Holding Auto
 {A marker in a closed cell where quest items, name tags and people wait.}
 Activator Property NameTag Auto
+Int Property AfterwordReady = 0 Auto Hidden
+{1 while a townsperson has an ended quest's rumour to tell (the Afterword alias names it).}
+Int Property QuestorWordReady = 0 Auto Hidden
+{1 while the player talks to the questor of an ended quest (the QuestorWord alias holds their answer).}
+Int Property AfterwordsKept = 16 AutoReadOnly
+GlobalVariable Property TalkTone Auto
+{DFTalkTone: 0 polite, 1 normal, 2 blunt (the tone topics set it).}
+GlobalVariable[] Property TalkReacts Auto
+{DFTalkReact0-4: how the tone lands with each social group (0 refused, 1 plain, 2 warm), rolled when a question is asked
+(RollTalk); the answers' conditions read them.}
+Int[] Property EtiquetteMods Auto
+Int[] Property StreetwiseMods Auto
+Quest Property Senses Auto
+{TMDfSensesQuest (TMDfSensesControl): Daggerfall's own skills, Etiquette (0) and Streetwise (1), their values and tallies.}
 FormList Property Sources Auto
 FormList Property RunningQuests Auto
 FormList Property DoneOnce Auto
@@ -70,6 +84,8 @@ String[] Property RulerNames Auto
 {By region: the ruler's name (the province's individual faction; "" none), for %rn.}
 FormList Property Lycanthropy Auto
 {Daggerfall's lycanthropy (DfDiseases.Lycanthropy): werewolf infection, wereboar infection, werewolf, wereboar.}
+FormList Property Vampirism Auto
+{Daggerfall's vampirism (DfDiseases.Vampirism): the infection, then the curse.}
 Location Property IliacBay Auto
 String[] Property RegionNames Auto
 String[] Property BuildingLabels Auto
@@ -116,10 +132,209 @@ Bool[] summoned
 Bool Property MainStarted = False Auto Hidden
 Int[] legal
 
+String[] afterNames
+String[] afterRumours
+String[] afterWords
+Actor[] afterQuestors
+Int afterCount = 0
+ObjectReference afterTag
+ObjectReference questorTag
+
 Event OnInit()
   legal = new Int[64]
+  RegisterForMenu("Dialogue Menu")
   RegisterForSingleUpdate(5.0)
 EndEvent
+
+; ---- What is said after a quest (Daggerfall Unity TombstoneQuest: AddOrReplaceQuestProgressRumor and
+; AddQuestorPostQuestMessage; TalkManager.GetNewsOrRumors and GetNPCQuestGreeting) ----
+
+; An ended quest's rumour (message 1006 or 1007) and its questor's answer (1008 or 1009), replacing the same quest's
+; earlier ones; the oldest of 16 forgotten.
+Function Afterword(String name, String rumour, String word, Actor questor)
+  If !afterNames
+    afterNames = Utility.CreateStringArray(AfterwordsKept)
+    afterRumours = Utility.CreateStringArray(AfterwordsKept)
+    afterWords = Utility.CreateStringArray(AfterwordsKept)
+    afterQuestors = new Actor[16]
+  EndIf
+  Int at = -1
+  Int k = 0
+  While k < afterCount && at < 0
+    If afterNames[k] == name
+      at = k
+    EndIf
+    k += 1
+  EndWhile
+  If at < 0
+    If afterCount < AfterwordsKept
+      at = afterCount
+      afterCount += 1
+    Else
+      k = 1
+      While k < AfterwordsKept
+        afterNames[k - 1] = afterNames[k]
+        afterRumours[k - 1] = afterRumours[k]
+        afterWords[k - 1] = afterWords[k]
+        afterQuestors[k - 1] = afterQuestors[k]
+        k += 1
+      EndWhile
+      at = AfterwordsKept - 1
+    EndIf
+  EndIf
+  afterNames[at] = name
+  afterRumours[at] = rumour
+  afterWords[at] = word
+  afterQuestors[at] = questor
+EndFunction
+
+; Talking to someone: a rumour of an ended quest picked at random for "Have you heard any rumors?", and the questor's
+; answer when it is them.
+; ---- The talk's tone (TalkTone, Daggerfall Unity GetReactionToPlayer_0_1_2) ----
+
+Int[] talkReaction      ; by tone: the reaction worked out this talk (0 none yet), offset by 1000
+Bool[] talkTallied      ; by tone: the skill tallied this talk
+Int talkRoll = -1       ; the roll to beat this talk (0-20)
+
+Function SetTalkTone(Int tone)
+  If TalkTone
+    TalkTone.SetValueInt(tone)
+  EndIf
+EndFunction
+
+; The reactions of the five social groups to the player's tone for a question (questionMod 5 "where is" a building, 0
+; work): Personality / 5 + the question's modifier + the tone's modifier for the group + 5 for a skill roll made, -10
+; failed, against this talk's roll of 0 to 20; the skill (Etiquette polite, Streetwise blunt) tallied once a talk.
+Function RollTalk(Int questionMod)
+  If !TalkReacts
+    Return
+  EndIf
+  If !talkReaction
+    talkReaction = new Int[3]
+    talkTallied = new Bool[3]
+  EndIf
+  Int tone = 1
+  If TalkTone
+    tone = TalkTone.GetValueInt()
+  EndIf
+  If tone < 0 || tone > 2
+    tone = 1
+  EndIf
+  If talkRoll < 0
+    talkRoll = Utility.RandomInt(0, 20)
+  EndIf
+  If talkReaction[tone] == 0
+    Int personality = 50
+    Quest q = Quest.GetQuest("TMProgression")
+    If q && (q as TMPassives)
+      personality = (q as TMPassives).AttributeValue(6)
+    EndIf
+    Int toneMod = 0
+    If tone != 1
+      Int skill = 0
+      Int index = 0   ; Etiquette
+      If tone == 2
+        index = 1     ; Streetwise
+      EndIf
+      TMDfSensesControl control = Senses as TMDfSensesControl
+      If control
+        skill = control.SkillValue(index)
+        If !talkTallied[tone]
+          control.Tally(index, 1)
+          talkTallied[tone] = True
+        EndIf
+      EndIf
+      If Utility.RandomInt(1, 100) > skill
+        toneMod = -10
+      Else
+        toneMod = 5
+      EndIf
+    EndIf
+    talkReaction[tone] = 1000 + personality / 5 + questionMod + toneMod
+  EndIf
+  Int base = talkReaction[tone] - 1000
+  Int g = 0
+  While g < TalkReacts.Length && g < 5
+    Int reaction = base
+    If tone == 0 && EtiquetteMods && g < EtiquetteMods.Length
+      reaction += EtiquetteMods[g]
+    ElseIf tone == 2 && StreetwiseMods && g < StreetwiseMods.Length
+      reaction += StreetwiseMods[g]
+    EndIf
+    Int r = 2
+    If reaction < talkRoll
+      r = 0
+    ElseIf reaction < talkRoll + 20
+      r = 1
+    EndIf
+    If TalkReacts[g]
+      TalkReacts[g].SetValueInt(r)
+    EndIf
+    g += 1
+  EndWhile
+EndFunction
+
+Event OnMenuOpen(String asMenuName)
+  If asMenuName != "Dialogue Menu"
+    Return
+  EndIf
+  ; A new talk: the tone's reactions rolled afresh when a question is asked (TalkToNpc resets them).
+  talkReaction = new Int[3]
+  talkTallied = new Bool[3]
+  talkRoll = -1
+  AfterwordReady = 0
+  QuestorWordReady = 0
+  If afterCount == 0
+    Return
+  EndIf
+  Int count = 0
+  Int pick = -1
+  Int k = 0
+  While k < afterCount
+    If afterRumours[k] != ""
+      count += 1
+      If Utility.RandomInt(1, count) == 1
+        pick = k
+      EndIf
+    EndIf
+    k += 1
+  EndWhile
+  If pick >= 0 && Tag(0)
+    afterTag.SetDisplayName(afterRumours[pick], True)
+    AfterwordReady = 1
+  EndIf
+  Actor target = PlayerRef.GetDialogueTarget()
+  If target
+    k = afterCount
+    While k > 0
+      k -= 1
+      If afterQuestors[k] == target && afterWords[k] != "" && Tag(1)
+        questorTag.SetDisplayName(afterWords[k], True)
+        QuestorWordReady = 1
+        k = 0
+      EndIf
+    EndWhile
+  EndIf
+EndEvent
+
+; The name tag the Afterword (0; alias 1) or QuestorWord (1; alias 2) alias shows, made at the holding cell the first time.
+Bool Function Tag(Int which)
+  If !NameTag || !Holding
+    Return False
+  EndIf
+  If which == 0
+    If !afterTag
+      afterTag = Holding.PlaceAtMe(NameTag, 1, True, False)
+      (GetAlias(1) as ReferenceAlias).ForceRefTo(afterTag)
+    EndIf
+    Return afterTag
+  EndIf
+  If !questorTag
+    questorTag = Holding.PlaceAtMe(NameTag, 1, True, False)
+    (GetAlias(2) as ReferenceAlias).ForceRefTo(questorTag)
+  EndIf
+  Return questorTag
+EndFunction
 
 Event OnUpdate()
   If !legal
@@ -127,7 +342,13 @@ Event OnUpdate()
   EndIf
   If !MainStarted && IliacBay && PlayerRef.IsInLocation(IliacBay)
     MainStarted = True
-    StartByName("_TUTOR__", None, 0, False)
+    ; The tutorial is Privateer's Hold's: it opens with "You wake and look around the room" and teaches in that
+    ; dungeon. A first arrival anywhere else (travel from another land comes in overland) has no room to wake in:
+    ; arriving in Daggerfall city showed that text in the street (seen in game, 2026-11-10).
+    Cell arrivedIn = PlayerRef.GetParentCell()
+    If arrivedIn && arrivedIn.IsInterior()
+      StartByName("_TUTOR__", None, 0, False)
+    EndIf
     StartByName("_BRISIEN", None, 0, False)
   EndIf
   RacialQuests()
@@ -154,12 +375,35 @@ Function RacialQuests()
     If lastRacialDay % 84 == 0
       RacialQuest(True)
     EndIf
+    ; Every 112 days reputations drift a point toward 0 (Daggerfall Unity PlayerEntity.Update: NormalizeReputations at
+    ; 161,280 minutes): every region's legal standing and every faction's regard.
+    If lastRacialDay % 112 == 0
+      NormalizeReputations()
+    EndIf
   EndWhile
+EndFunction
+
+; NormalizeReputations (Daggerfall Unity): each region's legal reputation one step toward 0, then each faction's one.
+Function NormalizeReputations()
+  If legal
+    Int r = 0
+    While r < legal.Length
+      If legal[r] > 0
+        legal[r] = legal[r] - 1
+      ElseIf legal[r] < 0
+        legal[r] = legal[r] + 1
+      EndIf
+      r += 1
+    EndWhile
+  EndIf
+  If Reputation
+    Reputation.Normalize()
+  EndIf
 EndFunction
 
 Function RacialQuest(Bool cure)
   Bool lycanthrope = Lycanthropy && (PlayerRef.HasSpell(Lycanthropy.GetAt(2)) || PlayerRef.HasSpell(Lycanthropy.GetAt(3)))
-  Bool vampire = VampireQuest && (VampireQuest as PlayerVampireQuestScript).VampireStatus > 0
+  Bool vampire = (Vampirism && Vampirism.GetSize() > 1 && PlayerRef.HasSpell(Vampirism.GetAt(1) as Spell)) || (VampireQuest && (VampireQuest as PlayerVampireQuestScript).VampireStatus > 0)
   If lycanthrope
     ; A cure, 1-100 under 30, unless one is running already.
     If cure && Utility.RandomInt(1, 100) < 30 && !QuestRunning("$CUREWER")
@@ -211,10 +455,37 @@ EndFunction
 ; ---- Registration ----
 
 Function Register(TMDfQuestSites s)
+  lastRegister = Utility.GetCurrentRealTime()
   If !s || Sources.Find(s) >= 0
     Return
   EndIf
   Sources.AddForm(s)
+EndFunction
+
+; Whether the player is in Daggerfall's lands (TMStoryOrder.WorldOf, on Skyrim's MQ101): its quests run only there.
+Bool Function InDaggerfall()
+  TMStoryOrder order = Game.GetFormFromFile(0x3372B, "Skyrim.esm") as TMStoryOrder
+  If !order
+    Return True
+  EndIf
+  Return order.WorldOf(Game.GetPlayer()) == order.StoryDaggerfall
+EndFunction
+
+; The sites register one at a time after the game starts (95 lists, some seconds: in the game on 2026-11-09 the opening's
+; quests began 2 s before the last had, found "no site for place 0" and never ran). A quest waits for them: until none
+; has registered for 3 s, a minute at most. (Real time starts over with each run of the game: a time before the last
+; registration means they registered in an earlier run.)
+Float lastRegister = 0.0
+Function WaitForSites()
+  Int tries = 0
+  While tries < 120
+    Float since = Utility.GetCurrentRealTime() - lastRegister
+    If Sources.GetSize() > 0 && (lastRegister == 0.0 || since < 0.0 || since >= 3.0)
+      Return
+    EndIf
+    Utility.WaitMenuMode(0.5)
+    tries += 1
+  EndWhile
 EndFunction
 
 TMDfQuestSites Function Source(Int site)
@@ -519,6 +790,10 @@ Bool Function StartQuest(Int i, Actor questor, Int fid, Bool offer)
   If !t || q.IsRunning()
     Return False
   EndIf
+  WaitForSites()
+  If q.IsRunning()
+    Return False
+  EndIf
   If !q.Start()
     Return False
   EndIf
@@ -693,6 +968,18 @@ Int Function SiteTown(Int site)
   Return -1
 EndFunction
 
+; A building site's type (DFLocation.BuildingTypes: 14 the temple, 15 the tavern ...), -1 for other sites.
+Int Function SiteBuildingType(Int site)
+  If SiteKind(site) != 0
+    Return -1
+  EndIf
+  TMDfQuestSites src = Source(site)
+  If !src
+    Return -1
+  EndIf
+  Return src.BType[SiteLocal(site)]
+EndFunction
+
 Int Function SiteRegion(Int site)
   Int kind = SiteKind(site)
   If kind < 0
@@ -717,12 +1004,11 @@ Int Function FindSite(Int scope, Int p1, Int p2, Int p3, Int town, Int[] used, I
     region = SiteRegion(CurrentTown)
   EndIf
   If p1 == 1
+    ; A dungeon of the type in the region, else any dungeon of the region (Daggerfall Unity SelectRemoteDungeonSite's
+    ; classic fallback); never another region's (the quest is dropped instead, as there).
     Int d = DungeonSite(region, p2, used, upTo)
     If d < 0
       d = DungeonSite(region, -1, used, upTo)
-    EndIf
-    If d < 0
-      d = DungeonSite(-1, -1, used, upTo)
     EndIf
     Return d
   ElseIf p1 == 2
@@ -1151,11 +1437,62 @@ Function PlaceStranger(Int site)
   MakePerson(site, 0, -1)
 EndFunction
 
-Function TransferPlayer(Int site)
-  ObjectReference spot = SiteRef(site, 2)
+; "transfer pc inside _place_ marker N" (Daggerfall Unity TeleportPc): the dungeon's N-th quest spawn marker, the first
+; (the site's spawn marker) when there is no such marker or none is named.
+Function TransferPlayer(Int site, Int marker = -1)
+  ObjectReference spot = None
+  If marker >= 0 && SiteKind(site) == 1
+    spot = SpawnMarker(site, marker)
+  EndIf
+  If !spot
+    spot = SiteRef(site, 2)
+  EndIf
   If spot
     PlayerRef.MoveTo(spot)
+    OpenHeldDoors(site)
   EndIf
+EndFunction
+
+; A dungeon's N-th quest spawn marker (DSpawnAll / DSpawnDungeon), None without one.
+ObjectReference Function SpawnMarker(Int site, Int n)
+  TMDfQuestSites src = Source(site)
+  If !src || !src.DSpawnAll || !src.DSpawnDungeon
+    Return None
+  EndIf
+  Int local = SiteLocal(site)
+  Int seen = 0
+  Int k = 0
+  While k < src.DSpawnAll.Length && k < src.DSpawnDungeon.Length
+    If src.DSpawnDungeon[k] == local
+      If seen == n
+        Return src.DSpawnAll[k]
+      EndIf
+      seen += 1
+    EndIf
+    k += 1
+  EndWhile
+  Return None
+EndFunction
+
+; A transfer into a dungeon opens its magically held doors (Castle Daggerfall's foyer: Daggerfall Unity's special case,
+; so the player isn't shut in behind doors no key or pick opens).
+Function OpenHeldDoors(Int site)
+  If SiteKind(site) != 1
+    Return
+  EndIf
+  TMDfQuestSites src = Source(site)
+  If !src || !src.DHeld || !src.DHeldDungeon
+    Return
+  EndIf
+  Int local = SiteLocal(site)
+  Int k = 0
+  While k < src.DHeld.Length && k < src.DHeldDungeon.Length
+    If src.DHeldDungeon[k] == local && src.DHeld[k]
+      src.DHeld[k].Lock(False)
+      TMDfDoor.SetDoor(src.DHeld[k], True)
+    EndIf
+    k += 1
+  EndWhile
 EndFunction
 
 Form Function RandomItemOf(Int group, Bool reward)
@@ -1166,18 +1503,36 @@ Form Function RandomItemOf(Int group, Bool reward)
 EndFunction
 
 ; Daggerfall Unity's quest reward: 150-200 gold per power (guild rank + 1, else level / 2 + 1, at most 10).
+; A quest's gold reward with no range given (Daggerfall Unity Item.CreateGold): 150-200 x (level / 2 + 1, or the guild
+; rank + 1 for a guild's quest, 10 at most) x (the region's price level / 2 + 500) / 1000 x (the faction's power + 50) /
+; 100 (50 for no guild); the Fighters Guild (faction 41) pays (10 + rank) / 10 of it (its AlterReward; no other guild alters it).
+; Regional prices aren't tracked here, so the price level is Daggerfall's middle, 1000.
 Int Function RewardGold(Int fid)
-  Int power = PlayerRef.GetLevel() / 2 + 1
+  Int playerMod = PlayerRef.GetLevel() / 2 + 1
+  Int factionMod = 50
   Int g = GuildOf(fid)
-  If g >= 0 && Guilds.IsMember(g)
-    power = PlayerRef.GetFactionRank(Guilds.Members[g]) + 1
+  Bool member = g >= 0 && Guilds.IsMember(g)
+  If member
+    playerMod = PlayerRef.GetFactionRank(Guilds.Members[g]) + 1
+    Int power = Reputation.PowerOf(fid)
+    If power > 0
+      factionMod = power
+    EndIf
   EndIf
-  If power > 10
-    power = 10
-  ElseIf power < 1
-    power = 1
+  If playerMod > 10
+    playerMod = 10
+  ElseIf playerMod < 1
+    playerMod = 1
   EndIf
-  Return Utility.RandomInt(150 * power, 200 * power)
+  Int regionPriceMod = 500
+  Int amount = Utility.RandomInt(150 * playerMod, 200 * playerMod) * (regionPriceMod + 500) / 1000 * (factionMod + 50) / 100
+  If member && g < GuildFaction.Length && GuildFaction[g] == 41
+    amount = amount * (10 + PlayerRef.GetFactionRank(Guilds.Members[g])) / 10
+  EndIf
+  If amount < 1
+    amount = 1
+  EndIf
+  Return amount
 EndFunction
 
 Int Function FactionOfType(Int type, Int town)
@@ -1266,8 +1621,21 @@ Function CurePlayer(Int what, Int disease = -1)
     If s
       PlayerRef.RemoveSpell(s)
     EndIf
-  ElseIf what == 1 && VampireQuest
-    (VampireQuest as PlayerVampireQuestScript).VampireCure(PlayerRef)
+  ElseIf what == 1
+    ; Daggerfall's vampirism and its infection (DfDiseases.Vampirism), then Skyrim's own should the player have that.
+    If Vampirism
+      Int v = 0
+      While v < Vampirism.GetSize()
+        Spell vs = Vampirism.GetAt(v) as Spell
+        If vs && PlayerRef.HasSpell(vs)
+          PlayerRef.RemoveSpell(vs)
+        EndIf
+        v += 1
+      EndWhile
+    EndIf
+    If VampireQuest && (VampireQuest as PlayerVampireQuestScript).VampireStatus > 0
+      (VampireQuest as PlayerVampireQuestScript).VampireCure(PlayerRef)
+    EndIf
   ElseIf what == 2
     If WerewolfCure
       (WerewolfCure as CompanionsHousekeepingScript).CurePlayer()

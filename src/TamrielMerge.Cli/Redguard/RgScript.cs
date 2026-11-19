@@ -111,7 +111,34 @@ public sealed class RgScript
         return flags;
     }
 
+    /// <summary>
+    /// Whether the scene's programs were compiled against the older SOUP386.DEF (HIDEOUT.RGM is: five functions were
+    /// added to the table after it was compiled, so its ids past 127 name the wrong functions; see <see cref="OldTable"/>).
+    /// </summary>
+    public bool OldFunctionTable { get; private set; }
+
+    /// <summary>
+    /// The current function id of an id compiled against the older table: the same up to 127, then one more from 128
+    /// (TorchActivate was added), two from 148, three from 244 and five from 316. Measured 2026-10-29 from the programs
+    /// every scene shares byte for byte (DEBUG, COMMON, FIREBALL, LASER, ITORCH, the potion scripts): HIDEOUT's calls
+    /// line up with the others' only under this shift (ResetAllAction(x, y) is PushAnimation, PlayerPickupLineUp('gremlin')
+    /// is PushPlayer, DragonBreathTask(n) is GetPotion...). Where exactly in 128-134, 148-158, 244-298 and 316-341 the
+    /// five were added isn't known; HIDEOUT calls no id in those spans, so the choice can't change its translation.
+    /// </summary>
+    public static int OldTable(int id) => id < 128 ? id : id < 148 ? id + 1 : id < 244 ? id + 2 : id < 316 ? id + 3 : id + 5;
+
     public static RgScript Load(byte[] rgm, RgScene scene)
+    {
+        var s = Load(rgm, scene, null);
+        // The shared DEBUG program pushes the gremlin (PushPlayer, 241, one argument): read with the older table it is
+        // PlayerPickupLineUp (239, three arguments) with one.
+        if (!s.Calls.Any(c => c.Actor.Equals("DEBUG", StringComparison.OrdinalIgnoreCase) && c.Function == 239 && c.Args.Length == 1)) return s;
+        s = Load(rgm, scene, OldTable);
+        s.OldFunctionTable = true;
+        return s;
+    }
+
+    static RgScript Load(byte[] rgm, RgScene scene, Func<int, int>? table)
     {
         var s = new RgScript();
         if (!scene.Sections.TryGetValue("RAHD", out var rahd) || !scene.Sections.TryGetValue("RASC", out var rasc)) return s;
@@ -165,7 +192,7 @@ public sealed class RgScript
             }
             if (length > 0 && pos + length <= rasc.Length)
             {
-                var walker = new Walker(rgm, rasc.Offset + pos, rasc.Offset + pos + length, name, s.Calls);
+                var walker = new Walker(rgm, rasc.Offset + pos, rasc.Offset + pos + length, name, s.Calls, table);
                 try { walker.Run(); }
                 catch (IndexOutOfRangeException) { }
                 catch (ArgumentOutOfRangeException) { }
@@ -176,9 +203,11 @@ public sealed class RgScript
         return s;
     }
 
-    sealed class Walker(byte[] b, int start, int end, string actor, List<Call> calls)
+    sealed class Walker(byte[] b, int start, int end, string actor, List<Call> calls, Func<int, int>? table)
     {
         enum Mode { Main, Lhs, Rhs, Parameter, Reference, Formula }
+        /// <summary>Where the code begins (kept as a field: the read position starts from it too).</summary>
+        readonly int start = start;
         int p = start;
         public List<Stmt> Program { get; } = [];
 
@@ -292,6 +321,7 @@ public sealed class RgScript
         {
             int id = U16();
             int n = id == 0 ? 0 : U8();
+            if (table is not null && id != 0) id = table(id);
             var args = new Value[n];
             for (int i = 0; i < n; i++) args[i] = Value(Mode.Parameter);
             calls.Add(new Call(actor, id, args.Select(a => a is Num num ? (int?)num.V : null).ToArray()));

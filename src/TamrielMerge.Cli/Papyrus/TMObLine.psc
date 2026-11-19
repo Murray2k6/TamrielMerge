@@ -20,10 +20,20 @@ Topic[] Property ConvLinks Auto
 Quest Property Conversations Auto
 {OBDialogue, which runs Oblivion's conversations (TMObConversations).}
 
+; The response's result script (OB_R_...'s own).
+Function Result(ObjectReference akSpeakerRef)
+EndFunction
+
 Function Fragment_Begin(ObjectReference akSpeakerRef)
   Parent.Fragment_Begin(akSpeakerRef)
   If ObState
-    ObState.LineStarted(akSpeakerRef as Actor, Self)
+    Int begun = ObState.LineBegins(akSpeakerRef as Actor, Self)
+    If begun == 1
+      ; A script's Say: the result as the line begins (not again when it is done: TMObState.ResultOwed).
+      Parent.Fragment_End(akSpeakerRef)
+      Result(akSpeakerRef)
+      ObState.ResultRan(akSpeakerRef as Actor)
+    EndIf
   EndIf
   If ConvTopic > 0 && Conversations
     (Conversations as TMObConversations).Spoken(akSpeakerRef as Actor, Self)
@@ -31,7 +41,10 @@ Function Fragment_Begin(ObjectReference akSpeakerRef)
 EndFunction
 
 Function Fragment_End(ObjectReference akSpeakerRef)
-  Parent.Fragment_End(akSpeakerRef)
+  If !ObState || ObState.ResultOwed(akSpeakerRef as Actor, Self)
+    Parent.Fragment_End(akSpeakerRef)
+    Result(akSpeakerRef)
+  EndIf
   If ObState
     ObState.LineEnded(akSpeakerRef as Actor, Self)
   EndIf

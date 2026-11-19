@@ -26,11 +26,20 @@ public static class Png
         Chunk(fs, "IEND", []);
     }
 
-    /// <summary>Reads an 8-bit, non-interlaced RGB or RGBA PNG (as Pillow writes) into ARGB pixels.</summary>
-    /// <summary>Any non-interlaced PNG (grey, grey+alpha, RGB, RGBA, palette; 8 or 16 bits a sample) as ARGB.</summary>
+    static readonly byte[] Signature = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    /// <summary>Any non-interlaced PNG (grey, grey+alpha, RGB, RGBA, palette; 8 or 16 bits a sample) as ARGB. Anything
+    /// else (a JPEG named as a texture) is refused: read as a PNG it was a 0 x 0 picture, and the giant bat's and the
+    /// liches' textures were written empty from their JPEGs (2026-11-06).</summary>
     public static (uint[] Argb, int Width, int Height) Read(string path)
     {
         var data = File.ReadAllBytes(path);
+        if (data.Length < 8 || !data.AsSpan(0, 8).SequenceEqual(Signature))
+        {
+            string kind = data.Length >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF ? "a JPEG"
+                : data.Length >= 2 && data[0] == (byte)'B' && data[1] == (byte)'M' ? "a BMP" : "not a PNG";
+            throw new InvalidDataException($"{path}: {kind}, and only PNG pictures are read here");
+        }
         int p = 8, width = 0, height = 0, channels = 0, depth = 8, colorType = 2;
         byte[]? palette = null, paletteAlpha = null;
         using var idat = new MemoryStream();
@@ -52,6 +61,7 @@ public static class Png
             else if (type == "IEND") break;
             p += 12 + len;
         }
+        if (width <= 0 || height <= 0) throw new InvalidDataException($"{path}: a PNG with no picture header (IHDR)");
         idat.Position = 0;
         using var z = new ZLibStream(idat, CompressionMode.Decompress);
         int bytes = depth / 8, bpp = channels * bytes, stride = width * bpp;

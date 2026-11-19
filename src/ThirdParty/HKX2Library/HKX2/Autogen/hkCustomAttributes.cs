@@ -40,7 +40,8 @@ namespace HKX2
         public bool Equals(hkCustomAttributes? other)
         {
             return other is not null &&
-                   m_attributes.Equals(other.m_attributes) &&
+                   // not filled by the readers (TYPE_SIMPLEARRAY); a null one threw NullReferenceException here before, and still does
+                   (m_attributes ?? throw new NullReferenceException("hkCustomAttributes.m_attributes is null")).Equals(other.m_attributes) &&
                    Signature == other.Signature; ;
         }
 

@@ -41,7 +41,7 @@ public sealed class LightFixturePlacer
 
     static readonly Dictionary<string, Dictionary<int, (int Width, int Height)[]>> sizeCache = new();
     readonly Dictionary<int, (int Width, int Height)[]> spriteSizes;
-    readonly List<DfPlacedPolygon> floors, ceilings, walls;
+    readonly PolyGrid floors, ceilings, walls;
 
     public LightFixturePlacer(string arena2, IEnumerable<DfPlacedPolygon> dungeonPolygons)
     {
@@ -53,15 +53,60 @@ public sealed class LightFixturePlacer
                     [E3LightsArchive] = ReadSpriteSizes(Path.Combine(arena2, $"TEXTURE.{E3LightsArchive:000}")),
                 };
         var polys = dungeonPolygons.ToList();
-        floors = polys.Where(p => p.Normal.Y > 0.7f).ToList();
-        ceilings = polys.Where(p => p.Normal.Y < -0.7f).ToList();
-        walls = polys.Where(p => MathF.Abs(p.Normal.Y) < 0.3f).ToList();
-        anyUp = polys.Where(p => p.Normal.Y > 0.3f).ToList();
-        anyDown = polys.Where(p => p.Normal.Y < -0.3f).ToList();
-        downAll = polys.Where(p => p.Normal.Y < -0.05f).ToList();
+        floors = new(polys.Where(p => p.Normal.Y > 0.7f));
+        ceilings = new(polys.Where(p => p.Normal.Y < -0.7f));
+        walls = new(polys.Where(p => MathF.Abs(p.Normal.Y) < 0.3f));
+        anyUp = new(polys.Where(p => p.Normal.Y > 0.3f));
+        anyDown = new(polys.Where(p => p.Normal.Y < -0.3f));
+        downAll = new(polys.Where(p => p.Normal.Y < -0.05f));
     }
 
-    readonly List<DfPlacedPolygon> anyUp = [], anyDown = [], downAll = [];
+    readonly PolyGrid anyUp, anyDown, downAll;
+
+    /// <summary>
+    /// Polygons binned by their extent across (Daggerfall's x and z, 256-unit bins), so a question about a point looks only
+    /// at the polygons near it (2026-11-02: each light's questions looked at every polygon of its dungeon, 11 of a dungeon
+    /// part's 79 seconds of laying out). A polygon under or over a point reaches the point's bin; a wall within a range
+    /// reaches a bin that near. The polygons come back in the order they were given, so the answers are as before.
+    /// </summary>
+    sealed class PolyGrid
+    {
+        const float Bin = 256;
+        readonly List<DfPlacedPolygon> all;
+        readonly Dictionary<(int, int), List<int>> bins = [];
+        readonly List<int> none = [];
+
+        public PolyGrid(IEnumerable<DfPlacedPolygon> polys)
+        {
+            all = polys.ToList();
+            for (int i = 0; i < all.Count; i++)
+            {
+                var pts = all[i].Points;
+                float x0 = pts.Min(q => q.X), x1 = pts.Max(q => q.X), z0 = pts.Min(q => q.Z), z1 = pts.Max(q => q.Z);
+                for (int bz = (int)MathF.Floor(z0 / Bin); bz <= (int)MathF.Floor(z1 / Bin); bz++)
+                    for (int bx = (int)MathF.Floor(x0 / Bin); bx <= (int)MathF.Floor(x1 / Bin); bx++)
+                        (bins.TryGetValue((bx, bz), out var l) ? l : bins[(bx, bz)] = []).Add(i);
+            }
+        }
+
+        public int Count => all.Count;
+
+        /// <summary>The polygons whose extent may hold the point across, in their order.</summary>
+        public IEnumerable<DfPlacedPolygon> At(float x, float z)
+        {
+            foreach (int i in bins.TryGetValue(((int)MathF.Floor(x / Bin), (int)MathF.Floor(z / Bin)), out var l) ? l : none) yield return all[i];
+        }
+
+        /// <summary>The polygons whose extent may come within <paramref name="range"/> of the point across, in their order.</summary>
+        public IEnumerable<DfPlacedPolygon> Near(float x, float z, float range)
+        {
+            var found = new SortedSet<int>();
+            for (int bz = (int)MathF.Floor((z - range) / Bin); bz <= (int)MathF.Floor((z + range) / Bin); bz++)
+                for (int bx = (int)MathF.Floor((x - range) / Bin); bx <= (int)MathF.Floor((x + range) / Bin); bx++)
+                    if (bins.TryGetValue((bx, bz), out var l)) found.UnionWith(l);
+            foreach (int i in found) yield return all[i];
+        }
+    }
 
     /// <summary>
     /// A point no room holds (Daggerfall units, Y up): nothing at all under it, or the nearest thing under it more
@@ -82,10 +127,10 @@ public sealed class LightFixturePlacer
     }
 
     /// <summary>The nearest face of <paramref name="polys"/> strictly under p, without Surface's 16-unit allowance.</summary>
-    static float? Strictly(List<DfPlacedPolygon> polys, Vector3 p, bool below)
+    static float? Strictly(PolyGrid polys, Vector3 p, bool below)
     {
         float? best = null;
-        foreach (var poly in polys)
+        foreach (var poly in polys.At(p.X, p.Z))
             for (int i = 1; i + 1 < poly.Points.Length; i++)
                 if (HeightInTriangle(poly.Points[0], poly.Points[i], poly.Points[i + 1], p.X, p.Z) is { } y
                     && (below ? y < p.Y - 4 && (best is null || y > best) : y > p.Y + 4 && (best is null || y < best)))
@@ -171,10 +216,10 @@ public sealed class LightFixturePlacer
     float? HeightBelow(Vector3 p) => Surface(floors, p, below: true);
     float? HeightAbove(Vector3 p) => Surface(ceilings, p, below: false);
 
-    static float? Surface(List<DfPlacedPolygon> polys, Vector3 p, bool below)
+    static float? Surface(PolyGrid polys, Vector3 p, bool below)
     {
         float? best = null;
-        foreach (var poly in polys)
+        foreach (var poly in polys.At(p.X, p.Z))
             for (int i = 1; i + 1 < poly.Points.Length; i++)
                 if (HeightInTriangle(poly.Points[0], poly.Points[i], poly.Points[i + 1], p.X, p.Z) is { } y
                     && (below ? y <= p.Y + 16 && (best is null || y > best) : y >= p.Y - 16 && (best is null || y < best)))
@@ -187,7 +232,8 @@ public sealed class LightFixturePlacer
     (Vector3 Point, Vector3 Normal, float Top)? NearestWall(Vector3 p, float range)
     {
         (Vector3, Vector3, float)? best = null; float bestD = range;
-        foreach (var wall in walls)
+        // Its point on the wall lies within range across, inside the wall's extent and 8 more.
+        foreach (var wall in walls.Near(p.X, p.Z, range + 8))
         {
             var n = Vector3.Normalize(new Vector3(wall.Normal.X, 0, wall.Normal.Z));
             float d = Vector3.Dot(p - wall.Points[0], n);

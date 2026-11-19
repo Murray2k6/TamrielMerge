@@ -11,6 +11,13 @@ Int Property Place = -1 Auto
 Int[] Property Reveals Auto
 {The "Tell me about" keys the answer names (place n, person 20 + n, item 40 + n).}
 
+; The tone's reactions for "any work" (its modifier 0: TalkTone); a refused answer (reaction 0) has no offer after it.
+Function Fragment_Begin(ObjectReference akSpeakerRef)
+  If Service == 0
+    Machine.RollTalk(0)
+  EndIf
+EndFunction
+
 Function Fragment_End(ObjectReference akSpeakerRef)
   If Service == 0
     Machine.OfferFrom(akSpeakerRef as Actor)

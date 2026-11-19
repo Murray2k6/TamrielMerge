@@ -6,12 +6,15 @@ namespace TamrielMerge.Skyrim.Terrain;
 public sealed record TerrainSettings
 {
     /// <summary>
-    /// Daggerfall map pixels per Skyrim cell edge. 4 => 250x125 cells (~1.9x Skyrim's land area, one worldspace);
-    /// 2 => 500x250 (~8x, in tiles: OverlandTiles); 1 => 1000x500 (~30x, 15 tiles). Daggerfall's own scale would be
-    /// 1/16. 1 since 2026-10-12 (user: "daggerfall has a big map"; "Twice as big"): the land's slopes half as steep
-    /// for the same heights (it was 2).
+    /// Daggerfall map pixels per Skyrim cell edge. 4 => 250x125 cells (~1.9x Skyrim's land area); 2 => 500x250 (~8x);
+    /// 1 => 1000x500 (~30x); 0.5 => 2000x1000 (~120x, two tiles: OverlandTiles). Daggerfall's own scale would be 1/16.
+    /// 0.5 since 2026-10-25 (user chose "Bigger overland" so the locations go on it at full size: at 1 their
+    /// footprints covered 180,720 of the 399,800 land cells and small places moved a median 38 cells to find room;
+    /// `locations --layout`). Was 1 since 2026-10-12 ("daggerfall has a big map"; "Twice as big").
     /// </summary>
-    public int PixelsPerCell { get; init; } = 1;
+    public double PixelsPerCell { get; init; } = 0.5;
+    /// <summary>The overland's cells across and down for these settings.</summary>
+    public (int X, int Y) Cells => ((int)Math.Ceiling(DfWorldMap.Width / PixelsPerCell), (int)Math.Ceiling(DfWorldMap.Height / PixelsPerCell));
     /// <summary>Skyrim units per Daggerfall Unity "scaled height" unit (max land ~1500 scaled).</summary>
     public float VerticalScale { get; init; } = 10f;
     /// <summary>Height multiplier grows by 1 per this many scaled units above sea level. 2000 since 2026-10-12 (it was
@@ -26,7 +29,7 @@ public sealed record TerrainSettings
 /// Global terrain heights for the whole Daggerfall map on Skyrim's vertex grid (32 quads of 128 units per cell).
 /// Row 0 is the southern edge; Skyrim's Y axis points north while Daggerfall's map rows run north to south.
 /// </summary>
-public sealed unsafe class HeightField
+public sealed unsafe class HeightField : IDisposable
 {
     public const int QuadsPerCell = 32, UnitsPerQuad = 128;
 
@@ -38,12 +41,30 @@ public sealed unsafe class HeightField
     /// <summary>Skyrim grid coordinate of the south-west cell.</summary>
     public int MinCellX => -CellsX / 2;
     public int MinCellY => -CellsY / 2;
-    /// <summary>Heights in Skyrim units, sea level at 0, indexed [vy * VertsX + vx]; null when read from a shared file
-    /// (<see cref="Shared"/>), then <see cref="At"/> reads them.</summary>
-    public float[]? Heights { get; init; }
-    float* mapped;
+    /// <summary>Heights in whole Skyrim units, sea level at 0, indexed [vy * VertsX + vx]; null when read from a shared
+    /// file (<see cref="Shared"/>), then <see cref="At"/> reads them. Two bytes each: the 2000 x 1000-cell overland has
+    /// 2.05 billion vertices, 8.2 GB as floats; its heights (about -3,500 to 22,000) fit a short, and the land records
+    /// keep only steps of 8 units.</summary>
+    public short[]? Heights { get; init; }
+    short* mapped;
+    // The shared file's mapping, held while the heights are read through mapped: unheld, the collector could close it
+    // under that pointer. Released by Dispose (else at the process's end).
     MemoryMappedFile? mappedFile;
     MemoryMappedViewAccessor? mappedView;
+
+    /// <summary>Lets go of a shared file's mapping (<see cref="Shared"/>); the heights can't be read after.</summary>
+    public void Dispose()
+    {
+        if (mappedView is { } view)
+        {
+            view.SafeMemoryMappedViewHandle.ReleasePointer();
+            view.Dispose();
+        }
+        mappedFile?.Dispose();
+        mappedView = null;
+        mappedFile = null;
+        mapped = null;
+    }
 
     public float At(int vx, int vy)
     {
@@ -51,13 +72,25 @@ public sealed unsafe class HeightField
         return Heights is { } h ? h[i] : mapped[i];
     }
 
+    /// <summary>A height in the range a vertex holds.</summary>
+    public static short Store(double h) => (short)Math.Clamp(Math.Round(h), short.MinValue, short.MaxValue);
+
     /// <summary>The highest point.</summary>
     public float Peak()
     {
         if (Heights is { } h) return h.Max();
-        float peak = float.MinValue;
+        short peak = short.MinValue;
         for (long i = 0, n = (long)VertsX * VertsY; i < n; i++) peak = Math.Max(peak, mapped[i]);
         return peak;
+    }
+
+    /// <summary>The lowest point.</summary>
+    public float Lowest()
+    {
+        if (Heights is { } h) return h.Min();
+        short low = short.MaxValue;
+        for (long i = 0, n = (long)VertsX * VertsY; i < n; i++) low = Math.Min(low, mapped[i]);
+        return low;
     }
 
     /// <summary>
@@ -66,7 +99,7 @@ public sealed unsafe class HeightField
     /// (<see cref="Save"/>) to the file TAMRIELMERGE_HEIGHTS names, and every part reads that file in place: the
     /// system keeps one copy in memory for all of them. Made here when there is no file or it is for other settings.
     /// </summary>
-    public static HeightField Shared(DfWorldMap map, TerrainSettings s)
+    public static HeightField Shared(DfWorldMap map, TerrainSettings s, IEnumerable<DfLocation> locations)
     {
         if (Environment.GetEnvironmentVariable("TAMRIELMERGE_HEIGHTS") is { Length: > 0 } path && File.Exists(path))
         {
@@ -78,22 +111,25 @@ public sealed unsafe class HeightField
                 view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
                 p += view.PointerOffset;
                 var head = System.Text.Encoding.UTF8.GetString(p, HeaderSize).TrimEnd('\0').Split('\n');
-                int cellsX = (DfWorldMap.Width + s.PixelsPerCell - 1) / s.PixelsPerCell, cellsY = (DfWorldMap.Height + s.PixelsPerCell - 1) / s.PixelsPerCell;
+                var (cellsX, cellsY) = s.Cells;
                 if (head.Length >= 4 && head[0] == Magic && head[1] == cellsX.ToString() && head[2] == cellsY.ToString() && head[3] == s.ToString())
-                    return new HeightField { Settings = s, CellsX = cellsX, CellsY = cellsY, mapped = (float*)(p + HeaderSize), mappedFile = file, mappedView = view };
+                    return new HeightField { Settings = s, CellsX = cellsX, CellsY = cellsY, mapped = (short*)(p + HeaderSize), mappedFile = file, mappedView = view };
                 view.SafeMemoryMappedViewHandle.ReleasePointer();
                 view.Dispose(); file.Dispose();
                 Console.WriteLine($"Heights: {Path.GetFileName(path)} is for other settings; making them here");
             }
             catch (IOException e) { Console.WriteLine($"Heights: {path} unreadable ({e.Message}); making them here"); }
         }
-        return Generate(map, s);
+        return Daggerfall(map, s, locations).Field;
     }
 
-    const string Magic = "TamrielMerge heights 1";
+    /// <summary>"4": shorts, the locations' footprints levelled and sunk under their ground (LocationLayout.Sink; "3" level
+    /// with it, "1" unlevelled floats).</summary>
+    // 5: the footprints levelled after every blend (LocationLayout.Level, 2026-11-02).
+    const string Magic = "TamrielMerge heights 5";
     const int HeaderSize = 4096;
 
-    /// <summary>Writes the heights for <see cref="Shared"/>: a header naming their size and settings, then the floats.</summary>
+    /// <summary>Writes the heights for <see cref="Shared"/>: a header naming their size and settings, then the shorts.</summary>
     public void Save(string path)
     {
         if (Heights is not { } h) throw new InvalidOperationException("Only made heights are saved");
@@ -103,7 +139,11 @@ public sealed unsafe class HeightField
             var head = new byte[HeaderSize];
             System.Text.Encoding.UTF8.GetBytes($"{Magic}\n{CellsX}\n{CellsY}\n{Settings}").CopyTo(head, 0);
             f.Write(head);
-            f.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(h.AsSpan()));
+            // In pieces: at two cells a map pixel the heights are 4.1 GB, past the 2 GB a span of bytes can hold
+            // (2026-10-26: one write overflowed as the town parts began).
+            const int piece = 1 << 26;
+            for (long at = 0; at < h.LongLength; at += piece)
+                f.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(h.AsSpan((int)at, (int)Math.Min(piece, h.LongLength - at))));
         }
         File.Move(temp, path, overwrite: true);
     }
@@ -111,15 +151,14 @@ public sealed unsafe class HeightField
     /// <summary>Continuous Daggerfall map-pixel coordinate (x east, y south) of a global vertex.</summary>
     public (double u, double v) PixelCoord(int vx, int vy)
     {
-        double perVert = (double)Settings.PixelsPerCell / QuadsPerCell;
+        double perVert = Settings.PixelsPerCell / QuadsPerCell;
         return (vx * perVert, CellsY * Settings.PixelsPerCell - vy * perVert);
     }
 
     public static HeightField Generate(DfWorldMap map, TerrainSettings s)
     {
-        int cellsX = (DfWorldMap.Width + s.PixelsPerCell - 1) / s.PixelsPerCell;
-        int cellsY = (DfWorldMap.Height + s.PixelsPerCell - 1) / s.PixelsPerCell;
-        var field = new HeightField { Settings = s, CellsX = cellsX, CellsY = cellsY, Heights = new float[(cellsX * QuadsPerCell + 1) * (cellsY * QuadsPerCell + 1)] };
+        var (cellsX, cellsY) = s.Cells;
+        var field = new HeightField { Settings = s, CellsX = cellsX, CellsY = cellsY, Heights = new short[(long)(cellsX * QuadsPerCell + 1) * (cellsY * QuadsPerCell + 1)] };
         var coastDistance = CoastDistance(map, s);
         // WOODS.WLD's fine grid is the coarse height plus +-2 jitter per sample. At Daggerfall's own scale
         // (819 m per pixel) that reads as gentle rolling ground; compressed to this scale it becomes spikes,
@@ -128,7 +167,7 @@ public sealed unsafe class HeightField
         // The coarse map is whole numbers, which bicubic sampling turns into terraces; soften the steps.
         var coarseSmooth = BoxBlur(map.Elevation.Select(b => (float)b).ToArray(), DfWorldMap.Width, DfWorldMap.Height, 1);
         var fineSmooth = BoxBlur(BoxBlur(map.FineElevation.Select(b => (float)b).ToArray(), fw, fh, 3), fw, fh, 3);
-        double unitsPerPixel = (double)QuadsPerCell * UnitsPerQuad / s.PixelsPerCell;
+        double unitsPerPixel = QuadsPerCell * UnitsPerQuad / s.PixelsPerCell;
 
         Parallel.For(0, field.VertsY, vy =>
         {
@@ -155,11 +194,23 @@ public sealed unsafe class HeightField
                     double ramp = Math.Clamp(-h / 150, 0, 1);
                     h -= Math.Min(d, 10) * 350 * ramp * ramp * (3 - 2 * ramp);
                 }
-                field.Heights![vy * field.VertsX + vx] = (float)h;
+                field.Heights![(long)vy * field.VertsX + vx] = Store(h);
             }
         });
-        LimitSlope(field.Heights!, field.VertsX, field.VertsY, MaxStep);
+        LimitSlope(field.Heights!, field.VertsX, field.VertsY, (short)MaxStep);
         return field;
+    }
+
+    /// <summary>
+    /// The overland's heights as the Daggerfall conversion builds on them: made (<see cref="Generate"/>), then the land
+    /// under every location's footprint levelled (<see cref="LocationLayout"/>), with the layout.
+    /// </summary>
+    public static (HeightField Field, LocationLayout Layout) Daggerfall(DfWorldMap map, TerrainSettings s, IEnumerable<DfLocation> locations)
+    {
+        var field = Generate(map, s);
+        var layout = LocationLayout.Make(field, locations);
+        layout.Level(field);
+        return (field, layout);
     }
 
     /// <summary>LAND heights are signed-byte deltas of 8 units, so neighbours may differ by at most 127 * 8.</summary>
@@ -169,22 +220,22 @@ public sealed unsafe class HeightField
     /// Raise-only slope limiter: sweep each axis both ways lifting any vertex more than <paramref name="limit"/>
     /// below its neighbour, until stable. Raising fills pits and sea floor rather than cutting down land.
     /// </summary>
-    static void LimitSlope(float[] h, int w, int rows, float limit)
+    static void LimitSlope(short[] h, int w, int rows, short limit)
     {
         for (int pass = 0; pass < 20; pass++)
         {
             int changed = 0;
             Parallel.For(0, rows, () => 0, (y, _, local) =>
             {
-                int o = y * w;
-                for (int x = 1; x < w; x++) if (h[o + x] < h[o + x - 1] - limit) { h[o + x] = h[o + x - 1] - limit; local++; }
-                for (int x = w - 2; x >= 0; x--) if (h[o + x] < h[o + x + 1] - limit) { h[o + x] = h[o + x + 1] - limit; local++; }
+                long o = (long)y * w;
+                for (int x = 1; x < w; x++) if (h[o + x] < h[o + x - 1] - limit) { h[o + x] = (short)(h[o + x - 1] - limit); local++; }
+                for (int x = w - 2; x >= 0; x--) if (h[o + x] < h[o + x + 1] - limit) { h[o + x] = (short)(h[o + x + 1] - limit); local++; }
                 return local;
             }, local => Interlocked.Add(ref changed, local));
             Parallel.For(0, w, () => 0, (x, _, local) =>
             {
-                for (int y = 1; y < rows; y++) if (h[y * w + x] < h[(y - 1) * w + x] - limit) { h[y * w + x] = h[(y - 1) * w + x] - limit; local++; }
-                for (int y = rows - 2; y >= 0; y--) if (h[y * w + x] < h[(y + 1) * w + x] - limit) { h[y * w + x] = h[(y + 1) * w + x] - limit; local++; }
+                for (int y = 1; y < rows; y++) if (h[(long)y * w + x] < h[(long)(y - 1) * w + x] - limit) { h[(long)y * w + x] = (short)(h[(long)(y - 1) * w + x] - limit); local++; }
+                for (int y = rows - 2; y >= 0; y--) if (h[(long)y * w + x] < h[(long)(y + 1) * w + x] - limit) { h[(long)y * w + x] = (short)(h[(long)(y + 1) * w + x] - limit); local++; }
                 return local;
             }, local => Interlocked.Add(ref changed, local));
             if (changed == 0) return;

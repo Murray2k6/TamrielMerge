@@ -29,8 +29,13 @@ public static class SkyrimRotation
         // R[i,j] = m[j,i].
         float b = MathF.Asin(Math.Clamp(m.M31, -1, 1));
         float a, c;
-        if (MathF.Abs(MathF.Cos(b)) > 1e-4f) { a = MathF.Atan2(-m.M32, m.M33); c = MathF.Atan2(-m.M21, m.M11); }
-        else { a = 0; c = MathF.Atan2(m.M12, m.M22); }
+        // A quarter turn about the middle axis leaves the other two turning about one line: one of them is taken as 0.
+        // Told by the matrix's own element, not by the angle's cosine: an exact quarter turn comes out of single
+        // precision as 0.99999994, whose angle's cosine is 3.4e-4, and the two angles were then read from the rounding
+        // noise of elements that should be 0 (2026-11-11, rg-euler-test with quarter turns: an error of 2, a full
+        // reversal; Redguard's banners, laid flat in their models and hung by their placement, stood at odd angles).
+        if (MathF.Abs(m.M31) < 0.999999f) { a = MathF.Atan2(-m.M32, m.M33); c = MathF.Atan2(-m.M21, m.M11); }
+        else { b = MathF.CopySign(MathF.PI / 2, m.M31); a = 0; c = MathF.Atan2(m.M12, m.M22); }
         return new Vector3(Wrap(-a), Wrap(-b), Wrap(-c));
     }
 

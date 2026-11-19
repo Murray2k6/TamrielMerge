@@ -87,12 +87,13 @@ public static class CreatureBones
             using var cache = new nifly.niflycpp.BlockCache(body.GetHeader());
             int shapes = 0, vertices = 0, overFour = 0, unweighted = 0, notWhole = 0; float worstBind = 0; string worstBindBone = "";
             var usedBones = new HashSet<string>();
-            // A tint copy ("<shape> [tint k]", MwCreatureSource) binds as its shape: its source shape's place by name.
+            // A tint copy ("<shape> [tint k]", MwCreatureSource) or a part ("<shape> [part k]", CreatureRig.SplitWideMeshes)
+            // binds as its shape: its source shape's place by name.
             var shapeNames = body.GetShapes().Select(s => s.name.get()).ToList();
             foreach (var shape in body.GetShapes())
             {
                 shapes++;
-                string baseName = System.Text.RegularExpressions.Regex.Replace(shape.name.get(), @" \[tint \d+\]$", "");
+                string baseName = CreatureRig.PartOf(shape.name.get());
                 int sourceShape = baseName != shape.name.get() && shapeNames.IndexOf(baseName) is >= 0 and var at ? at : shapes - 1;
                 using var bl = new nifly.vectorstring();
                 body.GetShapeBoneList(shape, bl);
@@ -133,6 +134,9 @@ public static class CreatureBones
             if (unweighted > 0) Issue($"{unweighted} vertices on no bone");
             if (notWhole > 0) Issue($"{notWhole} vertices whose weights don't add to 1");
         }
+        var (partitionLine, partitionIssues) = Partitions(Path.Combine(folder, id + ".nif"));
+        lines.Add("  " + partitionLine);
+        foreach (var pi in partitionIssues) Issue(pi);
 
         // Animations: a track per bone, bound in order.
         int anims = 0;
@@ -203,5 +207,80 @@ public static class CreatureBones
             if (worst > 0.05f) Issue($"{worstName} is {worst:F3} from the Morrowind node it came from");
         }
         return new Report(n, issues, lines);
+    }
+
+    /// <summary>
+    /// Whether a body's skin partitions can draw it (what the game skins with; 2026-11-06, every creature body had
+    /// partitions with no bones and the game drew none of them): every shape's triangles and vertices in its partitions,
+    /// each partition 1 to <see cref="CreatureRig.MaxPartitionBones"/> bones, each partition vertex's weights the skin data's
+    /// (weights under 0.005 aside: a partition drops them), and the shared vertex data's bone numbers the shape's (as
+    /// vanilla's: the draugr's body, 3,470 of 3,470). Returns a summary line and the issues.
+    /// </summary>
+    public static (string Line, List<string> Issues) Partitions(string nifPath)
+    {
+        var issues = new List<string>();
+        int shapes = 0, partitions = 0, most = 0, checkedVerts = 0;
+        using var nif = new nifly.NifFile();
+        if (nif.Load(nifPath) != 0) return ("partitions: the body didn't load", [$"{Path.GetFileName(nifPath)} didn't load"]);
+        using var cache = new nifly.niflycpp.BlockCache(nif.GetHeader());
+        // A skinned body's root is a plain NiNode: the game draws none of one under a BSFadeNode (in game, 2026-11-09).
+        string rootType = nif.GetHeader().GetBlockById(0).GetBlockName();
+        if (rootType != "NiNode") issues.Add($"{Path.GetFileName(nifPath)}: its root is a {rootType}, not a NiNode (the game won't draw the body)");
+        foreach (var shape in nif.GetShapes())
+        {
+            uint instId = shape.SkinInstanceRef().index;
+            if (instId == uint.MaxValue) continue;
+            string name = shape.name.get();
+            var inst = cache.EditableBlockById<nifly.NiSkinInstance>(instId);
+            var sd = inst is null ? null : cache.EditableBlockById<nifly.NiSkinData>(inst.dataRef.index);
+            var sp = inst is null ? null : cache.EditableBlockById<nifly.NiSkinPartition>(inst.skinPartitionRef.index);
+            if (sd is null || sp is null) { issues.Add($"{name}: no skin data or no skin partition"); continue; }
+            shapes++;
+            var want = new Dictionary<int, Dictionary<int, float>>();
+            for (int b = 0; b < sd.bones.Count; b++)
+                foreach (var sw in sd.bones[b].vertexWeights)
+                    if (sw.weight >= 0.005f) (want.TryGetValue(sw.index, out var d) ? d : want[sw.index] = [])[b] = sw.weight;
+            bool Same(Dictionary<int, float> got, int v)
+            {
+                var w = want.GetValueOrDefault(v) ?? [];
+                return w.Count == got.Count(g => g.Value >= 0.005f) && w.All(x => MathF.Abs(got.GetValueOrDefault(x.Key) - x.Value) < 0.01f);
+            }
+            int triangles = 0, badWeights = 0;
+            var covered = new HashSet<int>();
+            for (int p = 0; p < sp.partitions.Count; p++)
+            {
+                var pb = sp.partitions[p];
+                partitions++;
+                most = Math.Max(most, pb.bones.Count);
+                if (pb.bones.Count == 0) issues.Add($"{name}: partition {p + 1} has no bones");
+                else if (pb.bones.Count > CreatureRig.MaxPartitionBones) issues.Add($"{name}: partition {p + 1} has {pb.bones.Count} bones (at most {CreatureRig.MaxPartitionBones})");
+                triangles += pb.triangles.Count;
+                for (int j = 0; j < pb.vertexMap.Count; j++)
+                {
+                    int v = pb.vertexMap[j];
+                    covered.Add(v);
+                    checkedVerts++;
+                    if (j >= pb.vertexWeights.Count || j >= pb.boneIndices.Count) { badWeights++; continue; }
+                    var vw = pb.vertexWeights[j]; var bi = pb.boneIndices[j];
+                    var got = new Dictionary<int, float>();
+                    foreach (var (k, w) in new[] { (bi.i1, vw.w1), (bi.i2, vw.w2), (bi.i3, vw.w3), (bi.i4, vw.w4) })
+                        if (w > 0 && k < pb.bones.Count) got[pb.bones[k]] = got.GetValueOrDefault(pb.bones[k]) + w;
+                    if (!Same(got, v)) badWeights++;
+                }
+            }
+            int shared = 0;
+            for (int v = 0; v < sp.vertData.Count; v++)
+            {
+                var vd = sp.vertData[v];
+                var got = new Dictionary<int, float>();
+                for (int k = 0; k < 4; k++) if (vd.weights[k] > 0) got[vd.weightBones[k]] = got.GetValueOrDefault(vd.weightBones[k]) + vd.weights[k];
+                if (!Same(got, v)) shared++;
+            }
+            if (triangles != shape.GetNumTriangles()) issues.Add($"{name}: its partitions hold {triangles} of its {shape.GetNumTriangles()} triangles");
+            if (covered.Count != shape.GetNumVertices()) issues.Add($"{name}: its partitions hold {covered.Count} of its {shape.GetNumVertices()} vertices");
+            if (badWeights > 0) issues.Add($"{name}: {badWeights} partition vertices weighted unlike the skin data");
+            if (shared > 0) issues.Add($"{name}: {shared} of its {sp.vertData.Count} vertices' shared skinning unlike the skin data");
+        }
+        return ($"partitions: {shapes} shapes in {partitions} partitions, at most {most} bones each, {checkedVerts} partition vertices checked", issues);
     }
 }

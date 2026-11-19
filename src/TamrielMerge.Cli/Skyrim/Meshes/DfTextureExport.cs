@@ -151,12 +151,36 @@ public sealed class DfTextureExport(string arena2, string modOutDir)
     readonly Dictionary<(int, int), (string Path, int W, int H)> done = new();
     byte[]? palette;
 
+    /// <summary>
+    /// A Daggerfall texture for the land ({archive}_{record}_land.dds): the same picture with no alpha. Skyrim's land
+    /// takes a land texture's alpha as its shine (its own carry about 60 to 75 of 255, measured 2026-11-10); the
+    /// textures made for models are opaque, 255, and the land was as shiny as it can be.
+    /// </summary>
+    public string EnsureLand(int archive, int record)
+    {
+        var (rel, _, _) = Ensure(archive, record);
+        string land = System.IO.Path.ChangeExtension(rel, null) + "_land.dds";
+        string full = System.IO.Path.Combine(modOutDir, land);
+        if (File.Exists(full)) return land;
+        palette ??= DfTexture.Palette(arena2);
+        var tex = DfTexture.Load(arena2, archive)!;
+        var img = tex.Image(Math.Min(record, tex.Count - 1));
+        var (big, w, h) = Upscaled(archive, Math.Min(record, tex.Count - 1)) ?? Scale2x(Scale2x((Colours(img.Pixels, palette), img.Width, img.Height)));
+        var matte = new uint[big.Length];
+        for (int i = 0; i < big.Length; i++) matte[i] = big[i] & 0x00FFFFFFu;
+        WriteDds(full, matte, w, h);
+        return land;
+    }
+
     /// <summary>The DDS (data-relative path) for a Daggerfall texture and its size in Daggerfall texels.</summary>
     public (string Path, int W, int H) Ensure(int archive, int record)
     {
         if (done.TryGetValue((archive, record), out var hit)) return hit;
         palette ??= DfTexture.Palette(arena2);
         var tex = DfTexture.Load(arena2, archive) ?? throw new FileNotFoundException($"TEXTURE.{archive:D3}");
+        // A record the archive hasn't: its last stands in, and the log says so (2026-11-04: town ground tile 0xFF read as
+        // record 63 of 56 was clamped without a word, one tile repeated over whole blocks).
+        if (record >= tex.Count) Console.WriteLine($"  texture TEXTURE.{archive:D3} has no record {record} ({tex.Count} records): its last ({tex.Count - 1}) stands in");
         var img = tex.Image(Math.Min(record, tex.Count - 1));
         string rel = $@"textures\tamrielmerge\df\{archive}_{record}.dds";
         string full = Path.Combine(modOutDir, rel);

@@ -35,11 +35,21 @@ public static class TerrainBuilder
         ("MountainDirt", 102, 1, 510, DirtGrass), ("MountainGrass", 102, 2, 510, 1), ("MountainStone", 102, 3, 510, StoneGrass),
         ("TemperateDirt", 302, 1, 504, DirtGrass), ("TemperateGrass", 302, 2, 504, 1), ("TemperateStone", 302, 3, 504, StoneGrass),
         ("SwampDirt", 402, 1, 502, DirtGrass), ("SwampGrass", 402, 2, 502, 1), ("SwampStone", 402, 3, 502, StoneGrass),
+        // The ground under a location (LocationLayout's footprints, each climate's dirt, no grass): the location's own
+        // ground mesh lies on it, and grass grown on the land beneath came up through its streets and floors.
+        ("DesertTown", 2, 1, 503, 0), ("SubtropicalTown", 2, 1, 501, 0), ("MountainTown", 102, 1, 510, 0),
+        ("TemperateTown", 302, 1, 504, 0), ("SwampTown", 402, 1, 502, 0),
     ];
     const float DirtGrass = 0.2f / 0.9f, StoneGrass = 0.05f / 0.9f;
     enum Group { Desert, Subtropical, Mountain, Temperate, Swamp }
     const int Dirt = 0, Grassy = 1, Stone = 2, Kinds = 3, Groups = 5;
+    /// <summary>The first town ground entry (one per group, in the groups' order).</summary>
+    const int TownGround = Groups * Kinds;
     static readonly int TexCount = Ground.Length;
+
+    /// <summary>Whether a global vertex (the height field's grid) is under a location (LocationLayout.CoversVertex), for
+    /// the land textures there; unset, nowhere is.</summary>
+    public static Func<int, int, bool>? Settled { get; set; }
 
     static Group GroupOf(DfClimate c) => c switch
     {
@@ -79,7 +89,7 @@ public static class TerrainBuilder
             var (name, archive, record, _, _) = Ground[i];
             if (!made.TryGetValue((archive, record), out var set))
             {
-                string path = export.Ensure(archive, record).Path;
+                string path = export.EnsureLand(archive, record);
                 set = new TextureSet(mod)
                 {
                     EditorID = $"DFLandSet{archive}_{record}",
@@ -103,7 +113,7 @@ public static class TerrainBuilder
             foreach (var g in grass.For(i)) lt.Grasses.Add(g.ToLink<IGrassGetter>());
             mod.LandscapeTextures.Add(lt);
             forms[i] = lt.FormKey;
-            TerrainLod.KnownDiffuse[lt.FormKey] = @"textures\" + set.Diffuse!.DataRelativePath.Path;
+            TerrainLod.KnownDiffuse[lt.FormKey] = TerrainLod.TexturePath(set.Diffuse!.DataRelativePath.Path);
         }
         return daggerfallForms = forms;
     }
@@ -218,7 +228,9 @@ public static class TerrainBuilder
     /// The cell at field cell (<paramref name="cx"/>, <paramref name="cy"/>) with its land, at grid
     /// (<paramref name="gx"/>, <paramref name="gy"/>) of the worldspace it goes in; null when it lies all under the sea.
     /// </summary>
-    public static Cell? BuildCell(SkyrimMod mod, HeightField f, DfWorldMap map, int cx, int cy, float peak, int gx, int gy)
+    /// <param name="existing">The master's own cell at that grid point (a town Daggerfall.esm builds on the overland, its
+    /// cells without land): overridden with the land added, keeping its location and the rest.</param>
+    public static Cell? BuildCell(SkyrimMod mod, HeightField f, DfWorldMap map, int cx, int cy, float peak, int gx, int gy, ICellGetter? existing = null)
     {
         const int n = HeightField.QuadsPerCell + 1;
         int vx0 = cx * HeightField.QuadsPerCell, vy0 = cy * HeightField.QuadsPerCell;
@@ -246,6 +258,14 @@ public static class TerrainBuilder
         land.Layers.AddRange(BuildLayers(f, map, vx0, vy0, peak));
         land.IsCompressed = true;
 
+        if (existing is not null)
+        {
+            var over = existing.DeepCopy(new Cell.TranslationMask(defaultOn: true) { Persistent = false, Temporary = false, Landscape = false, NavigationMeshes = false });
+            over.Persistent.Clear(); over.Temporary.Clear(); over.NavigationMeshes.Clear();
+            if (min < 0) over.Flags |= Cell.Flag.HasWater;
+            over.Landscape = land;
+            return over;
+        }
         return new Cell(mod)
         {
             Grid = new CellGrid { Point = new P2Int(gx, gy) },
@@ -326,6 +346,14 @@ public static class TerrainBuilder
         float nz = (float)Normal(f, vx, vy).z;
         Shift(w, Dirt, 1 - Smooth(60, 260, h));      // beach and sea floor
         Shift(w, Stone, Smooth(0.86f, 0.72f, nz));    // ~31 to ~44 degrees
+        // Under a location: each climate's weight on its town ground.
+        if (Settled is { } settled && settled(vx, vy))
+            for (int g = 0; g < Groups; g++)
+            {
+                float total = w[g * Kinds] + w[g * Kinds + 1] + w[g * Kinds + 2];
+                w[g * Kinds] = w[g * Kinds + 1] = w[g * Kinds + 2] = 0;
+                w[TownGround + g] += total;
+            }
     }
 
     /// <summary>Moves <paramref name="a"/> of each climate's weight to its <paramref name="kind"/> of ground.</summary>
@@ -340,44 +368,106 @@ public static class TerrainBuilder
         }
     }
 
+    /// <summary>The grounds each world quadrant lays (a bit a ground), by quadrant; made once, asked for by neighbours.</summary>
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int), uint> keptCache = new();
+    /// <summary>Quadrants that held more than six grounds, and vertices given another ground because a quadrant they
+    /// lie on could not hold theirs.</summary>
+    public static int CrowdedQuadrants, VerticesRestood, NothingShared;
+
+    /// <summary>The (up to six) grounds the world quadrant at (<paramref name="qx"/>, <paramref name="qy"/>) lays
+    /// (quadrants of 16 quads of the height field's grid), commonest first.</summary>
+    internal static int[] Order(HeightField f, DfWorldMap map, int qx, int qy, float peak, float[]? w = null)
+    {
+        w ??= new float[QuadVerts * QuadVerts * TexCount];
+        Span<float> totals = stackalloc float[TexCount];
+        for (int ly = 0; ly < QuadVerts; ly++)
+            for (int lx = 0; lx < QuadVerts; lx++)
+            {
+                var span = w.AsSpan((ly * QuadVerts + lx) * TexCount, TexCount);
+                Weights(f, map, qx * 16 + lx, qy * 16 + ly, peak, span);
+                for (int t = 0; t < TexCount; t++) totals[t] += span[t];
+            }
+        var held = new List<int>();
+        for (int t = 0; t < TexCount; t++) if (totals[t] > 0.05f) held.Add(t);
+        var sums = totals.ToArray();
+        var order = held.OrderByDescending(t => sums[t]).ThenBy(t => t).Take(6).ToArray();
+        uint mask = 0;
+        foreach (int t in order) mask |= 1u << t;
+        if (keptCache.Count > 4_000_000) keptCache.Clear();
+        if (keptCache.TryAdd((qx, qy), mask) && held.Count > 6) Interlocked.Increment(ref CrowdedQuadrants);
+        return order;
+    }
+
+    static uint Kept(HeightField f, DfWorldMap map, int qx, int qy, float peak)
+    {
+        if (keptCache.TryGetValue((qx, qy), out uint mask)) return mask;
+        mask = 0;
+        foreach (int t in Order(f, map, qx, qy, peak)) mask |= 1u << t;
+        return mask;
+    }
+
     /// <summary>
-    /// One base layer plus alpha layers per quadrant. Skyrim paints alpha layers in order over the base, so
-    /// a layer's opacity is its weight divided by the total weight of itself and everything beneath it.
+    /// One base layer plus alpha layers per quadrant. A quadrant holds six grounds, and a vertex on a quadrant's edge
+    /// is its neighbours' too: it keeps only the grounds that every quadrant it lies on lays (and where none of its
+    /// own is, takes one they all lay: its own kind of ground in another climate, else the first), so that both sides
+    /// of an edge draw the same ground there. Grounds dropped by one quadrant alone showed as a straight seam along
+    /// the edge (Redguard's land, 2026-11-12).
     /// </summary>
     static IEnumerable<BaseLayer> BuildLayers(HeightField f, DfWorldMap map, int vx0, int vy0, float peak)
     {
-        const int maxAlphaLayers = 5;
         var w = new float[QuadVerts * QuadVerts * TexCount];
-        var totals = new float[TexCount];
         for (int q = 0; q < 4; q++)
         {
-            int qx = (q & 1) * 16, qy = (q >> 1) * 16;
-            Array.Clear(totals);
+            int qx = vx0 / 16 + (q & 1), qy = vy0 / 16 + (q >> 1);
+            var order = Order(f, map, qx, qy, peak, w);
+            if (order.Length == 0) continue;
+            uint own = 0;
+            foreach (int t in order) own |= 1u << t;
+            // The eight quadrants round this one, asked for only where a vertex lies on them.
+            var round = new uint?[9];
+            uint Round(int ox, int oy) => round[(oy + 1) * 3 + ox + 1] ??= Kept(f, map, qx + ox, qy + oy, peak);
             for (int ly = 0; ly < QuadVerts; ly++)
                 for (int lx = 0; lx < QuadVerts; lx++)
                 {
                     var span = w.AsSpan((ly * QuadVerts + lx) * TexCount, TexCount);
-                    Weights(f, map, vx0 + qx + lx, vy0 + qy + ly, peak, span);
-                    for (int t = 0; t < TexCount; t++) totals[t] += span[t];
+                    uint allowed = own;
+                    for (int oy = ly == 0 ? -1 : 0; oy <= (ly == 16 ? 1 : 0); oy++)
+                        for (int ox = lx == 0 ? -1 : 0; ox <= (lx == 16 ? 1 : 0); ox++)
+                            if (ox != 0 || oy != 0) { uint theirs = Round(ox, oy); if (theirs != 0) allowed &= theirs; }
+                    if (allowed == 0) { allowed = own; Interlocked.Increment(ref NothingShared); }   // nothing in common: this quadrant's own
+                    float sum = 0, most = 0;
+                    int main = 0;
+                    for (int t = 0; t < TexCount; t++)
+                    {
+                        if (span[t] > most) { most = span[t]; main = t; }
+                        if ((allowed >> t & 1) != 0) sum += span[t]; else span[t] = 0;
+                    }
+                    if (sum > 0) { for (int t = 0; t < TexCount; t++) span[t] /= sum; continue; }
+                    int stand = -1;
+                    if (main < TownGround)
+                        for (int t = main % Kinds; t < TownGround && stand < 0; t += Kinds) if ((allowed >> t & 1) != 0) stand = t;
+                    for (int t = 0; t < TexCount && stand < 0; t++) if ((allowed >> t & 1) != 0) stand = t;
+                    span[stand] = 1;
+                    Interlocked.Increment(ref VerticesRestood);
                 }
 
-            var order = Enumerable.Range(0, TexCount).Where(t => totals[t] > 0.05f).OrderByDescending(t => totals[t]).Take(maxAlphaLayers + 1).ToArray();
             var quadrant = (Quadrant)q;
             yield return new BaseLayer { Header = new LayerHeader { Texture = Form(order[0]).ToLink<ILandscapeTextureGetter>(), Quadrant = quadrant } };
-
+            ushort number = 0;
             for (int li = 1; li < order.Length; li++)
             {
-                var layer = new AlphaLayer { Header = new LayerHeader { Texture = Form(order[li]).ToLink<ILandscapeTextureGetter>(), Quadrant = quadrant, LayerNumber = (ushort)(li - 1) }, AlphaLayerData = [] };
+                var layer = new AlphaLayer { Header = new LayerHeader { Texture = Form(order[li]).ToLink<ILandscapeTextureGetter>(), Quadrant = quadrant, LayerNumber = number }, AlphaLayerData = [] };
                 for (int i = 0; i < QuadVerts * QuadVerts; i++)
                 {
-                    var span = w.AsSpan(i * TexCount, TexCount);
-                    float below = 0;
-                    for (int k = 0; k <= li; k++) below += span[order[k]];
-                    float alpha = below > 0 ? span[order[li]] / below : 0;
+                    // A layer's strength is its ground's plain share of the vertex; the base takes the rest. The game
+                    // adds the layers (seen on Redguard's land, 2026-11-12: written as layers laid one over another the
+                    // strengths of a vertex came to more than 1 and the land drew too bright, by another amount in
+                    // each quadrant, straight bright edges along cell borders).
+                    float alpha = w[i * TexCount + order[li]];
                     if (alpha > 0.004f)
                         layer.AlphaLayerData.Add(new AlphaLayerData { Position = (ushort)i, Opacity = Math.Min(alpha, 1f) });
                 }
-                if (layer.AlphaLayerData.Count > 0) yield return layer;
+                if (layer.AlphaLayerData.Count > 0) { number++; yield return layer; }
             }
         }
     }

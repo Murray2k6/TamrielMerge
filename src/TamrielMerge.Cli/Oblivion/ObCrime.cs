@@ -220,6 +220,20 @@ public sealed partial class ObPluginBuilder
     {
         if (scriptGlobals.TryGetValue(edid, out var hit)) return hit;
         var g = new GlobalFloat(mod) { EditorID = edid, Data = 0 };
+        // GetGameSetting: Oblivion's own value of the setting (TMOB_GMST_<name>), the last plugin's; a setting the
+        // plugins don't have (an engine default) stays 0 and is listed.
+        if (edid.StartsWith("TMOB_GMST_", StringComparison.Ordinal))
+        {
+            string name = edid[10..];
+            var setting = plugins.SelectMany(p => p.GameSettings).LastOrDefault(s => string.Equals(s.EditorID, name, StringComparison.OrdinalIgnoreCase));
+            g.Data = setting switch
+            {
+                Ob.IGameSettingFloatGetter f => f.Data ?? 0,
+                Ob.IGameSettingIntGetter i => i.Data ?? 0,
+                _ => 0,
+            };
+            if (setting is null or Ob.IGameSettingStringGetter) Problems.Add($"GetGameSetting {name}: not in the plugins (an engine default): 0");
+        }
         mod.Globals.Add(g);
         return scriptGlobals[edid] = g;
     }

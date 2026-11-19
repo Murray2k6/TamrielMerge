@@ -79,8 +79,17 @@ other from any of your games; *Textures & PBR…* changes its textures and makes
   the rest still work.
 - **For voices and lip sync**: the Skyrim Special Edition Creation Kit (free on Steam, under Library > Tools). Start it
   once after installing so it unpacks its tools.
-- **Disk space**: about 60 GB while converting all four games. The build is made on a solid-state drive when the
-  output folder is on a hard disk, keeping 32 GB free on the Windows drive.
+- **For fast voices** (optional): xVASynth's Skyrim voice models
+  ([Nexus Mods, Skyrim SE mod 44184](https://www.nexusmods.com/skyrimspecialedition/mods/44184)), put in
+  `tools\xvasynth\models\skyrim` (each `sk_<voice type>.pt` with its `.json`), or fetched by the tool once you log in to
+  Nexus. The voice types they cover are spoken by xVASynth, a whole line at a time; the rest, and every line without
+  them, are spoken by XTTS-v2, much more slowly.
+- **Disk space** (measured on a conversion of all four games, 2026-11-01): the output folder takes 73 GB, and Skyrim's
+  Data folder 51 GB once installed (its archives are compressed). By game, in the output: Daggerfall 47.8 GB (6.2 of
+  them its models), Oblivion 8.8, Morrowind 8.3 (5.0 of them its generated voices, estimated until measured), Redguard
+  3.2, and 4.9 shared by all. The app shows the figure for the games and parts you tick, with each drive's free space,
+  and once a conversion has run, the extra room it took while building (its parts and temporary files). The build is
+  made on a solid-state drive when the output folder is on a hard disk, keeping 32 GB free on the Windows drive.
 - **A graphics card** (NVIDIA recommended) for the remastered videos, the models and the voice generator. They work on
   the processor too, much more slowly.
 
@@ -92,7 +101,8 @@ other from any of your games; *Textures & PBR…* changes its textures and makes
 3. Run **`TamrielMerge.exe`**. It needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
    (Windows offers to install it the first time if it's missing).
 4. Click **Install missing tools**. It downloads what the conversion needs into the app's `tools` folder: ffmpeg, the
-   Bink encoder, the upscaling and AI models, Python environments, Blender, FFDec, and Java if you don't have it.
+   Bink encoder, the upscaling and AI models, Python environments, xVASynth's speech code, Blender, FFDec, and Java
+   if you don't have it.
    That's several gigabytes, and it only happens once.
 5. If the Creation Kit is missing, click **Open the Creation Kit in Steam** and install it (for voices).
 
@@ -119,6 +129,12 @@ Optional:
   voices. It runs for a long time; pause it
   whenever you like, and it resumes where it stopped.
 - **Distant LOD** remakes the distant view of the converted worlds after you change something.
+- **Uninstall TamrielMerge** (beside *Install*) takes TamrielMerge out of Skyrim's Data folder: what this version
+  installs and what older versions did (their plugins and archives, SKSE plugins with the graphics plugin's DLSS
+  runtime, videos, scripts and their sources, models, the build parts an early version left in Data), and the plugins
+  off Skyrim's Plugins.txt and loadorder.txt and Mod Organizer 2's profiles, older versions' plugin names too. It asks
+  first, saying what goes and how much, and asks separately about Crash Logger SSE (the game check installs it, but it
+  may have been yours). The output folder is kept.
 - **Models…** and **Mod organizer…** as above.
 
 ## Command line
@@ -130,6 +146,8 @@ TamrielMerge.Cli.exe setup                    install the tools the conversion n
 TamrielMerge.Cli.exe convert [--out DIR] [--install] [--gpu] [--skip Morrowind,Voices,...] [--resume] [--no-staging]
 TamrielMerge.Cli.exe lod --dir DIR [--only terrain,objects,trees] [--install]
 TamrielMerge.Cli.exe install [--dir DIR]       install a finished conversion into Skyrim's Data folder
+TamrielMerge.Cli.exe uninstall [--yes] [--crash-logger]   take TamrielMerge out of Skyrim's Data (lists only, without --yes)
+TamrielMerge.Cli.exe size-report [--out DIR]  a conversion's sizes by game and part
 TamrielMerge.Cli.exe voices --out DIR [--gpu]
 TamrielMerge.Cli.exe drives                   where a conversion would be built
 ```
@@ -195,6 +213,12 @@ Built with:
 - [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (BSD-3-Clause): upscaling, its models downloaded by setup.
 - [Coqui TTS / XTTS-v2](https://github.com/idiap/coqui-ai-TTS): voices, downloaded by setup (XTTS-v2's model is under
   the Coqui Public Model License).
+- [xVASynth](https://github.com/DanRuta/xVA-Synth) by Dan Ruta (GPL-3.0): its xVAPitch speech code speaks the voice
+  types it has a model for (`tools/voice/xva.py`); setup downloads its `python/xvapitch` code at a pinned commit, with
+  [h2p-parser](https://github.com/ionite34/h2p-parser) by ionite34 (Apache-2.0) for words spelt alike and said
+  differently. The Skyrim voice models are xVASynth's own packs on
+  [Nexus Mods (Skyrim SE mod 44184)](https://www.nexusmods.com/skyrimspecialedition/mods/44184), under that page's
+  terms: downloaded by you (setup's Nexus login can fetch them), never shipped with TamrielMerge.
 - [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), [DeepBump](https://github.com/HugoTini/DeepBump)
   (GPL-3.0), [FFDec](https://github.com/jindrapetrik/jpexs-decompiler) (GPL-3.0), [FluidSynth](https://www.fluidsynth.org/)
   (LGPL-2.1), [GeneralUser GS](https://schristiancollins.com/generaluser.php), [Blender](https://www.blender.org/),
@@ -202,6 +226,10 @@ Built with:
   [Eclipse Temurin](https://adoptium.net/), [WildMIDI](https://github.com/Mindwerks/wildmidi) (LGPL-3.0),
   [Crash Logger SSE](https://github.com/alandtse/CrashLoggerSSE) (MIT, for the game check): downloaded or used by setup.
 - Creature models: see [tools/creatures/CREDITS.md](tools/creatures/CREDITS.md) (CC0, CC-BY 3.0/4.0, CC-BY-SA 3.0).
+- Foliage models (Daggerfall's palms, oaks, beeches, elms, birches, maple, pines, firs, spruces, junipers, willows,
+  yucca, reeds, cattails, banana and tropical plants, ferns): 28 models from Sketchfab by PlantCatalog, evolveduk,
+  Lady Lion Studios, UPWARD, sixonetwo, Nicholas-3D and AlkaliDragon, under CC-BY 4.0, converted by TamrielMerge; each
+  one listed in [tools/foliage/CREDITS.md](tools/foliage/CREDITS.md).
 - The ship: a free model from [CGTrader](https://www.cgtrader.com/free-3d-models/watercraft/historic-watercraft/ship-8d79bbda-ccc3-45f9-8b38-ec81c5a4d0cd).
 - [SKSE](https://skse.silverlock.org/) runs the plugins; they read [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444).
 - SKSE64's source (2.3.1, shipped with SKSE in the game folder; a plugin built on it publishes its own source, as this

@@ -11,7 +11,8 @@ namespace TamrielMerge.Oblivion;
 /// <see cref="ObPapyrus"/> as the other scripts are (2026-10-22: the responses kept a regex's handful of lines,
 /// SetStage, StartQuest and the like, every other line dropped; the stages' scripts were dropped altogether).
 /// <list type="bullet">
-/// <item>A response's: OB_R_... extends TopicInfo, its Fragment_End the script, the response's own fragment.</item>
+/// <item>A response's: OB_R_... extends TMObLine, its Result the script: run when the line is done (TMObLine's end
+/// fragment), or as it begins when a script's Say says it, as Oblivion does (TMObState.LineBegins).</item>
 /// <item>A stage entry's: OB_S_... extends Quest, its OB_Run the script, attached to the quest; the quest's fragment
 /// script OB_QF_... (Skyrim runs a stage's fragments from one script) calls it from Fragment_n, the fragment of that
 /// stage and log entry. Skyrim, as Oblivion, takes the first log entry of a stage whose conditions hold.</item>
@@ -128,9 +129,12 @@ public sealed partial class ObPluginBuilder
                 continue;
             }
             if (entryFor(o) is not { } entry) continue;
-            // The script extends TMObLine: the topics the response gives the player stay with it.
-            if (r.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == LineScript)?.Properties.FirstOrDefault(p => p.Name == "Learns") is { } learns)
-                entry.Properties.Add(learns);
+            // The script extends TMObLine: what the line was given stays with it (the topics the response gives the
+            // player, its part in a conversation: without ConvTopic a conversation never heard of the line being said
+            // and stopped at it).
+            if (r.VirtualMachineAdapter?.Scripts.FirstOrDefault(s => s.Name == LineScript) is { } was)
+                foreach (var p in was.Properties)
+                    if (!entry.Properties.Any(x => string.Equals(x.Name, p.Name, StringComparison.OrdinalIgnoreCase))) entry.Properties.Add(p);
             r.VirtualMachineAdapter = LineAdapter(entry, o.ScriptName);
             ResultScriptsAttached++;
         }

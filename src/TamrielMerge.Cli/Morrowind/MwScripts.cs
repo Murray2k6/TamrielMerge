@@ -28,7 +28,8 @@ public sealed partial class MwPluginBuilder
         sourceDir = Path.GetFullPath(sourceDir);
         outDir = Path.GetFullPath(outDir);
         Directory.CreateDirectory(outDir);
-        string imports = $"-i={sourceDir};{shipped};{skse};{vanilla}";
+        // The helpers as their signatures alone (PapyrusRun.Stubs): what a caller's compile reads of them.
+        string imports = $"-i={sourceDir};{Skyrim.PapyrusRun.Stubs(shipped, sourceDir.TrimEnd('\\', '/') + "_helpers")};{skse};{vanilla}";
         var names = Directory.GetFiles(sourceDir, "*.psc").Select(f => Path.GetFileNameWithoutExtension(f)!).Order(StringComparer.OrdinalIgnoreCase).ToList();
         // What changed since the last build into this folder, and what names it (Skyrim.PapyrusRun.Stale): a source newer
         // than its .pex, every script naming a shipped helper whose signature changed (Papyrus binds calls by name when
@@ -38,13 +39,13 @@ public sealed partial class MwPluginBuilder
         var started = DateTime.UtcNow.AddSeconds(-2);
         bool Fresh(string n) => File.Exists(Path.Combine(outDir, n + ".pex")) && (!stale.Contains(n) || File.GetLastWriteTimeUtc(Path.Combine(outDir, n + ".pex")) >= started);
         var log = new System.Text.StringBuilder();
-        const int batch = 400;
+        var (atOnce, batch) = Skyrim.PapyrusRun.Plan(names.Count);
         // Several batches at once, each in a folder of its own (2026-10-14: one at a time took 17 minutes for 4,930
         // scripts; two side by side took no longer than one).
         var chunks = Enumerable.Range(0, (names.Count + batch - 1) / batch)
             .Select(i => (Index: i, Names: names.Skip(i * batch).Take(batch).Where(n => !Fresh(n)).ToList())).Where(c => c.Names.Count > 0).ToList();
         int compiled = 0;
-        Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 4, 1, 4) }, c =>
+        Parallel.ForEach(chunks, new ParallelOptions { MaxDegreeOfParallelism = atOnce }, c =>
         {
             string chunkDir = sourceDir.TrimEnd('\\', '/') + "_batch" + c.Index;
             if (Directory.Exists(chunkDir)) Directory.Delete(chunkDir, true);
@@ -76,6 +77,7 @@ public sealed partial class MwPluginBuilder
                 RedirectStandardError = true,
             }));
         Skyrim.PapyrusRun.KeepHelperSignatures(outDir, shipped);
+        Skyrim.PapyrusRun.KeepCompiled(sourceDir, outDir, shipped, names, Tes3Plugin.Encoding);
         return (names.Where(Fresh).ToHashSet(StringComparer.OrdinalIgnoreCase), log.ToString());
 
         static string Run(ProcessStartInfo info) => Skyrim.PapyrusRun.Run(info, info.ArgumentList.Contains("-all") ? Skyrim.PapyrusRun.Batch : Skyrim.PapyrusRun.One).Output;

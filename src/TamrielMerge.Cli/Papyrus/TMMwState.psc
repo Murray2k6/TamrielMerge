@@ -530,11 +530,12 @@ Faction Function MwFactionOf(Actor a)
   EndWhile
   Return None
 EndFunction
-String Property FactionRanks Auto
+String[] Property FactionRanks Auto
 {Per faction, 59 numbers: its two attributes; per rank the two attribute levels, the primary and favoured skill levels and
-the reputation it needs; its seven skills (Morrowind's skill numbers, -1 none). Factions ";" apart.}
-String Property FactionReactions Auto
-{"i,j,v;": faction i's reaction to faction j in its record.}
+the reputation it needs; its seven skills (Morrowind's skill numbers, -1 none). Factions ";" apart, in pieces each ending
+after a ";" (a save can't hold a script string of 4,096 characters: Skyrim.ScriptStrings).}
+String[] Property FactionReactions Auto
+{"i,j,v;": faction i's reaction to faction j in its record; in pieces as FactionRanks.}
 GlobalVariable[] Property FactionRep Auto
 {The player's reputation with each faction (Get/Mod/SetPCFacRep).}
 GlobalVariable[] Property RankReq Auto
@@ -546,10 +547,21 @@ Int[] reactionBase
 Int[] reactionOverride
 Bool[] overridden
 
-; The numbers of a text of numbers apart by "," and ";", into an array of n (SKSE's, which may be longer than 128).
-Int[] Function ParseInts(String asText, Int n)
+; The numbers of a text of numbers apart by "," and ";" (in pieces, each ending after a separator), into an array of n
+; (SKSE's, which may be longer than 128).
+Int[] Function ParseInts(String[] akPieces, Int n)
   Int[] values = Utility.CreateIntArray(n)
   Int count = 0
+  Int piece = 0
+  While akPieces && piece < akPieces.Length && count < n
+    count = ParseIntsInto(akPieces[piece], values, count, n)
+    piece += 1
+  EndWhile
+  Return values
+EndFunction
+
+; One piece's numbers into values from count on (at most n in all); the count after them.
+Int Function ParseIntsInto(String asText, Int[] values, Int count, Int n)
   Int value = 0
   Bool negative = False
   Bool inNumber = False
@@ -576,7 +588,7 @@ Int[] Function ParseInts(String asText, Int n)
     EndIf
     i += 1
   EndWhile
-  Return values
+  Return count
 EndFunction
 
 Function SetupFactions()
@@ -590,13 +602,18 @@ Function SetupFactions()
   overridden = Utility.CreateBoolArray(n * n)
   ; The record's reactions, three numbers each.
   Int count = 1
-  Int len = StringUtil.GetLength(FactionReactions)
+  Int piece = 0
   Int k = 0
-  While k < len
-    If StringUtil.GetNthChar(FactionReactions, k) == ";"
-      count += 1
-    EndIf
-    k += 1
+  While FactionReactions && piece < FactionReactions.Length
+    Int len = StringUtil.GetLength(FactionReactions[piece])
+    k = 0
+    While k < len
+      If StringUtil.GetNthChar(FactionReactions[piece], k) == ";"
+        count += 1
+      EndIf
+      k += 1
+    EndWhile
+    piece += 1
   EndWhile
   Int[] r = ParseInts(FactionReactions, count * 3)
   k = 0

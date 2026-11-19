@@ -30,7 +30,18 @@
     <PackageReference Include="Mutagen.Bethesda.Skyrim" Version="0.54.4" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="niflysharp" Version="2.0.4" />
+    <!-- Windows' data protection (DPAPI) for the Nexus Mods API key, sealed for the Windows user (Setup/Nexus.cs). -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.1" />
   </ItemGroup>
+
+  <!-- niflysharp ships its native library (niflycpp.dll, C++) in lib\net10.0 beside its managed wrapper, so the build
+       took it for a .NET assembly to compile against and warned that it has no metadata (MSB3246). It is only needed at
+       run time: kept among the files copied to the output, taken out of the compile references. -->
+  <Target Name="NiflyNativeIsNoReference" AfterTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <ResolvedCompileFileDefinitions Remove="@(ResolvedCompileFileDefinitions)" Condition="'%(Filename)' == 'niflycpp'" />
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <!-- Skyrim SE Havok files (skeletons, animations, behaviours) for creatures with their own skeleton: HKX2Library by
@@ -71,6 +82,7 @@
     <None Include="..\..\tools\scene3d\render_scene.py" Link="tools\scene3d\render_scene.py" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\tools\scene3d\blend_prep.py" Link="tools\scene3d\blend_prep.py" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\tools\scene3d\blend_scene.py" Link="tools\scene3d\blend_scene.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\scene3d\blend_runtime.py" Link="tools\scene3d\blend_runtime.py" CopyToOutputDirectory="PreserveNewest" />
     <!-- The model viewer's texture pictures and PBR tool. -->
     <None Include="..\..\tools\textures\pbr.py" Link="tools\textures\pbr.py" CopyToOutputDirectory="PreserveNewest" />
     <!-- The SKSE plugins the conversion installs (AltStartBuilder.CopyEraPlugin). -->
@@ -83,6 +95,8 @@
     <!-- The model viewer's turntable previews. -->
     <None Include="..\..\tools\scene3d\preview_model.py" Link="tools\scene3d\preview_model.py" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\tools\voice\generate.py" Link="tools\voice\generate.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\voice\xva.py" Link="tools\voice\xva.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\voice\fx.py" Link="tools\voice\fx.py" CopyToOutputDirectory="PreserveNewest" />
     <!-- The model maker for sprites Skyrim has no model of: sprite2mesh.py and TripoSR (MIT, patched: PyMCubes,
          optional rembg, baking on the model's device). -->
     <None Include="..\..\tools\model3d\sprite2mesh.py" Link="tools\model3d\sprite2mesh.py" CopyToOutputDirectory="PreserveNewest" />
@@ -96,12 +110,19 @@
     <!-- The finished sprite models (user, 2026-10-10: "update tool with meshes that we have ... so they get installed if a
          users game is detected and converted"): what SpriteModelImporter reads from each (mesh, baked texture, collision,
          the sprite it was made from for its colour, its fidelity score), so a user's conversion has them without running
-         the model maker. -->
-    <None Include="..\..\tools\model3d\work\models\**\mesh.obj;..\..\tools\model3d\work\models\**\texture.png;..\..\tools\model3d\work\models\**\collision.obj;..\..\tools\model3d\work\models\**\input.png;..\..\tools\model3d\work\models\**\score.txt" Link="tools\model3d\work\models\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+         the model maker; and what made and painted each (pipeline.txt, reprojected), without which the model maker took
+         every shipped model for an unfinished one and made all 628 again (2026-11-03). -->
+    <None Include="..\..\tools\model3d\work\models\**\mesh.obj;..\..\tools\model3d\work\models\**\texture.png;..\..\tools\model3d\work\models\**\collision.obj;..\..\tools\model3d\work\models\**\input.png;..\..\tools\model3d\work\models\**\score.txt;..\..\tools\model3d\work\models\**\pipeline.txt;..\..\tools\model3d\work\models\**\reprojected" Link="tools\model3d\work\models\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <!-- The creature models (docs/creatures.md): each creature's config, its Blender export (work\creature.json) and the
          textures that export uses (work\tex), so a conversion builds them without Blender or the downloads; the scripts
          and the credits (CC0 / CC-BY / CC-BY-SA, shipped with the models). Morrowind's come from the user's own game. -->
     <None Include="..\..\tools\creatures\*.py;..\..\tools\creatures\CREDITS.md" LinkBase="tools\creatures" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The foliage models' credits (CC-BY 4.0 asks for them wherever the models go), its scripts, and the project's own
+         README and licence at the tool's top (user, 2026-11-04: "update the readme and credits in the tool too"). -->
+    <None Include="..\..\tools\foliage\*.py;..\..\tools\foliage\CREDITS.md;..\..\tools\foliage\mapping.json" LinkBase="tools\foliage" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The realistic plants themselves (Skyrim/Meshes/FoliageModels), converted: what the conversion builds them from. -->
+    <None Include="..\..\tools\foliage\models\**\*.obj;..\..\tools\foliage\models\**\*.json;..\..\tools\foliage\models\**\*.png" Exclude="..\..\tools\foliage\models\**\thumb.png" Link="tools\foliage\models\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\README.md;..\..\LICENSE" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\tools\creatures\**\creature.json" Exclude="..\..\tools\creatures\**\source\**" Link="tools\creatures\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\tools\creatures\**\work\tex\*" Link="tools\creatures\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

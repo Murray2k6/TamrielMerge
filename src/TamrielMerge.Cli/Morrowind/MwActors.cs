@@ -21,7 +21,6 @@ namespace TamrielMerge.Morrowind;
 public sealed partial class MwPluginBuilder
 {
     readonly Dictionary<string, IMajorRecord?> actors = new(StringComparer.OrdinalIgnoreCase);
-    Dictionary<(FormKey Race, bool Female), List<INpcGetter>>? faces;
     Dictionary<string, INpcGetter>? vanillaNpcs;
     ISkyrimModDisposableGetter? dragonbornEsm;
 
@@ -71,26 +70,14 @@ public sealed partial class MwPluginBuilder
         return vanillaNpcs.Where(kv => kv.Key.StartsWith(editorIdOrPrefix, StringComparison.OrdinalIgnoreCase)).OrderBy(kv => kv.Key).Select(kv => kv.Value).FirstOrDefault();
     }
 
-    /// <summary>Vanilla NPCs with their own FaceGen head, by race and sex (generic encounter NPCs preferred).</summary>
+    /// <summary>Vanilla NPCs with their own FaceGen head, by race and sex, as townspeople look and speaking with the race's
+    /// voice when any do (Skyrim.VanillaActors.Faces, as the other games' people). Until 2026-11-10 this was its own list
+    /// that preferred Skyrim's encounter NPCs: every Morrowind person wore a bandit's or warlock's face.</summary>
     List<INpcGetter> FacesFor(FormKey race, bool female)
     {
-        if (faces is null)
-        {
-            VanillaNpc("EncBandit");
-            var withFace = Directory.GetFiles(SkyrimData!, "Skyrim - Meshes*.bsa")
-                .Select(b => Mutagen.Bethesda.Archives.Archive.CreateReader(GameRelease.SkyrimSE, b))
-                .SelectMany(a => a.Files).Select(f => f.Path.ToLowerInvariant())
-                .Where(p => p.Contains(@"facegeom\skyrim.esm\")).Select(Path.GetFileNameWithoutExtension).ToHashSet();
-            faces = skyrimEsm!.Npcs.Where(n => withFace.Contains(n.FormKey.ID.ToString("x8")))
-                .GroupBy(n => (n.Race.FormKey, n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Female)))
-                .ToDictionary(g => g.Key, g =>
-                {
-                    var voiced = Skyrim.VanillaActors.WithRaceVoice(skyrimEsm!, g.Where(n => !n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Essential)).ToList(), g.Key.Item1, g.Key.Item2);
-                    var generic = voiced.Where(n => n.EditorID?.StartsWith("Enc") == true).ToList();
-                    return (generic.Count >= 3 ? generic : voiced).OrderBy(n => n.FormKey.ID).ToList();
-                });
-        }
-        return faces.GetValueOrDefault((race, female)) ?? [];
+        VanillaNpc("EncBandit");
+        canonForms ??= new Skyrim.VanillaActors(SkyrimData!);
+        return Skyrim.VanillaActors.WithRaceVoice(skyrimEsm!, canonForms.Faces(race, female), race, female);
     }
 
     static int StableHash(string s) { unchecked { int h = 17; foreach (char c in s.ToLowerInvariant()) h = h * 31 + c; return h & 0x7FFFFFFF; } }
@@ -179,6 +166,8 @@ public sealed partial class MwPluginBuilder
                 new ScriptFloatProperty { Name = "WerewolfFightMod", Data = Setting("iWerewolfFightMod", 100) },
                 new ScriptFloatProperty { Name = "FleeHealthMult", Data = Setting("fAIFleeHealthMult", 7) },
                 new ScriptFloatProperty { Name = "FleeFleeMult", Data = Setting("fAIFleeFleeMult", 0.3f) },
+                new ScriptFloatProperty { Name = "MeleeArmorMult", Data = Setting("fAIMeleeArmorMult", 1) },
+                new ScriptFloatProperty { Name = "MeleeWeaponMult", Data = Setting("fAIMeleeWeaponMult", 2) },
                 new ScriptObjectProperty { Name = "WerewolfKills", Object = WerewolfKillsGlobal().ToLink<ISkyrimMajorRecordGetter>() },
                 new ScriptObjectProperty { Name = "LoadCount", Object = LoadCountGlobal().ToLink<ISkyrimMajorRecordGetter>() },
                 // Its record's AI package (the first: Morrowind's current one): -1 none, 0 wander, 1 travel, 2 escort,
@@ -205,6 +194,7 @@ public sealed partial class MwPluginBuilder
                 new ScriptFloatProperty { Name = "DispWeaponDrawn", Data = Setting("fDispWeaponDrawn", -5) },
             ],
         });
+        RecordPackages(npc.VirtualMachineAdapter.Scripts.Last(s => s.Name == "TMMwActorAI"), rec);
         // A creature the scripts ask a soul gem of (HasSoulGem, AddSoulGem...): its own gems, which trapping it fills.
         if (!person && scriptSet is not null && scriptSet.All.SelectMany(o => o.Properties).Any(p => p.Fill.Equals("creaturegems:" + rec.Id, StringComparison.OrdinalIgnoreCase)
                 || p.Fill.StartsWith("creaturegem:" + rec.Id + "|", StringComparison.OrdinalIgnoreCase)))
@@ -215,6 +205,105 @@ public sealed partial class MwPluginBuilder
             SoulTracked++;
         }
         ActorAIs++;
+    }
+
+    /// <summary>The follow, escort and activate targets of the records' own AI packages (their IDs), read before the
+    /// cells are built so each is placed where a property can point at it (PrepareScripts).</summary>
+    internal static IEnumerable<string> RecordPackageTargets(Tes3Record rec)
+    {
+        foreach (var f in rec.Fields)
+            if (f.Type is "AI_F" or "AI_E" && f.Data.Length >= 46) yield return Tes3Plugin.Encoding.GetString(f.Data, 14, 32).Split('\0')[0];
+            else if (f.Type == "AI_A" && f.Data.Length >= 32) yield return Tes3Plugin.Encoding.GetString(f.Data, 0, 32).Split('\0')[0];
+    }
+
+    readonly List<(ScriptEntry Entry, string Target)> recordTargets = [];
+    /// <summary>Actors whose record's own AI packages run (TMMwActorAI.RunRecord).</summary>
+    public int RecordPackageActors { get; private set; }
+    public int RecordPackageTargetsFound { get; private set; }
+
+    /// <summary>
+    /// The record's own AI packages, in its order (2026-11-10, user: "morrowind npcs dont do anything": 3,249 of
+    /// Morrowind's, Tribunal's and Bloodmoon's actors have one wander, and 173 have more: 100 follow someone (57 people
+    /// with AI_F alone, a lord's retainers), about 60 walk from point to point (AI_T lists that repeat: miners, guards),
+    /// which were all left standing or wandering). AI_W: distance (u16), hours (u16), hour of day, eight idle chances, repeat.
+    /// AI_T: x, y, z, repeat. AI_F and AI_E: x, y, z (FLT_MAX: none), hours (i16), the target's ID (32), repeat. AI_A: the
+    /// target's ID (32), repeat (OpenMW, components/esm3/aipackage.hpp). A record with only one wander keeps its Skyrim
+    /// package (PackageFor).
+    /// </summary>
+    /// <summary>Actors whose record's wander has idle chances (for the build's summary).</summary>
+    public int WanderIdleActors;
+
+    void RecordPackages(ScriptEntry entry, Tes3Record rec)
+    {
+        var list = rec.Fields.Where(f => f.Type is "AI_W" or "AI_T" or "AI_E" or "AI_F" or "AI_A").ToList();
+        // The first wander's idle chances (bytes 5-12), which TMMwActorAI.WanderIdle rolls while the actor wanders.
+        if (list.FirstOrDefault(f => f.Type == "AI_W") is { Data.Length: >= 13 } firstWander && firstWander.Data.Skip(5).Take(8).Any(b => b != 0))
+        {
+            entry.Properties.Add(new ScriptIntListProperty { Name = "IdleChances", Data = [.. firstWander.Data.Skip(5).Take(8).Select(b => (int)b)] });
+            WanderIdleActors++;
+        }
+        if (list.Count == 0 || (list.Count == 1 && list[0].Type == "AI_W")) return;
+        var idles = new List<int>();
+        var kinds = new List<int>(); var xs = new List<float>(); var ys = new List<float>(); var zs = new List<float>();
+        var hours = new List<float>(); var ranges = new List<float>();
+        bool repeat = false; string target = "";
+        static float Coordinate(byte[] d, int at) => BitConverter.ToSingle(d, at) is var v && float.IsFinite(v) && MathF.Abs(v) < 1e30f ? v : 0;
+        foreach (var f in list)
+        {
+            var d = f.Data;
+            float x = 0, y = 0, z = 0, h = 0, range = 0; int kind;
+            switch (f.Type)
+            {
+                case "AI_W":
+                    if (d.Length < 4) continue;
+                    kind = 0; range = BitConverter.ToUInt16(d, 0); h = BitConverter.ToUInt16(d, 2); repeat |= d.Length > 13 && d[13] != 0;
+                    break;
+                case "AI_T":
+                    if (d.Length < 12) continue;
+                    kind = 1; x = Coordinate(d, 0); y = Coordinate(d, 4); z = Coordinate(d, 8); repeat |= d.Length > 12 && d[12] != 0;
+                    break;
+                case "AI_E" or "AI_F":
+                    if (d.Length < 46) continue;
+                    kind = f.Type == "AI_E" ? 2 : 3; x = Coordinate(d, 0); y = Coordinate(d, 4); z = Coordinate(d, 8); h = BitConverter.ToInt16(d, 12);
+                    repeat |= d.Length > 46 && d[46] != 0;
+                    if (target.Length == 0) target = Tes3Plugin.Encoding.GetString(d, 14, 32).Split('\0')[0];
+                    break;
+                default:
+                    if (d.Length < 32) continue;
+                    kind = 4; repeat |= d.Length > 32 && d[32] != 0;
+                    if (target.Length == 0) target = Tes3Plugin.Encoding.GetString(d, 0, 32).Split('\0')[0];
+                    break;
+            }
+            kinds.Add(kind); xs.Add(x); ys.Add(y); zs.Add(z); hours.Add(h); ranges.Add(range);
+            idles.AddRange(f.Type == "AI_W" && d.Length >= 13 ? d.Skip(5).Take(8).Select(b => (int)b) : Enumerable.Repeat(0, 8));
+        }
+        if (kinds.Count == 0) return;
+        entry.Properties.Add(new ScriptIntListProperty { Name = "RecordKinds", Data = [.. kinds] });
+        if (idles.Any(v => v != 0)) entry.Properties.Add(new ScriptIntListProperty { Name = "RecordIdles", Data = [.. idles] });
+        entry.Properties.Add(new ScriptFloatListProperty { Name = "RecordX", Data = [.. xs] });
+        entry.Properties.Add(new ScriptFloatListProperty { Name = "RecordY", Data = [.. ys] });
+        entry.Properties.Add(new ScriptFloatListProperty { Name = "RecordZ", Data = [.. zs] });
+        entry.Properties.Add(new ScriptFloatListProperty { Name = "RecordHours", Data = [.. hours] });
+        entry.Properties.Add(new ScriptFloatListProperty { Name = "RecordRange", Data = [.. ranges] });
+        entry.Properties.Add(new ScriptBoolProperty { Name = "RecordRepeat", Data = repeat });
+        if (target.Equals("player", StringComparison.OrdinalIgnoreCase)) entry.Properties.Add(new ScriptBoolProperty { Name = "RecordTargetIsPlayer", Data = true });
+        else if (target.Length > 0) recordTargets.Add((entry, target));
+        // The quest whose aliases carry the packages (TMMwAI), though no script asks for it.
+        AiQuest();
+        RecordPackageActors++;
+    }
+
+    /// <summary>Each record package's target as the reference placed for it, once the cells are built.</summary>
+    void FillRecordTargets()
+    {
+        foreach (var (entry, id) in recordTargets)
+            if (scriptPlaced.TryGetValue(id, out var placed))
+            {
+                entry.Properties.Add(new ScriptObjectProperty { Name = "RecordTarget", Object = new FormLink<ISkyrimMajorRecordGetter>(placed.FormKey) });
+                RecordPackageTargetsFound++;
+            }
+            else Problems.Add($"AI package: its target {id} isn't placed in the world; that package is passed over");
+        recordTargets.Clear();
     }
 
     /// <summary>Creatures whose soul gems are their own (the scripts ask for them).</summary>
@@ -230,6 +319,10 @@ public sealed partial class MwPluginBuilder
         string? raceId = rec.Str("RNAM");
         if (raceId is null || !MwRaces.TryGetValue(raceId, out var skyRace)) { Problems.Add($"npc {rec.Id}: race {raceId} has no Skyrim counterpart"); return null; }
         VanillaNpc("EncBandit");   // opens the masters
+        // A vampire (its head is one of Morrowind's vampire body parts, which OpenMW npcanimation.cpp getVampireHead shows
+        // by the Vampirism effect) is Skyrim's vampire form of its race, when a vanilla face of that form exists (MwAfflictions.cs).
+        if (HasVampireHead(rec) && skyrimEsm!.Races.FirstOrDefault(r => r.EditorID == skyRace + "Vampire") is { } vampireRace && FacesFor(vampireRace.FormKey, female).Count > 0)
+            skyRace += "Vampire";
         var race = skyrimEsm!.Races.First(r => r.EditorID == skyRace);
         var pool = FacesFor(race.FormKey, female);
         if (pool.Count == 0) { Problems.Add($"npc {rec.Id}: no vanilla face for {skyRace} {(female ? "F" : "M")}"); return null; }
@@ -265,7 +358,8 @@ public sealed partial class MwPluginBuilder
         AddInventory(npc, rec);
         AddSpells(npc, rec);
         int gold = npdt is { } g ? (g.Data.Length == 12 ? g.Int(8) : g.Data.Length >= 52 ? g.Int(48) : 0) : 0;
-        if (gold > 0)
+        // A vendor's NPDT gold is its barter gold, in its merchant chest (MwVendors), not coin in its pockets.
+        if (gold > 0 && !IsVendor(rec))
         {
             npc.Items ??= [];
             npc.Items.Add(new ContainerEntry { Item = new ContainerItem { Item = new FormLink<IItemGetter>(Sk(0x00000F)), Count = gold } });

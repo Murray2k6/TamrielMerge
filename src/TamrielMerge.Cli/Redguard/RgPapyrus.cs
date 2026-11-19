@@ -115,7 +115,7 @@ public sealed class RgPapyrus
         ["PlayAnimation"] = (Category.Approximate, "animation"), ["WaitAnimFrame"] = (Category.Approximate, "animation time"),
         ["WaitPlayerAnimFrame"] = (Category.Approximate, "animation time"), ["SetAction"] = (Category.NoEffect, "animation"),
         ["ResetAction"] = (Category.NoEffect, "animation"), ["ResetAllAction"] = (Category.NoEffect, "animation"), ["HoldAnimation"] = (Category.NoEffect, "animation"),
-        ["ReleaseAnimation"] = (Category.NoEffect, "animation"), ["PauseAnimation"] = (Category.NoEffect, "animation"), ["HandItem"] = (Category.Approximate, "hand item"),
+        ["ReleaseAnimation"] = (Category.NoEffect, "animation"), ["PauseAnimation"] = (Category.NoEffect, "animation"), ["HandItem"] = (Category.Native, "hand item"),
         ["DisplayHandItem"] = (Category.Approximate, "hand item"), ["DisplayHandModel"] = (Category.NoEffect, "hand item"), ["DisplayHiltItem"] = (Category.Approximate, "hand item"),
         ["DisplayHiltModel"] = (Category.NoEffect, "hand item"), ["ShowItem"] = (Category.NoEffect, "item close-up"), ["ShowItemNoRtx"] = (Category.NoEffect, "item close-up"),
         // Sprite flats (MPSF/flat objects aren't converted) and the 2D screen: the potion status icons as a line, the
@@ -125,23 +125,23 @@ public sealed class RgPapyrus
         ["ShowBitmap"] = (Category.Approximate, "status icon"), ["UnShowBitmap"] = (Category.Approximate, "status icon"), ["ViewGXA"] = (Category.Approximate, "screen picture"),
         ["AnimateGXA"] = (Category.NoEffect, "screen picture"), ["QueueMovie"] = (Category.Native, "movie"),
         // Light tuning (on/off are Skyrim's).
-        ["LightRadius"] = (Category.NoEffect, "light tuning"), ["LightIntensity"] = (Category.NoEffect, "light tuning"), ["LightOffset"] = (Category.NoEffect, "light tuning"),
-        ["LightFlicker"] = (Category.NoEffect, "light tuning"), ["FlickerLight"] = (Category.NoEffect, "light tuning"), ["LightFlickerOff"] = (Category.NoEffect, "light tuning"),
+        ["LightRadius"] = (Category.NoEffect, "light tuning"), ["LightIntensity"] = (Category.Approximate, "light on/off"), ["LightOffset"] = (Category.Native, "light moved"),
+        ["LightFlicker"] = (Category.Native, "light record"), ["FlickerLight"] = (Category.NoEffect, "light tuning"), ["LightFlickerOff"] = (Category.NoEffect, "light tuning"),
         ["LightSize"] = (Category.NoEffect, "light tuning"), ["LightSizeOff"] = (Category.NoEffect, "light tuning"),
         // Redguard's AI internals (Skyrim's AI packages do this).
         ["SetAiType"] = (Category.NoEffect, "AI"), ["SetAiMode"] = (Category.NoEffect, "AI"), ["Guard"] = (Category.NoEffect, "AI"), ["Animal"] = (Category.NoEffect, "AI"),
         ["Wander"] = (Category.NoEffect, "AI"), ["projectileAI"] = (Category.NoEffect, "AI"), ["swordAI"] = (Category.NoEffect, "AI"), ["chargeWeapon"] = (Category.NoEffect, "AI"),
-        ["DisableNodeMaps"] = (Category.NoEffect, "AI"), ["EnableNodeMaps"] = (Category.NoEffect, "AI"), ["OpenShell"] = (Category.NoEffect, "AI"),
+        ["DisableNodeMaps"] = (Category.NoEffect, "AI"), ["EnableNodeMaps"] = (Category.NoEffect, "AI"), ["OpenShell"] = (Category.Native, "shell program"),
         // Debugging (developer keys and printouts).
         ["InKey"] = (Category.Native, "key held"), ["PrintSingleParm"] = (Category.Native, "debug print"), ["PrintParms"] = (Category.NoEffect, "debug print"),
         ["PrintStringParm"] = (Category.NoEffect, "debug print"), ["LogParms"] = (Category.NoEffect, "debug print"),
         // Approximations (and what used to be: group sync is a barrier on TMRgState, people walk, Cyrus hangs).
         ["SyncWithGroup"] = (Category.Native, "group sync"), ["SyncWithUser"] = (Category.Native, "group sync"), ["ResetGroupSync"] = (Category.Native, "group sync"),
         ["ChangeGroup"] = (Category.NoEffect, "group sync"),
-        ["PlayerParallelLineUp"] = (Category.Approximate, "line up"), ["PushPlayer"] = (Category.NoEffect, "line up"), ["PopPlayer"] = (Category.NoEffect, "line up"),
+        ["PlayerParallelLineUp"] = (Category.Approximate, "line up"), ["PushPlayer"] = (Category.Native, "gremlin"), ["PopPlayer"] = (Category.Native, "gremlin"),
         ["MovePlayerAboveMe"] = (Category.Native, "teleport"), ["MoveAboveMe"] = (Category.NoEffect, "line up"), ["Offset"] = (Category.NoEffect, "attach offset"),
         ["UnOffset"] = (Category.NoEffect, "attach offset"), ["PlayerOffset"] = (Category.NoEffect, "attach offset"), ["PlayerOffsettask"] = (Category.NoEffect, "attach offset"),
-        ["BounceObject"] = (Category.NoEffect, "bounce"), ["SetObjectLocation"] = (Category.NoEffect, "location edit"), ["OffsetLocation"] = (Category.NoEffect, "location edit"),
+        ["BounceObject"] = (Category.Native, "knock away"), ["SetObjectLocation"] = (Category.Native, "location edit"), ["OffsetLocation"] = (Category.Native, "location edit"),
         ["PlayerLineUp"] = (Category.Native, "line up"), ["PlayerPickupLineUp"] = (Category.Native, "line up (facing)"),
         ["PlayerHanging"] = (Category.Native, "hanging (TMRgMove)"), ["PlayerStatus"] = (Category.Approximate, "player status"), ["PlayerStand"] = (Category.Approximate, "standing on"),
         ["PlayerCollide"] = (Category.Approximate, "touching"), ["PlayerCollideStatic"] = (Category.Approximate, "touching"), ["CollidePlayerWeapon"] = (Category.Approximate, "weapon hit"),
@@ -150,11 +150,11 @@ public sealed class RgPapyrus
         ["ScriptParticles"] = (Category.NoEffect, "particles"), ["AddLightEffect"] = (Category.NoEffect, "particles"),
         ["MoveMarker"] = (Category.Native, "walk to marker"), ["MoveNodeMarker"] = (Category.Native, "walk to marker"), ["MoveNodeLocation"] = (Category.Native, "walk"),
         ["WalkForward"] = (Category.Native, "walk"), ["WalkBackward"] = (Category.Native, "walk"), ["MoveForward"] = (Category.Native, "walk"),
-        ["FacePlayer"] = (Category.Native, "turn"), ["FacePlayerInertia"] = (Category.Native, "turn"), ["FaceObject"] = (Category.Approximate, "turn"),
+        ["FacePlayer"] = (Category.Native, "turn"), ["FacePlayerInertia"] = (Category.Native, "turn"), ["FaceObject"] = (Category.NoEffect, "turn (never called)"),
         ["PlayerFaceObj"] = (Category.Native, "turn"), ["DropAllItems"] = (Category.Native, "Redguard's items taken"), ["PushAllItems"] = (Category.NoEffect, "item stash"),
         ["ItemUsed"] = (Category.NoEffect, "use count"), ["SelectItem"] = (Category.Native, "selection"),
         ["SetAttribute"] = (Category.Approximate, "attributes"), ["SetMyAttr"] = (Category.Approximate, "attributes"), ["setStrength"] = (Category.Approximate, "strength"), ["strength"] = (Category.Approximate, "strength"),
-        ["setArmor"] = (Category.Approximate, "armor"), ["armor"] = (Category.Approximate, "armor"), ["InRectangle"] = (Category.Approximate, "unstretched rectangle"),
+        ["setArmor"] = (Category.Approximate, "armor"), ["armor"] = (Category.Approximate, "armor"), ["InRectangle"] = (Category.Native, "stretched rectangle"),
         ["WaitNonMulti"] = (Category.Native, "wait"), ["GetFramePassed"] = (Category.Native, "nominal ticks"), ["EndSound"] = (Category.Native, "sound channels"),
         ["EndMySound"] = (Category.Native, "sound channels"), ["StopAllSounds"] = (Category.Native, "sound channels"), ["KillMyTasks"] = (Category.Native, "tasks"),
     };
@@ -551,8 +551,8 @@ public sealed class RgPapyrus
         var pre = new StringBuilder();
         string r = $"q{st.Temp++}";
         pre.AppendLine($"  ObjectReference {r} = {target}");
-        string X = comps.TryGetValue(1, out var fx) ? $"({Formula(st, fx, pre)}) / 256.0 - 32768.0" : $"{r}.GetPositionX()";
-        string Y = comps.TryGetValue(3, out var fz) ? $"({Formula(st, fz, pre)}) / 256.0 - 32768.0" : $"{r}.GetPositionY()";
+        string X = comps.TryGetValue(1, out var fx) ? $"({Formula(st, fx, pre)}) / 256.0 - 32768.0 + OffX" : $"{r}.GetPositionX()";
+        string Y = comps.TryGetValue(3, out var fz) ? $"({Formula(st, fz, pre)}) / 256.0 - 32768.0 + OffY" : $"{r}.GetPositionY()";
         string Z = comps.TryGetValue(2, out var fy) ? $"-({Formula(st, fy, pre)}) / 256.0" : $"{r}.GetPositionZ()";
         o.Append(pre);
         o.AppendLine($"  If {r}");
@@ -803,8 +803,11 @@ public sealed class RgPapyrus
             case "InRectangle" when Const(0) is int x1 && Const(1) is int z1 && Const(2) is int x2 && Const(3) is int z2:
             {
                 // The rectangle stretched as the world is (its corners and edge middles).
+                // Its numbers are 256ths like every position a script names (the Draggin Tale's "455680, 437760, 605184,
+                // 485120" is 1780..2364 by 1710..1895, behind its bar at 1795); read as whole units until 2026-11-12, so
+                // no rectangle ever held the player.
                 var pts = new[] { (x1, z1), (x2, z1), (x1, z2), (x2, z2), ((x1 + x2) / 2, z1), ((x1 + x2) / 2, z2), (x1, (z1 + z2) / 2), (x2, (z1 + z2) / 2) }
-                    .Select(c => st.Ctx.Place(new System.Numerics.Vector3(c.Item1, 0, c.Item2))).ToList();
+                    .Select(c => st.Ctx.Place(new System.Numerics.Vector3(c.Item1 / 256f, 0, c.Item2 / 256f))).ToList();
                 return ($"S_InRectangleSk({(int)MathF.Floor(pts.Min(p => p.X))}, {(int)MathF.Floor(pts.Min(p => p.Y))}, {(int)MathF.Ceiling(pts.Max(p => p.X))}, {(int)MathF.Ceiling(pts.Max(p => p.Y))})", Category.Native);
             }
             case "ACTIVATE": case "TorchActivate":

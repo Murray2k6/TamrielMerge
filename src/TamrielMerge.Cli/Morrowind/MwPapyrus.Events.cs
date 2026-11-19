@@ -58,10 +58,16 @@ public sealed partial class MwPapyrus
         bool dontSave = uses.Contains("dontsave");
         if (activate || polls || mirrored.Count > 0 || startPos || sleep || dontSave)
         {
-            sb.AppendLine("Event OnInit()");
-            sb.AppendLine("  MwInit()");
-            sb.AppendLine("EndEvent");
-            sb.AppendLine();
+            // An item starts when it is in the world (OnLoad) or the player takes it (OnContainerChanged): in a container
+            // its script has no object to act on, and every call in MwInit failed ("no native object bound", 198 errors in
+            // the game's log of 2026-11-09 from uniforms and books in chests).
+            if (!items)
+            {
+                sb.AppendLine("Event OnInit()");
+                sb.AppendLine("  MwInit()");
+                sb.AppendLine("EndEvent");
+                sb.AppendLine();
+            }
             sb.AppendLine("Event OnLoad()");
             sb.AppendLine("  MwInit()");
             sb.AppendLine("EndEvent");
@@ -260,6 +266,19 @@ public sealed partial class MwPapyrus
             sb.AppendLine("  MwTick()");
             sb.AppendLine("EndEvent");
             sb.AppendLine();
+            // Morrowind sets the OnPCEquip local back to 0 when the item comes off (the Legion uniform's script reads it
+            // to say the uniform is no longer worn; it stayed 1 for good, seen in the generated script 2026-11-10).
+            if (equipLocal)
+            {
+                sb.AppendLine("Event OnUnequipped(Actor akActor)");
+                sb.AppendLine("  If akActor != PlayerRef");
+                sb.AppendLine("    Return");
+                sb.AppendLine("  EndIf");
+                sb.AppendLine($"  {Var("OnPCEquip")} = 0");
+                sb.AppendLine("  MwTick()");
+                sb.AppendLine("EndEvent");
+                sb.AppendLine();
+            }
         }
         if (uses.Contains("onpchitme") || uses.Contains("hitonme"))
         {

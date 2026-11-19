@@ -28,10 +28,11 @@ public static class AltStartBuilder
     /// <summary>The start plugin. It masters only Skyrim.esm, so it works whichever games were converted: each
     /// story's start is looked up at runtime from its own plugin (Daggerfall's by <paramref name="daggerfallStartId"/>,
     /// the local FormID of its start marker in Daggerfall.esm, when Daggerfall was converted).</summary>
-    public static void Build(string skyrimData, string outDir, uint? daggerfallStartId, IReadOnlyList<AltStarts.AfterOpening>? afterOpenings = null)
+    public static void Build(string skyrimData, string outDir, uint? daggerfallStartId, IReadOnlyList<AltStarts.AfterOpening>? afterOpenings = null,
+        IReadOnlyList<AltStarts.Step>? steps = null)
     {
         var mod = new SkyrimMod(ModKey.FromFileName(PluginName), SkyrimRelease.SkyrimSE);
-        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small;
+        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Small | SkyrimModHeader.HeaderFlag.Master;
         using var skyrim = SkyrimMod.CreateFromBinaryOverlay(Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
 
         var confirm = AddMessage(mod, "TMConfirmNextStory", "Leave this land and begin the next story?", ["Yes", "No"]);
@@ -57,8 +58,12 @@ public static class AltStartBuilder
         int[] chronological = [1, 0, 2, 3, 4];
         var shows = new List<FormKey>();
         var markers = new List<FormKey>();
-        var buttons = chronological.Select(i => $"{eras[i]} {years[i]}: {places[i]}{(places[i] == worlds[i] ? "" : $" ({worlds[i]})")}").Append("Stay in this time").ToArray();
-        var travelMenu = AddMessage(mod, "TMTravelMenu", "To which time do you travel? A time you have been to resumes where and when you left it; one not begun yet starts there.", buttons);
+        // Short buttons (the game's name) with the times in the text: a row of long buttons is wider than the screen, the
+        // box is drawn smaller to fit and its buttons then answer the mouse beside where they are drawn (seen 2026-11-12:
+        // "3E 433: Cyrodiil (Oblivion)" lit up only under the right half of its text).
+        string timeline = string.Join(", ", chronological.Select(i => $"{worlds[i]} {eras[i]} {years[i]}"));
+        var buttons = chronological.Select(i => worlds[i]).Append("Stay").ToArray();
+        var travelMenu = AddMessage(mod, "TMTravelMenu", $"To which time do you travel? ({timeline}.) A time you have been to resumes where and when you left it; one not begun yet starts there.", buttons);
         for (int i = 0; i < worlds.Length; i++)
         {
             var show = new GlobalShort(mod) { EditorID = $"TMTravelShow{worlds[i]}", Data = 0 };
@@ -119,8 +124,7 @@ public static class AltStartBuilder
         // in order, or a time of the player's choosing (only the games they have: a global per time shows its button),
         // its opening played or done. Made after every older record, so their FormIDs stay as they were.
         var startHow = AddMessage(mod, "TMStartHow", "How does your journey begin?", ["The stories in order, from the first", "In a time of my choosing"]);
-        var startWhich = AddMessage(mod, "TMStartWhich", "In which time do you begin?",
-            [.. Enumerable.Range(0, worlds.Length).Select(i => $"{eras[i]} {years[i]}: {places[i]}{(places[i] == worlds[i] ? "" : $" ({worlds[i]})")}")]);
+        var startWhich = AddMessage(mod, "TMStartWhich", $"In which time do you begin? ({timeline}.)", [.. worlds]);
         var startShows = new List<FormKey>();
         for (int i = 0; i < worlds.Length; i++)
         {
@@ -134,7 +138,9 @@ public static class AltStartBuilder
                 ComparisonValue = 1,
             });
         }
-        var startOpening = AddMessage(mod, "TMStartOpening", "Begin with this time's opening, or after it (its first steps done)?", ["Play the opening", "Begin after the opening"]);
+        // Two buttons of one length: the longer "Begin after the opening" did not take the mouse on the left third of
+        // its text (seen 2026-11-13).
+        var startOpening = AddMessage(mod, "TMStartOpening", "Begin with this time's opening, or after it (its first steps done)?", ["Play the opening", "Skip the opening"]);
         var startSkyrim = AddMessage(mod, "TMStartSkyrim", "Skyrim begins at Helgen.",
             ["Play Helgen", "Escaped Helgen with Hadvar: an Imperial, at Riverwood", "Escaped Helgen with Ralof: a Stormcloak, at Riverwood"]);
         // Each converted game's start after its opening (AltStarts): the reference, the offset from it, its opening's quest
@@ -199,6 +205,12 @@ public static class AltStartBuilder
                 new ScriptIntListProperty { Name = "OpeningQuestIds", Data = [.. AfterInts(a => a.QuestId)] },
                 new ScriptIntListProperty { Name = "OpeningQuestStages", Data = [.. AfterInts(a => (uint)a.QuestStage)] },
                 new ScriptIntListProperty { Name = "OpeningItemIds", Data = [.. AfterInts(a => a.ItemId)] },
+                // Each game's own start-up (AltStarts.Steps), in order.
+                new ScriptIntListProperty { Name = "StepStories", Data = [.. (steps ?? []).Select(x => x.Story)] },
+                new ScriptIntListProperty { Name = "StepWhen", Data = [.. (steps ?? []).Select(x => x.After ? 1 : 0)] },
+                new ScriptIntListProperty { Name = "StepForms", Data = [.. (steps ?? []).Select(x => (int)x.FormId)] },
+                new ScriptFloatListProperty { Name = "StepValues", Data = [.. (steps ?? []).Select(x => x.Value)] },
+                new ScriptStringListProperty { Name = "StepPlugins", Data = [.. (steps ?? []).Select(x => x.Plugin ?? "")] },
                 ObjectProp("MQ102A", new FormKey(Skyrim, 0x2BF9C)),
                 ObjectProp("MQ102B", new FormKey(Skyrim, 0x2610A)),
                 ObjectProp("Hadvar", new FormKey(Skyrim, 0x2BFA2)),
@@ -231,16 +243,19 @@ public static class AltStartBuilder
             ObjectBounds = new ObjectBounds { First = new P3Int16(-8, -11, 0), Second = new P3Int16(8, 11, 3) },
         };
         mod.Books.Add(guide);
+        // Once a character has been welcomed (TMTutorial: a global, as the quest's own variables start over with MQ101).
+        var welcomed = new GlobalShort(mod) { EditorID = "TMWelcomed", Data = 0 };
+        mod.Globals.Add(welcomed);
         vm.Scripts.Add(new ScriptEntry
         {
             Name = "TMTutorial",
             Properties =
             [
                 new ScriptStringListProperty { Name = "Pages", Data = [.. guidePages] },
-                new ScriptStringListProperty { Name = "GamePages", Data = [.. gamePages] },
                 new ScriptStringListProperty { Name = "GameNames", Data = [.. worlds] },
                 new ScriptStringListProperty { Name = "KeyNames", Data = [.. KeyNames()] },
                 ObjectProp("Guide", guide.FormKey),
+                ObjectProp("Welcomed", welcomed.FormKey),
             ],
         });
 
@@ -261,7 +276,7 @@ public static class AltStartBuilder
     /// <summary>The guide's general pages (TMTutorial: %KEY% the Tamriel Menu control's key, %GAMES% the games installed).</summary>
     static string[] GuidePages() =>
     [
-        "Welcome to TamrielMerge.\n\nYour games: %GAMES%. Each is a time and place in Tamriel's history, and one character can live in all of them.\n\nThis guide is also in your inventory as a book: TamrielMerge Guide.",
+        "Welcome to TamrielMerge.\n\nYour games: %GAMES%. Each is a time and place in Tamriel's history, and one character can live in all of them.\n\nThe Tamriel menu: press %KEY%. Everything else is in the book in your inventory: TamrielMerge Guide.",
         "The Tamriel menu: press %KEY% (Tamriel Menu in Settings > Controls), or cast the Tamriel power (Magic > Powers).\n\nFactions: every game's guilds and factions, and your rank in each.\nCoin: every game's money, and what you carry.\nTravel: the towns of every world you have reached, travelled to as Daggerfall travels: days on the road, inns or camping, ships and horses, encounters on the way.\nSkills: the games' skills Skyrim lacks, rising with use, with their perks.\nPassives: the standing stones' web, from your birthsign, a point each level.",
         "Moving between the games\n\nTravel Through Time (Magic > Powers): go to another time you have been to; you come back where and when you left it. A time not begun yet starts at its beginning.\n\nWhen a game's story ends you are asked whether to go on to the next; the Begin the Next Story power does it later.\n\nEach time keeps its own date and its own coin; money changers in its towns exchange coin.",
     ];

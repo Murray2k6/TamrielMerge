@@ -14,13 +14,16 @@ public static class LocationPlacer
     static readonly FormKey MapMarkerStatic = new(ModKey.FromFileName("Skyrim.esm"), 0x10);
     const int PersistentFlag = 0x400;
 
-    public static List<(DfLocation Location, PlacedObject Marker)> PlaceMarkers(SkyrimMod mod, Worldspace ws, HeightField f, IEnumerable<DfLocation> locations)
+    /// <summary>Each location's marker, where <paramref name="spotOf"/> puts it (where fast travel arrives at a location
+    /// laid out on the overland, TownBuilder.ArrivalSpot), else at its map pixel.</summary>
+    public static List<(DfLocation Location, PlacedObject Marker)> PlaceMarkers(SkyrimMod mod, Worldspace ws, HeightField f, IEnumerable<DfLocation> locations,
+        Func<DfLocation, P3Float?>? spotOf = null)
     {
         var usedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var placed = new List<(DfLocation, PlacedObject)>();
         foreach (var loc in locations)
         {
-            var pos = WorldPosition(f, loc.PixelX + 0.5, loc.PixelY + 0.5);
+            var pos = spotOf?.Invoke(loc) ?? WorldPosition(f, loc.PixelX + 0.5, loc.PixelY + 0.5);
             bool town = loc.Type is DfLocationType.TownCity or DfLocationType.TownHamlet or DfLocationType.TownVillage;
             var marker = new PlacedObject(mod)
             {
@@ -32,7 +35,9 @@ public static class LocationPlacer
                 {
                     Name = loc.Name,
                     Type = MarkerType(loc),
-                    // Daggerfall shows towns on the travel map from the start; everything else must be found.
+                    // Daggerfall shows towns on the travel map from the start and travels to any of them; everything
+                    // else must be found first (Skyrim makes a marker travellable once discovered). Fast travel takes
+                    // the days the way takes (TMTravel), as Daggerfall's does.
                     Flags = town ? MapMarker.Flag.Visible | MapMarker.Flag.CanTravelTo : 0,
                 },
             };

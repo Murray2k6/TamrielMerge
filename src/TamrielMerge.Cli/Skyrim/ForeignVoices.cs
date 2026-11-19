@@ -28,7 +28,13 @@ public static class ForeignVoices
     /// added to the game's own topic of a moment (<paramref name="own"/>, after its lines) or in a topic of their own.
     /// Returns how many moments were silenced.
     /// </summary>
-    public static int Silence(ISkyrimMod mod, ISkyrimModGetter skyrim, Quest quest, FormKey people, string prefix, IReadOnlyDictionary<DialogTopic.SubtypeEnum, DialogTopic> own)
+    /// <param name="greeting">A faction a person is in while walking up to start a conversation (Oblivion's OBGreetNow),
+    /// when the game has one: the silent greeting stands aside for them too. Skyrim picks a walk-up's greeting a moment
+    /// before the conversation counts as begun, so "not in a conversation" alone let the silent line take the Emperor's
+    /// greeting in the prisoner's cell, the silent topic's quest being weighed first (runs r74 to r82, 2026-11-15: the
+    /// conversation opened with nothing said and nothing of his to ask, once he wore a face of his own and so was among
+    /// Oblivion's people; borrowing a Skyrim person's record before, he wasn't).</param>
+    public static int Silence(ISkyrimMod mod, ISkyrimModGetter skyrim, Quest quest, FormKey people, string prefix, IReadOnlyDictionary<DialogTopic.SubtypeEnum, DialogTopic> own, FormKey? greeting = null)
     {
         int count = 0;
         foreach (var (subtype, category) in Barks(skyrim))
@@ -56,7 +62,15 @@ public static class ForeignVoices
                 Responses = [new DialogResponse { Text = "", ResponseNumber = 1, Emotion = Emotion.Neutral, EmotionValue = 50 }],
             };
             if (subtype == DialogTopic.SubtypeEnum.Hello)
+            {
                 silent.Conditions.Add(new ConditionFloat { Data = new IsInDialogueWithPlayerConditionData(), CompareOperator = CompareOperator.EqualTo, ComparisonValue = 0 });
+                if (greeting is { } mark)
+                {
+                    var walking = new GetInFactionConditionData();
+                    walking.Faction = new FormLinkOrIndex<IFactionGetter>(walking, mark);
+                    silent.Conditions.Add(new ConditionFloat { Data = walking, CompareOperator = CompareOperator.EqualTo, ComparisonValue = 0 });
+                }
+            }
             topic.Responses.Add(silent);
             count++;
         }

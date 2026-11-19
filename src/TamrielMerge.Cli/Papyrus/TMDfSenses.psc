@@ -380,6 +380,10 @@ Function MakeHostile()
 EndFunction
 
 Event OnHit(ObjectReference akAggressor, Form akSource, Projectile akProjectile, Bool abPowerAttack, Bool abSneakAttack, Bool abBashAttack, Bool abHitBlocked)
+  ; A vampire's weapon hit feeds it (VampirismEffect.OnWeaponHitEntity).
+  If Senses && akAggressor == Senses.PlayerRef && (akSource as Weapon)
+    Senses.PlayerStruck()
+  EndIf
   If !hostile && Passive && !IsDead()
     ; A passive one struck by the player (or the player's followers) turns on them (MakeEnemyHostileToAttacker).
     Actor attacker = akAggressor as Actor

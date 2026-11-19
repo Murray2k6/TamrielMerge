@@ -35,12 +35,19 @@ public static class CreatureSpawns
     {
         // The games in load order, Daggerfall's dungeons right after Daggerfall.esm.
         var order = GameOrder.SelectMany(p => p == "Daggerfall.esm"
-            ? new[] { p, DaggerfallDungeons.PluginName }.Where(b => b == p || File.Exists(System.IO.Path.Combine(dir, b)))
+            // A list goes with its plugin when that is packed into another (PluginPack), whichever it is.
+            ? new[] { p, DaggerfallDungeons.PluginName }.Concat(Directory.GetFiles(dir, "Daggerfall *.creatures.json").Select(f => System.IO.Path.GetFileName(f)[..^".creatures.json".Length] + ".esm"))
+                .Distinct().Where(b => b == p || File.Exists(System.IO.Path.Combine(dir, b)))
             : [p]);
         var games = order.Select(p => (Path: System.IO.Path.Combine(dir, p), Catalog: CreatureCatalog.Load(System.IO.Path.Combine(dir, p))))
             .Where(g => g.Catalog is not null && File.Exists(g.Path)).Select(g => (g.Path, Catalog: g.Catalog!)).ToList();
         if (games.Count == 0) throw new InvalidOperationException($"no converted games with creature lists in {dir}");
         var mod = new SkyrimMod(ModKey.FromFileName(PluginName), SkyrimRelease.SkyrimSE);
+        // With the master flag (an .esp by name, loaded with the masters): without it every one of its references in the
+        // worldspaces (537,318 in a user's build, 2026-10-27) took one of Skyrim's 1,048,576 reference handles at load,
+        // and other mods' first reference after it got none and crashed (HandleCount). Its new records are its own; the
+        // flag changes only how its references are kept.
+        mod.ModHeader.Flags |= SkyrimModHeader.HeaderFlag.Master;
         using var skyrim = SkyrimMod.CreateFromBinaryOverlay(System.IO.Path.Combine(skyrimData, "Skyrim.esm"), SkyrimRelease.SkyrimSE);
         var listTemplate = skyrim.Npcs.First(n => n.EditorID == "LvlBanditMelee1H");
 

@@ -11,6 +11,10 @@ TamrielMerge lod [--dir out/convert] [--out DIR] [--only terrain,objects,trees] 
 Every exterior worldspace the converted game plugins add (Daggerfall's, Redguard's, Morrowind's, Oblivion's) gets:
 
 - **Land**: `Skyrim/TerrainLod.cs`, from the winning cells' landscape (the Iliac Bay a 128-cell region at a time).
+  Its normal maps are model-space as vanilla's: X east as red, Z up as green, Y north as blue (`lod-normal-fit` fits a
+  chunk's map against its mesh: vanilla tamriel.32.0.0 green 0.91 + 0.017 z, blue 0.51 + 0.18 y). Until 2026-11-03 Y
+  was green and Z blue, so the land was lit as if on its side: the world map and the distant land had no relief (user:
+  "the map menus do not have a 3d map its all flat").
 - **Objects**: every placed static big enough to see from afar, as chunks at levels 4, 8 and 16:
   half its largest extent at least 220 units (level 4), 450 (8), 900 (16). Deleted, initially disabled and
   enable-parented references are left out. A static's own distant meshes are used when it has them (Skyrim's);
@@ -29,7 +33,11 @@ The normal map is flat.
 **Chunks** follow Skyrim's own (`tamriel.4.0.0.bto`, `tamriel.8.0.0.bto` from Skyrim - Meshes1.bsa):
 
 - NiNode `Obj` → BSMultiBoundNode with its AABB → BSSubIndexTriShapes named `Obj`.
-- Local units 0-4096 across the chunk, scaled by the level (the shape's scale); full-precision vertices.
+- Local units 0-4096 across the chunk, scaled by the level (the shape's scale); full-precision vertices; each shape
+  translated to the chunk's south-west corner in world units and the AABB in world units (tamriel.4.4.-4.bto: t
+  16384,-16384, AABB centre 24471,-6862). Land chunks (.btr) differ: at 0,0,0 with a local AABB, placed by their
+  name. Until 2026-11-04 object chunks were written as land chunks, at 0,0,0: each was drawn its corner's distance
+  towards the world's origin (user: "floating buildings and archetecture and foliage in the distance").
 - BSLightingShaderProperty flags 0x80400000 / 0x5 (0x15 with double-sided for the cut-out cards, which also get
   NiAlphaProperty 0x12EC / 128).
 - At level 4 each shape's triangles run cell by cell: segment `(x - x0) * 4 + (y - y0)`, by the reference's own cell.

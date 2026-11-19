@@ -43,7 +43,9 @@ public static class BlockMeshBuilder
 
     /// <summary>A texture; ImageW/H (Daggerfall texels) mark a Daggerfall picture laid across its panel rather than tiled by world position.</summary>
     /// <param name="Stairs">Collision only: a step (tread or riser), given Skyrim's stair material.</param>
-    internal sealed record Tex(string Diffuse, string Normal, bool Wood, int ImageW = 0, int ImageH = 0, bool Stairs = false);
+    /// <param name="Archive">The Daggerfall texture it is (archive and record), -1 for a Skyrim one: a dungeon's texture
+    /// table swaps it (DungeonTextureTable).</param>
+    internal sealed record Tex(string Diffuse, string Normal, bool Wood, int ImageW = 0, int ImageH = 0, bool Stairs = false, int Archive = -1, int Record = -1);
 
     /// <summary>Exports Daggerfall's own windows, tapestries and banners; set by the dungeon builder. Without it they get Skyrim walls.</summary>
     public static DfTextureExport? Export { get; set; }
@@ -64,9 +66,9 @@ public static class BlockMeshBuilder
         // exporter.
         if (Export is not null)
         {
-            if (archive is 0 or 1) return new Tex(Export.EnsureSolid(archive, record), DfTextureExport.FlatNormal, false);
+            if (archive is 0 or 1) return new Tex(Export.EnsureSolid(archive, record), DfTextureExport.FlatNormal, false, Archive: archive, Record: record);
             var (path, w, h) = Export.Ensure(archive, record);
-            return new Tex(path, DfTextureExport.FlatNormal, (archive % 100) is 67 or 90 or 92 or 49 or 50 or 74 or 95, w, h);
+            return new Tex(path, DfTextureExport.FlatNormal, (archive % 100) is 67 or 90 or 92 or 49 or 50 or 74 or 95, w, h, Archive: archive, Record: record);
         }
         bool floor = normalUp.Y > 0.7f, ceiling = normalUp.Y < -0.7f;
         if (archive is 0 or 1) return Dark; // solid colours
@@ -86,6 +88,32 @@ public static class BlockMeshBuilder
     static Vector3 NormalToSkyrim(Vector3 n) => Vector3.Normalize(new Vector3(n.X, n.Z, n.Y));
 
     public sealed record Result(string Path, int Polygons, int Shapes, int CollisionShapes, Vector3 Min, Vector3 Max);
+
+    /// <summary>A shape of a block's mesh: its name and place among the mesh's shapes (as an alternate texture names it),
+    /// and the Daggerfall texture it wears.</summary>
+    public sealed record ShapeTexture(string Name, int Index, int Archive, int Record);
+
+    /// <summary>A shape's name in the mesh: its texture's file name and its place among the shapes.</summary>
+    static string ShapeName(Tex tex, int index) => $"DF_{System.IO.Path.GetFileNameWithoutExtension(tex.Diffuse)}_{index}";
+
+    /// <summary>
+    /// The shapes <see cref="Build"/> gives a dungeon block's mesh (no picker: Daggerfall's own textures), in order, and the
+    /// mesh's bounds, without making it or exporting any texture: for a dungeon's texture swaps on a mesh built once for
+    /// every dungeon (DungeonCellBuilder), also where another plugin built it.
+    /// </summary>
+    public static (List<ShapeTexture> Shapes, Vector3 Min, Vector3 Max) Describe(DfDungeonBlock block, IReadOnlyDictionary<uint, DfModel> models)
+    {
+        // Named as the exporter names its files (DfTextureExport.Ensure, EnsureSolid), which is all a shape's name takes.
+        var polys = Polygons(block, models, (archive, record, _) => new Tex(archive is 0 or 1
+            ? $@"textures\tamrielmerge\df\solid_{Math.Clamp((archive == 1 ? 128 : 0) + record, 0, 255)}.dds"
+            : $@"textures\tamrielmerge\df\{archive}_{record}.dds", DfTextureExport.FlatNormal, false, Archive: archive, Record: record));
+        var shapes = new List<ShapeTexture>();
+        foreach (var group in polys.GroupBy(p => (p.Tex.Archive, p.Tex.Record)))
+            if (group.Any(p => p.Pts.Length >= 3))
+                shapes.Add(new ShapeTexture(ShapeName(group.First().Tex, shapes.Count), shapes.Count, group.Key.Archive, group.Key.Record));
+        var all = polys.SelectMany(p => p.Pts).ToList();
+        return (shapes, all.Aggregate(new Vector3(float.MaxValue), Vector3.Min), all.Aggregate(new Vector3(float.MinValue), Vector3.Max));
+    }
 
     /// <summary>
     /// The block's collision polygons in block space (Skyrim units, z up), wound counter-clockwise around their
@@ -641,7 +669,7 @@ public static class BlockMeshBuilder
                 if (verts.Count > 60000) break; // BSTriShape uses 16-bit indices
             }
             if (tris.Count == 0) continue;
-            var shape = nif.CreateShapeFromData($"DF_{Path.GetFileNameWithoutExtension(group.Key.Diffuse)}_{shapes}", verts, tris, uvs, norms);
+            var shape = nif.CreateShapeFromData(ShapeName(group.Key, shapes), verts, tris, uvs, norms);
             nif.SetTextureSlot(shape, group.Key.Diffuse, 0);
             nif.SetTextureSlot(shape, group.Key.Normal, 1);
             nif.CalcTangentsForShape(shape);
@@ -797,7 +825,10 @@ public static class BlockMeshBuilder
     /// animated doors carry theirs), the rest on child nodes.</param>
     /// <param name="trap">A trap's: on the trap layer (14, quality 0), as vanilla traps' striking parts are (the Falmer
     /// claws, the battering ram, the bear trap's jaws), so what it hits gets OnTrapHit.</param>
-    internal static int AddCollision(NifFile nif, NiNode root, List<(Vector3[] Pts, Vector3 N, Tex Tex)> polys, bool moving, uint? materialOverride = null, bool onTarget = false, bool trap = false)
+    /// <param name="layer">The collision layer, when not the static, animated or trap one: 15 (non-collidable) is what
+    /// the crosshair finds and nothing bumps into (seen in game 2026-11-12: a door record with only such a box showed
+    /// its "Open" prompt and the player walked through it).</param>
+    internal static int AddCollision(NifFile nif, NiNode root, List<(Vector3[] Pts, Vector3 N, Tex Tex)> polys, bool moving, uint? materialOverride = null, bool onTarget = false, bool trap = false, byte? layer = null)
     {
         var hdr = nif.GetHeader();
         int total = 0, chunk = 0;
@@ -831,8 +862,8 @@ public static class BlockMeshBuilder
             body.shapeRef.index = listId;
             // Static: layer 1, fixed (vanilla Imperial halls). Moving: layer 2 animated static, keyframed (vanilla
             // animated architecture such as Nocturnal's chamber pieces), so collision follows the object.
-            body.collisionFilter.layer = (byte)(trap ? 14 : moving ? 2 : 1);
-            body.collisionFilterCopy.layer = (byte)(trap ? 14 : moving ? 2 : 1);
+            body.collisionFilter.layer = layer ?? (byte)(trap ? 14 : moving ? 2 : 1);
+            body.collisionFilterCopy.layer = layer ?? (byte)(trap ? 14 : moving ? 2 : 1);
             body.collisionResponse = hkResponseType.RESPONSE_SIMPLE_CONTACT;
             body.processContactCallbackDelay = 0xFFFF;
             body.motionSystem = (byte)(moving ? 4 : 5);

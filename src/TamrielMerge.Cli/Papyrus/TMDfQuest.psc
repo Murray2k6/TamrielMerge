@@ -60,6 +60,18 @@ Int Property TagAlias Auto
 Int Property DialogStage = 100 Auto
 {Stage DialogStage + key opens a "Tell me about" topic: key = place, 20 + person, 40 + item.}
 Int Property RumorStage = 200 Auto
+Int Property RunningStage = 50 Auto
+; The stage whose log entry is the first log message's whole text (DfQuestBuilder.LogStage; the objective is its first
+; sentence, as the HUD shows an objective on one line).
+Int Property LogStage = 1000 Auto
+{Set while the quest runs: its "rumors during quest" (message 1005) answers ask for it.}
+String[] Property AfterRumorSuccess Auto
+{Messages 1007, 1006, 1008, 1009 as plain text with <Tk> for the quest's name tags and %pcn the player: handed to the
+machine when the quest ends (Daggerfall Unity Quest.TombstoneQuest: the rumour the townsfolk tell afterwards, and
+what the questor says to the player).}
+String[] Property AfterRumorFailure Auto
+String[] Property AfterQuestorSuccess Auto
+String[] Property AfterQuestorFailure Auto
 Int[] Property RumorIds Auto
 ; "Tell me about" switches, one per resource key (place n, person 20 + n, item 40 + n): 0 shown, 1 hidden by "dialog link"
 ; (Daggerfall Unity TalkManager availableForDialog). The topics' responses ask for them (GetVMQuestVariable).
@@ -382,6 +394,7 @@ EndFunction
 Function Begin()
   Running = True
   SetActive(True)
+  SetStage(RunningStage)
   Pass()
   RegisterForSingleUpdate(2.0)
 EndFunction
@@ -395,6 +408,11 @@ EndFunction
 
 Event OnUpdate()
   If !Running
+    Return
+  EndIf
+  ; A quest waits while the player is in another game's lands (2026-11-09: the tutorial's boxes came up in Morrowind).
+  If Machine && !Machine.InDaggerfall()
+    RegisterForSingleUpdate(5.0)
     Return
   EndIf
   Pass()
@@ -424,9 +442,47 @@ Function Finish()
     EndIf
     s += 1
   EndWhile
+  ; What is said of it afterwards, filled in while the quest's names are still its own.
+  String rumour = ""
+  String word = ""
+  If Success
+    rumour = Afterword(AfterRumorSuccess)
+    word = Afterword(AfterQuestorSuccess)
+  Else
+    rumour = Afterword(AfterRumorFailure)
+    word = Afterword(AfterQuestorFailure)
+  EndIf
+  If rumour != "" || word != ""
+    Machine.Afterword(DfName, rumour, word, Questor)
+  EndIf
   Cleanup(True)
   Machine.QuestEnded(self, Success)
   Stop()
+EndFunction
+
+; One of a message's variants as plain text: the name tags (<Tk>) and the player's name filled in.
+String Function Afterword(String[] variants)
+  If !variants || variants.Length == 0
+    Return ""
+  EndIf
+  String s = variants[Utility.RandomInt(0, variants.Length - 1)]
+  Int k = 0
+  While k < TokenKind.Length
+    s = Fill(s, "<T" + k + ">", TokenText(k))
+    k += 1
+  EndWhile
+  Return Fill(s, "%pcn", Game.GetPlayer().GetDisplayName())
+EndFunction
+
+String Function Fill(String s, String macro, String value)
+  Int at = StringUtil.Find(s, macro)
+  Int guard = 0
+  While at >= 0 && guard < 16
+    s = StringUtil.Substring(s, 0, at) + value + StringUtil.Substring(s, at + StringUtil.GetLength(macro))
+    at = StringUtil.Find(s, macro)
+    guard += 1
+  EndWhile
+  Return s
 EndFunction
 
 Function Cleanup(Bool ended)
@@ -737,11 +793,13 @@ Bool Function RunAction(Int i)
     EndIf
     SetState(Arg(i, next), True)
   ElseIf code == 0x1D
-    ; Yes (button 0) or no.
-    If Say(Arg(i, 3)) == 0
-      SetState(Arg(i, 1), True)
-    Else
-      SetState(Arg(i, 2), True)
+    ; Yes (button 0) or no; without the message nothing is asked and neither task is set (Daggerfall Unity Prompt).
+    If MsgIds.Find(Arg(i, 3)) >= 0
+      If Say(Arg(i, 3)) == 0
+        SetState(Arg(i, 1), True)
+      Else
+        SetState(Arg(i, 2), True)
+      EndIf
     EndIf
   ElseIf code == 0x04
     ; Done: the reward (Daggerfall Unity GivePc shows "quest complete", 1004).
@@ -933,8 +991,9 @@ Bool Function RunAction(Int i)
       k += 1
     EndWhile
   ElseIf code == 0x51
+    ; "create npc _person_ at _place_" (Daggerfall Unity CreateNpcAt): the person at the place's spawn marker.
     If Arg(i, 2) >= 0
-      PlacePersonAt(Arg(i, 2), -1)
+      PlacePersonAt(Arg(i, 2), Arg(i, 1))
     ElseIf Arg(i, 1) >= 0
       Machine.PlaceStranger(placeSite[Arg(i, 1)])
     EndIf
@@ -943,7 +1002,7 @@ Bool Function RunAction(Int i)
       personMuted[Arg(i, 1)] = True
     EndIf
   ElseIf code == 0x53
-    Machine.TransferPlayer(placeSite[Arg(i, 1)])
+    Machine.TransferPlayer(placeSite[Arg(i, 1)], Arg(i, 3))
   ElseIf code == 0x55
     ; "add npc as questor" (Daggerfall Unity Quest.AddQuestor): the quest's questor is this person.
     If personRef[Arg(i, 1)]
@@ -1419,6 +1478,10 @@ Function ShowLog(Int id, Int step)
   EndIf
   If logShown[step] >= 0 && logShown[step] != o
     SetObjectiveDisplayed(logShown[step], False)
+  EndIf
+  ; The whole message in the journal (once a run), then its line on the HUD.
+  If !GetStageDone(LogStage + o)
+    SetStage(LogStage + o)
   EndIf
   SetObjectiveDisplayed(o, True)
   logShown[step] = o

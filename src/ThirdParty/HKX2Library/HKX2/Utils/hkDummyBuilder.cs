@@ -16,8 +16,9 @@ namespace HKX2.Utils
 
             AssemblyName aName = new(targetType.Name);
             AssemblyBuilder ab = AssemblyBuilder.DefineDynamicAssembly(aName, AssemblyBuilderAccess.Run);
-            ModuleBuilder mb = ab.DefineDynamicModule(aName.Name);
-            TypeBuilder tb = mb.DefineType(aName.Name, TypeAttributes.Public, dummyType);
+            // AssemblyName(string) parses the name it is given, so Name is set (a type name is never empty)
+            ModuleBuilder mb = ab.DefineDynamicModule(aName.Name!);
+            TypeBuilder tb = mb.DefineType(aName.Name!, TypeAttributes.Public, dummyType);
 
             FieldBuilder fbIsDummy = tb.DefineField("m_IsDummy", typeof(bool), FieldAttributes.Public);
             FieldBuilder fbValue = tb.DefineField("m_ConflictValue", typeof(IHavokObject), FieldAttributes.Public);
@@ -29,7 +30,8 @@ namespace HKX2.Utils
             var targetWriteXml = targetType.GetMethod("WriteXml");
 
 
-            var mReadHkxInfo = dummyType.GetMethod("Read");
+            // a missing method failed here as a NullReferenceException before, and still does, with its name
+            var mReadHkxInfo = dummyType.GetMethod("Read") ?? throw new NullReferenceException($"{dummyType} has no public Read method");
             var mReadHkxBody = tb.DefineMethod(mReadHkxInfo.Name,
                 MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.ReuseSlot | MethodAttributes.HideBySig, mReadHkxInfo.ReturnType, mReadHkxInfo.GetParameters().Select(t => t.ParameterType).ToArray());
 
@@ -39,11 +41,12 @@ namespace HKX2.Utils
             readHkxIl.Emit(OpCodes.Ldfld, fbValue);
             readHkxIl.Emit(OpCodes.Ldarg_1);
             readHkxIl.Emit(OpCodes.Ldarg_2);
-            readHkxIl.Emit(OpCodes.Callvirt, targetReadHkx);
+            // ILGenerator.Emit throws ArgumentNullException("meth") for a null method; the same, raised here
+            readHkxIl.Emit(OpCodes.Callvirt, targetReadHkx ?? throw new ArgumentNullException("meth"));
             readHkxIl.Emit(OpCodes.Nop);
             readHkxIl.Emit(OpCodes.Ret);
 
-            var mWriteHkxInfo = dummyType.GetMethod("Write");
+            var mWriteHkxInfo = dummyType.GetMethod("Write") ?? throw new NullReferenceException($"{dummyType} has no public Write method");
             var mWriteHkxBody = tb.DefineMethod(mWriteHkxInfo.Name,
                 MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.ReuseSlot | MethodAttributes.HideBySig, mWriteHkxInfo.ReturnType, mWriteHkxInfo.GetParameters().Select(t => t.ParameterType).ToArray());
 
@@ -53,11 +56,11 @@ namespace HKX2.Utils
             writeHkxIl.Emit(OpCodes.Ldfld, fbValue);
             writeHkxIl.Emit(OpCodes.Ldarg_1);
             writeHkxIl.Emit(OpCodes.Ldarg_2);
-            writeHkxIl.Emit(OpCodes.Callvirt, targetWriteHkx);
+            writeHkxIl.Emit(OpCodes.Callvirt, targetWriteHkx ?? throw new ArgumentNullException("meth"));
             writeHkxIl.Emit(OpCodes.Nop);
             writeHkxIl.Emit(OpCodes.Ret);
 
-            var mReadXmlInfo = dummyType.GetMethod("ReadXml");
+            var mReadXmlInfo = dummyType.GetMethod("ReadXml") ?? throw new NullReferenceException($"{dummyType} has no public ReadXml method");
             var mReadXmlBody = tb.DefineMethod(mReadXmlInfo.Name,
                 MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.ReuseSlot | MethodAttributes.HideBySig, mReadXmlInfo.ReturnType, mReadXmlInfo.GetParameters().Select(t => t.ParameterType).ToArray());
 
@@ -67,11 +70,11 @@ namespace HKX2.Utils
             readXmlIl.Emit(OpCodes.Ldfld, fbValue);
             readXmlIl.Emit(OpCodes.Ldarg_1);
             readXmlIl.Emit(OpCodes.Ldarg_2);
-            readXmlIl.Emit(OpCodes.Callvirt, targetReadXml);
+            readXmlIl.Emit(OpCodes.Callvirt, targetReadXml ?? throw new ArgumentNullException("meth"));
             readXmlIl.Emit(OpCodes.Nop);
             readXmlIl.Emit(OpCodes.Ret);
 
-            var mWriteXmlInfo = dummyType.GetMethod("WriteXml");
+            var mWriteXmlInfo = dummyType.GetMethod("WriteXml") ?? throw new NullReferenceException($"{dummyType} has no public WriteXml method");
             var mWriteXmlBody = tb.DefineMethod(mWriteXmlInfo.Name,
                 MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.ReuseSlot | MethodAttributes.HideBySig, mWriteXmlInfo.ReturnType, mWriteXmlInfo.GetParameters().Select(t => t.ParameterType).ToArray());
 
@@ -81,7 +84,7 @@ namespace HKX2.Utils
             writeXmlIl.Emit(OpCodes.Ldfld, fbValue);
             writeXmlIl.Emit(OpCodes.Ldarg_1);
             writeXmlIl.Emit(OpCodes.Ldarg_2);
-            writeXmlIl.Emit(OpCodes.Callvirt, targetWriteXml);
+            writeXmlIl.Emit(OpCodes.Callvirt, targetWriteXml ?? throw new ArgumentNullException("meth"));
             writeXmlIl.Emit(OpCodes.Nop);
             writeXmlIl.Emit(OpCodes.Ret);
 
@@ -94,7 +97,8 @@ namespace HKX2.Utils
         public static dynamic CreateDummy<T>(T targetObject, System.Type dummyType) where T : IHavokObject
         {
             var type = CreateDummyType(targetObject.GetType(), dummyType);
-            var dummy = (dynamic)Activator.CreateInstance(type);
+            // CreateInstance returns null only for Nullable<T>; the type built above is a class
+            var dummy = (dynamic)Activator.CreateInstance(type)!;
             dummy.m_ConflictValue = targetObject;
             dummy.m_IsDummy = true;
             dummy.Signature = targetObject.Signature;

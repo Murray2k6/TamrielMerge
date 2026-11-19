@@ -334,8 +334,11 @@ EndFunction
 
 ; The player's race in the games' tables (GameStones.Races), or -1.
 Int Function RaceIndex()
+  If !RaceForms || !RaceFormIndex
+    Return -1
+  EndIf
   Int i = RaceForms.Find(PlayerRef.GetRace())
-  If i < 0
+  If i < 0 || i >= RaceFormIndex.Length
     Return -1
   EndIf
   Return RaceFormIndex[i]
@@ -343,13 +346,15 @@ EndFunction
 
 ; Attribute a (0 Strength .. 7 Luck): the Daggerfall class's own or the race's, the class's favoured bonus, the levels'
 ; gains; at most 100.
+; Asked for before Setup has run (other games' scripts read the player's attributes from their first update: Morrowind's
+; dispositions did at the start, "Cannot access an element of a None array", 2026-11-05): what is there, gains none yet.
 Int Function AttributeValue(Int a)
   Int g = RuleGame()
-  If g < 0
+  If g < 0 || a < 0 || a >= 8 || !GameNeutral || g >= GameNeutral.Length
     Return 0
   EndIf
   Int value = GameNeutral[g]
-  If playerClass >= 0 && ClassAttributes[playerClass * 8] >= 0
+  If playerClass >= 0 && ClassAttributes && ClassAttributes[playerClass * 8] >= 0
     value = ClassAttributes[playerClass * 8 + a]
   Else
     Int r = RaceIndex()
@@ -358,16 +363,18 @@ Int Function AttributeValue(Int a)
       If sex < 0 || sex > 1
         sex = 0
       EndIf
-      Int fromRace = GameRaceAttributes[g * 160 + r * 16 + sex * 8 + a]
-      If fromRace > 0
-        value = fromRace
+      Int at = g * 160 + r * 16 + sex * 8 + a
+      If GameRaceAttributes && at < GameRaceAttributes.Length && GameRaceAttributes[at] > 0
+        value = GameRaceAttributes[at]
       EndIf
     EndIf
   EndIf
-  If playerClass >= 0 && (ClassFavored[playerClass * 2] == a || ClassFavored[playerClass * 2 + 1] == a)
+  If playerClass >= 0 && ClassFavored && GameFavoredBonus && (ClassFavored[playerClass * 2] == a || ClassFavored[playerClass * 2 + 1] == a)
     value += GameFavoredBonus[ClassGame[playerClass]]
   EndIf
-  value += gains[a]
+  If gains
+    value += gains[a]
+  EndIf
   If value > 100
     value = 100
   EndIf

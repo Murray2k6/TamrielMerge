@@ -27,8 +27,10 @@ public sealed class OverlandTiles
     /// <summary>A big worldspace's land, distant terrain and navmesh are built this many cells square at a time (a
     /// multiple of the distant terrain's largest chunk, so none of its chunks is split).</summary>
     public const int ChunkCells = 128;
-    /// <summary>Largest tile core: with the overlap a tile reaches ±120 cells from its origin.</summary>
-    public const int MaxCore = 224;
+    /// <summary>Largest tile core: with the overlap a tile reaches ±508 cells from its origin, inside the ±512 physics box
+    /// TamrielMergeSeamless makes (2026-10-25: the 2000 x 1000-cell overland as 2 tiles; at 224, for the old ±128 box, it
+    /// was 45).</summary>
+    public const int MaxCore = 1000;
     /// <summary>Neighbours' cells each tile also has land for (and distant terrain beyond it, <see cref="LodMargin"/>).</summary>
     public const int Overlap = 8;
     public const int LodMargin = 32;
@@ -157,6 +159,25 @@ public sealed class OverlandTiles
         var placed = world.TopCell?.Persistent.ToList() ?? [];
         world.TopCell?.Persistent.Clear();
         MoveInto(mod, placed, (ref_, t) => tiles[t].TopCell!.Persistent.Add(ref_));
+        // Exterior cells the build made (a town built on the overland: its cells, without land, which the land plugins
+        // give land): each into the tile it lies in, its grid and everything in it moved by the tile's shift.
+        var cells = world.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items).ToList();
+        world.SubCells.Clear();
+        // Every cell's references at once, each by its cell's tile (the doors leading to them are looked for once).
+        var moving = new List<(IPlaced Ref, Cell Cell, bool Persistent, int Tile)>();
+        foreach (var cell in cells)
+        {
+            int gx = cell.Grid!.Point.X, gy = cell.Grid.Point.Y;
+            int t = TileOfCell(gx, gy);
+            var (ox, oy) = Origin(t);
+            cell.Grid.Point = new Noggog.P2Int(gx - ox, gy - oy);
+            foreach (var r in cell.Persistent) moving.Add((r, cell, true, t));
+            foreach (var r in cell.Temporary) moving.Add((r, cell, false, t));
+            cell.Persistent.Clear(); cell.Temporary.Clear();
+            TerrainBuilder.AddCell(tiles[t], cell);
+        }
+        var at = moving.ToDictionary(m => m.Ref, m => m, (IEqualityComparer<IPlaced>)ReferenceEqualityComparer.Instance);
+        MoveInto(mod, moving.Select(m => m.Ref), (r, _) => { var m = at[r]; (m.Persistent ? m.Cell.Persistent : m.Cell.Temporary).Add(r); }, tileOf: r => at[r].Tile);
         mod.Worldspaces.Remove(world);
         return tiles;
     }
@@ -165,15 +186,15 @@ public sealed class OverlandTiles
     /// Moves references placed in global coordinates into tiles (<paramref name="add"/> puts one in its tile) and
     /// fixes the arrival point of every door in <paramref name="mod"/> that leads to one of them.
     /// </summary>
-    public void MoveInto(SkyrimMod mod, IEnumerable<IPlaced> placed, Action<IPlaced, int> add)
+    public void MoveInto(SkyrimMod mod, IEnumerable<IPlaced> placed, Action<IPlaced, int> add, int? tile = null, Func<IPlaced, int>? tileOf = null)
     {
         var shifts = new Dictionary<FormKey, P3Float>();
         foreach (var r in placed)
         {
-            int t = 0;
+            int t = tileOf?.Invoke(r) ?? tile ?? 0;
             if (r is IPlaced p && Position(p) is { } pos)
             {
-                t = TileAt(pos);
+                t = tileOf?.Invoke(r) ?? tile ?? TileAt(pos);
                 var s = Shift(t);
                 SetPosition(p, pos + s);
                 shifts[r.FormKey] = s;
@@ -188,10 +209,16 @@ public sealed class OverlandTiles
 
     /// <summary>
     /// For a plugin built on Daggerfall.esm (dungeon and town batches): a scratch worldspace standing for the whole
-    /// overland in global coordinates, to place entrances on (with <paramref name="master"/>'s climate, water and music),
-    /// and a function moving what was placed on it into overrides of the master's tiles (persistent cells only).
+    /// overland in global coordinates, to place on (with <paramref name="master"/>'s climate, water and music); its
+    /// cells by global grid (<c>CellAt</c>: each an override of the overland's own cell there, the last of
+    /// <paramref name="master"/> and <paramref name="lands"/>, the land plugins in load order, to have it, without its
+    /// land, navmesh or references; a new cell where none has one); and a function moving all of it into overrides of the
+    /// master's tiles: the scratch persistent cell's references into the tiles' persistent cells, its cells into the tiles
+    /// they lie in, everything in them by the tile's shift (and every door leading to them). A plugin taking cells
+    /// from <paramref name="lands"/> has them as masters.
     /// </summary>
-    public (Worldspace Scratch, Action MoveIntoTiles) OverrideTiles(SkyrimMod mod, ISkyrimModGetter master)
+    public (Worldspace Scratch, Func<int, int, Cell> CellAt, Action MoveIntoTiles) OverrideTiles(SkyrimMod mod, ISkyrimModGetter master,
+        IReadOnlyList<ISkyrimModGetter>? lands = null)
     {
         var first = master.Worldspaces.First(w => w.EditorID == EditorId(0));
         var scratch = new Worldspace(mod.GetNextFormKey(), SkyrimRelease.SkyrimSE)
@@ -214,12 +241,75 @@ public sealed class OverlandTiles
             mod.Worldspaces.Add(ws);
             return overrides[t] = ws;
         }
-        return (scratch, () =>
+        // Each plugin's blocks of each tile, by block number, found as a cell is asked for.
+        var sources = new[] { master }.Concat(lands ?? []).ToList();
+        var blocks = new Dictionary<(int Plugin, int Tile), Dictionary<(int, int), IWorldspaceBlockGetter>>();
+        ICellGetter? Own(int t, int lx, int ly)
+        {
+            for (int p = sources.Count - 1; p >= 0; p--)
+            {
+                if (!blocks.TryGetValue((p, t), out var byNumber))
+                {
+                    var key = master.Worldspaces.First(w => w.EditorID == EditorId(t)).FormKey;
+                    byNumber = new Dictionary<(int, int), IWorldspaceBlockGetter>();
+                    foreach (var w in sources[p].Worldspaces.Where(w => w.FormKey == key))
+                        foreach (var b in w.SubCells) byNumber.TryAdd((b.BlockNumberX, b.BlockNumberY), b);
+                    blocks[(p, t)] = byNumber;
+                }
+                if (!byNumber.TryGetValue((FloorDiv(lx, 32), FloorDiv(ly, 32)), out var block)) continue;
+                var sub = block.Items.FirstOrDefault(s => s.BlockNumberX == FloorDiv(lx, 8) && s.BlockNumberY == FloorDiv(ly, 8));
+                if (sub?.Items.FirstOrDefault(c => c.Grid is { } g && g.Point.X == lx && g.Point.Y == ly) is { } cell) return cell;
+            }
+            return null;
+        }
+        var cells = new Dictionary<(int, int), Cell>();
+        Cell CellAt(int gx, int gy)
+        {
+            if (cells.TryGetValue((gx, gy), out var cell)) return cell;
+            int t = TileOfCell(gx, gy);
+            var (ox, oy) = Origin(t);
+            if (Own(t, gx - ox, gy - oy) is { } own)
+            {
+                cell = own.DeepCopy(new Cell.TranslationMask(defaultOn: true) { Persistent = false, Temporary = false, Landscape = false, NavigationMeshes = false });
+                cell.Persistent.Clear(); cell.Temporary.Clear(); cell.NavigationMeshes.Clear(); cell.Landscape = null;
+                OverriddenCells++;
+            }
+            else
+            {
+                cell = new Cell(mod) { Flags = 0, Persistent = [], Temporary = [] };
+                NewCells++;
+            }
+            // The global grid until it is moved into its tile.
+            cell.Grid = new CellGrid { Point = new P2Int(gx, gy) };
+            TerrainBuilder.AddCell(scratch, cell);
+            return cells[(gx, gy)] = cell;
+        }
+        return (scratch, CellAt, () =>
         {
             MoveInto(mod, scratch.TopCell!.Persistent.ToList(), (r, t) => Tile(t).TopCell!.Persistent.Add(r));
             scratch.TopCell!.Persistent.Clear();
+            // Every cell's references at once, each by its cell's tile (the doors leading to them are looked for once).
+            var moving = new List<(IPlaced Ref, Cell Cell, bool Persistent, int Tile)>();
+            foreach (var ((gx, gy), cell) in cells)
+            {
+                int t = TileOfCell(gx, gy);
+                var (ox, oy) = Origin(t);
+                cell.Grid!.Point = new P2Int(gx - ox, gy - oy);
+                foreach (var r in cell.Persistent) moving.Add((r, cell, true, t));
+                foreach (var r in cell.Temporary) moving.Add((r, cell, false, t));
+                cell.Persistent.Clear(); cell.Temporary.Clear();
+                TerrainBuilder.AddCell(Tile(t), cell);
+            }
+            var at = moving.ToDictionary(m => m.Ref, m => m, (IEqualityComparer<IPlaced>)ReferenceEqualityComparer.Instance);
+            MoveInto(mod, moving.Select(m => m.Ref), (r, _) => { var m = at[r]; (m.Persistent ? m.Cell.Persistent : m.Cell.Temporary).Add(r); }, tileOf: r => at[r].Tile);
+            scratch.SubCells.Clear();
         });
     }
+
+    /// <summary>Of the cells <see cref="OverrideTiles"/> handed out, how many override the overland's own and how many it
+    /// made (where no plugin has a cell).</summary>
+    public int OverriddenCells { get; private set; }
+    public int NewCells { get; private set; }
 
     static P3Float? Position(IPlaced p) => p switch
     {
@@ -275,18 +365,39 @@ public sealed class OverlandTiles
     /// the ones before it as masters (the land textures are in the first), and the last also holds every navmesh, over
     /// the other plugins' cells, so the navmeshes' links between cells all stay in one plugin.
     /// </summary>
-    public static readonly string[] LandPluginNames = [LandPluginName, "Daggerfall Land 2.esm", "Daggerfall Land 3.esm", "Daggerfall Land 4.esm"];
+    public static readonly string[] LandPluginNames = [LandPluginName, .. Enumerable.Range(2, 9).Select(i => $"Daggerfall Land {i}.esm")];
     /// <summary>The land's plugins found in <paramref name="dir"/>, in load order.</summary>
     public static List<string> LandPluginsIn(string dir) => LandPluginNames.Where(n => File.Exists(Path.Combine(dir, n))).ToList();
-    /// <summary>The land plugin with the overland's navmeshes (and the navmesh map): the last of them.</summary>
-    public static string? NavmeshPluginIn(string dir) => LandPluginsIn(dir).LastOrDefault();
+    /// <summary>
+    /// The overland's navmeshes, a plugin a tile ("Daggerfall Navmesh.esm" the first tile's, "Daggerfall Navmesh 2.esm"
+    /// the next's...), loaded after the land plugins and before the town plugin (their cells are the land's, as the land
+    /// has them, and the towns' overrides of those cells come after): no navmesh links to another tile's (each tile is a
+    /// worldspace of its own), and each tile's are too many for the last land plugin as they were (2026-10-26: the first
+    /// tile's 670,511 navmeshes, 5.7 GB written, 2.2 times smaller compressed, past the 2 GB Mutagen reads).
+    /// </summary>
+    /// <summary>Tiles a navmesh plugin set may hold, and plugins a tile's navmeshes may be split into by size (OverlandNavmesh).</summary>
+    public const int NavmeshTiles = 4, NavmeshPartsPerTile = 8;
+    /// <summary>Tile <paramref name="tile"/>'s (1-based) <paramref name="part"/>-th navmesh plugin: "Daggerfall Navmesh.esm", then
+    /// "Daggerfall Navmesh 1-2.esm" ..., "Daggerfall Navmesh 2.esm", "Daggerfall Navmesh 2-2.esm" ... (each later part has the
+    /// earlier ones as masters).</summary>
+    public static string NavmeshPluginName(int tile, int part) =>
+        tile == 1 && part == 1 ? "Daggerfall Navmesh.esm" : part == 1 ? $"Daggerfall Navmesh {tile}.esm" : $"Daggerfall Navmesh {tile}-{part}.esm";
+    /// <summary>Every navmesh plugin name, in load order.</summary>
+    public static readonly string[] NavmeshPluginNames =
+        [.. Enumerable.Range(1, NavmeshTiles).SelectMany(t => Enumerable.Range(1, NavmeshPartsPerTile).Select(p => NavmeshPluginName(t, p)))];
+    /// <summary>The navmesh plugins found in <paramref name="dir"/>, in load order.</summary>
+    public static List<string> NavmeshPluginsIn(string dir) => NavmeshPluginNames.Where(n => File.Exists(Path.Combine(dir, n))).ToList();
     /// <summary>How many plugins the land is split into; null: as many as <see cref="PluginBudget"/> needs.</summary>
     public static int? LandPluginsWanted { get; set; }
     /// <summary>Bytes each land cell adds, joined and compressed (2026-10-15: 2,009,995,802 for 399,800 cells): its land,
     /// and its share of the navmeshes and their map.</summary>
-    const double LandBytesPerCell = (1627.2 + 26.7) * 1048576 / 399_800, NavmeshBytesPerCell = (225.4 + 19.1) * 1048576 / 399_800;
-    /// <summary>The most a land plugin is planned to hold, well under the 2 GB Mutagen reads (room for a finer navmesh).</summary>
-    const double PluginBudget = 1.6e9;
+    const double LandBytesPerCell = (1627.2 + 26.7) * 1048576 / 399_800;
+    /// <summary>The navmeshes went to plugins of their own on 2026-10-26 (OverlandNavmesh): none of a land plugin's bytes.</summary>
+    const double NavmeshBytesPerCell = 0;
+    /// <summary>The most a land plugin is planned to hold, under the 2 GB Mutagen reads (user, 2026-10-28: as few plugins
+    /// as the engine's slots allow; 2026-10-28's build put 1.39 million cells in six plugins of 1,050-1,190 MB at 1.6 GB
+    /// planned, 5,755 MB in all; at 1.85 GB planned they go in four).</summary>
+    const double PluginBudget = 1.85e9;
     static string LandPartPath(string dir, int part) => Path.Combine(dir, $"Daggerfall Land.part{part + 1}.esm");
 
     /// <summary>
@@ -347,6 +458,7 @@ public sealed class OverlandTiles
         if (plugins > 1) log?.Invoke($"{totalLand:N0} land cells, estimated {totalLand * (LandBytesPerCell + NavmeshBytesPerCell) / 1e9:F2} GB with the navmeshes: split into {plugins} plugins ({string.Join(", ", Enumerable.Range(0, plugins).Select(p => $"{LandPluginNames[p]} {Enumerable.Range(0, units.Count).Where(u => pluginOf[u] == p).Sum(u => landIn[u]):N0} cells"))})");
         var writtenBy = Enumerable.Range(0, plugins).Select(_ => new List<string>()).ToArray();
         var lodFramed = new HashSet<int>();
+        var masterCells = new Dictionary<int, Dictionary<(int, int), ICellGetter>>();
         for (int u = 0; u < units.Count; u++)
         {
             var (t, ux0, uy0, ux1, uy1, whole) = units[u];
@@ -371,6 +483,11 @@ public sealed class OverlandTiles
             var (ox, oy) = Origin(t);
             var (x0, y0, x1, y1) = Extent(t);
             int w = ux1 - ux0 + 1, h = uy1 - uy0 + 1;
+            // The master's own cells of this tile (a town Daggerfall.esm builds on the overland), which get their land as
+            // overrides.
+            if (!masterCells.TryGetValue(t, out var ownCells))
+                masterCells[t] = ownCells = masterWorld.SubCells.SelectMany(b => b.Items).SelectMany(sb => sb.Items)
+                    .Where(c => c.Grid is not null).ToDictionary(c => (c.Grid!.Point.X, c.Grid.Point.Y));
             // Land for the piece; a whole tile's also for the cells round it, for its distant terrain only.
             var built = new Cell?[w * h];
             Parallel.For(0, h, j =>
@@ -378,7 +495,8 @@ public sealed class OverlandTiles
                 for (int i = 0; i < w; i++)
                 {
                     int gx = ux0 + i, gy = uy0 + j;
-                    built[j * w + i] = TerrainBuilder.BuildCell(mod, f, map, gx - f.MinCellX, gy - f.MinCellY, peak, gx - ox, gy - oy);
+                    built[j * w + i] = TerrainBuilder.BuildCell(mod, f, map, gx - f.MinCellX, gy - f.MinCellY, peak, gx - ox, gy - oy,
+                        ownCells.GetValueOrDefault((gx - ox, gy - oy)));
                 }
             });
             var lodCells = new Dictionary<(int, int), Cell>();
@@ -430,6 +548,6 @@ public sealed class OverlandTiles
 
     /// <summary>The land plugins over <see cref="SafeSize"/> (Mutagen reads up to 2 GB), with their sizes in MB.</summary>
     public static List<string> Oversized(string dir) =>
-        LandPluginsIn(dir).Where(n => new FileInfo(Path.Combine(dir, n)).Length >= SafeSize).Select(n => $"{n} ({new FileInfo(Path.Combine(dir, n)).Length / 1048576} MB)").ToList();
+        LandPluginsIn(dir).Concat(NavmeshPluginsIn(dir)).Where(n => new FileInfo(Path.Combine(dir, n)).Length >= SafeSize).Select(n => $"{n} ({new FileInfo(Path.Combine(dir, n)).Length / 1048576} MB)").ToList();
     public const long SafeSize = 1_900_000_000;
 }

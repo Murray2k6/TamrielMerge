@@ -27,6 +27,14 @@ FormList Property Pictures Auto
 {The screen pictures (ViewGXA's images) as notes that show the image, by the scripts' picture number.}
 FormList Property Shells Auto
 {The programs OpenShell runs on their own (activators carrying them), by the translator's number.}
+Race Property GremlinRace Auto
+{The player's body while he is the gremlin (PushPlayer('gremlin') in MGUILD's SCENE4, PopPlayer in JAILINT's JOTO):
+Redguard's GREMLIN actor has no model of its own that Skyrim can animate, so Skyrim's nearest small creature race
+(Dragonborn's Riekling) stands in.}
+FormList Property HandTwins Auto
+{By item index (as Items): a weapon record wearing the item's hand model (ITEM.INI hand_object_file), for HandItem(n)
+on items Skyrim can't otherwise hold; a non-weapon entry where the item has none (weapons and the torch are held as
+themselves, potions drunk).}
 TMRgMove Property Mover Auto
 {Ledges, ropes and hanging (the quest RGMovement).}
 GlobalVariable Property FirstPersonAfterShots Auto
@@ -46,6 +54,10 @@ Float[] Property SoundSeconds Auto
 {How long each of those plays, all its loops (0: until stopped).}
 Float[] Property SoundReach Auto
 {How far off each of those is heard when placed: Redguard's volume is 0 from there on (0 for a centred one).}
+Int[] Property EffectLoops Auto
+{1 where the effect at that index loops (stopped once its loops have played), 0 where it plays once.}
+Int[] Property SoundLoops Auto
+{The same for the entries after them.}
 
 Int[] potions
 Int Property SelectedItem = 1 Auto Hidden
@@ -80,6 +92,7 @@ Int[] chanId
 Int[] chanEffect
 ObjectReference[] chanOwner
 Float[] chanEnd
+Bool[] chanLoop
 
 Function Channels()
   If chanId
@@ -89,6 +102,7 @@ Function Channels()
   chanEffect = new Int[16]
   chanOwner = new ObjectReference[16]
   chanEnd = new Float[16]
+  chanLoop = new Bool[16]
   Int c = 0
   While c < 16
     chanId[c] = -1
@@ -154,14 +168,25 @@ Float Function SoundSecondsOf(Int entry)
   Return 0.0
 EndFunction
 
+Bool Function SoundLoopsOf(Int entry)
+  Int i = entry - Effects()
+  If i < 0
+    Return EffectLoops && entry >= 0 && entry < EffectLoops.Length && EffectLoops[entry] != 0
+  EndIf
+  Return SoundLoops && i < SoundLoops.Length && SoundLoops[i] != 0
+EndFunction
+
 Bool Function ChannelPlaying(Int c)
   Channels()
   If c < 0 || c >= 16 || chanId[c] < 0
     Return False
   EndIf
   If chanEnd[c] > 0.0 && Utility.GetCurrentRealTime() >= chanEnd[c]
-    ; Played out (a sound looping a number of times is stopped after the last).
-    Sound.StopInstance(chanId[c])
+    ; Played out: a sound looping a number of times is stopped after the last; one played once has ended by itself
+    ; (stopping it again was an error each time, 2026-11-04).
+    If chanLoop[c]
+      Sound.StopInstance(chanId[c])
+    EndIf
     chanId[c] = -1
     chanOwner[c] = None
     chanEffect[c] = -1
@@ -172,9 +197,10 @@ EndFunction
 
 ; Starts a sound on the first idle channel from first: the entry's sound at the given reference (placed, or the
 ; player for a centred one), its volume scaled by gain (1: as built). Returns the channel, -1 when dropped.
-Int Function PlaySound(Sound s, Float seconds, Int effect, ObjectReference owner, ObjectReference at, Int first, Float gain)
+Int Function PlaySound(Sound s, Float seconds, Int effect, ObjectReference owner, ObjectReference at, Int first, Float gain, Bool loops = False)
   Channels()
-  If !s || !at
+  ; Nowhere to play it: a placed sound needs its object's 3D (one far off in an unloaded cell is out of hearing too).
+  If !s || !at || !at.Is3DLoaded()
     Return -1
   EndIf
   Int c = first
@@ -185,6 +211,9 @@ Int Function PlaySound(Sound s, Float seconds, Int effect, ObjectReference owner
     Return -1
   EndIf
   Int id = s.Play(at)
+  If id <= 0
+    Return -1
+  EndIf
   If gain < 1.0
     If gain < 0.0
       gain = 0.0
@@ -192,6 +221,7 @@ Int Function PlaySound(Sound s, Float seconds, Int effect, ObjectReference owner
     Sound.SetInstanceVolume(id, gain)
   EndIf
   chanId[c] = id
+  chanLoop[c] = loops
   chanEffect[c] = effect
   chanOwner[c] = owner
   If seconds > 0.0
@@ -206,7 +236,7 @@ Int Function PlayEntry(Int entry, Int effect, ObjectReference owner, ObjectRefer
   If entry < 0 || entry >= Sounds.GetSize()
     Return -1
   EndIf
-  Return PlaySound(Sounds.GetAt(entry) as Sound, SoundSecondsOf(entry), effect, owner, at, first, gain)
+  Return PlaySound(Sounds.GetAt(entry) as Sound, SoundSecondsOf(entry), effect, owner, at, first, gain, SoundLoopsOf(entry))
 EndFunction
 
 Function StopChannel(Int c)
@@ -261,7 +291,7 @@ EndFunction
 
 ; Redguard's lockoutPlayer(1/0): scripts nest it, so controls come back when the last one lets go (and a camera shot
 ; of the cutscene ends with it).
-Function Lockout(Bool on)
+Function Lockout(Bool on, ObjectReference akBy = None)
   If on
     lockouts += 1
     If lockouts == 1
@@ -270,12 +300,59 @@ Function Lockout(Bool on)
   ElseIf lockouts > 0
     lockouts -= 1
     If lockouts == 0
+      ; The shot ends first: leaving the free camera, the game puts the controls back as they were when the camera was
+      ; taken (held, under this lockout), over anything enabled before it. In a new game the docks' cutscene let go
+      ; (0 held) and Cyrus still could not walk: the console listed Menu disabled, and its EnablePlayerControls freed
+      ; him (2026-11-12, user: "you cant still move after the opening while on the ship").
+      EndShot()
       If !flying && !hangingOn
         Game.EnablePlayerControls()
       EndIf
-      EndShot()
     EndIf
   EndIf
+  Debug.Trace("[TamrielMerge] Redguard lockout " + on + " by " + akBy + ": " + lockouts + " held")
+EndFunction
+
+; A map change ends every cutscene's hold on the player, as Redguard's engine does: its opening (START's SCENEST) locks
+; Cyrus out and never lets go, the island's load does (2026-11-05, user: "redguard i still cant move when npcs can").
+; LoadWorld calls it, and TMStoryOrder before every journey between times and places.
+Function MapChanged()
+  If lockouts > 0 || flying
+    Debug.Trace("[TamrielMerge] Redguard: a map change released " + lockouts + " lockouts (flying " + flying + ")")
+  EndIf
+  lockouts = 0
+  If flying
+    Game.GetPlayer().StopTranslation()
+    flying = False
+  EndIf
+  EndShot()
+  If !hangingOn
+    Game.EnablePlayerControls()
+  EndIf
+EndFunction
+
+; Cyrus's log (Redguard's AddLog): the entry's stage set on the log quest, started if it isn't running, and the entry's
+; objective shown in place of the one before it (the log is a diary: its entries stay in the journal, the newest is
+; what the quest shows).
+Int lastLog = 0
+
+Function AddLog(Int stage)
+  If !LogQuest || stage <= 0
+    Return
+  EndIf
+  If !LogQuest.IsRunning()
+    LogQuest.Start()
+  EndIf
+  If LogQuest.IsStageDone(stage)
+    Return
+  EndIf
+  LogQuest.SetStage(stage)
+  If lastLog > 0 && lastLog != stage
+    LogQuest.SetObjectiveDisplayed(lastLog, False)
+  EndIf
+  LogQuest.SetObjectiveDisplayed(stage, True, True)
+  lastLog = stage
+  Debug.Trace("[TamrielMerge] Redguard log entry " + stage + " (quest running " + LogQuest.IsRunning() + ", stage done " + LogQuest.IsStageDone(stage) + ")")
 EndFunction
 
 Bool Function LockedOut()
@@ -321,6 +398,67 @@ Form Function Item(Int i)
   Return Items.GetAt(i)
 EndFunction
 
+; ---- the torch (Redguard's torch_timer, object field 9: a lit torch burns 60 s, then goes out) ----
+
+Float torchUntil = -1.0
+
+Function TorchLit(Actor a)
+  If a != Game.GetPlayer()
+    Return
+  EndIf
+  torchUntil = Utility.GetCurrentRealTime() + 60.0
+  RegisterForSingleUpdate(1.0)
+EndFunction
+
+Function TorchOut()
+  torchUntil = -1.0
+EndFunction
+
+; Seconds left on the player's torch (0 when it isn't burning).
+Int Function TorchTime()
+  If torchUntil < 0.0
+    Return 0
+  EndIf
+  Float left = torchUntil - Utility.GetCurrentRealTime()
+  If left <= 0.0
+    Return 0
+  EndIf
+  Return Math.Ceiling(left)
+EndFunction
+
+; A script setting the timer (0 puts the torch out).
+Function SetTorchTime(Int seconds)
+  Actor p = Game.GetPlayer()
+  Form torch = Item(45)
+  If seconds <= 0
+    torchUntil = -1.0
+    If torch && p.IsEquipped(torch)
+      p.UnequipItem(torch, False, True)
+    EndIf
+    Return
+  EndIf
+  torchUntil = Utility.GetCurrentRealTime() + seconds
+  RegisterForSingleUpdate(1.0)
+EndFunction
+
+; The torch's tick (the one OnUpdate below serves the flights too): True while it still burns.
+Bool Function TorchTick()
+  If torchUntil < 0.0
+    Return False
+  EndIf
+  If Utility.GetCurrentRealTime() >= torchUntil
+    torchUntil = -1.0
+    Actor p = Game.GetPlayer()
+    Form torch = Item(45)
+    If torch && p.IsEquipped(torch)
+      p.UnequipItem(torch, False, True)
+      Debug.Notification("The torch has burnt out.")
+    EndIf
+    Return False
+  EndIf
+  Return True
+EndFunction
+
 Float Function Atan2(Float y, Float x)
   If x > 0.0
     Return Math.atan(y / x)
@@ -349,8 +487,113 @@ Function ShotOfCyrus()
   EndIf
 EndFunction
 
+; ---- the placed camera (TamrielMergeNative 3: Skyrim's free camera put where Redguard's shot puts its camera) ----
+; Redguard Preservation engine/SOUP.html (read 2026-11-11): a shot's vector is map units from the subject, used as
+; given by showObj/showObjPan (the world's axes: x east, y down, z north) and turned by the subject's heading by the
+; Loc forms (x to its right, z ahead of it); the camera looks at the subject at its target height; a pan goes from
+; the camera's pose to the new one over its ticks. Not in the site: which side positive x is (taken as the right), and
+; the height the vector starts from (taken as the target height, so y 0 is level with what is looked at).
+Bool shotFree = False
+Int nativeCamera = -1
+
+Bool Function HasPlacedCamera()
+  If nativeCamera < 0
+    nativeCamera = 0
+    If SKSE.GetPluginVersion("TamrielMergeNative") >= 3
+      nativeCamera = 1
+    EndIf
+  EndIf
+  Return nativeCamera == 1
+EndFunction
+
+; The camera at the vector from akSubject, looking at it; afSeconds: a pan's time (0: at once). False when there is no
+; placed camera (the caller falls back to Skyrim's own).
+Bool Function PlaceShot(ObjectReference akSubject, Float afLookHeight, Float ox, Float oy, Float oz, Bool abTurned, Float afSeconds)
+  If !akSubject || flying || !HasPlacedCamera()
+    Return False
+  EndIf
+  Float wx = ox
+  Float wy = oz
+  If abTurned
+    Float h = akSubject.GetAngleZ()
+    wx = ox * Math.cos(h) + oz * Math.sin(h)
+    wy = -ox * Math.sin(h) + oz * Math.cos(h)
+  EndIf
+  Float flat = Math.sqrt(wx * wx + wy * wy)
+  If flat < 1.0 && Math.abs(oy) < 1.0
+    Return False
+  EndIf
+  Float tx = akSubject.GetPositionX()
+  Float ty = akSubject.GetPositionY()
+  Float tz = akSubject.GetPositionZ() + afLookHeight
+  Float cx = tx + wx
+  Float cy = ty + wy
+  Float cz = tz - oy
+  ; Looking from the camera at the subject: the heading clockwise from north, the pitch positive downwards.
+  Float yaw = Atan2(-wx, -wy) * 0.0174533
+  Float pitch = 0.0
+  If flat >= 1.0
+    pitch = Math.atan(-oy / flat) * 0.0174533
+  ElseIf oy < 0.0
+    pitch = 1.5
+  Else
+    pitch = -1.5
+  EndIf
+  If !shotFree
+    If !shotThird
+      shotThird = True
+      Game.ForceThirdPerson()
+    EndIf
+    If !TMNative.FreeCamera(True)
+      Return False
+    EndIf
+    shotFree = True
+    ; The shot is Redguard's, not the player's to turn: in the free camera the mouse still looked about (seen in game,
+    ; 2026-11-12, the docks shot). Looking alone is held, and given back when the shot ends.
+    Game.DisablePlayerControls(False, False, False, True, False, False, False)
+  EndIf
+  If afSeconds > 0.05
+    Float sx = TMNative.GetFreeCamera(0)
+    Float sy = TMNative.GetFreeCamera(1)
+    Float sz = TMNative.GetFreeCamera(2)
+    Float sp = TMNative.GetFreeCamera(3)
+    Float syaw = TMNative.GetFreeCamera(4)
+    Float turn = yaw - syaw
+    While turn > 3.14159
+      turn -= 6.28319
+    EndWhile
+    While turn < -3.14159
+      turn += 6.28319
+    EndWhile
+    Float began = Utility.GetCurrentRealTime()
+    Float t = 0.0
+    While t < 1.0 && shotFree
+      t = (Utility.GetCurrentRealTime() - began) / afSeconds
+      If t > 1.0
+        t = 1.0
+      EndIf
+      TMNative.SetFreeCamera(sx + (cx - sx) * t, sy + (cy - sy) * t, sz + (cz - sz) * t, sp + (pitch - sp) * t, syaw + turn * t)
+      Utility.Wait(0.01)
+    EndWhile
+  EndIf
+  If shotFree
+    TMNative.SetFreeCamera(cx, cy, cz, pitch, yaw)
+  EndIf
+  Return True
+EndFunction
+
 ; The camera back on the player (showPlayer, XResetCamera, the end of a cutscene).
 Function EndShot()
+  If shotFree
+    shotFree = False
+    TMNative.FreeCamera(False)
+    Game.EnablePlayerControls(False, False, False, True, False, False, False)
+    ; Leaving the free camera restores the controls of the moment it was taken: with nothing holding the player now,
+    ; they are all given back.
+    If lockouts == 0 && !flying && !hangingOn
+      Game.EnablePlayerControls()
+    EndIf
+  EndIf
   If shotThird && !flying
     shotThird = False
     If FirstPersonAfterShots && FirstPersonAfterShots.GetValueInt() == 1
@@ -442,9 +685,18 @@ EndFunction
 ; ---- hand items (HandItem: what Cyrus holds for an animation) ----
 
 Form handForm
+Bool handGiven   ; the hand form was a twin given for the purpose (taken back with the empty hand)
 
-; A weapon or torch Skyrim equips; none (item 0's call, an empty hand) takes back what was equipped for it. Potions
-; and the rest are Skyrim's own to show (drinking a potion plays its own sound and effect).
+; The twin of item i for the hand (None where it has none).
+Form Function HandTwin(Int i)
+  If !HandTwins || i < 0 || i >= HandTwins.GetSize()
+    Return None
+  EndIf
+  Return HandTwins.GetAt(i) as Weapon
+EndFunction
+
+; A weapon or torch Skyrim equips (an item's hand twin given for the while); none (item 0's call, an empty hand) takes
+; back what was equipped for it. Potions are Skyrim's own to show (drinking a potion plays its own sound and effect).
 Function HandItem(Actor a, Form f)
   If !a
     Return
@@ -453,15 +705,47 @@ Function HandItem(Actor a, Form f)
     If handForm && a.IsEquipped(handForm)
       a.UnequipItem(handForm, False, True)
     EndIf
+    If handForm && handGiven
+      a.RemoveItem(handForm, 1, True)
+    EndIf
     handForm = None
+    handGiven = False
     Return
   EndIf
   If (f as Weapon) || (f as Light)
-    If a.GetItemCount(f) > 0
-      a.EquipItem(f, False, True)
-      handForm = f
+    If a.GetItemCount(f) == 0
+      If !HandTwins || HandTwins.Find(f) < 0
+        Return
+      EndIf
+      a.AddItem(f, 1, True)
+      handGiven = True
     EndIf
+    a.EquipItem(f, False, True)
+    handForm = f
   EndIf
+EndFunction
+
+; ---- the gremlin (PushPlayer / PopPlayer) ----
+
+Race pushedRace
+
+; PushPlayer('gremlin'): the player goes on as the gremlin (his race swapped for GremlinRace; Redguard swaps the
+; player object for the GREMLIN actor); PopPlayer gives Cyrus back.
+Function PushPlayer()
+  Actor p = Game.GetPlayer()
+  If !GremlinRace || pushedRace
+    Return
+  EndIf
+  pushedRace = p.GetRace()
+  p.SetRace(GremlinRace)
+EndFunction
+
+Function PopPlayer()
+  If !pushedRace
+    Return
+  EndIf
+  Game.GetPlayer().SetRace(pushedRace)
+  pushedRace = None
 EndFunction
 
 ; ---- movies (QueueMovie: MENU.INI's movie_name[n], converted to Bink by the videos step) ----
@@ -601,20 +885,28 @@ Function FlyTo(Float x, Float y, Float z, Float seconds)
   RegisterForSingleUpdate(d / speed + 0.3)
 EndFunction
 
+; One update serves the flights (0.3 s while one runs) and the torch's burn-out (every second while it is lit).
 Event OnUpdate()
+  Float again = -1.0
   If flying
     If Utility.GetCurrentRealTime() < flyUntil
-      RegisterForSingleUpdate(0.3)
-      Return
+      again = 0.3
+    Else
+      Actor p = Game.GetPlayer()
+      p.StopTranslation()
+      p.SetPosition(flyX, flyY, flyZ)
+      flying = False
+      If lockouts == 0 && !hangingOn
+        EndShot()
+        Game.EnablePlayerControls()
+      EndIf
     EndIf
-    Actor p = Game.GetPlayer()
-    p.StopTranslation()
-    p.SetPosition(flyX, flyY, flyZ)
-    flying = False
-    If lockouts == 0 && !hangingOn
-      Game.EnablePlayerControls()
-      EndShot()
-    EndIf
+  EndIf
+  If TorchTick() && (again < 0.0 || again > 1.0)
+    again = 1.0
+  EndIf
+  If again > 0.0
+    RegisterForSingleUpdate(again)
   EndIf
 EndEvent
 

@@ -44,7 +44,9 @@ public sealed partial class MwPluginBuilder
         1 => new(BipedObjectFlag.Body, 32, "body", 1.2f, "body"),
         2 => new(Slot(57), 57, "body", 1.6f, null),
         3 => new(Slot(58), 58, "body", 1.6f, null),
-        4 => new(Slot(53), 53, "body", 1.2f, null),
+        // Greaves over the pants, which they cover whole, as Morrowind draws them (2026-11-02, user: "the npcs also have
+        // clipped through armour in morrowind": 495 of Morrowind's people wear both).
+        4 => new(Slot(53), 53, "body", 1.2f, null, Slot(52)),
         5 => new(BipedObjectFlag.Feet, 37, "feet", 0.8f, null),
         6 => new(Slot(60), 60, "hands", 0.6f, null),
         7 => new(BipedObjectFlag.Hands, 33, "hands", 0.6f, "hands"),

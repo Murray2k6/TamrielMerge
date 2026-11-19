@@ -11,7 +11,7 @@ $bat = @"
 @echo off
 cd /d "$here"
 call "$vs\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
-cl /nologo /LD /O2 /EHsc /std:c++20 /MT /W3 /D_CRT_SECURE_NO_WARNINGS TamrielMergeCrashLog.cpp /Fe:TamrielMergeCrashLog.dll /link dbghelp.lib psapi.lib
+cl /nologo /LD /O2 /EHsc /std:c++20 /MT /W3 /D_CRT_SECURE_NO_WARNINGS TamrielMergeCrashLog.cpp /Fe:TamrielMergeCrashLog.dll /link dbghelp.lib psapi.lib user32.lib
 if errorlevel 1 exit /b 1
 "@
 if ($Test) { $bat += "`r`ncl /nologo /O1 /EHsc /std:c++20 /MT /GR test\CrashTest.cpp /Fo:test\ /Fe:test\CrashTest.exe`r`nif errorlevel 1 exit /b 1`r`n" }

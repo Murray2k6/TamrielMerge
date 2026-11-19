@@ -173,10 +173,12 @@ public sealed partial class MwPluginBuilder
             Copy(w.CloudLodAmbientColor, fog);
             // Light: Morrowind's ambient is flat (the same from every side); its sun lights and colours the disc.
             SetTimes(w.AmbientColor, section, "Ambient");
-            w.DirectionalAmbientLightingColors.Sunrise = Flat(w.AmbientColor.Sunrise);
-            w.DirectionalAmbientLightingColors.Day = Flat(w.AmbientColor.Day);
-            w.DirectionalAmbientLightingColors.Sunset = Flat(w.AmbientColor.Sunset);
-            w.DirectionalAmbientLightingColors.Night = Flat(w.AmbientColor.Night);
+            // (Every vanilla template has its directional ambient: the record's own is filled.)
+            var directional = w.DirectionalAmbientLightingColors ??= new();
+            directional.Sunrise = Flat(w.AmbientColor.Sunrise);
+            directional.Day = Flat(w.AmbientColor.Day);
+            directional.Sunset = Flat(w.AmbientColor.Sunset);
+            directional.Night = Flat(w.AmbientColor.Night);
             SetTimes(w.SunlightColor, section, "Sun", SunScale);
             Copy(w.EffectLightingColor, w.SunlightColor);
             Copy(w.CloudLodDiffuseColor, w.SunlightColor);
@@ -285,7 +287,8 @@ public sealed partial class MwPluginBuilder
         var weathers = MwWeathers();
         var climate = mod.Climates.DuplicateInAsNewRecord(SkyrimEsm.Climates.First(c => c.EditorID == "SkyrimClimate"));
         climate.EditorID = editorId;
-        climate.WeatherTypes.Clear();
+        // SkyrimClimate's own list replaced by these.
+        climate.WeatherTypes = new();
         for (int i = 0; i < Math.Min(chances.Count, weathers.Length); i++)
             if (chances[i] > 0) climate.WeatherTypes.Add(new WeatherType { Weather = weathers[i].ToLink<IWeatherGetter>(), Chance = chances[i] });
         if (climate.WeatherTypes.Count == 0) climate.WeatherTypes.Add(new WeatherType { Weather = weathers[0].ToLink<IWeatherGetter>(), Chance = 100 });
@@ -355,6 +358,72 @@ public sealed partial class MwPluginBuilder
         w.NoiseLayerThreeTexture = new AssetLink<SkyrimTextureAssetType>(noise[2]);
         return w;
     }
+
+    Quest? regionWeatherQuest;
+
+    /// <summary>
+    /// The MWRegionWeather quest (TMMwRegionWeather): Morrowind's ModRegion. Which region each exterior cell is in, as a
+    /// row of letters per cell row (short strings: a save can't hold a long one), the interiors showing a region's sky,
+    /// Morrowind's weathers in its numbering and Morrowind.ini's hours between weather changes.
+    /// </summary>
+    Quest RegionWeatherQuest()
+    {
+        if (regionWeatherQuest is not null) return regionWeatherQuest;
+        const string alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+        var names = world.Objects.Values.Where(r => r.Type == "REGN").Select(r => r.Id).Take(alphabet.Length).ToList();
+        if (world.Objects.Values.Count(r => r.Type == "REGN") > alphabet.Length)
+            Problems.Add($"region weather: more than {alphabet.Length} regions; ModRegion works on the first {alphabet.Length}");
+        var index = names.Select((n, i) => (n, i)).ToDictionary(t => t.n, t => t.i, StringComparer.OrdinalIgnoreCase);
+        var cells = world.Exteriors.Values.Where(c => c.Region is not null && index.ContainsKey(c.Region)).ToList();
+        int minX = cells.Count > 0 ? cells.Min(c => c.GridX) : 0, maxX = cells.Count > 0 ? cells.Max(c => c.GridX) : -1;
+        int minY = cells.Count > 0 ? cells.Min(c => c.GridY) : 0, maxY = cells.Count > 0 ? cells.Max(c => c.GridY) : -1;
+        var rows = new List<string>();
+        for (int y = minY; y <= maxY; y++)
+        {
+            var row = new char[maxX - minX + 1];
+            Array.Fill(row, '.');
+            foreach (var c in cells.Where(c => c.GridY == y)) row[c.GridX - minX] = alphabet[index[c.Region!]];
+            rows.Add(new string(row));
+        }
+        var list = new FormList(mod) { EditorID = "MWRegionWeathers" };
+        foreach (var w in MwWeathers()) list.Items.Add(w.ToLink<ISkyrimMajorRecordGetter>());
+        mod.FormLists.Add(list);
+        var sky = new ScriptObjectListProperty { Name = "SkyCells" };
+        foreach (var name in names)
+        {
+            var skyCells = new FormList(mod) { EditorID = "MWRegionSky" + Sanitize(name) };
+            foreach (var source in world.Interiors.Values.Where(c => c.QuasiExterior && string.Equals(c.Region, name, StringComparison.OrdinalIgnoreCase)))
+                if (interiorsByName.TryGetValue(source.Name, out var built)) skyCells.Items.Add(built.ToLink<ISkyrimMajorRecordGetter>());
+            mod.FormLists.Add(skyCells);
+            sky.Objects.Add(new ScriptObjectProperty { Object = skyCells.ToLink<ISkyrimMajorRecordGetter>() });
+        }
+        var entry = new ScriptEntry { Name = "TMMwRegionWeather" };
+        entry.Properties.Add(new ScriptStringListProperty { Name = "RegionNames", Data = [.. names] });
+        entry.Properties.Add(new ScriptStringListProperty { Name = "Rows", Data = [.. rows] });
+        entry.Properties.Add(new ScriptIntProperty { Name = "MinX", Data = minX });
+        entry.Properties.Add(new ScriptIntProperty { Name = "MinY", Data = minY });
+        entry.Properties.Add(new ScriptObjectProperty { Name = "Weathers", Object = list.ToLink<ISkyrimMajorRecordGetter>() });
+        if (mod.Worldspaces.FirstOrDefault(w => w.EditorID == "MWVvardenfell") is { } ws)
+            entry.Properties.Add(new ScriptObjectProperty { Name = "World", Object = ws.ToLink<ISkyrimMajorRecordGetter>() });
+        entry.Properties.Add(sky);
+        entry.Properties.Add(new ScriptFloatProperty { Name = "HoursBetween", Data = IniFloat("Weather", "Hours Between Weather Changes", 20) });
+        entry.Properties.Add(new ScriptFloatProperty { Name = "CellUnits", Data = MwTerrain.MwCellUnits });
+        regionWeatherQuest = new Quest(mod)
+        {
+            EditorID = "MWRegionWeather",
+            Name = "Morrowind region weather",
+            Flags = Quest.Flag.StartGameEnabled,
+            Priority = 60,
+            Type = Quest.TypeEnum.None,
+            VirtualMachineAdapter = new QuestAdapter { Scripts = [entry] },
+        };
+        mod.Quests.Add(regionWeatherQuest);
+        RegionWeatherRows = rows.Count;
+        return regionWeatherQuest;
+    }
+
+    /// <summary>Cell rows in the region map ModRegion reads (0: no script changes a region).</summary>
+    public int RegionWeatherRows;
 
     /// <summary>A REGN's weather chances in WEAT order (8 bytes in Morrowind, 10 with Bloodmoon's snow and blizzard).</summary>
     static int[] Chances(Tes3Record region) => region.Get("WEAT")?.Data.Select(b => (int)b).ToArray() ?? [];

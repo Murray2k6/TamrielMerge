@@ -10,10 +10,11 @@ namespace HKX2
     public class XmlSerializer
     {
         private int _index = 0050;
-        private HKXHeader _header;
-        private Dictionary<IHavokObject, string> _serializedObjectsLookup;
-        private XDocument _document;
-        private XContainer _dataSection;
+        // set by Serialize before anything reads them
+        private HKXHeader _header = null!;
+        private Dictionary<IHavokObject, string> _serializedObjectsLookup = null!;
+        private XDocument _document = null!;
+        private XContainer _dataSection = null!;
 
         private string GetIndex()
         {
@@ -42,7 +43,8 @@ namespace HKX2
                     new XElement("hksection",
                         new XAttribute("name", "__data__"))));
 
-            _dataSection = _document.Element("hkpackfile").Element("hksection");
+            // both elements were created just above
+            _dataSection = _document.Element("hkpackfile")!.Element("hksection")!;
 
             var hkrootcontainer = WriteNode(rootObject, index);
             rootObject.WriteXml(this, hkrootcontainer);
@@ -82,7 +84,8 @@ namespace HKX2
             }
         }
 
-        public void WriteClassPointerArray<T>(XElement xe, string paramName, IList<T?> values) where T : IHavokObject
+        // T may be a nullable type: pointer arrays can hold null entries
+        public void WriteClassPointerArray<T>(XElement xe, string paramName, IList<T> values) where T : IHavokObject?
         {
             var indexs = new List<string>();
             var hkparam = WriteParam(xe, paramName);
@@ -102,7 +105,7 @@ namespace HKX2
                 var index = GetIndex();
                 _serializedObjectsLookup.Add(item, index);
                 indexs.Add(index);
-                var node = WriteNode(item, index);
+                var node = WriteNode<IHavokObject>(item, index);
                 item.WriteXml(this, node);
             }
             hkparam.Add(new XText(string.Join(" ", indexs)));

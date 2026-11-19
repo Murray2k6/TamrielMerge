@@ -148,20 +148,6 @@ public static class BodySleeve
             if (hit is null && closest < 2.5f) return (nearestSeen, closest, true);
             return (hit, closest, false);
         }
-        // A point moved by the repairs below, put back on the surface along its own ray from its ring's middle (not on the
-        // nearest surface point, which near a cuirass's corner is the same for neighbouring points: 2026-10-19, two
-        // vertices of 55 of 144 pauldrons and greaves met there, a triangle of no area).
-        (Vector3 P, (string, float)[] W)? OnRay(int r, Vector3 target)
-        {
-            var c = Vector3.Lerp(from, to, rings == 1 ? 0.5f : r / (float)(rings - 1));
-            var d = target - c; d -= axis * Vector3.Dot(d, axis);
-            if (d.LengthSquared() < 1e-6f) return null;
-            d = Vector3.Normalize(d);
-            // Only the ray's exact crossing: a near miss's nearest point is what made neighbouring points meet.
-            if (Crossing(c, d) is not { } f) return null;
-            var outward = Vector3.Dot(f.Normal, d) > 0 ? f.Normal : d;
-            return (f.Point + Vector3.Normalize(outward) * margin, Blend(body[f.Shape], f.A, f.B, f.C, f.U, f.W));
-        }
         for (int r = 0; r < rings; r++)
         {
             var centre = Vector3.Lerp(from, to, rings == 1 ? 0.5f : r / (float)(rings - 1));

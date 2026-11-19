@@ -26,6 +26,10 @@ import bpy
 import numpy as np
 from mathutils import Matrix, Vector
 
+# How it runs, apart from what it draws (not in the frames' stamp: intro.py rt_render).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from blend_runtime import limit_shader_workers, phase  # noqa: E402
+
 S = 0.01428          # metres per Skyrim unit
 TILE = 1024.0        # the land's texture repeat, units
 FAR_LAND = 30000.0   # land cells further than this from the scene's centre are built coarser
@@ -223,6 +227,12 @@ class Builder:
     def mesh(self, name, shape):
         pos = shape["pos"].astype(np.float64) * S
         tri = shape["tri"]
+        # Triangles naming a vertex twice (no area, so nothing drawn) left out: as polygons they break the mesh, and
+        # setting its custom normals then crashed Blender (2026-10-24: 16 of Daggerfall's sprite scenery models had them,
+        # EXCEPTION_ACCESS_VIOLATION in mesh_normals_corner_custom_set building the Daggerfall shot).
+        flat = (tri[:, 0] == tri[:, 1]) | (tri[:, 1] == tri[:, 2]) | (tri[:, 0] == tri[:, 2])
+        if flat.any():
+            tri = tri[~flat]
         nv, nt = len(pos), len(tri)
         me = bpy.data.meshes.new(name)
         me.vertices.add(nv); me.vertices.foreach_set("co", pos.ravel())
@@ -469,17 +479,69 @@ class Builder:
         self.coll.objects.link(ob)
         return ob
 
+    CROWD_REACH = 4000.0   # game units round the people and the crowd's streets that the crowd's rays stay within
+
     def caster(self):
         """Ray casts in game units into the place (its people left out): cast(origin, direction, distance) -> hit
-        point or None, and the hit's normal's z."""
-        bpy.context.view_layer.update()
-        dg = bpy.context.evaluated_depsgraph_get()
-        sc = bpy.context.scene
+        point or None, and the hit's normal's z. Against one tree of the place's triangles about the people, built
+        once (user, 2026-10-24: "it shouldnt take that long for the flybys": scene.ray_cast went through all of the
+        scene's 12,000 objects and 8,000 instances for each ray of the crowd's, 239 s of the Imperial City's 280 s
+        build). Every crowd ray stays within CROWD_REACH of a person or a crowd street (placing: 2000; a walk: 700),
+        and a triangle wholly outside that area can't be hit by one, so the tree gives the same hits."""
+        tree = getattr(self, "_crowd_tree", None)
+        if tree is None:
+            tree = self._crowd_tree = self.crowd_tree()
 
         def cast(o, d, dist):
-            hit, loc, nrm, _, _, _ = sc.ray_cast(dg, Vector((o[0] * S, o[1] * S, o[2] * S)), Vector(d), distance=dist * S)
-            return (np.array(loc, np.float64) / S, nrm.z) if hit else (None, 0.0)
+            if tree is False:
+                return (None, 0.0)
+            loc, nrm, _, _ = tree.ray_cast(Vector((o[0] * S, o[1] * S, o[2] * S)), Vector(d), dist * S)
+            return (np.array(loc, np.float64) / S, nrm.z) if loc is not None else (None, 0.0)
         return cast
+
+    def crowd_tree(self):
+        """A BVH tree of the triangles (world space) of everything shown in the viewport (not the people) reaching into
+        the crowd's area; False when there is no area."""
+        from mathutils.bvhtree import BVHTree
+        spots = [c["m"][:3, 3][:2] for c in self.crowd] + [np.array(p, np.float64) for line in getattr(self, "crowd_lines", []) for p in line]
+        if not spots:
+            return False
+        xy = np.array(spots, np.float64) * S
+        r = self.CROWD_REACH * S
+        x0, y0 = xy.min(0) - r
+        x1, y1 = xy.max(0) + r
+        bpy.context.view_layer.update()
+        dg = bpy.context.evaluated_depsgraph_get()
+        verts, tris, n = [], [], 0
+        for inst in dg.object_instances:
+            ob = inst.object
+            if ob.type != "MESH":
+                continue
+            mw = np.array(inst.matrix_world, np.float64)
+            corners = np.c_[np.array(ob.bound_box, np.float64), np.ones(8)] @ mw.T
+            if corners[:, 0].max() < x0 or corners[:, 0].min() > x1 or corners[:, 1].max() < y0 or corners[:, 1].min() > y1:
+                continue
+            me = ob.data
+            me.calc_loop_triangles()
+            if not me.loop_triangles:
+                continue
+            co = np.empty(len(me.vertices) * 3, np.float64); me.vertices.foreach_get("co", co)
+            co = np.c_[co.reshape(-1, 3), np.ones(len(me.vertices))] @ mw.T
+            tri = np.empty(len(me.loop_triangles) * 3, np.int64); me.loop_triangles.foreach_get("vertices", tri)
+            tri = tri.reshape(-1, 3)
+            tx, ty = co[tri, 0], co[tri, 1]
+            near = (tx.max(1) >= x0) & (tx.min(1) <= x1) & (ty.max(1) >= y0) & (ty.min(1) <= y1)
+            if not near.any():
+                continue
+            tri = tri[near]
+            used = np.unique(tri)
+            remap = np.full(len(co), -1, np.int64); remap[used] = np.arange(len(used))
+            verts.append(co[used, :3]); tris.append(remap[tri] + n); n += len(used)
+        if not tris:
+            return False
+        V, T = np.concatenate(verts), np.concatenate(tris)
+        print(f"  crowd rays: {len(T)} triangles round the people", flush=True)
+        return BVHTree.FromPolygons(V.tolist(), T.tolist(), all_triangles=True)
 
     def ground_at(self, cast, x, y, z_from, reach=400.0):
         """The ground's height under (x, y) cast down from z_from, and how level it is."""
@@ -786,6 +848,65 @@ class Builder:
         print(f"  land: {len(np.unique(chunk_of))} chunks, {len(materials)} materials", flush=True)
         print(f"land: {len(cells)} cells", flush=True)
         return True
+
+    def distant(self):
+        """The world past the land as the game's distant view draws it (scene.json "lod", user 2026-10-25: "i need it to
+        show wholy"): its LOD land and objects, each chunk placed at its south-west cell, without what falls on the
+        scene's own land or a placed town (a triangle by the cell under its middle: the finest chunks straddle the
+        land's round edge). Matte, as the ground: the game's distant land doesn't shine. Merged one mesh a texture.
+        Returns the lowest height it shows (None without any)."""
+        lod = self.scene.get("lod") or []
+        if not lod:
+            return None
+        covered = set(getattr(self, "land_cells", None) or ()) | {tuple(h) for h in self.scene.get("holes", [])}
+        cover_keys = np.array([gx * 100003 + gy for gx, gy in covered], np.int64)
+        groups = {}
+        cut = 0
+        lows = []
+        for item in lod:
+            path = os.path.join(self.dir, "meshes", f"{item['mesh']}.bin")
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                continue
+            m = np.array(item["m"], np.float64).reshape(4, 4)
+            for shape in read_mesh(path):
+                # Its water (our .btr's WATER shapes, untextured): the scene's own water plane stands for it.
+                if not shape["diffuse"]:
+                    continue
+                pos = shape["pos"].astype(np.float64) @ m[:3, :3].T + m[:3, 3]
+                tri = shape["tri"].astype(np.int64)
+                mid = pos[tri].mean(1)
+                cell = np.floor(mid[:, :2] / 4096.0).astype(np.int64)
+                keep = ~np.isin(cell[:, 0] * 100003 + cell[:, 1], cover_keys) if len(cover_keys) else np.ones(len(tri), bool)
+                cut += int((~keep).sum())
+                if not keep.any():
+                    continue
+                tri = tri[keep]
+                idx, local = np.unique(tri.ravel(), return_inverse=True)
+                part = dict(pos=pos[idx], nrm=shape["nrm"][idx], uv=shape["uv"][idx], col=shape["col"][idx], tri=local.reshape(-1, 3))
+                if item["kind"] == "land":
+                    lows.append(float(part["pos"][:, 2].min()))
+                key = (item["kind"], (shape["diffuse"] or "").lower(), shape["alpha_mode"], round(float(shape["threshold"]), 3), shape["two_sided"])
+                groups.setdefault(key, []).append((shape, part))
+        n_tri = 0
+        for n, (key, parts) in enumerate(groups.items()):
+            base = 0
+            pos, nrm, uv, col, tri = [], [], [], [], []
+            for _, p in parts:
+                pos.append(p["pos"]); nrm.append(p["nrm"]); uv.append(p["uv"]); col.append(p["col"])
+                tri.append(base + p["tri"]); base += len(p["pos"])
+            first = parts[0][0]
+            merged = dict(diffuse=first["diffuse"], alpha_mode=first["alpha_mode"], threshold=first["threshold"], vertex_alpha=False,
+                          two_sided=first["two_sided"], pos=np.vstack(pos), nrm=np.vstack(nrm).astype(np.float32), uv=np.vstack(uv),
+                          col=np.vstack(col), tri=np.vstack(tri).astype(np.int32))
+            n_tri += len(merged["tri"])
+            me = self.mesh(f"lod_{key[0]}{n}", merged)
+            mat = me.materials[0].copy(); me.materials[0] = mat
+            bsdf = mat.node_tree.nodes["Principled BSDF"]
+            bsdf.inputs["Roughness"].default_value = 1.0; bsdf.inputs["Specular IOR Level"].default_value = 0.0
+            self.coll.objects.link(bpy.data.objects.new(me.name, me))
+        lands = sum(1 for i in lod if i["kind"] == "land")
+        print(f"  distant view: {lands} land and {len(lod) - lands} object chunks, {n_tri} triangles in {len(groups)} meshes, {cut} over the land cut", flush=True)
+        return min(lows) if lows else None
 
     def levelled(self, x, y, z):
         """Heights z at x, y levelled round a placed town (scene.json "holes") to its ground, easing back to the land's
@@ -1506,6 +1627,7 @@ def setup_render(w, h, samples, game=None):
     ray traced, shadows traced through shadow maps, the haze's volume lit by the sun; samples are its anti-aliasing
     samples. Settings a Blender version lacks are skipped."""
     scn = bpy.context.scene
+    limit_shader_workers(bpy)
     for engine in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT"):
         try:
             scn.render.engine = engine; break
@@ -1596,20 +1718,35 @@ def main():
     b.game = game
     b.land_tint = spec.get("land_tint")
     b.tint_textures = [t.lower() for t in spec.get("tint_textures", [])]
+    phase("start")
     b.objects()
+    phase("objects")
     b.people()
+    phase("people")
     has_land = b.land(None if game else spec.get("land_tint"))
+    phase("land")
+    lod_low = b.distant()
+    phase("distant view")
     if not has_land and b.scene["water"] < -10000:
         b.ground(spec.get("ground"))
     elif has_land and spec.get("ground"):
-        b.ground(spec["ground"], b.land_edge - 60)
+        # Under the distant view too, where there is one (it floods its valleys otherwise), but no lower than the water:
+        # under water the water plane hides both.
+        z = b.land_edge
+        if lod_low is not None:
+            z = min(z, max(lod_low, b.scene["water"]) if b.scene["water"] > -10000 else lod_low)
+        b.ground(spec["ground"], z - 60)
     b.fill_holes(spec.get("ground"))
+    phase("ground")
     if spec.get("grass", True) is not False:
         b.grass(spec.get("grass"))
+    phase("grass")
+    b.crowd_lines = [c["line"] for c in spec.get("crowd", [])]
     for c in spec.get("crowd", []):
         b.add_crowd(c)
     b.populate(spec.get("populate", 0))
     b.plan_walks(spec["keys"][-1]["t"])
+    phase("crowd")
     if b.scene["water"] > -10000:
         b.water(spec["light"].get("water", [0.05, 0.11, 0.15]))
     keys = spec["keys"]
@@ -1626,6 +1763,7 @@ def main():
     if game and weather:
         b.sky_clouds(b.game_all, weather)
     setup_render(w, h, int(o["samples"]), game)
+    phase("world and render settings")
     cam_data = bpy.data.cameras.new("cam"); cam_data.sensor_fit = "VERTICAL"
     cam_data.angle_y = math.radians(spec.get("fov", 36)); cam_data.clip_start = 0.5; cam_data.clip_end = 20000
     cam = bpy.data.objects.new("cam", cam_data); bpy.context.scene.collection.objects.link(cam)

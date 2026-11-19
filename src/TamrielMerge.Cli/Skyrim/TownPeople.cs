@@ -201,10 +201,33 @@ public sealed class TownPeople(SkyrimMod mod, VanillaActors vanilla, DfFactions 
             person.Npc.Configuration.Flags &= ~NpcConfiguration.Flag.Unique;
             person.Npc.Packages.Clear();
             person.Npc.Packages.Add(new FormLink<IPackageGetter>(SandboxLarge));
-            if (guard) person.Npc.Factions.Add(new RankPlacement { Faction = TownNights.Guards(mod, "DF").ToLink<IFactionGetter>(), Rank = 0 });
+            // Always on the move, as Daggerfall's street people are (Daggerfall Unity MobilePersonMotor: they walk
+            // from tile to tile without stopping). At the copied look's energy (often 50) they stood for long spells
+            // between short walks (seen in game in Daggerfall city, 2026-11-10; user: "npcs dont move around").
+            if (person.Npc.AIData is { } wai) wai.EnergyLevel = 100;
+            if (guard)
+            {
+                person.Npc.Factions.Add(new RankPlacement { Faction = TownNights.Guards(mod, "DF").ToLink<IFactionGetter>(), Rank = 0 });
+                // A guard stands its ground (Make gives everyone a townsperson's cowardice: the watch ran from a rat).
+                if (person.Npc.AIData is { } gai) { gai.Confidence = Confidence.Brave; gai.Assistance = Assistance.HelpsAllies; }
+            }
             created = true;
         }
         return wanderers[key] = person;
+    }
+
+    /// <summary>
+    /// The name a town gives the <paramref name="index"/>-th street person it places from wanderer slot
+    /// <paramref name="slot"/> (Daggerfall's name generator, seeded by the town and the place, as its other people are):
+    /// the region's wanderers are a few records placed in every town of it, and went by the same names in each (user,
+    /// 2026-10-25: "about 4 in daggerfall that continue to be put in each town and with the same names").
+    /// </summary>
+    public string WandererName(DfLocation loc, int slot, bool guard, int index)
+    {
+        int key = guard ? -1 - slot % 4 : slot % WandererSlots;
+        var flat = new DfRdbObject(DfRdbObjectType.Flat, Vector3.Zero, Vector3.Zero, 0, guard ? 183 : 0, guard ? 4 : 0,
+            (ushort)(slot % 2 == 1 ? 0x20 : 0), 0, 0, false) { RecordOffset = 4096 + (key + 8) };
+        return NameIn(loc, 0, 0, WandererBuilding, DfBuildingType.None, flat, flat.RecordOffset + 131 * (index + 1));
     }
 
     /// <summary>A person sprite as a Skyrim NPC (not yet placed).</summary>

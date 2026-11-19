@@ -42,15 +42,15 @@ EndEvent
 
 Function Touch(Bool entered)
   Actor player = Game.GetPlayer()
-  Float x = player.GetPositionX()
-  Float y = player.GetPositionY()
-  Float z = player.GetPositionZ()
-  Bool moved = entered || (x - lastX) * (x - lastX) + (y - lastY) * (y - lastY) + (z - lastZ) * (z - lastZ) > 1.0
-  lastX = x
-  lastY = y
-  lastZ = z
+  Float ox = player.GetPositionX()
+  Float oy = player.GetPositionY()
+  Float oz = player.GetPositionZ()
+  Bool moved = entered || (ox - lastX) * (ox - lastX) + (oy - lastY) * (oy - lastY) + (oz - lastZ) * (oz - lastZ) > 1.0
+  lastX = ox
+  lastY = oy
+  lastZ = oz
   If moved || MovementHeld()
-    Target.Collided(z >= TopZ - 8.0)
+    Target.Collided(oz >= TopZ - 8.0)
   EndIf
   If inside
     RegisterForSingleUpdate(Timeout)
